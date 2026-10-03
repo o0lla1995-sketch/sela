@@ -99,6 +99,7 @@ export function PosScreen() {
   const embeddingsCount = useCatalogStore(state => state.embeddingsCount);
 
   const settings = useSettingsStore(state => state.settings);
+  const updateSettings = useSettingsStore(state => state.update);
   const printerStatus = usePrinterStore(state => state.status);
   const toast = useToastStore(state => state.show);
 
@@ -391,6 +392,29 @@ export function PosScreen() {
     setCameraOpen(false);
   }, []);
 
+  /** Round-8: explicit EMPTY-CART action with a confirm step. */
+  const confirmClearCart = useCallback(() => {
+    if (lines.length === 0) {
+      return;
+    }
+    Alert.alert(
+      'تفريغ سلة البيع',
+      `سيتم إلغاء ${totals.itemsCount} قطعة من السلة — لا يتم أي بيع ولا يُخصم شيء من المخزون.`,
+      [
+        {text: 'تراجع', style: 'cancel'},
+        {
+          text: 'تفريغ السلة',
+          style: 'destructive',
+          onPress: () => {
+            clear();
+            setDiscountText('');
+            toast('تم تفريغ السلة', 'info');
+          },
+        },
+      ],
+    );
+  }, [clear, lines.length, toast, totals.itemsCount]);
+
   const scannerLabel =
     scannerMode === 'barcode'
       ? 'باركود'
@@ -541,6 +565,26 @@ export function PosScreen() {
             </View>
           ) : (
             <>
+              {/* Compact header: title + live count + EMPTY button
+                  (round-8: "لا يوجد زر إلغاء أو تفريغ السلة"). */}
+              <View style={styles.cartHeaderRow}>
+                <View style={styles.cartHeaderTitle}>
+                  <Icon name="cart" size={14} color={c.accent} />
+                  <Text style={styles.cartHeaderText}>سلة البيع</Text>
+                  <Badge
+                    label={String(totals.itemsCount)}
+                    tone="neutral"
+                  />
+                </View>
+                <TouchableOpacity
+                  style={styles.clearCartBtn}
+                  onPress={confirmClearCart}
+                  hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                  activeOpacity={0.75}>
+                  <Icon name="trash" size={14} color={c.danger} />
+                  <Text style={styles.clearCartText}>تفريغ</Text>
+                </TouchableOpacity>
+              </View>
               <View style={styles.cartLinesWrap}>
                 <ScrollView showsVerticalScrollIndicator={false}>
                   {lines.map(line => (
@@ -682,10 +726,14 @@ export function PosScreen() {
       </View>
 
       {/* ── Full-screen scanner overlay ────────────────────────
-          v6: the camera lives in its own full-screen modal — opening
-          it NEVER squeezes the product grid or pushes the cart and
-          checkout buttons off small screens (the v5 inline-sheet
-          complaint). The selling layout below never moves. */}
+          v7 THREE-ZONE layout (per round-8 feedback): the old
+          design floated the chrome OVER a full-bleed camera — the
+          ROI frame landed under the bottom buttons and everything
+          overlapped. Now: top bar / camera zone (fills the middle
+          completely) / bottom panel — nothing ever overlaps, the
+          viewfinder is as large as the screen allows, and the
+          scanner ENGINE can be switched right here (barcode works
+          even when vision is having a bad day). */}
       <Modal
         visible={cameraOpen}
         animationType="slide"
@@ -693,8 +741,48 @@ export function PosScreen() {
         onRequestClose={closeScanner}>
         <StatusBar barStyle="light-content" backgroundColor="#0B0B10" />
         <View style={styles.scannerOverlay}>
-          <ErrorBoundary inline label="الكاميرا">
-            <View style={{flex: 1}}>
+          {/* Zone 1 — top bar: close + engine switcher */}
+          <View style={[styles.scannerTopBar, {paddingTop: Math.max(insets.top, spacing.md)}]}>
+            <TouchableOpacity
+              style={styles.scannerCloseChip}
+              onPress={closeScanner}
+              activeOpacity={0.8}>
+              <Icon name="x" size={16} color="#F4F4F5" />
+              <Text style={styles.scannerCloseText}>إغلاق</Text>
+            </TouchableOpacity>
+            <View style={styles.engineSwitcher}>
+              {(
+                [
+                  {value: 'barcode', label: 'باركود', icon: 'barcode'},
+                  {value: 'visual', label: 'بصري', icon: 'scan'},
+                  {value: 'both', label: 'كلاهما', icon: 'flash'},
+                ] as {value: ScannerMode; label: string; icon: string}[]
+              ).map(option => {
+                const active = scannerMode === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[styles.engineOption, active && styles.engineOptionOn]}
+                    onPress={() => updateSettings({scannerMode: option.value})}
+                    activeOpacity={0.8}>
+                    <Icon
+                      name={option.icon as never}
+                      size={13}
+                      color={active ? '#FFFFFF' : '#A1A1AA'}
+                    />
+                    <Text
+                      style={[styles.engineOptionText, active && styles.engineOptionTextOn]}>
+                      {option.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          {/* Zone 2 — the camera, filling its zone edge-to-edge */}
+          <View style={styles.scannerCameraZone}>
+            <ErrorBoundary inline label="الكاميرا">
               <ScannerCamera
                 ref={cameraRef}
                 mode="scan"
@@ -705,122 +793,96 @@ export function PosScreen() {
                 autoScan={visualActive && autoScan && tabFocused}
                 onMatch={handleMatch}
               />
-            </View>
+            </ErrorBoundary>
+          </View>
 
-            {/* Top chrome: close + engine hint */}
-            <View
-              style={[styles.scannerTopBar, {top: Math.max(insets.top, spacing.md)}]}>
-              <TouchableOpacity
-                style={styles.scannerCloseChip}
+          {/* Zone 3 — bottom panel: feedback + cart + actions */}
+          <View
+            style={[
+              styles.scannerBottom,
+              {paddingBottom: Math.max(insets.bottom, spacing.md)},
+            ]}>
+            {lastRecognized ? (
+              <View style={styles.scannerBanner}>
+                <Icon name="checkCircle" size={16} color={c.success} />
+                <Text style={styles.scannerBannerText} numberOfLines={1}>
+                  {lastRecognized.name}
+                </Text>
+                <Text style={styles.scannerBannerScore}>
+                  {(lastRecognized.score * 100).toFixed(0)}%
+                </Text>
+              </View>
+            ) : lastBarcode != null ? (
+              <View style={styles.scannerBanner}>
+                <Icon name="barcode" size={16} color={c.success} />
+                <Text style={styles.scannerBannerText} numberOfLines={1}>
+                  {lastBarcode}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.scannerBannerHint}>
+                <Text style={styles.scannerBannerHintText} numberOfLines={1}>
+                  {scannerMode === 'barcode'
+                    ? 'وجّه الكاميرا نحو ملصق الباركود'
+                    : scannerMode === 'visual'
+                    ? 'وجّه الكاميرا نحو المنتج — يُضاف تلقائياً عند التعرّف'
+                    : 'باركود أو بصري — كلاهما يعمل معاً'}
+                </Text>
+              </View>
+            )}
+
+            {/* Live cart summary — the merchant sees the sale grow
+                without leaving the scanner. */}
+            <View style={styles.scannerCartRow}>
+              <View style={styles.scannerCartInfo}>
+                <Icon name="cart" size={15} color={c.accent} />
+                <Text style={styles.scannerCartText}>
+                  {totals.itemsCount} قطعة · {formatMoney(totals.total)}
+                </Text>
+              </View>
+              <AppButton
+                small
+                title="السلة والدفع"
+                icon="cart"
                 onPress={closeScanner}
-                activeOpacity={0.8}>
-                <Icon name="x" size={18} color="#F4F4F5" />
-                <Text style={styles.scannerCloseText}>إغلاق</Text>
-              </TouchableOpacity>
-              <View style={styles.scannerEngineChip}>
-                <Icon
-                  name={
-                    scannerMode === 'barcode'
-                      ? 'barcode'
-                      : scannerMode === 'visual'
-                      ? 'scan'
-                      : 'flash'
-                  }
-                  size={14}
-                  color={c.accent}
-                />
-                <Text style={styles.scannerEngineText}>{scannerLabel}</Text>
-              </View>
+              />
             </View>
 
-            {/* Bottom chrome: recognition feedback + cart + actions */}
-            <View
-              style={[
-                styles.scannerBottom,
-                {paddingBottom: Math.max(insets.bottom, spacing.md)},
-              ]}>
-              {lastRecognized ? (
-                <View style={styles.scannerBanner}>
-                  <Icon name="checkCircle" size={16} color={c.success} />
-                  <Text style={styles.scannerBannerText} numberOfLines={1}>
-                    {lastRecognized.name}
+            <View style={styles.scannerActionsRow}>
+              {visualActive ? (
+                <TouchableOpacity
+                  style={[styles.autoScanChip, autoScan && styles.autoScanChipOn]}
+                  onPress={() => setAutoScan(value => !value)}
+                  activeOpacity={0.8}>
+                  <Icon
+                    name={autoScan ? 'flash' : 'clock'}
+                    size={14}
+                    color={autoScan ? c.accent : c.textDim}
+                  />
+                  <Text
+                    style={[
+                      styles.autoScanText,
+                      autoScan ? {color: c.accent} : null,
+                    ]}>
+                    {autoScan ? 'مسح تلقائي' : 'يدوي'}
                   </Text>
-                  <Text style={styles.scannerBannerScore}>
-                    {(lastRecognized.score * 100).toFixed(0)}%
-                  </Text>
-                </View>
-              ) : lastBarcode != null ? (
-                <View style={styles.scannerBanner}>
-                  <Icon name="barcode" size={16} color={c.success} />
-                  <Text style={styles.scannerBannerText} numberOfLines={1}>
-                    {lastBarcode}
-                  </Text>
-                </View>
+                </TouchableOpacity>
               ) : (
-                <View style={styles.scannerBannerHint}>
-                  <Text style={styles.scannerBannerHintText}>
-                    {scannerMode === 'barcode'
-                      ? 'وجّه الكاميرا نحو ملصق الباركود'
-                      : scannerMode === 'visual'
-                      ? 'وجّه الكاميرا نحو المنتج — يُضاف تلقائياً عند التعرّف'
-                      : 'باركود أو بصري — كلاهما يعمل معاً'}
-                  </Text>
-                </View>
+                <View />
               )}
-
-              {/* Live cart summary — the merchant sees the sale grow
-                  without leaving the scanner. */}
-              <View style={styles.scannerCartRow}>
-                <View style={styles.scannerCartInfo}>
-                  <Icon name="cart" size={15} color={c.accent} />
-                  <Text style={styles.scannerCartText}>
-                    {totals.itemsCount} قطعة · {formatMoney(totals.total)}
-                  </Text>
-                </View>
-                <AppButton
-                  small
-                  title="السلة والدفع"
-                  icon="cart"
-                  onPress={closeScanner}
-                />
-              </View>
-
-              <View style={styles.scannerActionsRow}>
-                {visualActive ? (
-                  <TouchableOpacity
-                    style={[styles.autoScanChip, autoScan && styles.autoScanChipOn]}
-                    onPress={() => setAutoScan(value => !value)}
-                    activeOpacity={0.8}>
-                    <Icon
-                      name={autoScan ? 'flash' : 'clock'}
-                      size={14}
-                      color={autoScan ? c.accent : c.textDim}
-                    />
-                    <Text
-                      style={[
-                        styles.autoScanText,
-                        autoScan ? {color: c.accent} : null,
-                      ]}>
-                      {autoScan ? 'مسح تلقائي' : 'يدوي'}
-                    </Text>
-                  </TouchableOpacity>
-                ) : (
-                  <View />
-                )}
-                {visualActive ? (
-                  <TouchableOpacity
-                    style={styles.snapNowButton}
-                    onPress={() => void cameraRef.current?.scanOnce()}
-                    activeOpacity={0.8}>
-                    <Icon name="camera" size={16} color={c.onAccent} />
-                    <Text style={styles.snapNowText}>التقط الآن</Text>
-                  </TouchableOpacity>
-                ) : (
-                  <View />
-                )}
-              </View>
+              {visualActive ? (
+                <TouchableOpacity
+                  style={styles.snapNowButton}
+                  onPress={() => void cameraRef.current?.scanOnce()}
+                  activeOpacity={0.8}>
+                  <Icon name="camera" size={16} color={c.onAccent} />
+                  <Text style={styles.snapNowText}>التقط الآن</Text>
+                </TouchableOpacity>
+              ) : (
+                <View />
+              )}
             </View>
-          </ErrorBoundary>
+          </View>
         </View>
       </Modal>
 
@@ -1015,26 +1077,28 @@ const useStyles = makeStyles(c =>
       fontSize: typography.caption,
     },
 
-    // Full-screen scanner overlay (v6)
+    // Full-screen scanner overlay (v7 — three-zone layout)
     scannerOverlay: {
       flex: 1,
       backgroundColor: '#0B0B10',
     },
     scannerTopBar: {
-      position: 'absolute',
-      left: spacing.md,
-      right: spacing.md,
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
+      paddingHorizontal: spacing.md,
+      paddingBottom: spacing.sm,
+      gap: spacing.sm,
     },
     scannerCloseChip: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
-      backgroundColor: 'rgba(14, 14, 18, 0.84)',
-      borderRadius: radius.pill,
-      paddingHorizontal: spacing.lg,
+      backgroundColor: 'rgba(31, 31, 41, 0.95)',
+      borderWidth: 1,
+      borderColor: '#3F3F4A',
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
       paddingVertical: 9,
     },
     scannerCloseText: {
@@ -1042,29 +1106,46 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
-    scannerEngineChip: {
+    engineSwitcher: {
+      flexDirection: 'row',
+      backgroundColor: 'rgba(31, 31, 41, 0.95)',
+      borderWidth: 1,
+      borderColor: '#3F3F4A',
+      borderRadius: radius.md,
+      padding: 3,
+      gap: 2,
+    },
+    engineOption: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
-      backgroundColor: 'rgba(14, 14, 18, 0.84)',
-      borderWidth: 1,
-      borderColor: c.border,
-      borderRadius: radius.pill,
-      paddingHorizontal: spacing.md,
+      gap: 5,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.sm + 2,
       paddingVertical: 7,
+      backgroundColor: 'transparent',
     },
-    scannerEngineText: {
-      color: c.accent,
+    engineOptionOn: {
+      backgroundColor: c.accent,
+    },
+    engineOptionText: {
+      color: '#A1A1AA',
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: typography.small - 0.5,
+    },
+    engineOptionTextOn: {
+      color: '#FFFFFF',
+    },
+    scannerCameraZone: {
+      flex: 1,
+      marginHorizontal: spacing.sm,
+      borderRadius: radius.lg,
+      overflow: 'hidden',
+      backgroundColor: '#0B0B10',
     },
     scannerBottom: {
-      position: 'absolute',
-      bottom: 0,
-      left: 0,
-      right: 0,
       paddingHorizontal: spacing.lg,
-      paddingTop: spacing.xs,
+      paddingTop: spacing.sm,
+      paddingBottom: spacing.md,
       gap: spacing.sm,
     },
     scannerBanner: {
@@ -1223,7 +1304,9 @@ const useStyles = makeStyles(c =>
       flex: 1,
     },
 
-    // Cart panel
+    // Cart panel (v7 compact — round-8: "حجم السلة كبير جداً يغطي
+    // الشاشة": 42% cap instead of 54%, tighter rows, header row
+    // with the live count + the تفريغ button)
     cartPanel: {
       backgroundColor: c.surface,
       borderTopWidth: 1,
@@ -1231,9 +1314,43 @@ const useStyles = makeStyles(c =>
       borderRadius: radius.lg,
       borderWidth: 1,
       borderColor: c.borderSoft,
-      padding: spacing.md,
-      gap: spacing.sm,
-      maxHeight: '54%',
+      padding: spacing.sm + 2,
+      gap: spacing.xs,
+      maxHeight: '42%',
+    },
+    cartHeaderRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingBottom: 2,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    cartHeaderTitle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    cartHeaderText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    clearCartBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      backgroundColor: c.dangerSoft,
+      borderWidth: 1,
+      borderColor: c.danger,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 5,
+    },
+    clearCartText: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
     },
     cartEmptyRow: {
       flexDirection: 'row',
@@ -1249,13 +1366,13 @@ const useStyles = makeStyles(c =>
       lineHeight: 18,
     },
     cartLinesWrap: {
-      maxHeight: 158,
+      maxHeight: 112,
     },
     cartLine: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
-      paddingVertical: 7,
+      paddingVertical: 4.5,
       borderBottomWidth: 1,
       borderBottomColor: c.borderSoft,
     },

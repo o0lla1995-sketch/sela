@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.SparseArray
 import android.view.Surface
+import android.view.View
 import android.widget.FrameLayout
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
@@ -26,9 +27,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
-import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.uimanager.UIManagerHelper
+import com.facebook.react.bridge.WritableMap
 import com.facebook.react.uimanager.ThemedReactContext
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
@@ -40,73 +41,57 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * SelaCameraView
+ * SelaCameraView — v7.
  * ─────────────────────────────────────────────────────────────────
- * v5 of the camera stack — the one that actually renders.
+ * What changed in v7 (and why — see SelaCameraModule for the full
+ * story of the five failed generations):
  *
- * Field history on the target device (every stack showed a BLACK
- * preview even with permission granted):
- *  v1 vision-camera frame-processor  → black (worklets missing)
- *  v2 vision-camera photo pipeline   → black + freeze
- *  v3 react-native-camera-kit        → black + freeze (ML Kit flood)
- *  v4 our CameraX view, PreviewView PERFORMANCE → STILL black.
+ *  • ALL state travels through the MODULE event channel
+ *    (RCTDeviceEventEmitter). The old custom view events
+ *    (topCameraReady/topCameraError/topReadCode dispatched via
+ *    UIManagerHelper) could be silently dropped by the Fabric
+ *    interop layer inside a <Modal> — the camera was live while JS
+ *    showed "تعذر تشغيل الكاميرا". Gone.
  *
- * v4's black screen had two plausible killers, both removed now:
+ *  • stateSnapshot() — JS polls getStatus(viewTag) every second as
+ *    a SECOND source of truth. bound + previewStreamState == LIVE
+ *    means the camera truly works, regardless of any lost event.
  *
- *  1. PreviewView PERFORMANCE mode renders through a **SurfaceView**,
- *     a separate compositor layer. On some OEM Android builds (cheap
- *     camera HALs / aggressive compositor tweaks) the surface simply
- *     never composites inside a React view tree — black forever.
- *     → v5 uses **COMPATIBLE mode (TextureView)**: the preview is a
- *       normal view in the hierarchy, immune to compositor quirks.
+ *  • Single-instance coordinator — the module force-releases the
+ *    previous camera view before a new one binds. No two concurrent
+ *    back-camera sessions ever again (budget HALs kill both).
  *
- *  2. Preview + ImageCapture + ImageAnalysis bound TOGETHER = three
- *     concurrent streams. Budget camera HALs often cap at two usable
- *     streams and quietly fail to produce preview frames.
- *     → v5 binds exactly TWO use cases: Preview + ImageCapture when
- *       capturing/visual mode, Preview + ImageAnalysis when barcode
- *       mode is on. Switching modes performs a controlled rebind.
+ *  • onMeasure hardening — if the Fabric interop layout pass hands
+ *    us an AT_MOST/UNSPECIFIED spec (the "camera renders small /
+ *    at the bottom of the modal" bug), we expand to the FULL size
+ *    the parent offered instead of collapsing to wrap-content.
  *
- *  3. v4 also cast the current activity to AppCompatActivity before
- *     binding — a hidden coupling. v5 owns a tiny LifecycleOwner
- *     driven by window attach/detach instead (works inside Modals
- *     and any host activity type).
+ *  • Preview stream state — "ready" now means CameraX says frames
+ *    are actually flowing (StreamState.LIVE), not just "bind call
+ *    returned".
  *
- * v5.1 — "both mode" capture without rebinds:
- *   v5 bound Preview + ImageCapture OR Preview + ImageAnalysis.
- *   In scanner mode "كلاهما" (barcode + visual) the JS scan loop
- *   called capture() while only ImageAnalysis was bound →
- *   E_CAMERA_NOT_READY → visual auto-scan silently broken.
- *   v5.1: when capture() arrives in barcode mode, the analyzer's
- *   NEXT frame is converted YUV→NV21→JPEG on the spot (no camera
- *   rebind, no third stream, no preview glitch — barcode keeps
- *   running between passes). Pixel rotation is intentionally NOT
- *   applied: the embedding decoder ignores EXIF, and ImageCapture
- *   JPEGs store unrotated pixels too — both paths therefore feed
- *   the model identically-oriented pixels, keeping cosine
- *   similarity consistent between enrollment and scanning.
- *
- * Kept from v4: ONE ML Kit client per view, analyzer paused during
- * capture, single-flight capture with a 6s watchdog, native barcode
- * dedupe, JS-recoverable rebind.
+ * Kept from v5/v6 (proven in the field): TextureView COMPATIBLE
+ * preview, max TWO use cases per bind, bind failure ladder (retry
+ * 600ms → preview-only fallback → real error with the exception
+ * class), ONE ML Kit client per view, native barcode dedupe,
+ * single-flight capture with 6s watchdogs, frame-grab capture in
+ * barcode mode without a rebind.
  */
 class SelaCameraView(
     private val reactContext: ThemedReactContext,
 ) : FrameLayout(reactContext) {
 
     companion object {
-        /** Live view registry keyed by RN view tag (module looks up here). */
+        /** Live view registry keyed by Android view id. */
         private val instances = SparseArray<SelaCameraView>()
 
         fun find(tag: Int): SelaCameraView? = synchronized(instances) { instances.get(tag) }
     }
 
     /**
-     * Minimal lifecycle the camera binds to. Created per bind cycle:
-     * INITIALIZED → RESUMED on bind, DESTROYED on release. Tying the
-     * camera to the VIEW (not the activity) means unbinding always
-     * happens when this view goes away — no leaked cameras from
-     * modals, tabs or navigation transitions.
+     * Minimal lifecycle the camera binds to — tied to the VIEW, not
+     * the activity: unbinding always happens when this view goes
+     * away (modals, tabs, navigation transitions).
      */
     private class CameraHost : LifecycleOwner {
         private val registry = LifecycleRegistry(this)
@@ -128,7 +113,6 @@ class SelaCameraView(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val previewView = PreviewView(context).apply {
-        // COMPATIBLE = TextureView — see class docs (the v4 black screen).
         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         scaleType = PreviewView.ScaleType.FILL_CENTER
     }
@@ -156,11 +140,23 @@ class SelaCameraView(
     private val analyzing = AtomicBoolean(false)
     private val captureInFlight = AtomicBoolean(false)
 
+    /** True once CameraX reports frames actually flowing. */
+    private val previewLive = AtomicBoolean(false)
+
+    /** The last real bind/capture failure — surfaced to JS polls. */
+    @Volatile private var lastBindError: String = ""
+
+    /** Set while the module coordinator force-replaces this view. */
+    private val replaced = AtomicBoolean(false)
+
+    /** True while the diagnostics self-test owns this instance. */
+    private val diagnosticsMode = AtomicBoolean(false)
+
     // Barcode dedupe
     private var lastCode: String? = null
     private var lastCodeAt = 0L
 
-    // ── Frame-grab snapshot state (barcode-mode capture, v5.1) ──
+    // ── Frame-grab snapshot state (barcode-mode capture) ──
     private val wantSnapshot = AtomicBoolean(false)
     @Volatile private var snapshotFile: File? = null
     @Volatile private var snapshotPromise: Promise? = null
@@ -172,6 +168,64 @@ class SelaCameraView(
             LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT
         )
         addView(previewView)
+        // The preview stream state is the ground truth for "live"
+        // (camera-view 1.3.4 exposes it as LiveData; observeForever
+        // MUST run on the main thread — view construction can happen
+        // on a React manager thread).
+        mainHandler.post {
+            try {
+                previewView.previewStreamState.observeForever { state ->
+                    previewLive.set(state == PreviewView.StreamState.LIVE)
+                }
+            } catch (_: Exception) {
+                // Non-fatal — bound-flag polling still covers us.
+            }
+        }
+    }
+
+    // ── Layout hardening ────────────────────────────────────────
+    //
+    // Under the Fabric interop layer the measurement spec handed to
+    // a custom view can arrive as AT_MOST instead of EXACTLY (seen
+    // inside Modals) — a plain FrameLayout then collapses toward
+    // wrap-content and the camera renders as a shrunken strip at the
+    // bottom of the modal. We force the LARGEST size the parent was
+    // willing to give us, exactly.
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val widthMode = View.MeasureSpec.getMode(widthMeasureSpec)
+        val widthSize = View.MeasureSpec.getSize(widthMeasureSpec)
+        val heightMode = View.MeasureSpec.getMode(heightMeasureSpec)
+        val heightSize = View.MeasureSpec.getSize(heightMeasureSpec)
+
+        val width = when (widthMode) {
+            View.MeasureSpec.UNSPECIFIED ->
+                suggestedMinimumWidth.coerceAtLeast(if (widthSize > 0) widthSize else 0)
+            else -> widthSize.coerceAtLeast(suggestedMinimumWidth)
+        }
+        val height = when (heightMode) {
+            View.MeasureSpec.UNSPECIFIED ->
+                suggestedMinimumHeight.coerceAtLeast(if (heightSize > 0) heightSize else 0)
+            else -> heightSize.coerceAtLeast(suggestedMinimumHeight)
+        }
+
+        setMeasuredDimension(
+            if (width > 0) width else suggestedMinimumWidth.coerceAtLeast(1),
+            if (height > 0) height else suggestedMinimumHeight.coerceAtLeast(1),
+        )
+        measureChildren(
+            View.MeasureSpec.makeMeasureSpec(measuredWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(measuredHeight, View.MeasureSpec.EXACTLY),
+        )
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // A resize (first real layout, modal settling) is a fresh
+        // chance to bind if we were waiting for dimensions.
+        if (w > 0 && h > 0 && !bound.get() && !binding.get() && attached.get()) {
+            mainHandler.post { ensureBound() }
+        }
     }
 
     // ── React props (called from the UI manager thread) ─────────
@@ -181,7 +235,7 @@ class SelaCameraView(
         propBarcodeEnabled = enabled
         mainHandler.post {
             if (bound.get()) {
-                // The use-case set changes with the mode → controlled rebind.
+                // The use-case set changes with the mode → rebind.
                 rebindNow()
             } else {
                 ensureBound()
@@ -213,12 +267,16 @@ class SelaCameraView(
         super.onAttachedToWindow()
         attached.set(true)
         synchronized(instances) { instances.put(id, this) }
+        // Register with the single-instance coordinator: this claims
+        // the camera (force-releasing any previous holder first).
+        module()?.claimCamera(id)
         mainHandler.post { ensureBound() }
     }
 
     override fun onDetachedFromWindow() {
         attached.set(false)
         synchronized(instances) { instances.remove(id) }
+        module()?.releaseClaim(id)
         mainHandler.post { releaseCamera() }
         super.onDetachedFromWindow()
     }
@@ -229,6 +287,8 @@ class SelaCameraView(
             mainHandler.post { ensureBound() }
         }
     }
+
+    private fun module(): SelaCameraModule? = SelaCameraModule.current()
 
     private fun hasCameraPermission(): Boolean {
         if (propPermissionGranted) return true
@@ -247,32 +307,47 @@ class SelaCameraView(
         return created
     }
 
-    /**
-     * Binds Preview + exactly ONE capture use case (see class docs):
-     *  - barcode mode  → Preview + ImageAnalysis (ML Kit reads frames)
-     *  - visual/camera → Preview + ImageCapture  (still photos)
-     * Idempotent: safe to call from attach, layout and prop changes.
-     *
-     * v5.2 resilience: a failed bind retries ONCE after 600ms (some
-     * budget camera HALs need a beat after a previous release), then
-     * falls back to a PREVIEW-ONLY bind (a single stream — the weakest
-     * combination every HAL supports) before giving up. Only our OWN
-     * previous use cases are unbound — the global unbindAll() could
-     * kill another live SelaCameraView's session (two views exist
-     * while switching between the POS sheet and the product form).
-     */
+    // ── State snapshot (the JS polling contract) ────────────────
+
+    fun stateSnapshot(): WritableMap = Arguments.createMap().apply {
+        putBoolean("exists", true)
+        putBoolean("bound", bound.get())
+        putBoolean("previewLive", previewLive.get() && bound.get())
+        putString(
+            "state",
+            when {
+                diagnosticsMode.get() -> "diagnostics"
+                bound.get() -> "ready"
+                binding.get() -> "starting"
+                replaced.get() -> "replaced"
+                deadCamera.get() -> "error"
+                !attached.get() -> "detached"
+                else -> "starting"
+            },
+        )
+        putString("lastError", lastBindError)
+        putInt("width", width)
+        putInt("height", height)
+        putBoolean("barcodeEnabled", propBarcodeEnabled)
+        putBoolean("torch", propTorch)
+    }
+
+    fun lastBindError(): String? = lastBindError.ifEmpty { null }
+
+    // ── Binding ─────────────────────────────────────────────────
+
     private fun ensureBound() {
         if (binding.get() || bound.get() || deadCamera.get()) return
+        if (replaced.get() || diagnosticsMode.get()) return
         if (!attached.get()) return
         if (width == 0 || height == 0) return // wait for layout
-        if (!hasCameraPermission()) return    // wait for permission prop
+        if (!hasCameraPermission()) return    // wait for permission
         if (!previewView.isAttachedToWindow) return
 
         binding.set(true)
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
-            if (!attached.get()) {
-                // View went away while the provider spun up.
+            if (!attached.get() || replaced.get()) {
                 binding.set(false)
                 return@addListener
             }
@@ -288,8 +363,8 @@ class SelaCameraView(
 
     /** Single bind attempt; throws on failure. */
     private fun bindInternal(provider: ProcessCameraProvider) {
-        // Release ONLY this view's previous use cases (never the
-        // global unbindAll — another SelaCameraView may be live).
+        // Release ONLY this view's previous use cases (a global
+        // unbindAll could kill another live SelaCameraView).
         val previous = listOfNotNull(preview, imageCapture, imageAnalysis)
         if (previous.isNotEmpty()) {
             try {
@@ -352,25 +427,29 @@ class SelaCameraView(
             camera?.cameraControl?.enableTorch(true)
         }
 
+        previewLive.set(false)
         bound.set(true)
         binding.set(false)
+        lastBindError = ""
         if (propBarcodeEnabled) applyAnalyzer()
         dispatchReady()
     }
 
     /**
-     * v5.2 failure ladder: retry once → preview-only fallback → real
-     * error (with the exception class, so Diagnostics finally shows
-     * WHY the camera failed on a given device).
+     * Failure ladder: retry once → preview-only fallback → real
+     * error (with the exception class, so the Diagnostics screen
+     * finally shows WHY the camera failed on a given device).
      */
     private fun handleBindFailure(error: Exception) {
         val reason = "${error.javaClass.simpleName}: ${error.message ?: "خطأ غير معروف"}"
-        if (!attached.get()) {
+        lastBindError = reason
+        if (!attached.get() || replaced.get()) {
             binding.set(false)
             return
         }
+
         mainHandler.postDelayed({
-            if (!attached.get() || deadCamera.get()) {
+            if (!attached.get() || deadCamera.get() || replaced.get()) {
                 binding.set(false)
                 return@postDelayed
             }
@@ -387,12 +466,12 @@ class SelaCameraView(
             } catch (_: Exception) {
                 // fall through to the preview-only fallback
             }
-            if (!attached.get() || deadCamera.get()) {
+            if (!attached.get() || deadCamera.get() || replaced.get()) {
                 binding.set(false)
                 return@postDelayed
             }
-            // Fallback — preview alone (weakest combination any HAL
-            // supports). Captures will report not-ready but the
+            // Fallback — preview alone (the weakest combination any
+            // HAL supports). Captures will report not-ready but the
             // merchant at least gets a live viewfinder + retry.
             try {
                 imageCapture = null
@@ -416,6 +495,7 @@ class SelaCameraView(
                     newPreview
                 )
                 newPreview.setSurfaceProvider(previewView.surfaceProvider)
+                previewLive.set(false)
                 bound.set(true)
                 binding.set(false)
                 dispatchReady()
@@ -426,6 +506,7 @@ class SelaCameraView(
                 host = null
                 val fatalReason =
                     "${fatal.javaClass.simpleName}: ${fatal.message ?: "خطأ غير معروف"}"
+                lastBindError = fatalReason
                 dispatchError("فشل تشغيل الكاميرا: $fatalReason (بعد محاولتين)")
             }
         }, 600)
@@ -446,9 +527,8 @@ class SelaCameraView(
             } catch (_: Exception) {
                 null
             }
-            // ── Pending visual capture? Grab THIS frame as JPEG ──
-            // (runs before ML Kit so the JS scan pass resolves fast;
-            // barcode analysis simply skips this single frame.)
+            // Pending visual capture? Grab THIS frame as JPEG (runs
+            // before ML Kit so the JS scan pass resolves fast).
             if (wantSnapshot.get()) {
                 handleSnapshotFrame(image)
                 return@setAnalyzer
@@ -480,7 +560,7 @@ class SelaCameraView(
         }
     }
 
-    /** ONE scanner client for the whole view lifetime (camera-kit's fatal bug). */
+    /** ONE scanner client for the whole view lifetime. */
     private fun obtainScanner(): BarcodeScanner? {
         if (barcodeScanner != null) return barcodeScanner
         return try {
@@ -496,25 +576,11 @@ class SelaCameraView(
         if (code == lastCode && now - lastCodeAt < 1200) return
         lastCode = code
         lastCodeAt = now
-        val surfaceId = UIManagerHelper.getSurfaceId(reactContext)
-        val dispatcher = UIManagerHelper.getEventDispatcherForReactTag(reactContext, id)
-        if (surfaceId != null && dispatcher != null) {
-            dispatcher.dispatchEvent(CameraReadCodeEvent(surfaceId, id, code))
-        }
+        module()?.emitBarcode(id, code)
     }
 
     // ── Capture (called via SelaCameraModule) ───────────────────
 
-    /**
-     * Takes one photo to a cache file and resolves with its absolute path.
-     * Single-flight + 6s watchdog: a dead camera REJECTS instead of
-     * hanging the JS pipeline forever (the v3 freeze).
-     *
-     * Two paths:
-     *  1. ImageCapture bound (visual / enrollment mode) → takePicture.
-     *  2. Only ImageAnalysis bound (barcode / both mode) → frame-grab:
-     *     the analyzer's next frame is saved as JPEG (see v5.1 notes).
-     */
     fun capture(promise: Promise) {
         mainHandler.post {
             if (!bound.get()) {
@@ -542,6 +608,7 @@ class SelaCameraView(
                 settled = true
                 captureInFlight.set(false)
                 deadCamera.set(true)
+                lastBindError = "تجمد الالتقاط"
                 dispatchError("تجمد الالتقاط — سيُعاد تشغيل الكاميرا")
                 promise.reject("E_CAPTURE_TIMEOUT", "انتهت مهلة الالتقاط", null)
             }
@@ -576,16 +643,13 @@ class SelaCameraView(
         }
     }
 
-    // ── Frame-grab capture (barcode / "both" mode, v5.1) ───────
+    // ── Frame-grab capture (barcode / "both" mode) ──────────────
 
-    /** Arms the analyzer to save its next frame as JPEG. */
     private fun startFrameGrab(promise: Promise) {
         if (imageAnalysis == null) {
             promise.reject("E_CAMERA_NOT_READY", "الكاميرا غير جاهزة — أعد المحاولة", null)
             return
         }
-        // Prepare everything BEFORE arming wantSnapshot — the volatile
-        // CAS below publishes these writes to the analysis thread.
         val outFile = File(
             context.cacheDir,
             "sela_snap_${System.currentTimeMillis()}.jpg"
@@ -601,8 +665,6 @@ class SelaCameraView(
             return
         }
 
-        // Same watchdog contract as takePicture: a camera that stops
-        // producing frames rejects (JS remounts → fresh bind).
         val watchdog = Runnable {
             if (snapshotSettled.compareAndSet(false, true)) {
                 wantSnapshot.set(false)
@@ -610,6 +672,7 @@ class SelaCameraView(
                 snapshotPromise = null
                 snapshotFile = null
                 deadCamera.set(true)
+                lastBindError = "تجمد الالتقاط"
                 dispatchError("تجمد الالتقاط — سيُعاد تشغيل الكاميرا")
                 pending?.reject("E_CAPTURE_TIMEOUT", "انتهت مهلة الالتقاط", null)
             }
@@ -618,11 +681,6 @@ class SelaCameraView(
         mainHandler.postDelayed(watchdog, 6000)
     }
 
-    /**
-     * Analyzer callback: converts the incoming ImageProxy to a JPEG
-     * file and resolves the pending capture promise. Runs on the
-     * single analysis thread — a 640×480 conversion is a few ms.
-     */
     private fun handleSnapshotFrame(image: ImageProxy) {
         val file = snapshotFile
         val ok = try {
@@ -657,7 +715,7 @@ class SelaCameraView(
         }
     }
 
-    /** ImageProxy (YUV_420_888) → NV21 → JPEG file, no rotation (see v5.1 notes). */
+    /** ImageProxy (YUV_420_888) → NV21 → JPEG file, no rotation. */
     private fun imageProxyToJpeg(image: ImageProxy, outFile: File): Boolean {
         val nv21 = yuv420ToNv21(image)
         val yuv = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
@@ -669,14 +727,13 @@ class SelaCameraView(
         return outFile.exists() && outFile.length() > 0
     }
 
-    /** Classic YUV_420_888 → NV21 with row/pixel-stride padding handling. */
+    /** Classic YUV_420_888 → NV21 with stride padding handling. */
     private fun yuv420ToNv21(image: ImageProxy): ByteArray {
         val width = image.width
         val height = image.height
         val ySize = width * height
         val nv21 = ByteArray(ySize + 2 * (ySize / 4))
 
-        // Y plane — copy row by row to skip rowStride padding.
         val yPlane = image.planes[0]
         val yBuffer = yPlane.buffer.duplicate()
         for (row in 0 until height) {
@@ -684,7 +741,6 @@ class SelaCameraView(
             yBuffer.get(nv21, row * width, width)
         }
 
-        // Interleave V then U (NV21) from the chroma planes.
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
         val uBuffer = uPlane.buffer.duplicate()
@@ -699,7 +755,9 @@ class SelaCameraView(
         return nv21
     }
 
-    /** Full teardown + fresh bind (used by the JS retry button). */
+    // ── Rebind / teardown ───────────────────────────────────────
+
+    /** Full teardown + fresh bind (the JS retry button). */
     fun rebind(promise: Promise) {
         mainHandler.post {
             rebindNow()
@@ -710,18 +768,28 @@ class SelaCameraView(
     private fun rebindNow() {
         releaseCamera()
         deadCamera.set(false)
+        replaced.set(false)
         lastCode = null
         lastCodeAt = 0L
         ensureBound()
+    }
+
+    /**
+     * The coordinator calls this when a NEWER camera view claims the
+     * camera (POS modal opened over the product form, etc.).
+     * Synchronous, on the main thread — the new view must not see
+     * MAXIMUM_NUMBER_OF_CAMERAS_IN_USE from our stale session.
+     */
+    fun forceReleaseForReplacement() {
+        replaced.set(true)
+        deadCamera.set(true)
+        releaseCamera()
     }
 
     private fun releaseCamera() {
         // Never leave a pending frame-grab promise hanging on teardown.
         finishSnapshot(null, "أُغلق ماسح الكاميرا")
         try {
-            // Unbind ONLY this view's own use cases — a global
-            // unbindAll() would kill another live SelaCameraView's
-            // session (e.g. POS sheet camera + product form camera).
             val own = listOfNotNull(preview, imageCapture, imageAnalysis)
             if (own.isNotEmpty()) {
                 cameraProvider?.unbind(*own.toTypedArray())
@@ -737,6 +805,7 @@ class SelaCameraView(
         imageAnalysis = null
         bound.set(false)
         binding.set(false)
+        previewLive.set(false)
         try {
             barcodeScanner?.close()
         } catch (_: Exception) {
@@ -744,28 +813,60 @@ class SelaCameraView(
         barcodeScanner = null
     }
 
-    // ── Events ──────────────────────────────────────────────────
+    // ── Diagnostics self-test (headless, no UI) ─────────────────
 
-    private fun dispatchReady() {
-        val surfaceId = UIManagerHelper.getSurfaceId(reactContext)
-        val dispatcher = UIManagerHelper.getEventDispatcherForReactTag(reactContext, id)
-        if (surfaceId != null && dispatcher != null) {
-            dispatcher.dispatchEvent(CameraReadyEvent(surfaceId, id))
+    /**
+     * Binds a preview-only session on this DETACHED instance — the
+     * real CameraX path with zero UI involvement. Returns true when
+     * the bind succeeds and the preview surface got a provider.
+     */
+    fun diagnosticBind(provider: ProcessCameraProvider): Boolean {
+        if (!diagnosticsMode.compareAndSet(false, true)) return false
+        return try {
+            val owner = CameraHost()
+            owner.resume()
+            host = owner
+            val newPreview = Preview.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .setTargetRotation(Surface.ROTATION_0)
+                .build()
+            preview = newPreview
+            camera = provider.bindToLifecycle(
+                owner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                newPreview
+            )
+            // A detached PreviewView still accepts a surface provider.
+            newPreview.setSurfaceProvider(previewView.surfaceProvider)
+            true
+        } catch (error: Exception) {
+            lastBindError =
+                "${error.javaClass.simpleName}: ${error.message ?: "خطأ غير معروف"}"
+            false
         }
     }
 
+    /** Releases a diagnostics instance completely. */
+    fun releaseForDiagnostics() {
+        if (!diagnosticsMode.get()) return
+        releaseCamera()
+        diagnosticsMode.set(false)
+    }
+
+    // ── Events (module channel — see class docs) ────────────────
+
+    private fun dispatchReady() {
+        module()?.emitReady(id)
+    }
+
     private fun dispatchError(message: String) {
-        val surfaceId = UIManagerHelper.getSurfaceId(reactContext)
-        val dispatcher = UIManagerHelper.getEventDispatcherForReactTag(reactContext, id)
-        if (surfaceId != null && dispatcher != null) {
-            dispatcher.dispatchEvent(CameraErrorEvent(surfaceId, id, message))
-        }
+        module()?.emitError(id, message)
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
         // After returning from permission dialogs etc., retry binding.
-        if (hasWindowFocus && !bound.get() && !deadCamera.get()) {
+        if (hasWindowFocus && !bound.get() && !deadCamera.get() && !replaced.get()) {
             mainHandler.post { ensureBound() }
         }
     }

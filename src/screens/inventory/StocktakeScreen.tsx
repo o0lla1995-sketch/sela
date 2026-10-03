@@ -10,7 +10,7 @@
  * Completed sessions are listed with their full audit report and can
  * be exported as CSV from here.
  */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Alert,
   ScrollView,
@@ -73,6 +73,11 @@ export function StocktakeScreen() {
   const [starting, setStarting] = useState(false);
   const [reportSession, setReportSession] = useState<Stocktake | null>(null);
   const [reportItems, setReportItems] = useState<StocktakeItem[] | null>(null);
+
+  /** Count-input chain (round-8): "next" on the keyboard jumps to
+   *  the NEXT product's count field — counting flows row by row
+   *  without ever touching the screen. */
+  const countRefs = useRef<({focus: () => void} | null)[]>([]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -519,12 +524,19 @@ export function StocktakeScreen() {
             }}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled">
-            {filteredItems.map(item => (
+            {filteredItems.map((item, index) => (
               <CountRow
                 key={item.product_id}
                 item={item}
                 onSetCounted={setCounted}
                 onMarkMatched={markMatched}
+                returnKeyType={
+                  index === filteredItems.length - 1 ? 'done' : 'next'
+                }
+                onSubmitEditing={() => countRefs.current[index + 1]?.focus()}
+                registerRef={handle => {
+                  countRefs.current[index] = handle;
+                }}
               />
             ))}
           </ScrollView>
@@ -560,16 +572,33 @@ function CountRow({
   item,
   onSetCounted,
   onMarkMatched,
+  returnKeyType,
+  onSubmitEditing,
+  registerRef,
 }: {
   item: StocktakeItem;
   onSetCounted: (item: StocktakeItem, raw: string) => Promise<void>;
   onMarkMatched: (item: StocktakeItem) => Promise<void>;
+  /** Keyboard chain (round-8): "next" jumps to the next row's count. */
+  returnKeyType?: 'next' | 'done';
+  onSubmitEditing?: () => void;
+  registerRef?: (handle: {focus: () => void} | null) => void;
 }) {
   const c = useThemeColors();
   const styles = useStyles();
+  const inputRef = useRef<TextInput>(null);
   const [text, setText] = useState(
     item.counted_qty == null ? '' : String(item.counted_qty),
   );
+
+  // Expose focus() to the parent's count chain.
+  useEffect(() => {
+    registerRef?.({
+      focus: () => inputRef.current?.focus(),
+    });
+    return () => registerRef?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     setText(item.counted_qty == null ? '' : String(item.counted_qty));
@@ -619,6 +648,7 @@ function CountRow({
           <Text style={styles.matchText}>مطابق</Text>
         </TouchableOpacity>
         <TextInput
+          ref={inputRef}
           style={styles.countInput}
           value={text}
           onChangeText={setText}
@@ -626,6 +656,12 @@ function CountRow({
           keyboardType="numeric"
           placeholder="0"
           placeholderTextColor={c.textFaint}
+          returnKeyType={returnKeyType ?? 'next'}
+          onSubmitEditing={() => {
+            void onSetCounted(item, text);
+            onSubmitEditing?.();
+          }}
+          blurOnSubmit={false}
         />
       </View>
     </View>

@@ -1,22 +1,31 @@
 /**
- * ScannerCamera — v4 on the hand-written native SelaCameraView.
+ * ScannerCamera — v7 on the module-coordinated native camera.
  * ─────────────────────────────────────────────────────────────────
- * Camera history (why this file exists in this shape):
- *  v1 react-native-vision-camera frame-processor → black screen
- *     (worklets runtime missing).
- *  v2 vision-camera photo pipeline → black screen + freezes (format
- *     selection + takePhoto on several devices).
- *  v3 react-native-camera-kit → STILL black screen + full-app
- *     freeze: camera-kit created a NEW ML Kit client on EVERY frame
- *     (memory/CPU flood) and its capture() promise hung forever when
- *     the camera died, leaving the scanner dead until app restart.
- *  v4 our own CameraX view (SelaCameraView.kt): one ML Kit client,
- *     single 4:3 bind, analyzer paused during capture, native barcode
- *     dedupe, 6s capture watchdog. JS side adds hard timeouts on
- *     every native call + automatic camera rebind on fatal errors,
- *     so nothing can freeze or hang the flow again.
+ * Camera history (five generations, every one "broken" in the
+ * field):
+ *  v1 vision-camera frame-processor → black (worklets missing).
+ *  v2 vision-camera photo pipeline → black + freezes.
+ *  v3 react-native-camera-kit → black + freeze (ML Kit flood).
+ *  v4 our CameraX view (SurfaceView) → black on budget compositors.
+ *  v5/v6 our CameraX view (TextureView) → WORKED natively in many
+ *     cases, but state traveled as custom VIEW EVENTS
+ *     (topCameraReady/topCameraError/topReadCode) which the Fabric
+ *     interop layer can silently drop inside <Modal> — so JS showed
+ *     "تعذر تشغيل الكاميرا" over a LIVE camera.
  *
- * Public API (unchanged since v3 — PosScreen/ProductForm untouched):
+ * v7 architecture (this file):
+ *  • Camera state + barcodes arrive over the MODULE event channel
+ *    (RCTDeviceEventEmitter) — the same channel every battle-tested
+ *    RN library uses. Works on Paper and Fabric, in and out of
+ *    Modals, no view-tag dispatch, no interop registration.
+ *  • JS POLLS getStatus(viewTag) every second as a second source of
+ *    truth: bound + previewLive ⇒ ready, whatever happened to the
+ *    events. The watchdog can never lie again.
+ *  • The native module coordinates ONE live camera at a time (a new
+ *    view force-releases the previous holder) — no more dual-session
+ *    deaths on budget camera HALs.
+ *
+ * Public API (unchanged — PosScreen/ProductForm untouched):
  *   <ScannerCamera mode="scan"|"capture" barcodeEnabled onBarcode
  *                   onMatch onScore autoScan height />
  *   ref.scanOnce()      → ScanResult | null
@@ -32,6 +41,8 @@ import React, {
 } from 'react';
 import {
   ActivityIndicator,
+  AppState,
+  DeviceEventEmitter,
   PermissionsAndroid,
   Platform,
   StyleSheet,
@@ -95,13 +106,11 @@ interface ScannerCameraProps {
   height?: number;
 }
 
+/** Props only — ALL state events come from the module channel now. */
 interface NativeCameraProps {
   barcodeEnabled: boolean;
   torch: boolean;
   permissionGranted: boolean;
-  onReadCode?: (event: {nativeEvent: {codeStringValue: string}}) => void;
-  onCameraError?: (event: {nativeEvent: {errorMessage: string}}) => void;
-  onCameraReady?: (event: unknown) => void;
   style?: unknown;
 }
 
@@ -132,6 +141,13 @@ function withTimeout<T>(
   });
 }
 
+/** Module event payloads (see SelaCameraModule.kt). */
+interface CameraModuleEvent {
+  viewTag: number;
+  message?: string;
+  code?: string;
+}
+
 export const ScannerCamera = forwardRef<
   ScannerCameraHandle,
   ScannerCameraProps
@@ -155,9 +171,10 @@ export const ScannerCamera = forwardRef<
   const [camState, setCamState] = useState<'starting' | 'ready' | 'error'>(
     'starting',
   );
-  /** Real native failure reason ("" when the JS watchdog fired instead). */
+  /** Real native failure reason ("" when only the watchdog fired). */
   const [nativeError, setNativeError] = useState<string>('');
   const [remountKey, setRemountKey] = useState(0);
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
   const [busy, setBusy] = useState(false);
   const [statusText, setStatusText] = useState<string>(
     mode === 'capture'
@@ -172,12 +189,15 @@ export const ScannerCamera = forwardRef<
   const viewRef = useRef<
     (React.Component<NativeCameraProps> & Readonly<NativeMethods>) | null
   >(null);
+  /** Our native view's tag — captured after every (re)mount. */
+  const viewTagRef = useRef<number | null>(null);
   const busyRef = useRef(false);
   const disposedRef = useRef(false);
   const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMatchRef = useRef<{productId: number; at: number} | null>(null);
   const lastBarcodeRef = useRef<{code: string; at: number} | null>(null);
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const threshold = useSettingsStore(state => state.settings.matchThreshold);
   const cooldownMs = useSettingsStore(
@@ -251,15 +271,103 @@ export const ScannerCamera = forwardRef<
         clearTimeout(readyTimerRef.current);
         readyTimerRef.current = null;
       }
+      if (pollTimerRef.current != null) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
     };
   }, []);
 
-  // ── Ready watchdog: if the native camera doesn't come up within
-  //    8s (cold CameraX init + the v5.2 retry/fallback ladder can
-  //    legitimately take a few seconds on budget hardware), show
-  //    the retry overlay instead of a silent black box.
+  // ── Release the camera while the app is backgrounded. ────────
   useEffect(() => {
-    if (permission !== 'granted') {
+    const sub = AppState.addEventListener('change', state => {
+      setAppActive(state === 'active');
+    });
+    return () => sub.remove();
+  }, []);
+
+  // ── Capture our view tag after every (re)mount. ──────────────
+  useEffect(() => {
+    // findNodeHandle needs one frame for the native view to exist.
+    const timer = setTimeout(() => {
+      viewTagRef.current = findNodeHandle(viewRef.current);
+    }, 80);
+    return () => {
+      clearTimeout(timer);
+      viewTagRef.current = null;
+    };
+  }, [remountKey, appActive, permission]);
+
+  // ── MODULE event channel: ready / error / barcode. ───────────
+  // The single-instance coordinator means at most ONE camera view
+  // is live app-wide; events are matched to our tag once captured
+  // (the pre-capture window is a single frame — accepting those is
+  // safe and covers the bind-before-tag race).
+  useEffect(() => {
+    const owns = (event: CameraModuleEvent) =>
+      viewTagRef.current == null || event.viewTag === viewTagRef.current;
+
+    const readySub = DeviceEventEmitter.addListener(
+      'selaCameraReady',
+      (event: CameraModuleEvent) => {
+        if (!owns(event)) return;
+        setCamState('ready');
+        setNativeError('');
+        if (readyTimerRef.current != null) {
+          clearTimeout(readyTimerRef.current);
+          readyTimerRef.current = null;
+        }
+      },
+    );
+    const errorSub = DeviceEventEmitter.addListener(
+      'selaCameraError',
+      (event: CameraModuleEvent) => {
+        if (!owns(event)) return;
+        const message = event.message ?? 'خطأ غير معروف';
+        logDiag('camera', `خطأ الكاميرا: ${message}`, 'error');
+        setNativeError(message);
+        setCamState('error');
+        setStatusText(message);
+      },
+    );
+    const barcodeSub = DeviceEventEmitter.addListener(
+      'selaCameraBarcode',
+      (event: CameraModuleEvent) => {
+        if (!owns(event)) return;
+        const code = event.code;
+        if (!code) return;
+        const now = Date.now();
+        const last = lastBarcodeRef.current;
+        if (
+          last != null &&
+          last.code === code &&
+          now - last.at < BARCODE_DEDUPE_MS
+        ) {
+          return;
+        }
+        lastBarcodeRef.current = {code, at: now};
+        setFlash(true);
+        setTimeout(() => setFlash(false), 180);
+        Vibration.vibrate(35);
+        try {
+          void requirePlatformUtils().beep(0);
+        } catch {
+          // Sound is a nicety.
+        }
+        setStatusText(`باركود: ${code}`);
+        onBarcodeRef.current?.(code);
+      },
+    );
+    return () => {
+      readySub.remove();
+      errorSub.remove();
+      barcodeSub.remove();
+    };
+  }, []);
+
+  // ── Ready watchdog (fallback — the poll below is authoritative).
+  useEffect(() => {
+    if (permission !== 'granted' || !appActive) {
       return;
     }
     setCamState('starting');
@@ -267,16 +375,75 @@ export const ScannerCamera = forwardRef<
     if (readyTimerRef.current != null) {
       clearTimeout(readyTimerRef.current);
     }
+    // Cold CameraX init + the retry/fallback ladder can legitimately
+    // take several seconds on budget hardware.
     readyTimerRef.current = setTimeout(() => {
       setCamState(current => (current === 'starting' ? 'error' : current));
-    }, 8000);
+    }, 10000);
     return () => {
       if (readyTimerRef.current != null) {
         clearTimeout(readyTimerRef.current);
         readyTimerRef.current = null;
       }
     };
-  }, [remountKey, permission]);
+  }, [remountKey, permission, appActive]);
+
+  // ── POLLING: the second source of truth. ─────────────────────
+  // If the native session says bound+live, we are READY — even if
+  // the ready event was lost. If it says error, we show the real
+  // reason. This is what makes the watchdog unable to ever lie.
+  useEffect(() => {
+    if (permission !== 'granted' || !appActive) {
+      return;
+    }
+    const poll = async () => {
+      const tag = viewTagRef.current;
+      if (tag == null || SelaCameraNative == null || disposedRef.current) {
+        return;
+      }
+      try {
+        const snapshot = await SelaCameraNative.getStatus(tag);
+        if (disposedRef.current) {
+          return;
+        }
+        if (snapshot.bound && snapshot.previewLive) {
+          setCamState(current => {
+            if (current !== 'ready') {
+              if (readyTimerRef.current != null) {
+                clearTimeout(readyTimerRef.current);
+                readyTimerRef.current = null;
+              }
+              return 'ready';
+            }
+            return current;
+          });
+          setNativeError('');
+        } else if (
+          snapshot.state === 'error' ||
+          snapshot.state === 'replaced'
+        ) {
+          setCamState(current =>
+            current === 'ready'
+              ? current // was ready: transient rebind, wait for ladder
+              : 'error',
+          );
+          if (snapshot.lastError) {
+            setNativeError(snapshot.lastError);
+          }
+        }
+      } catch {
+        // getStatus is best-effort — events + watchdog still cover us.
+      }
+    };
+    void poll();
+    pollTimerRef.current = setInterval(poll, 900);
+    return () => {
+      if (pollTimerRef.current != null) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [permission, appActive, remountKey]);
 
   const capturePhoto = useCallback(async (): Promise<string | null> => {
     const viewHandle = findNodeHandle(viewRef.current);
@@ -326,7 +493,7 @@ export const ScannerCamera = forwardRef<
 
   // ── Visual recognition pass ──────────────────────────────────
   const scanOnce = useCallback(async (): Promise<ScanResult | null> => {
-    if (busyRef.current) {
+    if (busyRef.current || !appActive) {
       return null;
     }
     if (camState !== 'ready') {
@@ -409,6 +576,7 @@ export const ScannerCamera = forwardRef<
       setBusy(false);
     }
   }, [
+    appActive,
     barcodeEnabled,
     beep,
     camState,
@@ -471,31 +639,6 @@ export const ScannerCamera = forwardRef<
     captureAngle: async (angle: AngleLabel) => captureAngle(angle),
     isBusy: () => busyRef.current,
   }));
-
-  // ── Barcode handler (native dedupe + JS-side guard) ──────────
-  const handleReadCode = useCallback(
-    (event: {nativeEvent: {codeStringValue: string}}) => {
-      const code = event.nativeEvent?.codeStringValue;
-      if (!code) return;
-      const now = Date.now();
-      const last = lastBarcodeRef.current;
-      if (
-        last != null &&
-        last.code === code &&
-        now - last.at < BARCODE_DEDUPE_MS
-      ) {
-        return;
-      }
-      lastBarcodeRef.current = {code, at: now};
-      setFlash(true);
-      setTimeout(() => setFlash(false), 180);
-      Vibration.vibrate(35);
-      beep();
-      setStatusText(`باركود: ${code}`);
-      onBarcodeRef.current?.(code);
-    },
-    [beep],
-  );
 
   // ── Auto visual-scan loop ────────────────────────────────────
   // Skips the pass entirely while the camera isn't ready or no
@@ -572,28 +715,18 @@ export const ScannerCamera = forwardRef<
 
   return (
     <View style={[styles.wrap, height != null ? {height} : null]}>
-      <SelaCameraView
-        key={remountKey}
-        ref={viewRef}
-        style={StyleSheet.absoluteFill}
-        barcodeEnabled={barcodeEnabled}
-        torch={torch}
-        permissionGranted={permission === 'granted'}
-        onReadCode={handleReadCode}
-        onCameraError={(event: {nativeEvent: {errorMessage: string}}) => {
-          const message = event.nativeEvent?.errorMessage ?? 'خطأ غير معروف';
-          logDiag('camera', `خطأ الكاميرا: ${message}`, 'error');
-          setNativeError(message);
-          setCamState('error');
-          setStatusText(message);
-        }}
-        onCameraReady={() => {
-          setCamState('ready');
-          if (mode === 'capture') {
-            setStatusText('وجّه الكاميرا نحو المنتج');
-          }
-        }}
-      />
+      {appActive ? (
+        <SelaCameraView
+          key={remountKey}
+          ref={viewRef}
+          style={StyleSheet.absoluteFill}
+          barcodeEnabled={barcodeEnabled}
+          torch={torch}
+          permissionGranted={permission === 'granted'}
+        />
+      ) : (
+        <View style={StyleSheet.absoluteFill} />
+      )}
 
       {/* Camera error overlay + one-tap full rebind */}
       {camState === 'error' ? (

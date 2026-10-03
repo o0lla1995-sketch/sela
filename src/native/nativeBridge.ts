@@ -76,10 +76,42 @@ interface PlatformUtilsNative {
   deleteFile(path: string): Promise<boolean>;
 }
 
-/** Hand-written CameraX view (capture/rebind by React view tag). */
+/**
+ * Hand-written CameraX module (v7 — the camera COORDINATOR).
+ *
+ * State events arrive over RCTDeviceEventEmitter (works on both
+ * architectures and inside Modals — the old view-event channel
+ * could be dropped silently by the Fabric interop layer):
+ *   selaCameraReady   { viewTag }
+ *   selaCameraError   { viewTag, message }
+ *   selaCameraBarcode { viewTag, code }
+ */
 interface SelaCameraNativeModule {
   capture(viewTag: number): Promise<string>;
   rebind(viewTag: number): Promise<boolean>;
+  /** True native camera state — the polling source of truth. */
+  getStatus(viewTag: number): Promise<{
+    exists: boolean;
+    bound: boolean;
+    previewLive: boolean;
+    state: 'ready' | 'starting' | 'error' | 'detached' | 'replaced' | 'diagnostics';
+    lastError: string;
+    width: number;
+    height: number;
+    barcodeEnabled: boolean;
+    torch: boolean;
+  }>;
+  /** Headless camera self-test → every step's outcome. */
+  runDiagnostics(): Promise<{
+    permissionGranted: boolean;
+    providerOk?: boolean;
+    providerError?: string;
+    cameraCount?: number;
+    hasBackCamera?: boolean;
+    previewBindOk?: boolean;
+    bindError?: string;
+    result: 'ok' | 'bind-failed' | 'provider-failed';
+  }>;
 }
 
 interface ImageDecoderNative {

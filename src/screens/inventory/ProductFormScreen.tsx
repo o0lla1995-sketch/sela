@@ -8,6 +8,7 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   LayoutAnimation,
   Platform,
@@ -25,6 +26,7 @@ import {
   Card,
   Field,
   SectionTitle,
+  type FieldHandle,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {ErrorBoundary} from '../../components/ErrorBoundary';
@@ -89,6 +91,23 @@ export function ProductFormScreen() {
   const cameraRef = useRef<ScannerCameraHandle>(null);
   const toast = useToastStore(state => state.show);
   const refreshCatalog = useCatalogStore(state => state.refresh);
+
+  // ── Keyboard field chain (round-8: "صعوبة الانتقال بين الحقول
+  //    من خلال لوحة المفاتيح") — زر التالي يقفز مباشرة للحقل
+  //    التالي: الاسم ← الباركود ← التكلفة ← المفرق ← الجملة ←
+  //    الكمية ← حد التنبيه ← إغلاق لوحة المفاتيح.
+  const nameRef = useRef<FieldHandle>(null);
+  const barcodeRef = useRef<FieldHandle>(null);
+  const costRef = useRef<FieldHandle>(null);
+  const retailRef = useRef<FieldHandle>(null);
+  const wholesaleRef = useRef<FieldHandle>(null);
+  const stockRef = useRef<FieldHandle>(null);
+  const thresholdRef = useRef<FieldHandle>(null);
+  /** Unit-card fields, keyed `unitId:field` — chained inside each card. */
+  const unitFieldRefs = useRef<Record<string, FieldHandle | null>>({});
+  const focusUnitField = useCallback((key: string) => {
+    unitFieldRefs.current[key]?.focus();
+  }, []);
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [units, setUnits] = useState<Unit[]>([]);
@@ -587,19 +606,25 @@ export function ProductFormScreen() {
           {/* ── Details form ──────────────────────────────────── */}
           <SectionTitle title="بيانات المنتج" />
           <Field
+            ref={nameRef}
             label="اسم المنتج *"
             value={name}
             onChangeText={setName}
             placeholder="مثال: شوكولاتة دوف 100غ"
+            returnKeyType="next"
+            onSubmitEditing={() => barcodeRef.current?.focus()}
           />
           <View style={styles.barcodeRow}>
             <View style={{flex: 1}}>
               <Field
+                ref={barcodeRef}
                 label="الباركود (اختياري)"
                 value={barcode}
                 onChangeText={setBarcode}
                 keyboardType="numeric"
                 placeholder="امسحه أو اكتبه"
+                returnKeyType="next"
+                onSubmitEditing={() => costRef.current?.focus()}
               />
             </View>
             <TouchableOpacity
@@ -635,29 +660,38 @@ export function ProductFormScreen() {
             </ErrorBoundary>
           ) : null}
           <Field
+            ref={costRef}
             label="سعر التكلفة للقطعة (₪) *"
             value={costPrice}
             onChangeText={setCostPrice}
             keyboardType="numeric"
             placeholder="0.00"
+            returnKeyType="next"
+            onSubmitEditing={() => retailRef.current?.focus()}
           />
           <View style={styles.priceRow}>
             <View style={{flex: 1}}>
               <Field
+                ref={retailRef}
                 label="سعر المفرق (₪) *"
                 value={retailPrice}
                 onChangeText={setRetailPrice}
                 keyboardType="numeric"
                 placeholder="0.00"
+                returnKeyType="next"
+                onSubmitEditing={() => wholesaleRef.current?.focus()}
               />
             </View>
             <View style={{flex: 1}}>
               <Field
+                ref={wholesaleRef}
                 label="سعر الجملة (₪)"
                 value={wholesalePrice}
                 onChangeText={setWholesalePrice}
                 keyboardType="numeric"
                 placeholder="= المفرق"
+                returnKeyType="next"
+                onSubmitEditing={() => stockRef.current?.focus()}
               />
             </View>
           </View>
@@ -665,6 +699,7 @@ export function ProductFormScreen() {
           <View style={styles.priceRow}>
             <View style={{flex: 1.2}}>
               <Field
+                ref={stockRef}
                 label={`الكمية ${
                   stockUnitId != null
                     ? `بـ${unitNameById.get(stockUnitId) ?? ''}`
@@ -674,15 +709,20 @@ export function ProductFormScreen() {
                 onChangeText={setStock}
                 keyboardType="numeric"
                 placeholder="0"
+                returnKeyType="next"
+                onSubmitEditing={() => thresholdRef.current?.focus()}
               />
             </View>
             <View style={{flex: 1}}>
               <Field
+                ref={thresholdRef}
                 label="حد التنبيه"
                 value={threshold}
                 onChangeText={setThreshold}
                 keyboardType="numeric"
                 placeholder={String(DEFAULT_LOW_STOCK_THRESHOLD)}
+                returnKeyType="done"
+                onSubmitEditing={() => Keyboard.dismiss()}
               />
             </View>
           </View>
@@ -834,6 +874,9 @@ export function ProductFormScreen() {
                   <View style={styles.unitFieldsRow}>
                     <View style={{flex: 1}}>
                       <Field
+                        ref={handle => {
+                          unitFieldRefs.current[`${row.unit_id}:conversion`] = handle;
+                        }}
                         label={`تحتوي (${BASE_UNIT_NAME})`}
                         value={row.conversion}
                         onChangeText={text =>
@@ -841,10 +884,17 @@ export function ProductFormScreen() {
                         }
                         keyboardType="numeric"
                         placeholder="24"
+                        returnKeyType="next"
+                        onSubmitEditing={() =>
+                          focusUnitField(`${row.unit_id}:retail`)
+                        }
                       />
                     </View>
                     <View style={{flex: 1}}>
                       <Field
+                        ref={handle => {
+                          unitFieldRefs.current[`${row.unit_id}:retail`] = handle;
+                        }}
                         label="مفرق الوحدة (₪)"
                         value={row.retail}
                         onChangeText={text =>
@@ -852,12 +902,19 @@ export function ProductFormScreen() {
                         }
                         keyboardType="numeric"
                         placeholder="تلقائي"
+                        returnKeyType="next"
+                        onSubmitEditing={() =>
+                          focusUnitField(`${row.unit_id}:wholesale`)
+                        }
                       />
                     </View>
                   </View>
                   <View style={styles.unitFieldsRow}>
                     <View style={{flex: 1}}>
                       <Field
+                        ref={handle => {
+                          unitFieldRefs.current[`${row.unit_id}:wholesale`] = handle;
+                        }}
                         label="جملة الوحدة (₪)"
                         value={row.wholesale}
                         onChangeText={text =>
@@ -865,10 +922,17 @@ export function ProductFormScreen() {
                         }
                         keyboardType="numeric"
                         placeholder="تلقائي"
+                        returnKeyType="next"
+                        onSubmitEditing={() =>
+                          focusUnitField(`${row.unit_id}:barcode`)
+                        }
                       />
                     </View>
                     <View style={{flex: 1}}>
                       <Field
+                        ref={handle => {
+                          unitFieldRefs.current[`${row.unit_id}:barcode`] = handle;
+                        }}
                         label="باركود الوحدة"
                         value={row.barcode}
                         onChangeText={text =>
@@ -876,6 +940,8 @@ export function ProductFormScreen() {
                         }
                         keyboardType="numeric"
                         placeholder="اختياري"
+                        returnKeyType="done"
+                        onSubmitEditing={() => Keyboard.dismiss()}
                       />
                     </View>
                   </View>

@@ -11,9 +11,10 @@ import {CategoryRepo} from '../../database/repositories/CategoryRepo';
 import {EmbeddingRepo} from '../../database/repositories/EmbeddingRepo';
 import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {usePrinterStore} from '../../stores/printerStore';
-import {getDiagnostics, clearDiagnostics} from '../../core/diagnostics';
+import {getDiagnostics, clearDiagnostics, logDiag} from '../../core/diagnostics';
 import {makeStyles, spacing, typography} from '../../core/theme';
 import {MODEL_INPUT_SIZE} from '../../core/config';
+import {SelaCameraNative} from '../../native/nativeBridge';
 
 interface Counts {
   products: number;
@@ -22,10 +23,24 @@ interface Counts {
   sales: number;
 }
 
+/** Report of the native camera self-test (SelaCamera.runDiagnostics). */
+interface CameraReport {
+  permissionGranted: boolean;
+  providerOk?: boolean;
+  providerError?: string;
+  cameraCount?: number;
+  hasBackCamera?: boolean;
+  previewBindOk?: boolean;
+  bindError?: string;
+  result: 'ok' | 'bind-failed' | 'provider-failed';
+}
+
 export function DiagnosticsScreen() {
   const styles = useStyles();
   const [counts, setCounts] = useState<Counts | null>(null);
   const [logVersion, setLogVersion] = useState(0);
+  const [cameraReport, setCameraReport] = useState<CameraReport | null>(null);
+  const [cameraTesting, setCameraTesting] = useState(false);
   const printerStatus = usePrinterStore(state => state.status);
   const printerName = usePrinterStore(state => state.deviceName);
 
@@ -62,6 +77,37 @@ export function DiagnosticsScreen() {
   }, []);
 
   const entries = getDiagnostics();
+
+  const runCameraTest = async () => {
+    if (SelaCameraNative == null) {
+      setCameraReport({
+        permissionGranted: false,
+        result: 'provider-failed',
+        providerError: 'وحدة الكاميرا غير متوفرة في هذا الإصدار',
+      });
+      return;
+    }
+    setCameraTesting(true);
+    setCameraReport(null);
+    try {
+      const report = await SelaCameraNative.runDiagnostics();
+      setCameraReport(report);
+      logDiag(
+        'camera',
+        `فحص ذاتي: ${report.result}${report.bindError ? ` — ${report.bindError}` : ''}`,
+        report.result === 'ok' ? 'info' : 'error',
+      );
+    } catch (error) {
+      setCameraReport({
+        permissionGranted: false,
+        result: 'provider-failed',
+        providerError:
+          error instanceof Error ? error.message : 'خطأ غير معروف',
+      });
+    } finally {
+      setCameraTesting(false);
+    }
+  };
 
   return (
     <Screen>
@@ -114,6 +160,74 @@ export function DiagnosticsScreen() {
             label="النموذج"
             value="MobileNetV3-Small float32 (محلي 100%)"
           />
+        </Card>
+
+        {/* ── Camera self-test ─────────────────────────────────── */}
+        <Card>
+          <View style={styles.cardHeaderRow}>
+            <Text style={styles.sectionTitle}>فحص الكاميرا الذاتي</Text>
+            {cameraReport ? (
+              <Badge
+                label={
+                  cameraReport.result === 'ok'
+                    ? 'سليمة'
+                    : cameraReport.result === 'bind-failed'
+                    ? 'فشل التشغيل'
+                    : 'فشل النظام'
+                }
+                tone={cameraReport.result === 'ok' ? 'success' : 'danger'}
+              />
+            ) : null}
+          </View>
+          <Text style={styles.cameraTestHint}>
+            يشغّل الكاميرا فعلياً بدون واجهة ويعرض النتيجة الحقيقية من الجهاز:
+            الإذن، خدمة الكاميرا، عدد الكاميرات، ونجاح بدء المعاينة — إن كانت
+            الكاميرا لا تعمل عندك، شغّل هذا الفحص وستظهر السبب الدقيق.
+          </Text>
+          <AppButton
+            title={cameraTesting ? 'جارٍ الفحص…' : 'تشغيل فحص الكاميرا'}
+            icon="camera"
+            small
+            loading={cameraTesting}
+            disabled={cameraTesting}
+            onPress={() => void runCameraTest()}
+          />
+          {cameraReport ? (
+            <View style={styles.cameraReportWrap}>
+              <DiagRow
+                label="إذن الكاميرا"
+                value={cameraReport.permissionGranted ? 'ممنوح ✓' : 'مرفوض ✖'}
+              />
+              <DiagRow
+                label="خدمة الكاميرا (CameraX)"
+                value={
+                  cameraReport.providerOk == null
+                    ? '…'
+                    : cameraReport.providerOk
+                    ? 'تعمل ✓'
+                    : cameraReport.providerError ?? 'فشلت'
+                }
+              />
+              {cameraReport.cameraCount != null ? (
+                <DiagRow
+                  label="عدد الكاميرات"
+                  value={`${cameraReport.cameraCount}${
+                    cameraReport.hasBackCamera ? ' (خلفية موجودة)' : ''
+                  }`}
+                />
+              ) : null}
+              {cameraReport.previewBindOk != null ? (
+                <DiagRow
+                  label="بدء المعاينة"
+                  value={
+                    cameraReport.previewBindOk
+                      ? 'نجح ✓ — الكاميرا سليمة'
+                      : cameraReport.bindError ?? 'فشل'
+                  }
+                />
+              ) : null}
+            </View>
+          ) : null}
         </Card>
 
         {/* ── Database ─────────────────────────────────────────── */}
@@ -260,6 +374,13 @@ const useStyles = makeStyles(c =>
     logWarn: {color: c.warning},
     logTag: {color: c.textFaint, fontSize: 10, marginBottom: 2},
     logMessage: {color: c.textDim, fontSize: typography.small, lineHeight: 17},
+    cameraTestHint: {
+      color: c.textDim,
+      fontSize: typography.small,
+      lineHeight: 19,
+      marginBottom: spacing.sm,
+    },
+    cameraReportWrap: {marginTop: spacing.sm},
     emptyLog: {
       color: c.textDim,
       fontSize: typography.small,

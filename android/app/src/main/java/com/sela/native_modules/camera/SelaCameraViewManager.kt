@@ -1,6 +1,5 @@
 package com.sela.native_modules.camera
 
-import com.facebook.react.common.MapBuilder
 import com.facebook.react.uimanager.SimpleViewManager
 import com.facebook.react.uimanager.ThemedReactContext
 import com.facebook.react.uimanager.annotations.ReactProp
@@ -10,15 +9,12 @@ import com.facebook.react.uimanager.annotations.ReactProp
  * ─────────────────────────────────────────────────────────────────
  * Exposes SelaCameraView to JS as <SelaCameraView />.
  *
- * Props:
- *   barcodeEnabled   — run the offline ML Kit barcode analyzer
- *   torch            — flashlight (no camera rebind)
- *   permissionGranted— JS-side permission gate (belt & suspenders)
- *
- * Events (direct, top-* mapping):
- *   onReadCode    { codeStringValue }
- *   onCameraError { errorMessage }
- *   onCameraReady { }
+ * v7: PROPS ONLY. All camera state (ready / error / barcode) now
+ * travels over the SelaCameraModule event channel
+ * (RCTDeviceEventEmitter) — the old custom view events could be
+ * silently dropped by the Fabric interop layer inside Modals, which
+ * is why the camera "never worked" while actually being live. See
+ * SelaCameraModule for the full story.
  */
 class SelaCameraViewManager : SimpleViewManager<SelaCameraView>() {
 
@@ -41,14 +37,4 @@ class SelaCameraViewManager : SimpleViewManager<SelaCameraView>() {
     fun setPermissionGranted(view: SelaCameraView, granted: Boolean) {
         view.setPermissionGrantedProp(granted)
     }
-
-    override fun getExportedCustomDirectEventTypeConstants(): Map<String, Any> =
-        mapOf(
-            CameraReadCodeEvent.EVENT_NAME to
-                mapOf("registrationName" to "onReadCode"),
-            CameraErrorEvent.EVENT_NAME to
-                mapOf("registrationName" to "onCameraError"),
-            CameraReadyEvent.EVENT_NAME to
-                mapOf("registrationName" to "onCameraReady"),
-        )
 }

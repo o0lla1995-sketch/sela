@@ -10,12 +10,17 @@
  * The header brand mark is now the sela basket (not a star), and
  * the bell is a clean filled notification glyph.
  */
-import React from 'react';
+import React, {
+  forwardRef,
+  useImperativeHandle,
+  useRef,
+} from 'react';
 import {
   ActivityIndicator,
   I18nManager,
   KeyboardTypeOptions,
   Pressable,
+  ReturnKeyTypeOptions,
   StyleSheet,
   Switch,
   Text,
@@ -682,17 +687,23 @@ const useDataStyles = makeStyles(c =>
 // Inputs
 // ────────────────────────────────────────────────────────────────
 
-export function Field({
-  label,
-  value,
-  onChangeText,
-  placeholder,
-  keyboardType,
-  suffix,
-  multiline = false,
-  numberOfLines = 1,
-  onFocus,
-}: {
+/**
+ * Text field with keyboard NEXT/DONE navigation.
+ *
+ * Round-8 feedback: "لا تستخدم الانتقال بين الحقول من خلال لوحة
+ * المفاتيح بشكل سلس" — the field now forwards a ref exposing
+ * focus()/blur(), accepts returnKeyType/onSubmitEditing and keeps
+ * the keyboard up between submits (blurOnSubmit={false}), so forms
+ * chain like native Android apps: زر "التالي" على لوحة المفاتيح
+ * يقفز للحقـل التالي مباشرة.
+ */
+export interface FieldHandle {
+  focus: () => void;
+  blur: () => void;
+  isFocused: () => boolean;
+}
+
+interface FieldProps {
   label: string;
   value: string;
   onChangeText: (text: string) => void;
@@ -702,14 +713,44 @@ export function Field({
   multiline?: boolean;
   numberOfLines?: number;
   onFocus?: () => void;
-}) {
+  /** Keyboard action button ("next" jumps to the next field). */
+  returnKeyType?: ReturnKeyTypeOptions;
+  /** Fired when the keyboard's action button is pressed. */
+  onSubmitEditing?: () => void;
+}
+
+export const Field = forwardRef<FieldHandle, FieldProps>(function Field(
+  {
+    label,
+    value,
+    onChangeText,
+    placeholder,
+    keyboardType,
+    suffix,
+    multiline = false,
+    numberOfLines = 1,
+    onFocus,
+    returnKeyType,
+    onSubmitEditing,
+  },
+  ref,
+) {
   const c = useThemeColors();
   const styles = useInputStyles();
+  const inputRef = useRef<TextInput>(null);
+
+  useImperativeHandle(ref, () => ({
+    focus: () => inputRef.current?.focus(),
+    blur: () => inputRef.current?.blur(),
+    isFocused: () => inputRef.current?.isFocused() ?? false,
+  }));
+
   return (
     <View style={styles.fieldWrap}>
       <Text style={styles.fieldLabel}>{label}</Text>
       <View style={styles.fieldRow}>
         <TextInput
+          ref={inputRef}
           style={[styles.fieldInput, multiline && styles.fieldMultiline]}
           value={value}
           onChangeText={onChangeText}
@@ -721,12 +762,15 @@ export function Field({
           textAlign={I18nManager.isRTL ? 'right' : 'left'}
           textAlignVertical={multiline ? 'top' : 'center'}
           onFocus={onFocus}
+          returnKeyType={returnKeyType ?? (multiline ? 'done' : 'next')}
+          onSubmitEditing={onSubmitEditing}
+          blurOnSubmit={multiline ? true : false}
         />
         {suffix ? <Text style={styles.fieldSuffix}>{suffix}</Text> : null}
       </View>
     </View>
   );
-}
+});
 
 export function SearchBar({
   value,
