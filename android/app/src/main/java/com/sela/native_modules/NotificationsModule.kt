@@ -12,6 +12,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import java.util.Locale
 
 /**
  * NotificationsModule
@@ -113,6 +114,12 @@ class NotificationsModule(reactContext: ReactApplicationContext) :
         .setContentTitle(title)
         .setContentText(body)
         .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+        // Arabic-first notification: force the ar locale so the shade
+        // lays this notification out RIGHT-to-left (title/body aligned
+        // right, icon on the right) even when the device locale is
+        // Hebrew/English — fixes "alerts read left-to-right and get cut
+        // off at the left edge".
+        .setLocale(Locale("ar"))
         .setAutoCancel(true)
         .setPriority(
           if (kind == "out_of_stock") NotificationCompat.PRIORITY_HIGH

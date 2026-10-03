@@ -126,6 +126,13 @@ export function HomeScreen() {
                 {products.length} منتج · البيع الافتراضي{' '}
                 {settings.defaultPricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}
               </Text>
+              {/* Distinctive version badge — always visible on the dashboard */}
+              <View style={styles.versionBadge}>
+                <View style={styles.versionDot} />
+                <Text style={styles.versionBadgeText}>
+                  الإصدار {APP_VERSION}
+                </Text>
+              </View>
             </View>
             <Badge
               label={
@@ -333,6 +340,29 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.small,
       marginTop: 2,
+    },
+    versionBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      alignSelf: 'flex-start',
+      backgroundColor: c.accentSoft,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 2,
+      marginTop: 6,
+    },
+    versionDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: c.accent,
+    },
+    versionBadgeText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+      fontVariant: ['tabular-nums'],
     },
     statsGrid: {
       flexDirection: 'row',

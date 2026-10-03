@@ -180,11 +180,14 @@ function InventoryLayout({
           placeholder="ابحث بالاسم أو الباركود…"
         />
 
-        {/* ── Category chips (with counts, roomier) ─────────── */}
+        {/* ── Category chips — compact, horizontally scrollable ── */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{gap: spacing.sm, paddingVertical: 4}}>
+          contentContainerStyle={{
+            gap: 6,
+            paddingVertical: 2,
+          }}>
           <FilterChip
             label="الكل"
             count={countFor('all')}
@@ -428,29 +431,30 @@ const useStyles = makeStyles(c =>
     chip: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 7,
+      gap: 6,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: radius.pill,
       paddingHorizontal: spacing.md,
-      paddingVertical: 10,
+      paddingVertical: 6,
     },
     chipText: {
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
     chipCount: {
-      minWidth: 22,
-      borderRadius: 8,
+      minWidth: 18,
+      minHeight: 16,
+      borderRadius: 6,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingHorizontal: 5,
+      paddingHorizontal: 4,
       paddingVertical: 1,
     },
     chipCountText: {
       fontFamily: fonts.bold,
-      fontSize: typography.micro,
+      fontSize: typography.micro - 0.5,
       fontVariant: ['tabular-nums'],
     },
     row: {

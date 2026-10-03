@@ -25,7 +25,6 @@ import {
   Card,
   Field,
   SectionTitle,
-  Segmented,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {ErrorBoundary} from '../../components/ErrorBoundary';
@@ -47,7 +46,7 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {parseNumber} from '../../core/format';
+import {formatMoney, parseNumber} from '../../core/format';
 import {
   ANGLE_LABELS,
   ANGLE_LABELS_AR,
@@ -100,6 +99,8 @@ export function ProductFormScreen() {
   const [wholesalePrice, setWholesalePrice] = useState('');
   const [stock, setStock] = useState('');
   const [threshold, setThreshold] = useState('');
+  /** Which unit the merchant is entering stock in (null = base قطعة). */
+  const [stockUnitId, setStockUnitId] = useState<number | null>(null);
   const [categoryId, setCategoryId] = useState<number | 'none'>('none');
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
@@ -243,6 +244,79 @@ export function ProductFormScreen() {
     return map;
   }, [units]);
 
+  // ── Stock entry in units (international standard) ────────────
+  // Stock is always STORED in base pieces, but the merchant may
+  // TYPE it in any sale unit (e.g. 5 كرتونة) — converted live.
+  const unitRowsById = useMemo(
+    () => new Map(unitRows.map(row => [row.unit_id, row])),
+    [unitRows],
+  );
+
+  /** Valid (> 0) conversion of a unit row, or null when unusable. */
+  const validConversion = useCallback(
+    (unitId: number | null): number | null => {
+      if (unitId == null) {
+        return 1;
+      }
+      const row = unitRowsById.get(unitId);
+      if (row == null) {
+        return null;
+      }
+      const value = parseNumber(row.conversion);
+      return Number.isNaN(value) || value <= 0 ? null : value;
+    },
+    [unitRowsById],
+  );
+
+  /** Unit rows usable as a stock-entry unit (valid conversion). */
+  const stockUnitChoices = useMemo(
+    () => unitRows.filter(row => validConversion(row.unit_id) != null),
+    [unitRows, validConversion],
+  );
+
+  /** Switch the stock-entry unit and re-express the typed quantity
+   *  in the new unit (120 قطعة ⇄ 5 كرتونة) so nothing is lost. */
+  const switchStockUnit = useCallback(
+    (unitId: number | null) => {
+      if (unitId === stockUnitId) {
+        return;
+      }
+      const oldConv = validConversion(stockUnitId) ?? 1;
+      const newConv = validConversion(unitId) ?? 1;
+      setStockUnitId(unitId);
+      if (oldConv !== newConv && stock.trim()) {
+        const current = parseNumber(stock);
+        if (!Number.isNaN(current)) {
+          const basePieces = current * oldConv;
+          const next = basePieces / newConv;
+          setStock(String(Math.round(next * 1000) / 1000));
+        }
+      }
+    },
+    [stock, stockUnitId, validConversion],
+  );
+
+  // Keep the stock unit valid when unit rows are removed/edited.
+  useEffect(() => {
+    if (stockUnitId != null && validConversion(stockUnitId) == null) {
+      setStockUnitId(null);
+    }
+  }, [stockUnitId, validConversion]);
+
+  /** Live conversion hint under the stock field. */
+  const stockHint = useMemo(() => {
+    const conv = validConversion(stockUnitId);
+    if (stockUnitId == null || conv == null || !stock.trim()) {
+      return null;
+    }
+    const value = parseNumber(stock);
+    if (Number.isNaN(value)) {
+      return null;
+    }
+    const basePieces = Math.round(value * conv * 1000) / 1000;
+    return `${value} ${unitNameById.get(stockUnitId) ?? ''} = ${basePieces} ${BASE_UNIT_NAME} محفوظة في المخزون`;
+  }, [stock, stockUnitId, unitNameById, validConversion]);
+
   const save = useCallback(async () => {
     const trimmedName = name.trim();
     const cost = parseNumber(costPrice);
@@ -250,7 +324,10 @@ export function ProductFormScreen() {
     const wholesale = wholesalePrice.trim()
       ? parseNumber(wholesalePrice)
       : retail;
-    const stockValue = stock.trim() ? parseNumber(stock) : 0;
+    const stockConversion = validConversion(stockUnitId) ?? 1;
+    const stockValue = stock.trim()
+      ? parseNumber(stock) * stockConversion
+      : 0;
     const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
 
     if (!trimmedName) {
@@ -368,6 +445,8 @@ export function ProductFormScreen() {
     categoryId,
     imageUri,
     unitRows,
+    stockUnitId,
+    validConversion,
     angles,
     productId,
     refreshCatalog,
@@ -582,10 +661,15 @@ export function ProductFormScreen() {
               />
             </View>
           </View>
+          {/* ── Stock entry: type in any unit, stored in pieces ── */}
           <View style={styles.priceRow}>
-            <View style={{flex: 1}}>
+            <View style={{flex: 1.2}}>
               <Field
-                label={`الكمية (${BASE_UNIT_NAME})`}
+                label={`الكمية$(${
+                  stockUnitId != null
+                    ? ` بـ${unitNameById.get(stockUnitId) ?? ''}`
+                    : ` (${BASE_UNIT_NAME})`
+                })`}
                 value={stock}
                 onChangeText={setStock}
                 keyboardType="numeric"
@@ -602,6 +686,32 @@ export function ProductFormScreen() {
               />
             </View>
           </View>
+          {stockUnitChoices.length > 0 ? (
+            <View style={styles.stockUnitRow}>
+              <Text style={styles.stockUnitLabel}>وحدة الإدخال:</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.stockUnitChips}>
+                <StockUnitChip
+                  label={BASE_UNIT_NAME}
+                  active={stockUnitId == null}
+                  onPress={() => switchStockUnit(null)}
+                />
+                {stockUnitChoices.map(row => (
+                  <StockUnitChip
+                    key={row.unit_id}
+                    label={unitNameById.get(row.unit_id) ?? 'وحدة'}
+                    active={stockUnitId === row.unit_id}
+                    onPress={() => switchStockUnit(row.unit_id)}
+                  />
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+          {stockHint ? (
+            <Text style={styles.stockHintText}>{stockHint}</Text>
+          ) : null}
 
           {/* ── Category picker ──────────────────────────────── */}
           <View style={styles.categoryHeader}>
@@ -685,10 +795,46 @@ export function ProductFormScreen() {
                       <Icon name="trash" size={16} color={c.danger} />
                     </TouchableOpacity>
                   </View>
+                  {/* Unit selector — content-sized wrap chips: names can
+                      never overlap regardless of their length. */}
+                  <View style={styles.unitPickWrap}>
+                    {units
+                      .filter(
+                        unit =>
+                          unit.id === row.unit_id ||
+                          !unitRows.some(r => r.unit_id === unit.id),
+                      )
+                      .map(unit => {
+                        const active = row.unit_id === unit.id;
+                        return (
+                          <TouchableOpacity
+                            key={unit.id}
+                            style={[
+                              styles.unitPickChip,
+                              active
+                                ? {backgroundColor: c.accent, borderColor: c.accent}
+                                : null,
+                            ]}
+                            onPress={() =>
+                              updateUnitRow(index, {unit_id: unit.id})
+                            }
+                            activeOpacity={0.8}>
+                            <Text
+                              style={[
+                                styles.unitPickChipText,
+                                {color: active ? c.onAccent : c.textDim},
+                              ]}
+                              numberOfLines={1}>
+                              {unit.name}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                  </View>
                   <View style={styles.unitFieldsRow}>
                     <View style={{flex: 1}}>
                       <Field
-                        label="تحتوي (قطعة)"
+                        label={`تحتوي (${BASE_UNIT_NAME})`}
                         value={row.conversion}
                         onChangeText={text =>
                           updateUnitRow(index, {conversion: text})
@@ -733,20 +879,16 @@ export function ProductFormScreen() {
                       />
                     </View>
                   </View>
-                  <Segmented
-                    compact
-                    value={row.unit_id}
-                    onChange={(value: number) =>
-                      updateUnitRow(index, {unit_id: value})
-                    }
-                    options={units
-                      .filter(
-                        unit =>
-                          unit.id === row.unit_id ||
-                          !unitRows.some(r => r.unit_id === unit.id),
-                      )
-                      .map(unit => ({value: unit.id, label: unit.name}))}
-                  />
+                  {validConversion(row.unit_id) == null ? (
+                    <Text style={styles.unitInvalidText}>
+                      أدخل عدد القطع التي تحتويها الوحدة (أكبر من صفر)
+                    </Text>
+                  ) : (
+                    <Text style={styles.unitSummaryText}>
+                      بيع 1 {unitNameById.get(row.unit_id) ?? ''} يخصم{' '}
+                      {parseNumber(row.conversion)} {BASE_UNIT_NAME} من المخزون
+                    </Text>
+                  )}
                 </Card>
               ))}
             </View>
@@ -773,6 +915,38 @@ export function ProductFormScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
     </View>
+  );
+}
+
+/** Compact chip for choosing the unit the stock is TYPED in. */
+function StockUnitChip({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  return (
+    <TouchableOpacity
+      style={[
+        styles.stockUnitChip,
+        active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+      ]}
+      onPress={onPress}
+      activeOpacity={0.8}>
+      <Text
+        style={[
+          styles.stockUnitChipText,
+          {color: active ? c.onAccent : c.textDim},
+        ]}
+        numberOfLines={1}>
+        {label}
+      </Text>
+    </TouchableOpacity>
   );
 }
 
@@ -933,6 +1107,71 @@ const useStyles = makeStyles(c =>
     unitFieldsRow: {
       flexDirection: 'row',
       gap: spacing.sm,
+    },
+    // ── Stock-entry unit chips ───────────────────────────────────
+    stockUnitRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      marginTop: -spacing.xs,
+    },
+    stockUnitLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    stockUnitChips: {
+      gap: 6,
+      paddingVertical: 2,
+    },
+    stockUnitChip: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 5,
+    },
+    stockUnitChipText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    stockHintText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+      marginTop: -spacing.xs,
+      fontVariant: ['tabular-nums'],
+    },
+    // ── Unit-row picker chips (wrap → names can never overlap) ──
+    unitPickWrap: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 6,
+    },
+    unitPickChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 6,
+      maxWidth: 150,
+    },
+    unitPickChipText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    unitInvalidText: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    unitSummaryText: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      fontVariant: ['tabular-nums'],
     },
   }),
 );

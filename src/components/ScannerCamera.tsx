@@ -161,8 +161,8 @@ export const ScannerCamera = forwardRef<
     mode === 'capture'
       ? 'وجّه الكاميرا نحو المنتج'
       : barcodeEnabled
-      ? 'وجّه الباركود نحو الكاميرا'
-      : 'جاهز للمسح',
+      ? 'باركود جاهز — وجّه الكاميرا نحو الملصق'
+      : 'جاهز للمسح البصري',
   );
   const [flash, setFlash] = useState(false);
   const [torch, setTorch] = useState(false);
@@ -376,8 +376,12 @@ export const ScannerCamera = forwardRef<
           setStatusText('تمت الإضافة للسلة');
           return best;
         }
+        // In "both" mode keep the barcode hint visible between visual
+        // passes — a "no match" line would hide it every ~1s.
         setStatusText(
-          `أقرب تشابه ${(best.score * 100).toFixed(0)}% — قرّب الكاميرا أكثر`,
+          barcodeEnabled
+            ? `أقرب تشابه ${(best.score * 100).toFixed(0)}% — الباركود يعمل`
+            : `أقرب تشابه ${(best.score * 100).toFixed(0)}% — قرّب الكاميرا أكثر`,
         );
         return null;
       } finally {
@@ -385,14 +389,22 @@ export const ScannerCamera = forwardRef<
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'خطأ غير معروف';
-      setStatusText(`فشل المسح: ${message}`);
-      logDiag('camera', `فشل المسح البصري: ${message}`, 'warn');
+      // E_CAMERA_NOT_READY / busy in barcode mode are transient (the
+      // analyzer frame lands a beat later) — keep the barcode hint
+      // instead of scaring the merchant with an error line.
+      if (barcodeEnabled && message.includes('غير جاهزة')) {
+        setStatusText('باركود جاهز — وجّه الكاميرا نحو الملصق');
+      } else {
+        setStatusText(`فشل المسح: ${message}`);
+        logDiag('camera', `فشل المسح البصري: ${message}`, 'warn');
+      }
       return null;
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
   }, [
+    barcodeEnabled,
     beep,
     camState,
     capturePhoto,

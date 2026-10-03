@@ -88,7 +88,7 @@ export const APP_NAME = 'sela';
 export const APP_NAME_AR = 'سيلا';
 
 /** App version shown in Settings → About. */
-export const APP_VERSION = '4.1.0';
+export const APP_VERSION = '5.0.0';
 
 // ─────────────────────────────────────────────────────────────
 // Subscription / licensing
