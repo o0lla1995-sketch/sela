@@ -1,12 +1,12 @@
 package com.sela.native_modules
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -109,23 +109,34 @@ class NotificationsModule(reactContext: ReactApplicationContext) :
         "sale" -> CHANNEL_SALES_ID
         else -> CHANNEL_ID
       }
-      val builder = NotificationCompat.Builder(ctx, channel)
-        .setSmallIcon(ctx.resources.getIdentifier("ic_stat_sela", "drawable", ctx.packageName))
-        .setContentTitle(title)
-        .setContentText(body)
-        .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-        // Arabic-first notification: force the ar locale so the shade
-        // lays this notification out RIGHT-to-left (title/body aligned
-        // right, icon on the right) even when the device locale is
-        // Hebrew/English — fixes "alerts read left-to-right and get cut
-        // off at the left edge".
-        .setLocale(Locale("ar"))
-        .setAutoCancel(true)
-        .setPriority(
-          if (kind == "out_of_stock") NotificationCompat.PRIORITY_HIGH
-          else NotificationCompat.PRIORITY_DEFAULT
+      // Arabic-first notification: framework Notification.Builder is
+      // used (instead of NotificationCompat) because setLocale(Locale)
+      // exists there since API 24 = our minSdk. It forces the shade
+      // to lay this notification out RIGHT-to-left (title/body aligned
+      // right, icon on the right) even when the device locale is
+      // Hebrew/English — fixes "alerts read left-to-right and get cut
+      // off at the left edge". (NotificationCompat lacks setLocale.)
+      val locale = Locale("ar")
+      val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        Notification.Builder(ctx, channel)
+      } else {
+        @Suppress("DEPRECATION")
+        Notification.Builder(ctx)
+      }.apply {
+        setSmallIcon(
+          ctx.resources.getIdentifier("ic_stat_sela", "drawable", ctx.packageName)
         )
-      NotificationManagerCompat.from(ctx).notify(id.coerceAtLeast(1), builder.build())
+        setContentTitle(title)
+        setContentText(body)
+        setStyle(Notification.BigTextStyle().bigText(body))
+        setLocale(locale)
+        setAutoCancel(true)
+        setPriority(
+          if (kind == "out_of_stock") Notification.PRIORITY_HIGH
+          else Notification.PRIORITY_DEFAULT
+        )
+      }.build()
+      NotificationManagerCompat.from(ctx).notify(id.coerceAtLeast(1), notification)
       promise.resolve(true)
     } catch (e: Exception) {
       // A failed notification must never crash the app.

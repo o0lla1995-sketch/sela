@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.Rect
+import android.graphics.YuvImage
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -237,12 +238,13 @@ class SelaCameraView(
     }
 
     private fun executor(): ExecutorService {
-        var e = analysisExecutor
-        if (e == null || e.isShutdown) {
-            e = Executors.newSingleThreadExecutor()
-            analysisExecutor = e
+        val existing = analysisExecutor
+        if (existing != null && !existing.isShutdown) {
+            return existing
         }
-        return e
+        val created = Executors.newSingleThreadExecutor()
+        analysisExecutor = created
+        return created
     }
 
     /**
