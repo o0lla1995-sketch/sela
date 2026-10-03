@@ -10,7 +10,7 @@
  * is always reserved in base pieces. Manual selling never depends on
  * the camera being available.
  */
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Alert,
   Dimensions,
@@ -18,7 +18,6 @@ import {
   Keyboard,
   Modal,
   ScrollView,
-  StatusBar,
   StyleSheet,
   Text,
   TextInput,
@@ -26,8 +25,7 @@ import {
   Vibration,
   View,
 } from 'react-native';
-import {useFocusEffect, useNavigation} from '@react-navigation/native';
-import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {useNavigation} from '@react-navigation/native';
 import {
   AppButton,
   AppHeader,
@@ -38,11 +36,6 @@ import {
   Stepper,
 } from '../components/ui';
 import {Icon} from '../components/Icon';
-import {ErrorBoundary} from '../components/ErrorBoundary';
-import {
-  ScannerCamera,
-  type ScannerCameraHandle,
-} from '../components/ScannerCamera';
 import {useCartStore, cartTotals, unitPriceFor} from '../stores/cartStore';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
@@ -51,10 +44,10 @@ import {useToastStore} from '../stores/toastStore';
 import {InvoiceService} from '../services/InvoiceService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
-import {
-  requirePlatformUtils,
-  PlatformUtilsNative,
-} from '../native/nativeBridge';
+import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
+import {findTopMatches} from '../services/vision/embedding';
+import {scanBarcode, capturePhoto} from '../services/vision/scanFlow';
+import {requirePlatformUtils} from '../native/nativeBridge';
 import {BASE_UNIT_NAME, type ScannerMode} from '../core/config';
 import {
   fonts,
@@ -79,8 +72,6 @@ export function PosScreen() {
   const c = useThemeColors();
   const styles = useStyles();
   const navigation = useNavigation<any>();
-  const cameraRef = useRef<ScannerCameraHandle>(null);
-  const insets = useSafeAreaInsets();
 
   const lines = useCartStore(state => state.lines);
   const pricingMode = useCartStore(state => state.pricingMode);
@@ -99,41 +90,23 @@ export function PosScreen() {
   const embeddingsCount = useCatalogStore(state => state.embeddingsCount);
 
   const settings = useSettingsStore(state => state.settings);
-  const updateSettings = useSettingsStore(state => state.update);
   const printerStatus = usePrinterStore(state => state.status);
   const toast = useToastStore(state => state.show);
 
   const [search, setSearch] = useState('');
   const [discountText, setDiscountText] = useState('');
-  const [cameraOpen, setCameraOpen] = useState(false);
-  // 32-bit devices run the TFLite inference 10-40x slower — the auto
-  // visual loop would saturate the JS thread there. Default to manual
-  // capture on them (merchant can still enable it manually).
-  const [autoScan, setAutoScan] = useState(true);
-
-  useEffect(() => {
-    let mounted = true;
-    void PlatformUtilsNative?.getAbi()
-      .then(abi => {
-        if (
-          mounted &&
-          typeof abi === 'string' &&
-          abi.startsWith('armeabi-v7')
-        ) {
-          setAutoScan(false);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      mounted = false;
-    };
-  }, []);
-  const [busy, setBusy] = useState(false);
-  const [lastRecognized, setLastRecognized] = useState<{
-    name: string;
-    score: number;
+  // v8: the scanner is a NATIVE full-screen activity — no in-RN
+  // camera state left. scanBusy guards the launch, enginePicker is
+  // the "which engine?" sheet (scannerMode = both), and visionResult
+  // is the photo → top-matches result sheet.
+  const [scanBusy, setScanBusy] = useState(false);
+  const [enginePickerOpen, setEnginePickerOpen] = useState(false);
+  const [visionResult, setVisionResult] = useState<{
+    photoPath: string;
+    matches: {product: Product; score: number}[];
+    autoAdded: boolean;
   } | null>(null);
-  const [lastBarcode, setLastBarcode] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [unitPickerLine, setUnitPickerLine] = useState<CartLine | null>(null);
   const [unitPickerRows, setUnitPickerRows] = useState<ProductUnit[] | null>(
     null,
@@ -144,15 +117,6 @@ export function PosScreen() {
   const visualActive = scannerMode === 'visual' || scannerMode === 'both';
 
   const totals = useMemo(() => cartTotals(lines, discount), [lines, discount]);
-
-  // Pause the scanner whenever the tab loses focus (battery + camera).
-  const [tabFocused, setTabFocused] = useState(true);
-  useFocusEffect(
-    useCallback(() => {
-      setTabFocused(true);
-      return () => setTabFocused(false);
-    }, []),
-  );
 
   useEffect(() => {
     if (discount === 0) {
@@ -183,34 +147,75 @@ export function PosScreen() {
     [addProduct, pricingMode, beep, toast],
   );
 
-  const handleMatch = useCallback(
-    (match: {productId: number; score: number}) => {
-      const product = useCatalogStore
-        .getState()
-        .products.find(entry => entry.id === match.productId);
-      if (!product) {
+  /** v8: photo engine → embed → top matches → auto-add or sheet. */
+  const runVisionScan = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    setScanBusy(true);
+    try {
+      const photoPath = await capturePhoto();
+      if (photoPath == null) {
+        return; // Merchant closed the native scanner.
+      }
+      await VisionRecognitionService.loadModel();
+      const vector = await VisionRecognitionService.embedPhoto(photoPath);
+      const index = useCatalogStore.getState().embeddingsIndex;
+      if (index == null || index.ids.length === 0) {
+        toast(
+          'لا توجد بصمات بصرية محفوظة — سجّل صور المنتجات من شاشة المنتج أولاً',
+          'error',
+        );
         return;
       }
-      setLastRecognized({name: product.name, score: match.score});
-      const result = addProduct(
-        product,
-        useCartStore.getState().pricingMode,
-        null,
-      );
-      if (result.added) {
-        Vibration.vibrate(40);
-        beep();
-      } else if (result.reason) {
-        toast(result.reason, 'error');
+      const top = findTopMatches(vector, index.flat, index.ids, index.dim, 5);
+      const products = useCatalogStore.getState().products;
+      const matches = top
+        .map(match => ({
+          product: products.find(p => p.id === match.productId),
+          score: match.score,
+        }))
+        .filter(
+          (match): match is {product: Product; score: number} =>
+            match.product != null,
+        );
+      if (matches.length === 0) {
+        toast('لم يتم التعرف على المنتج — جرّب زاوية أو إضاءة أفضل', 'error');
+        return;
       }
-    },
-    [addProduct, beep, toast],
-  );
+      const threshold = settings.matchThreshold;
+      const best = matches[0];
+      if (best.score >= threshold) {
+        // Confident match → straight into the cart, like a barcode.
+        const result = addProduct(
+          best.product,
+          useCartStore.getState().pricingMode,
+          null,
+        );
+        if (result.added) {
+          Vibration.vibrate(40);
+          beep();
+        } else if (result.reason) {
+          toast(result.reason, 'error');
+        }
+        setVisionResult({photoPath, matches, autoAdded: true});
+      } else {
+        // Below threshold → merchant picks from the top matches.
+        setVisionResult({photoPath, matches, autoAdded: false});
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل المسح البصري',
+        'error',
+      );
+    } finally {
+      setScanBusy(false);
+    }
+  }, [scanBusy, addProduct, beep, toast, settings.matchThreshold]);
 
   /** Barcode read → exact product lookup → cart or create prompt. */
   const handleBarcode = useCallback(
     async (code: string) => {
-      setLastBarcode(code);
       try {
         // 1. Base product barcode.
         const product = await ProductRepo.findByBarcode(code);
@@ -272,6 +277,27 @@ export function PosScreen() {
     [addProduct, beep, toast, navigation],
   );
 
+  /** v8: barcode engine → the proven lookup chain. */
+  const runBarcodeScan = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    setScanBusy(true);
+    try {
+      const code = await scanBarcode();
+      if (code != null) {
+        await handleBarcode(code);
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل مسح الباركود',
+        'error',
+      );
+    } finally {
+      setScanBusy(false);
+    }
+  }, [scanBusy, handleBarcode, toast]);
+
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) {
@@ -306,11 +332,15 @@ export function PosScreen() {
 
   const pickUnit = useCallback(
     (unit: ProductUnit | null) => {
-      if (unitPickerLine == null) return;
+      if (unitPickerLine == null) {
+        return;
+      }
       const product = products.find(
         entry => entry.id === unitPickerLine.productId,
       );
-      if (product == null) return;
+      if (product == null) {
+        return;
+      }
       const result = setLineUnit(product, unit);
       if (!result.ok && result.reason) {
         toast(result.reason, 'error');
@@ -359,8 +389,7 @@ export function PosScreen() {
         });
         clear();
         setDiscountText('');
-        setLastRecognized(null);
-        setLastBarcode(null);
+        setVisionResult(null);
         void refreshCatalog();
         toast(
           `تم إتمام البيع بنجاح ${withPrint ? 'وإرساله للطابعة' : ''}`,
@@ -385,12 +414,18 @@ export function PosScreen() {
     ],
   );
 
+  /** v8: scan entry — dispatches to the right NATIVE engine.
+   *  barcode/visual modes open their engine directly; 'both' shows
+   *  a small picker sheet. Each engine is fully independent. */
   const openScanner = useCallback(() => {
-    setCameraOpen(true);
-  }, []);
-  const closeScanner = useCallback(() => {
-    setCameraOpen(false);
-  }, []);
+    if (scannerMode === 'barcode') {
+      void runBarcodeScan();
+    } else if (scannerMode === 'visual') {
+      void runVisionScan();
+    } else {
+      setEnginePickerOpen(true);
+    }
+  }, [scannerMode, runBarcodeScan, runVisionScan]);
 
   /** Round-8: explicit EMPTY-CART action with a confirm step. */
   const confirmClearCart = useCallback(() => {
@@ -457,9 +492,7 @@ export function PosScreen() {
               onPress={openScanner}
               activeOpacity={0.8}>
               <Icon
-                name={
-                  scannerMode === 'barcode' ? 'barcode' : 'scan'
-                }
+                name={scannerMode === 'barcode' ? 'barcode' : 'scan'}
                 size={19}
                 color={c.onAccent}
               />
@@ -571,10 +604,7 @@ export function PosScreen() {
                 <View style={styles.cartHeaderTitle}>
                   <Icon name="cart" size={14} color={c.accent} />
                   <Text style={styles.cartHeaderText}>سلة البيع</Text>
-                  <Badge
-                    label={String(totals.itemsCount)}
-                    tone="neutral"
-                  />
+                  <Badge label={String(totals.itemsCount)} tone="neutral" />
                 </View>
                 <TouchableOpacity
                   style={styles.clearCartBtn}
@@ -593,28 +623,35 @@ export function PosScreen() {
                         <Text style={styles.cartLineName} numberOfLines={1}>
                           {line.name}
                         </Text>
+                        {/* Round-9: ONE meta row — price×qty and the unit
+                            chip inline together, so each line is two
+                            rows tall max and nothing overflows. */}
                         <View style={styles.cartLineMetaRow}>
-                          <Text style={styles.cartLineMeta}>
+                          <Text style={styles.cartLineMeta} numberOfLines={1}>
                             {formatMoney(line.unitPrice)} × {line.quantity} ={' '}
                             {formatMoney(line.unitPrice * line.quantity)}
                           </Text>
+                          <TouchableOpacity
+                            style={styles.unitChip}
+                            onPress={() => openUnitPicker(line)}
+                            activeOpacity={0.8}>
+                            <Icon name="scale" size={10} color={c.accent} />
+                            <Text style={styles.unitChipText} numberOfLines={1}>
+                              {line.unitName}
+                              {line.conversion > 1
+                                ? ` (${line.conversion})`
+                                : ''}
+                            </Text>
+                            <Icon
+                              name="chevronDown"
+                              size={10}
+                              color={c.accent}
+                            />
+                          </TouchableOpacity>
                         </View>
-                        {/* Unit chip — opens the unit picker */}
-                        <TouchableOpacity
-                          style={styles.unitChip}
-                          onPress={() => openUnitPicker(line)}
-                          activeOpacity={0.8}>
-                          <Icon name="scale" size={12} color={c.accent} />
-                          <Text style={styles.unitChipText}>
-                            {line.unitName}
-                            {line.conversion > 1
-                              ? ` (${line.conversion} ${BASE_UNIT_NAME})`
-                              : ''}
-                          </Text>
-                          <Icon name="chevronDown" size={12} color={c.accent} />
-                        </TouchableOpacity>
                       </View>
                       <Stepper
+                        compact
                         value={line.quantity}
                         onIncrement={() => {
                           const result = increment(line.key);
@@ -630,8 +667,8 @@ export function PosScreen() {
                       <TouchableOpacity
                         onPress={() => removeLine(line.key)}
                         style={styles.removeBtn}
-                        hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
-                        <Icon name="trash" size={16} color={c.danger} />
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                        <Icon name="trash" size={13} color={c.danger} />
                       </TouchableOpacity>
                     </View>
                   ))}
@@ -725,164 +762,143 @@ export function PosScreen() {
         </View>
       </View>
 
-      {/* ── Full-screen scanner overlay ────────────────────────
-          v7 THREE-ZONE layout (per round-8 feedback): the old
-          design floated the chrome OVER a full-bleed camera — the
-          ROI frame landed under the bottom buttons and everything
-          overlapped. Now: top bar / camera zone (fills the middle
-          completely) / bottom panel — nothing ever overlaps, the
-          viewfinder is as large as the screen allows, and the
-          scanner ENGINE can be switched right here (barcode works
-          even when vision is having a bad day). */}
+      {/* ── v8 engine picker (only in "both" mode) ───────────
+          The camera itself now runs in a NATIVE full-screen
+          activity — it always fills the screen correctly and can
+          never show a black frame or overlap POS chrome. This tiny
+          sheet just picks WHICH independent engine to launch. */}
       <Modal
-        visible={cameraOpen}
-        animationType="slide"
-        statusBarTranslucent
-        onRequestClose={closeScanner}>
-        <StatusBar barStyle="light-content" backgroundColor="#0B0B10" />
-        <View style={styles.scannerOverlay}>
-          {/* Zone 1 — top bar: close + engine switcher */}
-          <View style={[styles.scannerTopBar, {paddingTop: Math.max(insets.top, spacing.md)}]}>
+        visible={enginePickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setEnginePickerOpen(false)}>
+        <TouchableOpacity
+          style={styles.engineSheetOverlay}
+          activeOpacity={1}
+          onPress={() => setEnginePickerOpen(false)}>
+          <View style={styles.engineSheet}>
+            <Text style={styles.engineSheetTitle}>اختر طريقة المسح</Text>
             <TouchableOpacity
-              style={styles.scannerCloseChip}
-              onPress={closeScanner}
+              style={styles.engineRow}
+              onPress={() => {
+                setEnginePickerOpen(false);
+                void runBarcodeScan();
+              }}
               activeOpacity={0.8}>
-              <Icon name="x" size={16} color="#F4F4F5" />
-              <Text style={styles.scannerCloseText}>إغلاق</Text>
+              <View style={styles.engineIconWrap}>
+                <Icon name="barcode" size={22} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.engineRowTitle}>مسح الباركود</Text>
+                <Text style={styles.engineRowMeta}>
+                  سريع ودقيق — يُغلق تلقائياً عند قراءة الملصق
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={18} color={c.textFaint} />
             </TouchableOpacity>
-            <View style={styles.engineSwitcher}>
-              {(
-                [
-                  {value: 'barcode', label: 'باركود', icon: 'barcode'},
-                  {value: 'visual', label: 'بصري', icon: 'scan'},
-                  {value: 'both', label: 'كلاهما', icon: 'flash'},
-                ] as {value: ScannerMode; label: string; icon: string}[]
-              ).map(option => {
-                const active = scannerMode === option.value;
-                return (
-                  <TouchableOpacity
-                    key={option.value}
-                    style={[styles.engineOption, active && styles.engineOptionOn]}
-                    onPress={() => updateSettings({scannerMode: option.value})}
-                    activeOpacity={0.8}>
-                    <Icon
-                      name={option.icon as never}
-                      size={13}
-                      color={active ? '#FFFFFF' : '#A1A1AA'}
-                    />
-                    <Text
-                      style={[styles.engineOptionText, active && styles.engineOptionTextOn]}>
-                      {option.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            <TouchableOpacity
+              style={styles.engineRow}
+              onPress={() => {
+                setEnginePickerOpen(false);
+                void runVisionScan();
+              }}
+              activeOpacity={0.8}>
+              <View style={styles.engineIconWrap}>
+                <Icon name="camera" size={22} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.engineRowTitle}>المسح البصري</Text>
+                <Text style={styles.engineRowMeta}>
+                  صوّر المنتج بالكاميرا ويتم التعرف عليه فوراً
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={18} color={c.textFaint} />
+            </TouchableOpacity>
           </View>
+        </TouchableOpacity>
+      </Modal>
 
-          {/* Zone 2 — the camera, filling its zone edge-to-edge */}
-          <View style={styles.scannerCameraZone}>
-            <ErrorBoundary inline label="الكاميرا">
-              <ScannerCamera
-                ref={cameraRef}
-                mode="scan"
-                barcodeEnabled={barcodeActive}
-                onBarcode={code => {
-                  void handleBarcode(code);
-                }}
-                autoScan={visualActive && autoScan && tabFocused}
-                onMatch={handleMatch}
+      {/* ── v8 vision result sheet ────────────────────────────
+          Photo captured by the native engine → embedding → top
+          matches. Confident match = already added (green banner);
+          otherwise the merchant taps the right product. */}
+      <Modal
+        visible={visionResult != null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setVisionResult(null)}>
+        <View style={styles.visionSheetOverlay}>
+          <TouchableOpacity
+            style={{flex: 1}}
+            activeOpacity={1}
+            onPress={() => setVisionResult(null)}
+          />
+          {visionResult != null ? (
+            <View style={styles.visionSheet}>
+              <View style={styles.visionSheetHandle} />
+              <Text style={styles.visionSheetTitle}>نتيجة المسح البصري</Text>
+              <Image
+                source={{uri: `file://${visionResult.photoPath}`}}
+                style={styles.visionPhoto}
+                resizeMode="cover"
               />
-            </ErrorBoundary>
-          </View>
-
-          {/* Zone 3 — bottom panel: feedback + cart + actions */}
-          <View
-            style={[
-              styles.scannerBottom,
-              {paddingBottom: Math.max(insets.bottom, spacing.md)},
-            ]}>
-            {lastRecognized ? (
-              <View style={styles.scannerBanner}>
-                <Icon name="checkCircle" size={16} color={c.success} />
-                <Text style={styles.scannerBannerText} numberOfLines={1}>
-                  {lastRecognized.name}
-                </Text>
-                <Text style={styles.scannerBannerScore}>
-                  {(lastRecognized.score * 100).toFixed(0)}%
-                </Text>
-              </View>
-            ) : lastBarcode != null ? (
-              <View style={styles.scannerBanner}>
-                <Icon name="barcode" size={16} color={c.success} />
-                <Text style={styles.scannerBannerText} numberOfLines={1}>
-                  {lastBarcode}
-                </Text>
-              </View>
-            ) : (
-              <View style={styles.scannerBannerHint}>
-                <Text style={styles.scannerBannerHintText} numberOfLines={1}>
-                  {scannerMode === 'barcode'
-                    ? 'وجّه الكاميرا نحو ملصق الباركود'
-                    : scannerMode === 'visual'
-                    ? 'وجّه الكاميرا نحو المنتج — يُضاف تلقائياً عند التعرّف'
-                    : 'باركود أو بصري — كلاهما يعمل معاً'}
-                </Text>
-              </View>
-            )}
-
-            {/* Live cart summary — the merchant sees the sale grow
-                without leaving the scanner. */}
-            <View style={styles.scannerCartRow}>
-              <View style={styles.scannerCartInfo}>
-                <Icon name="cart" size={15} color={c.accent} />
-                <Text style={styles.scannerCartText}>
-                  {totals.itemsCount} قطعة · {formatMoney(totals.total)}
-                </Text>
-              </View>
-              <AppButton
-                small
-                title="السلة والدفع"
-                icon="cart"
-                onPress={closeScanner}
-              />
-            </View>
-
-            <View style={styles.scannerActionsRow}>
-              {visualActive ? (
-                <TouchableOpacity
-                  style={[styles.autoScanChip, autoScan && styles.autoScanChipOn]}
-                  onPress={() => setAutoScan(value => !value)}
-                  activeOpacity={0.8}>
-                  <Icon
-                    name={autoScan ? 'flash' : 'clock'}
-                    size={14}
-                    color={autoScan ? c.accent : c.textDim}
-                  />
-                  <Text
-                    style={[
-                      styles.autoScanText,
-                      autoScan ? {color: c.accent} : null,
-                    ]}>
-                    {autoScan ? 'مسح تلقائي' : 'يدوي'}
+              {visionResult.autoAdded ? (
+                <View style={styles.visionAddedBanner}>
+                  <Icon name="checkCircle" size={15} color={c.success} />
+                  <Text style={styles.visionAddedText} numberOfLines={1}>
+                    أُضيف للسلة: {visionResult.matches[0]?.product.name}
                   </Text>
-                </TouchableOpacity>
+                  <Text style={styles.visionAddedScore}>
+                    {((visionResult.matches[0]?.score ?? 0) * 100).toFixed(0)}%
+                  </Text>
+                </View>
               ) : (
-                <View />
+                <Text style={styles.visionPickHint}>
+                  التطابق غير مؤكد — اختر المنتج الصحيح:
+                </Text>
               )}
-              {visualActive ? (
-                <TouchableOpacity
-                  style={styles.snapNowButton}
-                  onPress={() => void cameraRef.current?.scanOnce()}
-                  activeOpacity={0.8}>
-                  <Icon name="camera" size={16} color={c.onAccent} />
-                  <Text style={styles.snapNowText}>التقط الآن</Text>
-                </TouchableOpacity>
-              ) : (
-                <View />
-              )}
+              <ScrollView
+                style={{maxHeight: 200}}
+                showsVerticalScrollIndicator={false}>
+                {(visionResult.autoAdded
+                  ? visionResult.matches.slice(1)
+                  : visionResult.matches
+                ).map(match => (
+                  <VisionMatchRow
+                    key={match.product.id}
+                    product={match.product}
+                    score={match.score}
+                    onPress={() => {
+                      tryAdd(match.product);
+                      setVisionResult(null);
+                    }}
+                  />
+                ))}
+                {visionResult.autoAdded && visionResult.matches.length <= 1 ? (
+                  <Text style={styles.visionNoMore}>لا توجد مطابقات أخرى</Text>
+                ) : null}
+              </ScrollView>
+              <View style={styles.visionSheetActions}>
+                <AppButton
+                  small
+                  style={{flex: 1}}
+                  title="مسح أخرى"
+                  icon="camera"
+                  onPress={() => {
+                    setVisionResult(null);
+                    void runVisionScan();
+                  }}
+                />
+                <AppButton
+                  small
+                  style={{flex: 1}}
+                  variant="secondary"
+                  title="إغلاق"
+                  onPress={() => setVisionResult(null)}
+                />
+              </View>
             </View>
-          </View>
+          ) : null}
         </View>
       </Modal>
 
@@ -966,6 +982,56 @@ export function PosScreen() {
 // ────────────────────────────────────────────────────────────────
 // Sub-components
 // ────────────────────────────────────────────────────────────────
+
+function VisionMatchRow({
+  product,
+  score,
+  onPress,
+}: {
+  product: Product;
+  score: number;
+  onPress: () => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  return (
+    <TouchableOpacity
+      style={styles.visionMatchRow}
+      onPress={onPress}
+      activeOpacity={0.8}>
+      {product.image_uri ? (
+        <Image
+          source={{uri: `file://${product.image_uri}`}}
+          style={styles.visionMatchThumb}
+        />
+      ) : (
+        <View
+          style={[
+            styles.visionMatchThumb,
+            {
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: c.surfaceAlt,
+            },
+          ]}>
+          <Icon name="box" size={18} color={c.textDim} />
+        </View>
+      )}
+      <View style={{flex: 1}}>
+        <Text style={styles.visionMatchName} numberOfLines={1}>
+          {product.name}
+        </Text>
+        <Text style={styles.visionMatchMeta} numberOfLines={1}>
+          {formatMoney(product.retail_price)} · المتوفر {product.stock_quantity}{' '}
+          {BASE_UNIT_NAME}
+        </Text>
+      </View>
+      <View style={styles.visionScoreChip}>
+        <Text style={styles.visionScoreText}>{(score * 100).toFixed(0)}%</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
 
 function UnitOption({
   label,
@@ -1078,175 +1144,164 @@ const useStyles = makeStyles(c =>
     },
 
     // Full-screen scanner overlay (v7 — three-zone layout)
-    scannerOverlay: {
+    // v8 engine picker sheet
+    engineSheetOverlay: {
       flex: 1,
-      backgroundColor: '#0B0B10',
+      backgroundColor: c.overlay,
+      justifyContent: 'flex-end',
     },
-    scannerTopBar: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      paddingHorizontal: spacing.md,
-      paddingBottom: spacing.sm,
+    engineSheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
       gap: spacing.sm,
+      paddingBottom: spacing.xl,
     },
-    scannerCloseChip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      backgroundColor: 'rgba(31, 31, 41, 0.95)',
-      borderWidth: 1,
-      borderColor: '#3F3F4A',
-      borderRadius: radius.md,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 9,
-    },
-    scannerCloseText: {
-      color: '#F4F4F5',
+    engineSheetTitle: {
+      color: c.text,
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: typography.body,
+      textAlign: 'center',
+      marginBottom: spacing.xs,
     },
-    engineSwitcher: {
-      flexDirection: 'row',
-      backgroundColor: 'rgba(31, 31, 41, 0.95)',
-      borderWidth: 1,
-      borderColor: '#3F3F4A',
-      borderRadius: radius.md,
-      padding: 3,
-      gap: 2,
-    },
-    engineOption: {
+    engineRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 5,
-      borderRadius: radius.sm,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 7,
-      backgroundColor: 'transparent',
-    },
-    engineOptionOn: {
-      backgroundColor: c.accent,
-    },
-    engineOptionText: {
-      color: '#A1A1AA',
-      fontFamily: fonts.bold,
-      fontSize: typography.small - 0.5,
-    },
-    engineOptionTextOn: {
-      color: '#FFFFFF',
-    },
-    scannerCameraZone: {
-      flex: 1,
-      marginHorizontal: spacing.sm,
-      borderRadius: radius.lg,
-      overflow: 'hidden',
-      backgroundColor: '#0B0B10',
-    },
-    scannerBottom: {
-      paddingHorizontal: spacing.lg,
-      paddingTop: spacing.sm,
-      paddingBottom: spacing.md,
-      gap: spacing.sm,
-    },
-    scannerBanner: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-      backgroundColor: 'rgba(14, 14, 18, 0.84)',
-      borderRadius: radius.md,
+      gap: spacing.md,
+      backgroundColor: c.surfaceAlt,
       borderWidth: 1,
-      borderColor: c.success,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 10,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
     },
-    scannerBannerText: {
-      flex: 1,
-      color: c.success,
+    engineIconWrap: {
+      width: 44,
+      height: 44,
+      borderRadius: radius.md,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    engineRowTitle: {
+      color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.caption,
     },
-    scannerBannerScore: {
-      color: c.success,
-      fontFamily: fonts.black,
-      fontSize: typography.caption,
-      fontVariant: ['tabular-nums'],
-    },
-    scannerBannerHint: {
-      backgroundColor: 'rgba(14, 14, 18, 0.84)',
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 10,
-      alignItems: 'center',
-    },
-    scannerBannerHintText: {
+    engineRowMeta: {
       color: c.textDim,
-      fontFamily: fonts.bold,
+      fontFamily: fonts.regular,
       fontSize: typography.small,
+      marginTop: 2,
+    },
+
+    // v8 vision result sheet
+    visionSheetOverlay: {
+      flex: 1,
+      backgroundColor: c.overlay,
+      justifyContent: 'flex-end',
+    },
+    visionSheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      gap: spacing.sm,
+      paddingBottom: spacing.xl,
+    },
+    visionSheetHandle: {
+      alignSelf: 'center',
+      width: 44,
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: c.border,
+      marginBottom: 2,
+    },
+    visionSheetTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
       textAlign: 'center',
     },
-    scannerCartRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      backgroundColor: 'rgba(14, 14, 18, 0.84)',
+    visionPhoto: {
+      width: '100%',
+      height: 130,
       borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 8,
+      backgroundColor: c.surfaceAlt,
     },
-    scannerCartInfo: {
+    visionAddedBanner: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
+      gap: 6,
+      backgroundColor: c.successSoft,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 7,
     },
-    scannerCartText: {
-      color: '#F4F4F5',
+    visionAddedText: {
+      flex: 1,
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    visionAddedScore: {
+      color: c.success,
       fontFamily: fonts.black,
-      fontSize: typography.caption,
+      fontSize: typography.small,
       fontVariant: ['tabular-nums'],
     },
-    scannerActionsRow: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      minHeight: 44,
-    },
-    autoScanChip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      backgroundColor: 'rgba(14, 14, 18, 0.84)',
-      borderRadius: radius.pill,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 9,
-    },
-    autoScanChipOn: {
-      borderColor: c.accent,
-      backgroundColor: 'rgba(249, 115, 22, 0.18)',
-    },
-    autoScanText: {
+    visionPickHint: {
       color: c.textDim,
-      fontFamily: fonts.bold,
+      fontFamily: fonts.regular,
       fontSize: typography.small,
     },
-    snapNowButton: {
+    visionMatchRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
-      backgroundColor: c.accent,
-      borderRadius: radius.pill,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: 10,
+      gap: spacing.sm,
+      paddingVertical: 7,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
     },
-    snapNowText: {
-      color: c.onAccent,
+    visionMatchThumb: {
+      width: 40,
+      height: 40,
+      borderRadius: radius.sm,
+      backgroundColor: c.surfaceAlt,
+    },
+    visionMatchName: {
+      color: c.text,
       fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    visionMatchMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+    },
+    visionScoreChip: {
+      backgroundColor: c.accentSofter,
+      borderRadius: radius.pill,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+    },
+    visionScoreText: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.micro + 1,
+      fontVariant: ['tabular-nums'],
+    },
+    visionNoMore: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
       fontSize: typography.small,
+      textAlign: 'center',
+      paddingVertical: spacing.md,
+    },
+    visionSheetActions: {
+      flexDirection: 'row',
+      gap: spacing.sm,
     },
 
     // Grid
@@ -1304,9 +1359,10 @@ const useStyles = makeStyles(c =>
       flex: 1,
     },
 
-    // Cart panel (v7 compact — round-8: "حجم السلة كبير جداً يغطي
-    // الشاشة": 42% cap instead of 54%, tighter rows, header row
-    // with the live count + the تفريغ button)
+    // Cart panel (v9 compact — round-9: "حجم السلة مناسب ولكن
+    // النصوص والعناصر والأزرار كبيرة جداً لدرجة أنها تخرج منها":
+    // tighter rows, compact 26px steppers, inline unit chips and
+    // smaller quick-action chips — nothing overflows the panel.)
     cartPanel: {
       backgroundColor: c.surface,
       borderTopWidth: 1,
@@ -1314,7 +1370,7 @@ const useStyles = makeStyles(c =>
       borderRadius: radius.lg,
       borderWidth: 1,
       borderColor: c.borderSoft,
-      padding: spacing.sm + 2,
+      padding: spacing.sm,
       gap: spacing.xs,
       maxHeight: '42%',
     },
@@ -1329,7 +1385,7 @@ const useStyles = makeStyles(c =>
     cartHeaderTitle: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
+      gap: 5,
     },
     cartHeaderText: {
       color: c.text,
@@ -1339,18 +1395,18 @@ const useStyles = makeStyles(c =>
     clearCartBtn: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 5,
+      gap: 4,
       backgroundColor: c.dangerSoft,
       borderWidth: 1,
       borderColor: c.danger,
       borderRadius: radius.sm,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 5,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 3,
     },
     clearCartText: {
       color: c.danger,
       fontFamily: fonts.bold,
-      fontSize: typography.micro + 1,
+      fontSize: typography.micro,
     },
     cartEmptyRow: {
       flexDirection: 'row',
@@ -1366,13 +1422,13 @@ const useStyles = makeStyles(c =>
       lineHeight: 18,
     },
     cartLinesWrap: {
-      maxHeight: 112,
+      maxHeight: 132,
     },
     cartLine: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
-      paddingVertical: 4.5,
+      gap: spacing.sm - 2,
+      paddingVertical: 3.5,
       borderBottomWidth: 1,
       borderBottomColor: c.borderSoft,
     },
@@ -1380,46 +1436,45 @@ const useStyles = makeStyles(c =>
     cartLineName: {
       color: c.text,
       fontFamily: fonts.bold,
-      fontSize: typography.caption,
+      fontSize: typography.small,
     },
     cartLineMetaRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
+      gap: 6,
+      marginTop: 1.5,
     },
     cartLineMeta: {
       color: c.textDim,
       fontFamily: fonts.regular,
-      fontSize: typography.micro + 1,
-      marginTop: 1,
+      fontSize: typography.micro + 0.5,
+      flexShrink: 1,
       fontVariant: ['tabular-nums'],
     },
     unitChip: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 4,
+      gap: 3,
       backgroundColor: c.accentSofter,
       borderRadius: radius.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 3,
-      alignSelf: 'flex-start',
-      marginTop: 4,
+      paddingHorizontal: 7,
+      paddingVertical: 1.5,
     },
     unitChipText: {
       color: c.accent,
       fontFamily: fonts.bold,
-      fontSize: typography.micro,
+      fontSize: typography.micro - 0.5,
     },
     removeBtn: {
-      width: 34,
-      height: 34,
+      width: 26,
+      height: 26,
       alignItems: 'center',
       justifyContent: 'center',
     },
     discountRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
+      gap: spacing.sm - 2,
     },
     discountLabel: {
       color: c.textDim,
@@ -1427,34 +1482,34 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
     },
     discountInput: {
-      width: 74,
+      width: 62,
       backgroundColor: c.surfaceAlt,
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: radius.sm,
       color: c.text,
       textAlign: 'center',
-      paddingVertical: 6,
-      fontSize: typography.caption,
+      paddingVertical: 4,
+      fontSize: typography.small,
       fontFamily: fonts.bold,
     },
     quickChip: {
       backgroundColor: c.accentSoft,
       borderRadius: radius.sm,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 7,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 4,
     },
     quickChipGhost: {backgroundColor: c.surfaceAlt},
     quickChipText: {
       color: c.accent,
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: typography.micro + 1,
     },
     totalsRow: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      paddingTop: spacing.xs,
+      paddingTop: 2,
     },
     totalLabel: {
       color: c.textDim,

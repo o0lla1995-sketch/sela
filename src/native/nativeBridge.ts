@@ -77,29 +77,19 @@ interface PlatformUtilsNative {
 }
 
 /**
- * Hand-written CameraX module (v7 — the camera COORDINATOR).
- *
- * State events arrive over RCTDeviceEventEmitter (works on both
- * architectures and inside Modals — the old view-event channel
- * could be dropped silently by the Fabric interop layer):
- *   selaCameraReady   { viewTag }
- *   selaCameraError   { viewTag, message }
- *   selaCameraBarcode { viewTag, code }
+ * v8 scanner gateway — the camera preview lives in a NATIVE
+ * full-screen Activity (ScannerActivity), completely outside the RN
+ * view tree. This is the module that opens it and resolves with the
+ * result. Two FULLY INDEPENDENT engines:
+ *   'barcode' → Preview + ML Kit frame analysis → { code }
+ *   'photo'   → Preview + ImageCapture (shutter) → { path }
  */
-interface SelaCameraNativeModule {
-  capture(viewTag: number): Promise<string>;
-  rebind(viewTag: number): Promise<boolean>;
-  /** True native camera state — the polling source of truth. */
-  getStatus(viewTag: number): Promise<{
-    exists: boolean;
-    bound: boolean;
-    previewLive: boolean;
-    state: 'ready' | 'starting' | 'error' | 'detached' | 'replaced' | 'diagnostics';
-    lastError: string;
-    width: number;
-    height: number;
-    barcodeEnabled: boolean;
-    torch: boolean;
+interface SelaScannerNativeModule {
+  /** Opens the native scanner; resolves {code} / {path} / {cancelled}. */
+  openScanner(mode: 'barcode' | 'photo'): Promise<{
+    cancelled?: boolean;
+    code?: string;
+    path?: string;
   }>;
   /** Headless camera self-test → every step's outcome. */
   runDiagnostics(): Promise<{
@@ -108,6 +98,7 @@ interface SelaCameraNativeModule {
     providerError?: string;
     cameraCount?: number;
     hasBackCamera?: boolean;
+    torchSupported?: boolean;
     previewBindOk?: boolean;
     bindError?: string;
     result: 'ok' | 'bind-failed' | 'provider-failed';
@@ -150,8 +141,16 @@ export const SelaNotificationsNative: MaybeModule<SelaNotificationsNative> =
 export const SelaImagePickerNative: MaybeModule<SelaImagePickerNative> =
   NativeModules.SelaImagePicker as MaybeModule<SelaImagePickerNative>;
 
-export const SelaCameraNative: MaybeModule<SelaCameraNativeModule> =
-  NativeModules.SelaCamera as MaybeModule<SelaCameraNativeModule>;
+export const SelaScannerNative: MaybeModule<SelaScannerNativeModule> =
+  NativeModules.SelaScanner as MaybeModule<SelaScannerNativeModule>;
+
+/** Opens the native BARCODE scanner — throws if unavailable. */
+export function requireBarcodeScanner(): SelaScannerNativeModule {
+  if (SelaScannerNative == null) {
+    throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
+  }
+  return SelaScannerNative;
+}
 
 export function requireThermalPrinter(): ThermalPrinterNative {
   if (ThermalPrinterNative == null) {

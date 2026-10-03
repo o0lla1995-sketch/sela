@@ -62,5 +62,19 @@
           <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+
+      <!-- ════════════════════════════════════════════════════════
+           v8 scanner engines — a NATIVE full-screen window that
+           lives entirely outside the React Native view tree (the
+           definitive fix for the blind/black camera: the preview is
+           laid out by Android itself, always fills the screen, and
+           the torch is a real native toggle).
+           ════════════════════════════════════════════════════════ -->
+      <activity
+        android:name=".native_modules.ScannerActivity"
+        android:label="سيلا — الماسح"
+        android:screenOrientation="portrait"
+        android:exported="false"
+        android:theme="@style/AppTheme" />
     </application>
 </manifest>

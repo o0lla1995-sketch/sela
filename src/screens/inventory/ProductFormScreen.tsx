@@ -10,7 +10,6 @@ import {
   Image,
   Keyboard,
   KeyboardAvoidingView,
-  LayoutAnimation,
   Platform,
   ScrollView,
   StyleSheet,
@@ -29,17 +28,14 @@ import {
   type FieldHandle,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
-import {ErrorBoundary} from '../../components/ErrorBoundary';
-import {
-  ScannerCamera,
-  type ScannerCameraHandle,
-} from '../../components/ScannerCamera';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
 import {EmbeddingRepo} from '../../database/repositories/EmbeddingRepo';
 import {UnitRepo} from '../../database/repositories/UnitRepo';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useToastStore} from '../../stores/toastStore';
+import {VisionRecognitionService} from '../../services/vision/VisionRecognitionService';
+import {scanBarcode, capturePhoto} from '../../services/vision/scanFlow';
 import {
   fonts,
   makeStyles,
@@ -48,7 +44,7 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {formatMoney, parseNumber} from '../../core/format';
+import {parseNumber} from '../../core/format';
 import {
   ANGLE_LABELS,
   ANGLE_LABELS_AR,
@@ -88,7 +84,6 @@ export function ProductFormScreen() {
   const productId: number | undefined = route.params?.productId;
   const presetBarcode: string | undefined = route.params?.barcode;
 
-  const cameraRef = useRef<ScannerCameraHandle>(null);
   const toast = useToastStore(state => state.show);
   const refreshCatalog = useCatalogStore(state => state.refresh);
 
@@ -128,9 +123,6 @@ export function ProductFormScreen() {
     back: {embedding: null, thumbnailPath: null},
     side: {embedding: null, thumbnailPath: null},
   });
-  const [cameraOpen, setCameraOpen] = useState(false);
-  const [barcodeScannerOpen, setBarcodeScannerOpen] = useState(false);
-  const [activeAngle, setActiveAngle] = useState<AngleLabel>('front');
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(productId != null);
 
@@ -143,7 +135,9 @@ export function ProductFormScreen() {
           CategoryRepo.list(),
           UnitRepo.list(),
         ]);
-        if (!mounted) return;
+        if (!mounted) {
+          return;
+        }
         setCategories(cats);
         setUnits(unitList);
         if (productId != null) {
@@ -191,38 +185,55 @@ export function ProductFormScreen() {
     [angles],
   );
 
-  const captureCurrent = useCallback(async () => {
+  /** v8: native PHOTO engine → embed → this angle's fingerprint.
+   *  The camera runs in its own native window (ScannerActivity):
+   *  fill-frame preview, real torch, correct dimensions — every
+   *  time, on every device. */
+  const captureAngle = useCallback(
+    async (angle: AngleLabel) => {
+      try {
+        const photoPath = await capturePhoto();
+        if (photoPath == null) {
+          return; // Merchant closed the scanner.
+        }
+        await VisionRecognitionService.loadModel();
+        const embedding = await VisionRecognitionService.embedPhoto(photoPath);
+        const thumbnailPath = await VisionRecognitionService.saveThumbnail(
+          photoPath,
+        );
+        setAngles(prev => ({
+          ...prev,
+          [angle]: {embedding, thumbnailPath},
+        }));
+        if (thumbnailPath != null && imageUri == null) {
+          setImageUri(thumbnailPath);
+        }
+        toast(`تم حفظ البصمة ${ANGLE_LABELS_AR[angle]}`, 'success');
+      } catch (error) {
+        toast(
+          error instanceof Error ? error.message : 'فشل التقاط البصمة',
+          'error',
+        );
+      }
+    },
+    [imageUri, toast],
+  );
+
+  /** v8: native BARCODE engine → fill the barcode field. */
+  const scanBarcodeField = useCallback(async () => {
     try {
-      const result = await cameraRef.current?.captureAngle(activeAngle);
-      if (result == null) {
-        return;
-      }
-      setAngles(prev => ({
-        ...prev,
-        [activeAngle]: {
-          embedding: result.embedding,
-          thumbnailPath: result.thumbnailPath,
-        },
-      }));
-      if (result.thumbnailPath != null && imageUri == null) {
-        setImageUri(result.thumbnailPath);
-      }
-      toast(`تم حفظ البصمة ${ANGLE_LABELS_AR[activeAngle]}`, 'success');
-      // Auto-advance to the next uncaptured angle.
-      const order: AngleLabel[] = ['front', 'back', 'side'];
-      const next = order.find(
-        angle => angles[angle]?.embedding == null && angle !== activeAngle,
-      );
-      if (next != null) {
-        setActiveAngle(next);
+      const code = await scanBarcode();
+      if (code != null) {
+        setBarcode(code);
+        toast(`تم قراءة الباركود: ${code}`, 'success');
       }
     } catch (error) {
       toast(
-        error instanceof Error ? error.message : 'فشل التقاط البصمة',
+        error instanceof Error ? error.message : 'فشل مسح الباركود',
         'error',
       );
     }
-  }, [activeAngle, angles, imageUri, toast]);
+  }, [toast]);
 
   // ── Unit rows ─────────────────────────────────────────────────
   const addUnitRow = useCallback(() => {
@@ -333,7 +344,9 @@ export function ProductFormScreen() {
       return null;
     }
     const basePieces = Math.round(value * conv * 1000) / 1000;
-    return `${value} ${unitNameById.get(stockUnitId) ?? ''} = ${basePieces} ${BASE_UNIT_NAME} محفوظة في المخزون`;
+    return `${value} ${
+      unitNameById.get(stockUnitId) ?? ''
+    } = ${basePieces} ${BASE_UNIT_NAME} محفوظة في المخزون`;
   }, [stock, stockUnitId, unitNameById, validConversion]);
 
   const save = useCallback(async () => {
@@ -344,9 +357,7 @@ export function ProductFormScreen() {
       ? parseNumber(wholesalePrice)
       : retail;
     const stockConversion = validConversion(stockUnitId) ?? 1;
-    const stockValue = stock.trim()
-      ? parseNumber(stock) * stockConversion
-      : 0;
+    const stockValue = stock.trim() ? parseNumber(stock) * stockConversion : 0;
     const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
 
     if (!trimmedName) {
@@ -537,21 +548,14 @@ export function ProductFormScreen() {
           <View style={styles.anglesRow}>
             {ANGLE_LABELS.map(angle => {
               const state = angles[angle];
-              const active = cameraOpen && activeAngle === angle;
               return (
                 <TouchableOpacity
                   key={angle}
                   style={[
                     styles.angleCard,
-                    active ? {borderColor: c.accent, borderWidth: 1.5} : null,
-                    state.embedding != null && !active
-                      ? {borderColor: c.success}
-                      : null,
+                    state.embedding != null ? {borderColor: c.success} : null,
                   ]}
-                  onPress={() => {
-                    setActiveAngle(angle);
-                    setCameraOpen(true);
-                  }}
+                  onPress={() => void captureAngle(angle)}
                   activeOpacity={0.8}>
                   {state.thumbnailPath != null ? (
                     <Image
@@ -576,32 +580,28 @@ export function ProductFormScreen() {
             })}
           </View>
 
-          {cameraOpen ? (
-            <ErrorBoundary inline label="الكاميرا">
-              <View style={styles.cameraSheet}>
-                <ScannerCamera ref={cameraRef} mode="capture" />
-                <View style={styles.captureBar}>
-                  <Text style={styles.captureHint}>
-                    التقط {ANGLE_LABELS_AR[activeAngle]} — عبّئ الإطار بالمنتج
-                  </Text>
-                  <TouchableOpacity
-                    style={styles.shutterButton}
-                    onPress={captureCurrent}
-                    activeOpacity={0.75}>
-                    <Icon name="camera" size={26} color={c.onAccent} />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </ErrorBoundary>
-          ) : (
-            <AppButton
-              title="فتح الكاميرا للتسجيل البصري"
-              variant="secondary"
-              icon="camera"
-              small
-              onPress={() => setCameraOpen(true)}
-            />
-          )}
+          {/* v8: one tap → the NATIVE photo engine opens full-screen
+              (torch + proper preview guaranteed) → the fingerprint
+              of the first empty angle is saved automatically. */}
+          <AppButton
+            title="تصوير بصمة المنتج بالكاميرا"
+            variant="secondary"
+            icon="camera"
+            small
+            onPress={() => {
+              const firstEmpty = ANGLE_LABELS.find(
+                angle => angles[angle]?.embedding == null,
+              );
+              if (firstEmpty == null) {
+                toast(
+                  'كل الزوايا مسجّلة — المس أي بطاقة زاوية لإعادة تصويرها',
+                  'info',
+                );
+                return;
+              }
+              void captureAngle(firstEmpty);
+            }}
+          />
 
           {/* ── Details form ──────────────────────────────────── */}
           <SectionTitle title="بيانات المنتج" />
@@ -629,36 +629,11 @@ export function ProductFormScreen() {
             </View>
             <TouchableOpacity
               style={styles.barcodeScanBtn}
-              onPress={() => {
-                LayoutAnimation.configureNext(
-                  LayoutAnimation.Presets.easeInEaseOut,
-                );
-                setBarcodeScannerOpen(value => !value);
-              }}
+              onPress={() => void scanBarcodeField()}
               activeOpacity={0.8}>
-              <Icon
-                name={barcodeScannerOpen ? 'x' : 'barcode'}
-                size={20}
-                color={barcodeScannerOpen ? c.danger : c.onAccent}
-              />
+              <Icon name="barcode" size={20} color={c.onAccent} />
             </TouchableOpacity>
           </View>
-          {barcodeScannerOpen ? (
-            <ErrorBoundary inline label="ماسح الباركود">
-              <View style={styles.barcodeSheet}>
-                <ScannerCamera
-                  mode="scan"
-                  barcodeEnabled
-                  height={210}
-                  onBarcode={code => {
-                    setBarcode(code);
-                    setBarcodeScannerOpen(false);
-                    toast(`تم قراءة الباركود: ${code}`, 'success');
-                  }}
-                />
-              </View>
-            </ErrorBoundary>
-          ) : null}
           <Field
             ref={costRef}
             label="سعر التكلفة للقطعة (₪) *"
@@ -852,7 +827,10 @@ export function ProductFormScreen() {
                             style={[
                               styles.unitPickChip,
                               active
-                                ? {backgroundColor: c.accent, borderColor: c.accent}
+                                ? {
+                                    backgroundColor: c.accent,
+                                    borderColor: c.accent,
+                                  }
                                 : null,
                             ]}
                             onPress={() =>
@@ -875,7 +853,8 @@ export function ProductFormScreen() {
                     <View style={{flex: 1}}>
                       <Field
                         ref={handle => {
-                          unitFieldRefs.current[`${row.unit_id}:conversion`] = handle;
+                          unitFieldRefs.current[`${row.unit_id}:conversion`] =
+                            handle;
                         }}
                         label={`تحتوي (${BASE_UNIT_NAME})`}
                         value={row.conversion}
@@ -893,7 +872,8 @@ export function ProductFormScreen() {
                     <View style={{flex: 1}}>
                       <Field
                         ref={handle => {
-                          unitFieldRefs.current[`${row.unit_id}:retail`] = handle;
+                          unitFieldRefs.current[`${row.unit_id}:retail`] =
+                            handle;
                         }}
                         label="مفرق الوحدة (₪)"
                         value={row.retail}
@@ -913,7 +893,8 @@ export function ProductFormScreen() {
                     <View style={{flex: 1}}>
                       <Field
                         ref={handle => {
-                          unitFieldRefs.current[`${row.unit_id}:wholesale`] = handle;
+                          unitFieldRefs.current[`${row.unit_id}:wholesale`] =
+                            handle;
                         }}
                         label="جملة الوحدة (₪)"
                         value={row.wholesale}
@@ -931,7 +912,8 @@ export function ProductFormScreen() {
                     <View style={{flex: 1}}>
                       <Field
                         ref={handle => {
-                          unitFieldRefs.current[`${row.unit_id}:barcode`] = handle;
+                          unitFieldRefs.current[`${row.unit_id}:barcode`] =
+                            handle;
                         }}
                         label="باركود الوحدة"
                         value={row.barcode}
@@ -1056,39 +1038,6 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
-    cameraSheet: {
-      height: 330,
-      borderRadius: radius.lg,
-      overflow: 'hidden',
-      backgroundColor: '#0B0B10',
-    },
-    captureBar: {
-      position: 'absolute',
-      bottom: 0,
-      left: 0,
-      right: 0,
-      backgroundColor: c.scrim,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.sm,
-    },
-    captureHint: {
-      flex: 1,
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-      marginRight: spacing.sm,
-    },
-    shutterButton: {
-      width: 52,
-      height: 52,
-      borderRadius: 26,
-      backgroundColor: c.accent,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
     barcodeRow: {
       flexDirection: 'row',
       alignItems: 'flex-end',
@@ -1101,12 +1050,6 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.accent,
       alignItems: 'center',
       justifyContent: 'center',
-    },
-    barcodeSheet: {
-      height: 220,
-      borderRadius: radius.lg,
-      overflow: 'hidden',
-      backgroundColor: '#0B0B10',
     },
     priceRow: {
       flexDirection: 'row',

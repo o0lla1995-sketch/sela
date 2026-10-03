@@ -124,6 +124,51 @@ export function findBestMatch(
   return {productId: bestId, score: Math.max(-1, Math.min(1, bestScore))};
 }
 
+/**
+ * Top-N matches by cosine similarity (probe must be unit-length).
+ * Used by the POS vision result sheet so the merchant can pick the
+ * right product when the top score is below the auto-add threshold.
+ */
+export function findTopMatches(
+  probe: Float32Array,
+  flat: Float32Array,
+  ids: number[],
+  dim: number,
+  topN: number,
+): {productId: number; score: number}[] {
+  if (
+    flat == null ||
+    ids == null ||
+    ids.length === 0 ||
+    dim <= 0 ||
+    probe.length !== dim
+  ) {
+    return [];
+  }
+  const rows = ids.length;
+  const scores = new Float32Array(rows);
+  for (let r = 0; r < rows; r++) {
+    let dot = 0;
+    const base = r * dim;
+    for (let d = 0; d < dim; d++) {
+      dot += probe[d] * flat[base + d];
+    }
+    scores[r] = dot;
+  }
+  const order = Array.from({length: rows}, (_, i) => i);
+  order.sort((a, b) => scores[b] - scores[a]);
+  const limit = Math.min(topN, order.length);
+  const results: {productId: number; score: number}[] = [];
+  for (let i = 0; i < limit; i++) {
+    const row = order[i];
+    results.push({
+      productId: ids[row],
+      score: Math.max(-1, Math.min(1, scores[row])),
+    });
+  }
+  return results;
+}
+
 /** Rounds + serializes a Float32 embedding to compact JSON. */
 export function serializeEmbedding(
   vec: Float32Array,

@@ -10,11 +10,7 @@
  * The header brand mark is now the sela basket (not a star), and
  * the bell is a clean filled notification glyph.
  */
-import React, {
-  forwardRef,
-  useImperativeHandle,
-  useRef,
-} from 'react';
+import React, {forwardRef, useImperativeHandle, useRef} from 'react';
 import {
   ActivityIndicator,
   I18nManager,
@@ -971,27 +967,36 @@ export function Stepper({
   onDecrement,
   min = 0,
   decrementDanger = false,
+  compact = false,
 }: {
   value: number;
   onIncrement: () => void;
   onDecrement: () => void;
   min?: number;
   decrementDanger?: boolean;
+  /** Round-9: cart rows — 26px buttons so nothing overflows. */
+  compact?: boolean;
 }) {
   const c = useThemeColors();
   const styles = useControlStyles();
+  const btnStyle = compact
+    ? [styles.stepperBtn, styles.stepperBtnCompact]
+    : [styles.stepperBtn];
   return (
-    <View style={styles.stepper}>
+    <View style={[styles.stepper, compact && {gap: 4}]}>
       <TouchableOpacity
-        style={[styles.stepperBtn, styles.stepperBtnInc]}
+        style={[...btnStyle, styles.stepperBtnInc]}
         onPress={onIncrement}
         activeOpacity={0.8}>
-        <Icon name="plus" size={17} color={c.onAccent} />
+        <Icon name="plus" size={compact ? 14 : 17} color={c.onAccent} />
       </TouchableOpacity>
-      <Text style={styles.stepperValue}>{value}</Text>
+      <Text
+        style={[styles.stepperValue, compact && styles.stepperValueCompact]}>
+        {value}
+      </Text>
       <TouchableOpacity
         style={[
-          styles.stepperBtn,
+          ...btnStyle,
           decrementDanger && value <= min + 1
             ? {backgroundColor: c.dangerSoft, borderColor: c.danger}
             : styles.stepperBtnDec,
@@ -1000,7 +1005,7 @@ export function Stepper({
         activeOpacity={0.8}>
         <Icon
           name="minus"
-          size={17}
+          size={compact ? 14 : 17}
           color={decrementDanger && value <= min + 1 ? c.danger : c.text}
         />
       </TouchableOpacity>
@@ -1047,6 +1052,11 @@ const useControlStyles = makeStyles(c =>
       alignItems: 'center',
       justifyContent: 'center',
     },
+    stepperBtnCompact: {
+      width: 26,
+      height: 26,
+      borderRadius: 8,
+    },
     stepperBtnInc: {
       backgroundColor: c.accent,
     },
@@ -1062,6 +1072,10 @@ const useControlStyles = makeStyles(c =>
       minWidth: 30,
       textAlign: 'center',
       fontVariant: ['tabular-nums'],
+    },
+    stepperValueCompact: {
+      fontSize: typography.caption,
+      minWidth: 22,
     },
   }),
 );

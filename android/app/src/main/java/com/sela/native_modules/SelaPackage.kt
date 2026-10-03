@@ -4,8 +4,6 @@ import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ViewManager
-import com.sela.native_modules.camera.SelaCameraModule
-import com.sela.native_modules.camera.SelaCameraViewManager
 
 /**
  * SelaPackage
@@ -16,8 +14,14 @@ import com.sela.native_modules.camera.SelaCameraViewManager
  *                     device id / monotonic uptime / ABI
  *  - ImageDecoder   : photo → raw RGB for the vision pipeline
  *  - SelaNotifications : local stock-alert notifications
- *  - SelaCamera     : CameraX preview + capture + offline barcode
- *                     (SelaCameraView native component)
+ *  - ImagePicker    : system image picker for the store logo
+ *  - SelaScanner    : v8 native full-screen scanner engines
+ *                     (ScannerActivity — barcode ML Kit + photo
+ *                     capture) + headless camera diagnostics.
+ *
+ * NOTE v8: the old SelaCameraView in-RN camera component is GONE —
+ * the preview now lives in its own native Activity window, which is
+ * what finally killed the black-screen class of bugs for good.
  */
 class SelaPackage : ReactPackage {
 
@@ -29,10 +33,10 @@ class SelaPackage : ReactPackage {
     ImageDecoderModule(reactContext),
     NotificationsModule(reactContext),
     ImagePickerModule(reactContext),
-    SelaCameraModule(reactContext)
+    SelaScannerModule(reactContext)
   )
 
   override fun createViewManagers(
     reactContext: ReactApplicationContext
-  ): List<ViewManager<*, *>> = listOf(SelaCameraViewManager())
+  ): List<ViewManager<*, *>> = emptyList()
 }

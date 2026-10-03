@@ -11,10 +11,14 @@ import {CategoryRepo} from '../../database/repositories/CategoryRepo';
 import {EmbeddingRepo} from '../../database/repositories/EmbeddingRepo';
 import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {usePrinterStore} from '../../stores/printerStore';
-import {getDiagnostics, clearDiagnostics, logDiag} from '../../core/diagnostics';
+import {
+  getDiagnostics,
+  clearDiagnostics,
+  logDiag,
+} from '../../core/diagnostics';
 import {makeStyles, spacing, typography} from '../../core/theme';
 import {MODEL_INPUT_SIZE} from '../../core/config';
-import {SelaCameraNative} from '../../native/nativeBridge';
+import {SelaScannerNative} from '../../native/nativeBridge';
 
 interface Counts {
   products: number;
@@ -23,13 +27,14 @@ interface Counts {
   sales: number;
 }
 
-/** Report of the native camera self-test (SelaCamera.runDiagnostics). */
+/** Report of the native camera self-test (SelaScanner.runDiagnostics). */
 interface CameraReport {
   permissionGranted: boolean;
   providerOk?: boolean;
   providerError?: string;
   cameraCount?: number;
   hasBackCamera?: boolean;
+  torchSupported?: boolean;
   previewBindOk?: boolean;
   bindError?: string;
   result: 'ok' | 'bind-failed' | 'provider-failed';
@@ -79,30 +84,31 @@ export function DiagnosticsScreen() {
   const entries = getDiagnostics();
 
   const runCameraTest = async () => {
-    if (SelaCameraNative == null) {
+    if (SelaScannerNative == null) {
       setCameraReport({
         permissionGranted: false,
         result: 'provider-failed',
-        providerError: 'وحدة الكاميرا غير متوفرة في هذا الإصدار',
+        providerError: 'وحدة الماسح غير متوفرة في هذا الإصدار',
       });
       return;
     }
     setCameraTesting(true);
     setCameraReport(null);
     try {
-      const report = await SelaCameraNative.runDiagnostics();
+      const report = await SelaScannerNative.runDiagnostics();
       setCameraReport(report);
       logDiag(
         'camera',
-        `فحص ذاتي: ${report.result}${report.bindError ? ` — ${report.bindError}` : ''}`,
+        `فحص ذاتي: ${report.result}${
+          report.bindError ? ` — ${report.bindError}` : ''
+        }`,
         report.result === 'ok' ? 'info' : 'error',
       );
     } catch (error) {
       setCameraReport({
         permissionGranted: false,
         result: 'provider-failed',
-        providerError:
-          error instanceof Error ? error.message : 'خطأ غير معروف',
+        providerError: error instanceof Error ? error.message : 'خطأ غير معروف',
       });
     } finally {
       setCameraTesting(false);
@@ -180,9 +186,10 @@ export function DiagnosticsScreen() {
             ) : null}
           </View>
           <Text style={styles.cameraTestHint}>
-            يشغّل الكاميرا فعلياً بدون واجهة ويعرض النتيجة الحقيقية من الجهاز:
-            الإذن، خدمة الكاميرا، عدد الكاميرات، ونجاح بدء المعاينة — إن كانت
-            الكاميرا لا تعمل عندك، شغّل هذا الفحص وستظهر السبب الدقيق.
+            يفحص المحرك الجديد (v8): الإذن، خدمة CameraX، عدد الكاميرات، دعم
+            الفلاش، ونجاح بدء المعاينة بدون واجهة — والمسح نفسه يعمل الآن في
+            نافذة نظام مستقلة مملوءة الشاشة، لذا إن نجح هذا الفحص فالكاميرا تعمل
+            فعلياً في الماسح.
           </Text>
           <AppButton
             title={cameraTesting ? 'جارٍ الفحص…' : 'تشغيل فحص الكاميرا'}
@@ -214,6 +221,16 @@ export function DiagnosticsScreen() {
                   value={`${cameraReport.cameraCount}${
                     cameraReport.hasBackCamera ? ' (خلفية موجودة)' : ''
                   }`}
+                />
+              ) : null}
+              {cameraReport.torchSupported != null ? (
+                <DiagRow
+                  label="الفلاش الضوئي (Torch)"
+                  value={
+                    cameraReport.torchSupported
+                      ? 'مدعوم ✓'
+                      : 'غير مدعوم بهذا الجهاز'
+                  }
                 />
               ) : null}
               {cameraReport.previewBindOk != null ? (
