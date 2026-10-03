@@ -83,10 +83,20 @@ interface PlatformUtilsNative {
  * result. Two FULLY INDEPENDENT engines:
  *   'barcode' → Preview + ML Kit frame analysis → { code }
  *   'photo'   → Preview + ImageCapture (shutter) → { path }
+ * v8.1 adds openScannerContinuous(): a barcode session that never
+ * auto-closes — every deduped read streams to JS as a
+ * "selaScanBarcode" event; the promise resolves {cancelled:true}
+ * when the merchant closes the scanner.
  */
 interface SelaScannerNativeModule {
   /** Opens the native scanner; resolves {code} / {path} / {cancelled}. */
   openScanner(mode: 'barcode' | 'photo'): Promise<{
+    cancelled?: boolean;
+    code?: string;
+    path?: string;
+  }>;
+  /** v8.1: opens the continuous multi-scan barcode session. */
+  openScannerContinuous(): Promise<{
     cancelled?: boolean;
     code?: string;
     path?: string;

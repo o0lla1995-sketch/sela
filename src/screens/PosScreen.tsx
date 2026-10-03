@@ -46,7 +46,7 @@ import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {findTopMatches} from '../services/vision/embedding';
-import {scanBarcode, capturePhoto} from '../services/vision/scanFlow';
+import {scanBarcodeContinuous, capturePhoto} from '../services/vision/scanFlow';
 import {requirePlatformUtils} from '../native/nativeBridge';
 import {BASE_UNIT_NAME, type ScannerMode} from '../core/config';
 import {
@@ -101,10 +101,14 @@ export function PosScreen() {
   // is the photo → top-matches result sheet.
   const [scanBusy, setScanBusy] = useState(false);
   const [enginePickerOpen, setEnginePickerOpen] = useState(false);
+  // v8.1: the sheet now tracks WHICH product was added (addedName)
+  // instead of a boolean — a manual pick keeps the sheet open so the
+  // merchant can keep scanning more products in one session.
   const [visionResult, setVisionResult] = useState<{
     photoPath: string;
     matches: {product: Product; score: number}[];
-    autoAdded: boolean;
+    addedName: string | null;
+    addedScore: number | null;
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [unitPickerLine, setUnitPickerLine] = useState<CartLine | null>(null);
@@ -147,7 +151,9 @@ export function PosScreen() {
     [addProduct, pricingMode, beep, toast],
   );
 
-  /** v8: photo engine → embed → top matches → auto-add or sheet. */
+  /** v8: photo engine → embed → top matches → auto-add or sheet.
+   *  v8.1: confident matches auto-add and the sheet stays open with
+   *  "مسح أخرى" — continuous multi-scan in one session. */
   const runVisionScan = useCallback(async () => {
     if (scanBusy) {
       return;
@@ -169,10 +175,10 @@ export function PosScreen() {
         return;
       }
       const top = findTopMatches(vector, index.flat, index.ids, index.dim, 5);
-      const products = useCatalogStore.getState().products;
+      const allProducts = useCatalogStore.getState().products;
       const matches = top
         .map(match => ({
-          product: products.find(p => p.id === match.productId),
+          product: allProducts.find(p => p.id === match.productId),
           score: match.score,
         }))
         .filter(
@@ -198,10 +204,20 @@ export function PosScreen() {
         } else if (result.reason) {
           toast(result.reason, 'error');
         }
-        setVisionResult({photoPath, matches, autoAdded: true});
+        setVisionResult({
+          photoPath,
+          matches: matches.slice(1),
+          addedName: best.product.name,
+          addedScore: best.score,
+        });
       } else {
         // Below threshold → merchant picks from the top matches.
-        setVisionResult({photoPath, matches, autoAdded: false});
+        setVisionResult({
+          photoPath,
+          matches,
+          addedName: null,
+          addedScore: null,
+        });
       }
     } catch (error) {
       toast(
@@ -213,9 +229,18 @@ export function PosScreen() {
     }
   }, [scanBusy, addProduct, beep, toast, settings.matchThreshold]);
 
-  /** Barcode read → exact product lookup → cart or create prompt. */
+  /**
+   * Barcode read → exact product lookup → cart or create prompt.
+   * v8.1: `interactive: false` (continuous session) collects unknown
+   * codes instead of showing an Alert — an RN Alert would be INVISIBLE
+   * behind the fullscreen native scanner and would break the session.
+   */
   const handleBarcode = useCallback(
-    async (code: string) => {
+    async (
+      code: string,
+      interactive: boolean = true,
+      unknownCollector?: (code: string) => void,
+    ): Promise<void> => {
       try {
         // 1. Base product barcode.
         const product = await ProductRepo.findByBarcode(code);
@@ -255,6 +280,10 @@ export function PosScreen() {
           }
         }
         // 3. Unknown → offer creating the product with this barcode.
+        if (!interactive && unknownCollector != null) {
+          unknownCollector(code);
+          return;
+        }
         Alert.alert(
           'باركود غير معروف',
           `لا يوجد منتج مسجل بالباركود ${code}. هل تريد إضافة منتج جديد بهذا الباركود؟`,
@@ -277,17 +306,28 @@ export function PosScreen() {
     [addProduct, beep, toast, navigation],
   );
 
-  /** v8: barcode engine → the proven lookup chain. */
+  /**
+   * v8.1 CONTINUOUS multi-scan barcode session: the native engine
+   * never auto-closes; every deduped read streams in and is added
+   * immediately. The merchant scans item after item without ever
+   * leaving the camera, then presses إغلاق to finish.
+   */
   const runBarcodeScan = useCallback(async () => {
     if (scanBusy) {
       return;
     }
     setScanBusy(true);
+    const unknown: string[] = [];
+    let reads = 0;
     try {
-      const code = await scanBarcode();
-      if (code != null) {
-        await handleBarcode(code);
-      }
+      await scanBarcodeContinuous(code => {
+        reads++;
+        void handleBarcode(code, false, unknownCode => {
+          if (!unknown.includes(unknownCode)) {
+            unknown.push(unknownCode);
+          }
+        });
+      });
     } catch (error) {
       toast(
         error instanceof Error ? error.message : 'فشل مسح الباركود',
@@ -295,8 +335,32 @@ export function PosScreen() {
       );
     } finally {
       setScanBusy(false);
+      if (reads > 0) {
+        toast(`انتهت جلسة المسح — ${reads} قراءة أُضيفت للسلة`, 'success');
+      }
+      if (unknown.length > 0) {
+        const sample = unknown.slice(0, 3).join('، ');
+        const shown =
+          unknown.length === 1
+            ? sample
+            : `${sample} (${unknown.length} أكواد غير مسجلة)`;
+        Alert.alert(
+          'باركود غير مسجل',
+          `لا يوجد منتج مسجل بالباركود ${shown}. هل تريد إضافة منتج جديد بأول باركود؟`,
+          [
+            {text: 'إلغاء', style: 'cancel'},
+            {
+              text: 'إضافة منتج',
+              onPress: () =>
+                navigation.navigate('ProductForm', {
+                  barcode: unknown[0],
+                }),
+            },
+          ],
+        );
+      }
     }
-  }, [scanBusy, handleBarcode, toast]);
+  }, [scanBusy, handleBarcode, toast, navigation]);
 
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -484,9 +548,8 @@ export function PosScreen() {
             compact
           />
           <View style={styles.searchRow}>
-            <View style={{flex: 1}}>
-              <SearchInput value={search} onChange={setSearch} />
-            </View>
+            {/* v8.1: scan button FIRST in the RTL row → it sits on the
+                RIGHT edge of the screen and the search fills the LEFT. */}
             <TouchableOpacity
               style={styles.scanButton}
               onPress={openScanner}
@@ -498,6 +561,9 @@ export function PosScreen() {
               />
               <Text style={styles.scanButtonText}>{scannerLabel}</Text>
             </TouchableOpacity>
+            <View style={{flex: 1}}>
+              <SearchInput value={search} onChange={setSearch} />
+            </View>
           </View>
         </View>
 
@@ -616,7 +682,9 @@ export function PosScreen() {
                 </TouchableOpacity>
               </View>
               <View style={styles.cartLinesWrap}>
-                <ScrollView showsVerticalScrollIndicator={false}>
+                <ScrollView
+                  style={{flex: 1}}
+                  showsVerticalScrollIndicator={false}>
                   {lines.map(line => (
                     <View key={line.key} style={styles.cartLine}>
                       <View style={styles.cartLineInfo}>
@@ -791,7 +859,7 @@ export function PosScreen() {
               <View style={{flex: 1}}>
                 <Text style={styles.engineRowTitle}>مسح الباركود</Text>
                 <Text style={styles.engineRowMeta}>
-                  سريع ودقيق — يُغلق تلقائياً عند قراءة الملصق
+                  جلسة متعددة — امسح عدة منتجات وكل قراءة تُضاف للسلة فوراً
                 </Text>
               </View>
               <Icon name="chevronLeft" size={18} color={c.textFaint} />
@@ -821,7 +889,10 @@ export function PosScreen() {
       {/* ── v8 vision result sheet ────────────────────────────
           Photo captured by the native engine → embedding → top
           matches. Confident match = already added (green banner);
-          otherwise the merchant taps the right product. */}
+          otherwise the merchant taps the right product. v8.1: a
+          manual pick KEEPS THE SHEET OPEN (addedName feedback) so a
+          whole multi-product scanning session happens in one place,
+          with the live cart total always visible. */}
       <Modal
         visible={visionResult != null}
         transparent
@@ -842,15 +913,17 @@ export function PosScreen() {
                 style={styles.visionPhoto}
                 resizeMode="cover"
               />
-              {visionResult.autoAdded ? (
+              {visionResult.addedName != null ? (
                 <View style={styles.visionAddedBanner}>
                   <Icon name="checkCircle" size={15} color={c.success} />
                   <Text style={styles.visionAddedText} numberOfLines={1}>
-                    أُضيف للسلة: {visionResult.matches[0]?.product.name}
+                    أُضيف للسلة: {visionResult.addedName}
                   </Text>
-                  <Text style={styles.visionAddedScore}>
-                    {((visionResult.matches[0]?.score ?? 0) * 100).toFixed(0)}%
-                  </Text>
+                  {visionResult.addedScore != null ? (
+                    <Text style={styles.visionAddedScore}>
+                      {((visionResult.addedScore as number) * 100).toFixed(0)}%
+                    </Text>
+                  ) : null}
                 </View>
               ) : (
                 <Text style={styles.visionPickHint}>
@@ -860,24 +933,45 @@ export function PosScreen() {
               <ScrollView
                 style={{maxHeight: 200}}
                 showsVerticalScrollIndicator={false}>
-                {(visionResult.autoAdded
-                  ? visionResult.matches.slice(1)
-                  : visionResult.matches
-                ).map(match => (
+                {visionResult.matches.map(match => (
                   <VisionMatchRow
                     key={match.product.id}
                     product={match.product}
                     score={match.score}
                     onPress={() => {
+                      // v8.1: add and STAY OPEN — the merchant can pick
+                      // another candidate or scan the next product.
                       tryAdd(match.product);
-                      setVisionResult(null);
+                      setVisionResult(prev =>
+                        prev == null
+                          ? null
+                          : {
+                              ...prev,
+                              matches: prev.matches.filter(
+                                entry => entry.product.id !== match.product.id,
+                              ),
+                              addedName: match.product.name,
+                              addedScore: match.score,
+                            },
+                      );
                     }}
                   />
                 ))}
-                {visionResult.autoAdded && visionResult.matches.length <= 1 ? (
+                {visionResult.addedName != null &&
+                visionResult.matches.length === 0 ? (
                   <Text style={styles.visionNoMore}>لا توجد مطابقات أخرى</Text>
                 ) : null}
               </ScrollView>
+              {/* Live cart summary — the sale grows inside the sheet. */}
+              <View style={styles.visionCartRow}>
+                <View style={styles.visionCartInfo}>
+                  <Icon name="cart" size={14} color={c.accent} />
+                  <Text style={styles.visionCartText}>
+                    السلة: {totals.itemsCount} قطعة ·{' '}
+                    {formatMoney(totals.total)}
+                  </Text>
+                </View>
+              </View>
               <View style={styles.visionSheetActions}>
                 <AppButton
                   small
@@ -1303,6 +1397,27 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       gap: spacing.sm,
     },
+    visionCartRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 7,
+    },
+    visionCartInfo: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+    },
+    visionCartText: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
 
     // Grid
     grid: {
@@ -1362,7 +1477,12 @@ const useStyles = makeStyles(c =>
     // Cart panel (v9 compact — round-9: "حجم السلة مناسب ولكن
     // النصوص والعناصر والأزرار كبيرة جداً لدرجة أنها تخرج منها":
     // tighter rows, compact 26px steppers, inline unit chips and
-    // smaller quick-action chips — nothing overflows the panel.)
+    // smaller quick-action chips — nothing overflows the panel.
+    // v8.1: the lines wrap is the ONLY flexible child (flexShrink)
+    // inside the 42%-capped panel — with many products it shrinks
+    // and scrolls INTERNALLY instead of pushing the discount row /
+    // totals / بيع buttons out of the frame under the bottom tab bar
+    // (round-10 #3).
     cartPanel: {
       backgroundColor: c.surface,
       borderTopWidth: 1,
@@ -1422,7 +1542,9 @@ const useStyles = makeStyles(c =>
       lineHeight: 18,
     },
     cartLinesWrap: {
-      maxHeight: 132,
+      flexShrink: 1,
+      minHeight: 48,
+      overflow: 'hidden',
     },
     cartLine: {
       flexDirection: 'row',

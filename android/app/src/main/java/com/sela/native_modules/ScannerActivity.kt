@@ -40,6 +40,7 @@ import com.google.mlkit.vision.common.InputImage
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * ScannerActivity — محرك المسح المنفصل (v8).
@@ -73,8 +74,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  *                   anywhere in the app).
  *
  *  JS contract (SelaScannerModule):
- *   • opens with  intent extra "mode" = "barcode" | "photo"
- *   • returns     "code" (barcode) or "path" (photo) or "error"
+ *   • opens with  intent extra "mode" = "barcode" | "photo",
+ *     optional extra "continuous" = true (barcode only).
+ *   • returns     "code" (barcode) or "path" (photo) or "error";
+ *     a CONTINUOUS session returns {cancelled:true} when closed —
+ *     each read is already delivered live via the
+ *     "selaScanBarcode" JS event (v8.1 multi-scan).
  *   • cancel      = user pressed إغلاق / back
  */
 class ScannerActivity : Activity() {
@@ -84,8 +89,13 @@ class ScannerActivity : Activity() {
         const val EXTRA_CODE = "code"
         const val EXTRA_PATH = "path"
         const val EXTRA_ERROR = "error"
+        const val EXTRA_CONTINUOUS = "continuous"
         const val MODE_BARCODE = "barcode"
         const val MODE_PHOTO = "photo"
+
+        /** v8.1: sink the module registers so a continuous session can
+         *  stream each read to JS instantly ("selaScanBarcode" event). */
+        @JvmStatic var continuousSink: ((code: String) -> Unit)? = null
 
         /** Same formats the old engine accepted — all offline. */
         private val BARCODE_FORMATS = BarcodeScannerOptions.Builder()
@@ -127,6 +137,12 @@ class ScannerActivity : Activity() {
         intent?.getStringExtra(EXTRA_MODE) != MODE_PHOTO
     }
 
+    /** v8.1 continuous multi-scan (barcode only): never auto-close;
+     *  stream every deduped read to JS and keep scanning. */
+    private val isContinuous: Boolean by lazy {
+        isBarcodeMode && intent?.getBooleanExtra(EXTRA_CONTINUOUS, false) == true
+    }
+
     // ── Camera ────────────────────────────────────────────────
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -134,6 +150,11 @@ class ScannerActivity : Activity() {
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private val scannerClient by lazy { BarcodeScanning.getClient(BARCODE_FORMATS) }
     private val settled = AtomicBoolean(false)
+
+    /** v8.1: continuous-session read counter + per-code dedupe. */
+    private val continuousReads = AtomicInteger(0)
+    private var lastCode: String? = null
+    private var lastCodeAt = 0L
 
     /** The lifecycle the camera binds to — driven by this activity. */
     private val cameraHost = Host()
@@ -179,6 +200,11 @@ class ScannerActivity : Activity() {
         if (settled.compareAndSet(false, true)) {
             // Guarantee the JS promise never hangs if the system kills us.
             finishWithError("أُغلق الماسح قبل إكمال العملية")
+        }
+        // v8.1: a continuous session is over — drop the stream sink so
+        // a stale activity can never leak reads into a new session.
+        if (isContinuous) {
+            ScannerActivity.continuousSink = null
         }
         cameraHost.destroy()
         runCatching { scannerClient.close() }
@@ -250,7 +276,11 @@ class ScannerActivity : Activity() {
             setOnClickListener { finishCancelled() }
         }
         statusChip = chip(
-            if (isBarcodeMode) "ماسح الباركود" else "المسح البصري",
+            when {
+                isContinuous -> "مسح متعدد · 0"
+                isBarcodeMode -> "ماسح الباركود"
+                else -> "المسح البصري"
+            },
             chipBg, stroke
         )
         torchButton = chip("الفلاش", chipBg, stroke).apply {
@@ -281,7 +311,15 @@ class ScannerActivity : Activity() {
             root.addView(line)
             animateScanLine(line)
 
-            root.addView(hintView("وجّه الكاميرا نحو ملصق الباركود — يُقفل تلقائياً عند القراءة"))
+            root.addView(
+                hintView(
+                    if (isContinuous) {
+                        "امسح عدة منتجات — كل قراءة تُضاف للسلة فوراً · إغلاق للإنهاء"
+                    } else {
+                        "وجّه الكاميرا نحو ملصق الباركود — يُقفل تلقائياً عند القراءة"
+                    }
+                )
+            )
         } else {
             // Shutter: big white ring + inner disc, bottom-center.
             val shutter = FrameLayout(this).apply {
@@ -488,13 +526,45 @@ class ScannerActivity : Activity() {
                     val value = barcodes
                         .firstOrNull()?.rawValue
                         ?.takeIf { it.isNotBlank() }
-                    if (value != null && settled.compareAndSet(false, true)) {
-                        runOnUiThread { onBarcodeRead(value) }
+                    if (value != null) {
+                        if (isContinuous) {
+                            onBarcodeContinuous(value)
+                        } else if (settled.compareAndSet(false, true)) {
+                            runOnUiThread { onBarcodeRead(value) }
+                        }
                     }
                 }
                 .addOnCompleteListener { proxy.close() }
         } catch (_: Exception) {
             proxy.close()
+        }
+    }
+
+    /** v8.1 continuous session: dedupe the same label for 1.6s, then
+     *  stream every NEW code to JS and keep scanning — the merchant
+     *  scans item after item without ever leaving the camera. */
+    private fun onBarcodeContinuous(code: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(this) {
+            if (code == lastCode && now - lastCodeAt < 1600L) {
+                return
+            }
+            lastCode = code
+            lastCodeAt = now
+        }
+        val reads = continuousReads.incrementAndGet()
+        runOnUiThread {
+            if (settled.get()) {
+                return@runOnUiThread
+            }
+            vibrate(40)
+            flash(Color.parseColor("#3322C55E"), 200)
+            statusChip.text = "مسح متعدد · $reads"
+        }
+        // Stream to JS on the analysis thread (the emitter is
+        // thread-safe); errors here must never kill the session.
+        runCatching {
+            ScannerActivity.continuousSink?.invoke(code)
         }
     }
 

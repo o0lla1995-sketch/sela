@@ -14,8 +14,14 @@ export const MODEL_INPUT_SIZE = 224;
 export const NORM_MEAN = 127.5;
 export const NORM_STD = 127.5;
 
-/** Default cosine similarity threshold (spec: 82%). */
-export const DEFAULT_MATCH_THRESHOLD = 0.82;
+/**
+ * Default cosine similarity threshold.
+ * v8.1: 0.82 → 0.78 — 0.82 was too strict for real-world lighting/angle
+ * drift at the checkout counter; confident auto-adds rarely fired and
+ * the merchant had to pick manually every time. 0.78 + the new
+ * Settings slider (50–95%) gives direct control.
+ */
+export const DEFAULT_MATCH_THRESHOLD = 0.78;
 
 /** Minimum time between two auto-adds of the SAME product (ms). */
 export const DEFAULT_RECOGNITION_COOLDOWN_MS = 1500;
@@ -98,9 +104,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '8.0.0';
+export const APP_VERSION = '8.1.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 9;
+export const APP_BUILD_CODE = 10;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

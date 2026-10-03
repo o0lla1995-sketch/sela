@@ -29,7 +29,6 @@ import {
   EmptyState,
   SectionTitle,
   SearchBar,
-  StatCard,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {StocktakeRepo} from '../../database/repositories/StocktakeRepo';
@@ -137,7 +136,9 @@ export function StocktakeScreen() {
 
   const setCounted = useCallback(
     async (item: StocktakeItem, raw: string) => {
-      if (session == null) return;
+      if (session == null) {
+        return;
+      }
       const trimmed = raw.trim();
       const value = trimmed === '' ? null : parseNumber(trimmed);
       if (value != null && (Number.isNaN(value) || value < 0)) {
@@ -178,7 +179,9 @@ export function StocktakeScreen() {
   );
 
   const completeSession = useCallback(() => {
-    if (session == null || summary == null) return;
+    if (session == null || summary == null) {
+      return;
+    }
     const uncounted = summary.totalItems - summary.countedItems;
     Alert.alert(
       'إنهاء الجرد',
@@ -246,7 +249,9 @@ export function StocktakeScreen() {
   }, [session, summary, loadAll, refreshCatalog, pushNotification, toast]);
 
   const cancelSession = useCallback(() => {
-    if (session == null) return;
+    if (session == null) {
+      return;
+    }
     Alert.alert(
       'إلغاء الجرد',
       'سيتم حذف جلسة الجرد الحالية بالكامل دون أي تعديل على المخزون. متابعة؟',
@@ -303,12 +308,15 @@ export function StocktakeScreen() {
   const filteredItems = useMemo(() => {
     const query = search.trim().toLowerCase();
     return items.filter(item => {
-      if (onlyPending && item.counted_qty != null) return false;
+      if (onlyPending && item.counted_qty != null) {
+        return false;
+      }
       if (categoryFilter !== 'all' && item.categoryId !== categoryFilter) {
         return false;
       }
-      if (query && !item.productName.toLowerCase().includes(query))
+      if (query && !item.productName.toLowerCase().includes(query)) {
         return false;
+      }
       return true;
     });
   }, [items, search, categoryFilter, onlyPending]);
@@ -445,25 +453,25 @@ export function StocktakeScreen() {
       />
 
       <View style={styles.body}>
-        {/* Progress strip */}
-        <View style={styles.statsRow}>
-          <StatCard
+        {/* v8.1 compact progress strip — ONE slim bar (~52dp) replaces
+            the three tall stat cards that ate the counting list. */}
+        <View style={styles.miniStats}>
+          <MiniStat
+            tone="success"
             label="مطابق"
             value={String(summary?.matchedItems ?? 0)}
-            tone="success"
-            icon="checkCircle"
           />
-          <StatCard
+          <View style={styles.miniStatDivider} />
+          <MiniStat
+            tone="danger"
             label="نقص"
             value={String(summary?.shortageItems ?? 0)}
-            tone="danger"
-            icon="packageMinus"
           />
-          <StatCard
+          <View style={styles.miniStatDivider} />
+          <MiniStat
+            tone="info"
             label="زيادة"
             value={String(summary?.surplusItems ?? 0)}
-            tone="info"
-            icon="plus"
           />
         </View>
 
@@ -779,11 +787,35 @@ function FilterChip({
         active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
       ]}
       onPress={onPress}
-      activeOpacity={0.8}>
+      activeOpacity={0.7}
+      hitSlop={{top: 4, bottom: 4, left: 2, right: 2}}>
       <Text style={[styles.chipText, {color: active ? c.onAccent : c.textDim}]}>
         {label}
       </Text>
     </TouchableOpacity>
+  );
+}
+
+/** v8.1 compact stat segment for the progress strip. */
+function MiniStat({
+  tone,
+  label,
+  value,
+}: {
+  tone: 'success' | 'danger' | 'info';
+  label: string;
+  value: string;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  const color =
+    tone === 'success' ? c.success : tone === 'danger' ? c.danger : c.info;
+  return (
+    <View style={styles.miniStat}>
+      <View style={[styles.miniDot, {backgroundColor: color}]} />
+      <Text style={styles.miniStatValue}>{value}</Text>
+      <Text style={styles.miniStatLabel}>{label}</Text>
+    </View>
   );
 }
 
@@ -807,9 +839,44 @@ const useStyles = makeStyles(c =>
       padding: spacing.lg,
       gap: spacing.md,
     },
-    statsRow: {
+    miniStats: {
       flexDirection: 'row',
-      gap: spacing.sm,
+      alignItems: 'center',
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      paddingVertical: 10,
+      paddingHorizontal: spacing.sm,
+    },
+    miniStat: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+    },
+    miniDot: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+    },
+    miniStatValue: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: 16,
+      fontVariant: ['tabular-nums'],
+    },
+    miniStatLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    miniStatDivider: {
+      width: 1,
+      alignSelf: 'stretch',
+      backgroundColor: c.borderSoft,
+      marginVertical: 2,
     },
     pendingToggle: {
       flexDirection: 'row',
@@ -986,16 +1053,20 @@ const useStyles = makeStyles(c =>
       fontVariant: ['tabular-nums'],
     },
     chip: {
+      // v8.1: fixed 30dp height + tight padding — identical chip size
+      // across every category, pill → small rectangle, instant tap.
+      height: 30,
+      justifyContent: 'center',
+      alignItems: 'center',
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.pill,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: 8,
+      borderRadius: 6,
+      paddingHorizontal: 10,
     },
     chipText: {
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: 12,
     },
   }),
 );

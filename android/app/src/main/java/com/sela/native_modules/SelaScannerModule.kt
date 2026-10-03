@@ -42,6 +42,8 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
 
     companion object {
         private const val REQUEST_SCAN = 47831
+        /** v8.1: event name for live barcode reads in a continuous session. */
+        private const val BARCODE_READ_EVENT = "selaScanBarcode"
     }
 
     private var pendingPromise: Promise? = null
@@ -63,6 +65,30 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun openScanner(mode: String, promise: Promise) {
+        launchScanner(
+            mode,
+            continuous = false,
+            promise = promise
+        )
+    }
+
+    /**
+     * v8.1 continuous multi-scan session (barcode engine only).
+     * Every deduped read is streamed to JS as a "selaScanBarcode"
+     * event; the promise resolves {cancelled:true} when the merchant
+     * closes the scanner. Separate @ReactMethod so the positional
+     * argument mapping of the existing openScanner calls is untouched.
+     */
+    @ReactMethod
+    fun openScannerContinuous(promise: Promise) {
+        launchScanner(
+            ScannerActivity.MODE_BARCODE,
+            continuous = true,
+            promise = promise
+        )
+    }
+
+    private fun launchScanner(mode: String, continuous: Boolean, promise: Promise) {
         val activity: Activity? = currentActivity
         if (activity == null) {
             promise.reject("E_NO_ACTIVITY", "لا توجد نافذة نشطة لفتح الماسح", null)
@@ -74,6 +100,10 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         }
 
         pendingPromise = promise
+        if (continuous) {
+            // Stream sink — must exist before the activity can read.
+            ScannerActivity.continuousSink = { code -> emitBarcodeRead(code) }
+        }
         try {
             val intent = Intent(activity, ScannerActivity::class.java)
                 .putExtra(
@@ -84,8 +114,12 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
                         ScannerActivity.MODE_BARCODE
                     }
                 )
+                .putExtra(ScannerActivity.EXTRA_CONTINUOUS, continuous)
             activity.startActivityForResult(intent, REQUEST_SCAN)
         } catch (error: Exception) {
+            if (continuous) {
+                ScannerActivity.continuousSink = null
+            }
             pendingPromise = null
             promise.reject(
                 "E_OPEN",
@@ -93,6 +127,16 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
                     (error.message?.let { " — $it" } ?: ""),
                 null
             )
+        }
+    }
+
+    /** v8.1: live read stream → JS event. Safe from any thread. */
+    private fun emitBarcodeRead(code: String) {
+        runCatching {
+            val params = Arguments.createMap().apply { putString("code", code) }
+            reactApplicationContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit(BARCODE_READ_EVENT, params)
         }
     }
 
@@ -111,6 +155,9 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         }
         val promise = pendingPromise ?: return
         pendingPromise = null
+        // v8.1: the continuous session is over — drop the stream sink
+        // immediately so no stale read can leak into the next session.
+        ScannerActivity.continuousSink = null
 
         try {
             if (resultCode == Activity.RESULT_OK) {

@@ -18,6 +18,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import Slider, {type SliderProps} from '@react-native-community/slider';
 import {useNavigation} from '@react-navigation/native';
 import {
   AppButton,
@@ -51,6 +52,10 @@ import {
 import type {ScannerMode} from '../../core/config';
 import {parseNumber} from '../../core/format';
 import type {PricingMode} from '../../core/types';
+
+/** slider 5.x ships FC types that trip @types/react 18 (returns
+ *  ReactNode instead of Element|null) — cast to a plain ComponentType. */
+const ThemedSlider = Slider as unknown as React.ComponentType<SliderProps>;
 
 export function SettingsScreen() {
   const c = useThemeColors();
@@ -369,20 +374,43 @@ export function SettingsScreen() {
             value={settings.soundEnabled}
             onValueChange={value => update({soundEnabled: value})}
           />
-          <Field
-            label={`حد التشابه للتعرف (% افتراضي ${Math.round(
-              settings.matchThreshold * 100,
-            )})`}
-            value={String(Math.round(settings.matchThreshold * 100))}
-            onChangeText={text => {
-              const value = parseNumber(text);
-              if (!Number.isNaN(value) && value >= 50 && value <= 100) {
-                update({matchThreshold: value / 100});
+          {/* v8.1: the threshold was previously a typed Field whose
+              controlled value snapped back on every invalid keystroke —
+              merchants literally could not edit it. Replaced with a
+              live drag slider (50–95%). */}
+          <View style={styles.thresholdCard}>
+            <View style={styles.thresholdHead}>
+              <View style={{flex: 1}}>
+                <Text style={styles.fieldLabel}>حد التشابه للتعرف</Text>
+                <Text style={styles.thresholdHint}>
+                  أقل = تعرّف أسهل وأسرع (فرص خطأ أعلى) — أعلى = أدق (قد يفوّت
+                  بعض المنتجات)
+                </Text>
+              </View>
+              <View style={styles.thresholdValue}>
+                <Text style={styles.thresholdValueText}>
+                  {Math.round(settings.matchThreshold * 100)}%
+                </Text>
+              </View>
+            </View>
+            <ThemedSlider
+              style={styles.slider}
+              minimumValue={50}
+              maximumValue={95}
+              step={1}
+              value={Math.round(settings.matchThreshold * 100)}
+              onValueChange={value =>
+                update({matchThreshold: Math.round(value) / 100})
               }
-            }}
-            keyboardType="numeric"
-            suffix="%"
-          />
+              minimumTrackTintColor={c.accent}
+              maximumTrackTintColor={c.border}
+              thumbTintColor={c.accent}
+            />
+            <View style={styles.sliderLabels}>
+              <Text style={styles.sliderLabelText}>50%</Text>
+              <Text style={styles.sliderLabelText}>95%</Text>
+            </View>
+          </View>
         </Card>
 
         {/* ── Selling ────────────────────────────────────────── */}
@@ -628,6 +656,55 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.small,
       lineHeight: 18,
+    },
+    thresholdCard: {
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.md,
+      gap: spacing.xs,
+    },
+    thresholdHead: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: spacing.sm,
+    },
+    thresholdHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 16,
+      marginTop: 2,
+    },
+    thresholdValue: {
+      minWidth: 58,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.accentSoft,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 8,
+    },
+    thresholdValueText: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      fontVariant: ['tabular-nums'],
+    },
+    slider: {
+      width: '100%',
+      height: 40,
+    },
+    sliderLabels: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginTop: -6,
+    },
+    sliderLabelText: {
+      color: c.textFaint,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
     },
     logoRow: {
       flexDirection: 'row',
