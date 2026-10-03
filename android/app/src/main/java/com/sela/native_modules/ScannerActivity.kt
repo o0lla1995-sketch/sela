@@ -30,6 +30,9 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -101,6 +104,25 @@ class ScannerActivity : Activity() {
             .build()
     }
 
+    /**
+     * CameraX binds to a LifecycleOwner — a plain Activity is not
+     * one, so the activity owns a minimal registry tied to its own
+     * start/stop (same proven pattern as the v5–v7 native view).
+     */
+    private class Host : LifecycleOwner {
+        private val registry = LifecycleRegistry(this)
+        override val lifecycle: Lifecycle get() = registry
+        fun resume() {
+            registry.currentState = Lifecycle.State.RESUMED
+        }
+        fun pause() {
+            registry.currentState = Lifecycle.State.CREATED
+        }
+        fun destroy() {
+            runCatching { registry.currentState = Lifecycle.State.DESTROYED }
+        }
+    }
+
     private val isBarcodeMode: Boolean by lazy {
         intent?.getStringExtra(EXTRA_MODE) != MODE_PHOTO
     }
@@ -112,6 +134,9 @@ class ScannerActivity : Activity() {
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private val scannerClient by lazy { BarcodeScanning.getClient(BARCODE_FORMATS) }
     private val settled = AtomicBoolean(false)
+
+    /** The lifecycle the camera binds to — driven by this activity. */
+    private val cameraHost = Host()
 
     // ── UI ────────────────────────────────────────────────────
     private lateinit var root: FrameLayout
@@ -139,12 +164,23 @@ class ScannerActivity : Activity() {
         bindCamera()
     }
 
+    override fun onStart() {
+        super.onStart()
+        cameraHost.resume()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        cameraHost.pause()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (settled.compareAndSet(false, true)) {
             // Guarantee the JS promise never hangs if the system kills us.
             finishWithError("أُغلق الماسح قبل إكمال العملية")
         }
+        cameraHost.destroy()
         runCatching { scannerClient.close() }
         runCatching { analysisExecutor.shutdown() }
     }
@@ -153,9 +189,9 @@ class ScannerActivity : Activity() {
     // UI — 100% programmatic, RTL Arabic, no resource files
     // ═══════════════════════════════════════════════════════════
 
-    private fun dp(value: Float): Int =
+    private fun dp(value: Int): Int =
         TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP, value, resources.displayMetrics
+            TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics
         ).toInt()
 
     @SuppressLint("RtlHardcoded")
@@ -386,14 +422,14 @@ class ScannerActivity : Activity() {
                     .build()
                     .also { it.setAnalyzer(analysisExecutor, ::analyzeFrame) }
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, preview, analysis)
+                provider.bindToLifecycle(cameraHost, selector, preview, analysis)
             } else {
                 val capture = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                     .build()
                     .also { imageCapture = it }
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, preview, capture)
+                provider.bindToLifecycle(cameraHost, selector, preview, capture)
             }
             applyTorch()
         } catch (firstError: Exception) {
@@ -411,12 +447,12 @@ class ScannerActivity : Activity() {
                                 .build()
                                 .also { it.setAnalyzer(analysisExecutor, ::analyzeFrame) }
                             provider.bindToLifecycle(
-                                this, selector, preview, analysis
+                                cameraHost, selector, preview, analysis
                             )
                         } else {
                             val capture = ImageCapture.Builder().build()
                                 .also { imageCapture = it }
-                            provider.bindToLifecycle(this, selector, preview, capture)
+                            provider.bindToLifecycle(cameraHost, selector, preview, capture)
                         }
                         applyTorch()
                     } catch (secondError: Exception) {
@@ -485,8 +521,9 @@ class ScannerActivity : Activity() {
         vibrate(25)
         val dir = File(filesDir, "scans").apply { mkdirs() }
         val file = File(dir, "scan_${System.currentTimeMillis()}.jpg")
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
         capture.takePicture(
-            file,
+            outputOptions,
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
