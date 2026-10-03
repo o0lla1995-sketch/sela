@@ -21,6 +21,7 @@ import {
   View,
 } from 'react-native';
 import {Icon} from '../../components/Icon';
+import {ContactButtons} from '../../components/ContactButtons';
 import {
   fonts,
   makeStyles,
@@ -281,34 +282,15 @@ export function ActivationScreen({status}: {status: LicenseStatus}) {
           </Text>
         </View>
 
-        {/* Contact card — subscriptions are sold by the management */}
+        {/* Contact card — subscriptions are sold by the management.
+            Channels configured by the owner appear as tappable icons
+            (phone / WhatsApp / Telegram / email deep links). */}
         <View style={styles.card}>
           <Text style={styles.contactTitle}>لشراء الاشتراك أو تجديده</Text>
-          <Text style={styles.contactNote}>{contact.note}</Text>
-          <TouchableOpacity
-            style={styles.contactRow}
-            onPress={() =>
-              void Linking.openURL(`tel:${contact.phone.replace(/\s/g, '')}`)
-            }>
-            <Icon name="phone" size={16} color={c.accent} />
-            <Text style={styles.contactValue}>{contact.phone}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.contactRow}
-            onPress={() =>
-              void Linking.openURL(
-                `https://wa.me/${contact.whatsapp.replace(/[^\d]/g, '')}`,
-              )
-            }>
-            <Icon name="send" size={16} color={c.accent} />
-            <Text style={styles.contactValue}>واتساب الإدارة</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.contactRow}
-            onPress={() => void Linking.openURL(`mailto:${contact.email}`)}>
-            <Icon name="mail" size={16} color={c.accent} />
-            <Text style={styles.contactValue}>{contact.email}</Text>
-          </TouchableOpacity>
+          {contact.note ? (
+            <Text style={styles.contactNote}>{contact.note}</Text>
+          ) : null}
+          <ContactButtons contact={contact} />
         </View>
 
         {/* Advanced: server URL (for management migrations) */}

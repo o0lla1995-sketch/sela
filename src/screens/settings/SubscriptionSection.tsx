@@ -21,6 +21,7 @@ import {
 } from 'react-native';
 import {Icon} from '../../components/Icon';
 import {AppButton} from '../../components/ui';
+import {ContactButtons} from '../../components/ContactButtons';
 import {
   fonts,
   makeStyles,
@@ -219,34 +220,14 @@ export function SubscriptionSection() {
         </View>
       )}
 
-      {/* Management contact */}
+      {/* Management contact — channels configured by the owner show
+          as tappable brand icons (phone / WhatsApp / Telegram / email). */}
       <View style={styles.contactCard}>
         <Text style={styles.contactTitle}>لشراء وتجديد الاشتراكات</Text>
-        <Text style={styles.contactNote}>{contact.note}</Text>
-        <TouchableOpacity
-          style={styles.contactRow}
-          onPress={() =>
-            void Linking.openURL(`tel:${contact.phone.replace(/\s/g, '')}`)
-          }>
-          <Icon name="phone" size={15} color={c.accent} />
-          <Text style={styles.contactValue}>{contact.phone}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.contactRow}
-          onPress={() =>
-            void Linking.openURL(
-              `https://wa.me/${contact.whatsapp.replace(/[^\d]/g, '')}`,
-            )
-          }>
-          <Icon name="send" size={15} color={c.accent} />
-          <Text style={styles.contactValue}>واتساب الإدارة</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.contactRow}
-          onPress={() => void Linking.openURL(`mailto:${contact.email}`)}>
-          <Icon name="mail" size={15} color={c.accent} />
-          <Text style={styles.contactValue}>{contact.email}</Text>
-        </TouchableOpacity>
+        {contact.note ? (
+          <Text style={styles.contactNote}>{contact.note}</Text>
+        ) : null}
+        <ContactButtons contact={contact} />
       </View>
     </View>
   );

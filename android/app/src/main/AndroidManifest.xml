@@ -5,6 +5,10 @@
          On-Device Vision (Camera + TFLite) — 100% offline processing
          ══════════════════════════════════════════════════════════════ -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- License activation / periodic verification — the ONLY online
+         feature; the POS itself keeps working fully offline. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Local stock-alert notifications (runtime on Android 13+). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -42,6 +46,7 @@
       android:icon="@mipmap/ic_launcher"
       android:roundIcon="@mipmap/ic_launcher_round"
       android:allowBackup="false"
+      android:usesCleartextTraffic="true"
       android:supportsRtl="true"
       android:theme="@style/AppTheme">
       <activity

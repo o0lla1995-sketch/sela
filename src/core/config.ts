@@ -88,7 +88,7 @@ export const APP_NAME = 'sela';
 export const APP_NAME_AR = 'سيلا';
 
 /** App version shown in Settings → About. */
-export const APP_VERSION = '4.0.0';
+export const APP_VERSION = '4.1.0';
 
 // ─────────────────────────────────────────────────────────────
 // Subscription / licensing
@@ -97,7 +97,8 @@ export const APP_VERSION = '4.0.0';
 /** Default license-server base URL (owner's Coolify deployment).
  *  Merchants can override it in the activation screen if the
  *  management moves the server. */
-export const LICENSE_SERVER_URL = 'https://license.sela.app';
+export const LICENSE_SERVER_URL =
+  'http://8jz9a3yyhn3eltmwqgnchn29.130.61.171.201.sslip.io';
 
 /** Ed25519 PUBLIC key (hex) of the license server — licenses are
  *  signed server-side and verified on-device; the private key never
@@ -117,10 +118,12 @@ export const LICENSE_GRACE_HARD_HOURS = 240;
 export const LICENSE_ROLLBACK_TOLERANCE_MS = 5 * 60 * 1000;
 
 /** Management contact shown on the activation + subscription
- *  screens (server config overrides these when reachable). */
+ *  screens (server config overrides these when reachable). Any
+ *  channel left empty here (or on the server) is hidden in the UI. */
 export const LICENSE_CONTACT_FALLBACK = {
   phone: '+972 59 000 0000',
   whatsapp: '+972 59 000 0000',
+  telegram: '',
   email: 'abdalasela@gmail.com',
-  note: 'لشراء أو تجديد الاشتراك تواصل مع الإدارة عبر واتساب أو الهاتف',
+  note: 'لشراء أو تجديد الاشتراك تواصل مع الإدارة عبر أحد قنوات التواصل',
 };

@@ -58,6 +58,7 @@ export interface LicensePayload {
 export interface LicenseContact {
   phone: string;
   whatsapp: string;
+  telegram: string;
   email: string;
   note: string;
 }
