@@ -89,6 +89,7 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
   }
 
   override fun onActivityResult(
+    activity: Activity?,
     requestCode: Int,
     resultCode: Int,
     data: Intent?
@@ -121,7 +122,7 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     }
   }
 
-  override fun onNewIntent(intent: Intent) {
+  override fun onNewIntent(intent: Intent?) {
     // Not used — required by ActivityEventListener.
   }
 
