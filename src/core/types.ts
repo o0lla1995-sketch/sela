@@ -19,7 +19,12 @@ export interface Product {
   category_id: number | null;
   image_uri: string | null;
   created_at: string;
+  /** Per-product low-stock alert override (NULL → global default). */
+  low_stock_threshold: number | null;
 }
+
+/** Stock state derived from quantity vs threshold. */
+export type StockState = 'out' | 'low' | 'ok';
 
 export type AngleLabel = 'front' | 'back' | 'side';
 
@@ -144,4 +149,38 @@ export interface VisionModelInfo {
   inputName: string;
   outputName: string;
   loadError: string | null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Notifications (in-app center + Android local notifications)
+// ────────────────────────────────────────────────────────────────
+
+export type NotificationKind =
+  | 'out_of_stock'
+  | 'low_stock'
+  | 'info'
+  | 'printer'
+  | 'sale';
+
+export interface AppNotification {
+  /** Stable id (timestamp-based). */
+  id: string;
+  kind: NotificationKind;
+  title: string;
+  body: string;
+  /** 'YYYY-MM-DD HH:MM:SS' local. */
+  createdAt: string;
+  read: boolean;
+  /** Optional product reference for deep-navigation. */
+  productId?: number;
+}
+
+/** Derives the stock state for a product given the global default threshold. */
+export function stockStateOf(
+  product: Pick<Product, 'stock_quantity' | 'low_stock_threshold'>,
+  defaultThreshold: number,
+): StockState {
+  if (product.stock_quantity <= 0) return 'out';
+  const threshold = product.low_stock_threshold ?? defaultThreshold;
+  return product.stock_quantity <= threshold ? 'low' : 'ok';
 }

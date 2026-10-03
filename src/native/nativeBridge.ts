@@ -55,6 +55,20 @@ interface PlatformUtilsNative {
   deleteFile(path: string): Promise<boolean>;
 }
 
+interface ImageDecoderNative {
+  /** Photo → base64 RGB bytes (center-cropped square, size×size). */
+  decodeRgb(path: string, size: number): Promise<string>;
+  /** Downscaled JPEG copy for thumbnails → new absolute path. */
+  saveScaled(path: string, maxDim: number, quality: number): Promise<string>;
+}
+
+interface SelaNotificationsNative {
+  areNotificationsEnabled(): Promise<boolean>;
+  requestPermission(): Promise<boolean>;
+  show(id: number, title: string, body: string, kind: string): Promise<boolean>;
+  cancelAll(): Promise<boolean>;
+}
+
 type MaybeModule<T> = T | undefined;
 
 export const ThermalPrinterNative: MaybeModule<ThermalPrinterNative> =
@@ -62,6 +76,12 @@ export const ThermalPrinterNative: MaybeModule<ThermalPrinterNative> =
 
 export const PlatformUtilsNative: MaybeModule<PlatformUtilsNative> =
   NativeModules.PlatformUtils as MaybeModule<PlatformUtilsNative>;
+
+export const ImageDecoderNative: MaybeModule<ImageDecoderNative> =
+  NativeModules.ImageDecoder as MaybeModule<ImageDecoderNative>;
+
+export const SelaNotificationsNative: MaybeModule<SelaNotificationsNative> =
+  NativeModules.SelaNotifications as MaybeModule<SelaNotificationsNative>;
 
 export function requireThermalPrinter(): ThermalPrinterNative {
   if (ThermalPrinterNative == null) {

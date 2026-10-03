@@ -1,49 +1,67 @@
 /**
- * Bold Commercial Design System
+ * سيلا (Sela) — Design System Tokens v2.0
  * ─────────────────────────────────────────────────────────────────
- * Deep charcoal surfaces + high-energy orange accents.
- * Tuned for retail environments: high contrast, big tap targets,
- * readable at arm's length under strong shop lighting.
+ * Single source of truth for every visual decision. Full spec:
+ * see design.md at the repository root.
+ *
+ * Layered surfaces instead of flat black; Tajawal Arabic type scale;
+ * 4pt spacing grid; semantic colors reserved for meaning.
  */
-import {StyleSheet, Platform, StatusBar} from 'react-native';
+import {Platform, StatusBar, StyleSheet} from 'react-native';
 
 export const colors = {
-  /** App background — deep charcoal. */
-  bg: '#111111',
-  /** Elevated cards / panels. */
-  surface: '#1B1B1F',
-  /** Slightly lighter surface for nested elements. */
-  surfaceAlt: '#232329',
-  /** Border / divider color. */
-  border: '#2E2E36',
-  /** Energy orange — primary action color. */
+  // ── Layered surfaces (never pure black) ──────────────────────
+  bg: '#0E0E12',
+  surface: '#17171D',
+  surfaceAlt: '#1F1F27',
+  surfaceHi: '#26262F',
+  border: '#2A2A33',
+  borderSoft: '#22222B',
+
+  // ── Brand & actions ──────────────────────────────────────────
   accent: '#F97316',
-  /** Pressed / darker orange. */
   accentDark: '#C2410C',
-  /** Soft orange background (chips, highlights). */
-  accentSoft: 'rgba(249, 115, 22, 0.16)',
-  /** Success green (stock OK, connection OK). */
+  accentSoft: 'rgba(249, 115, 22, 0.14)',
+  accentSofter: 'rgba(249, 115, 22, 0.08)',
+
+  // ── Semantic (meaning only, never decoration) ────────────────
   success: '#22C55E',
   successSoft: 'rgba(34, 197, 94, 0.15)',
-  /** Danger red (deletes, errors, low stock). */
   danger: '#EF4444',
   dangerSoft: 'rgba(239, 68, 68, 0.15)',
-  /** Warning amber (low stock). */
   warning: '#FACC15',
   warningSoft: 'rgba(250, 204, 21, 0.15)',
-  /** Info blue. */
   info: '#38BDF8',
   infoSoft: 'rgba(56, 189, 248, 0.14)',
-  /** Primary text. */
-  text: '#FAFAFA',
-  /** Secondary / muted text. */
-  textDim: '#9CA3AF',
-  /** Even softer text (labels, hints). */
-  textFaint: '#6B7280',
-  /** Camera ROI frame. */
+
+  // ── Text ─────────────────────────────────────────────────────
+  text: '#F4F4F5',
+  textDim: '#A1A1AA',
+  textFaint: '#71717A',
+  onAccent: '#FFFFFF',
+
+  // ── Camera / vision ──────────────────────────────────────────
   roi: '#F97316',
-  /** Scanner flash. */
-  flash: 'rgba(34, 197, 94, 0.22)',
+  flash: 'rgba(34, 197, 94, 0.24)',
+  scrim: 'rgba(14, 14, 18, 0.82)',
+} as const;
+
+/** Tajawal font files bundled in android/app/src/main/assets/fonts. */
+export const fonts = {
+  regular: 'Tajawal-Regular',
+  medium: 'Tajawal-Medium',
+  bold: 'Tajawal-Bold',
+  black: 'Tajawal-Black',
+} as const;
+
+export const typography = {
+  display: 34,
+  title: 24,
+  heading: 18,
+  body: 15.5,
+  caption: 13.5,
+  small: 12,
+  micro: 10.5,
 } as const;
 
 export const spacing = {
@@ -56,40 +74,27 @@ export const spacing = {
 } as const;
 
 export const radius = {
-  sm: 6,
-  md: 10,
-  lg: 14,
-  xl: 20,
+  sm: 8,
+  md: 12,
+  lg: 16,
+  pill: 999,
 } as const;
 
-export const typography = {
-  title: 26,
-  heading: 20,
-  body: 16,
-  caption: 13,
-  small: 11,
-  money: 18,
-  moneyBig: 28,
-} as const;
-
+/** Minimal elevation — borders + layers carry the depth (see design.md §6). */
 export const shadows = StyleSheet.create({
-  card: {
-    elevation: 3,
+  floating: {
+    elevation: 6,
     shadowColor: '#000000',
-    shadowOffset: {width: 0, height: 2},
-    shadowOpacity: 0.35,
-    shadowRadius: 4,
+    shadowOffset: {width: 0, height: 3},
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
   },
 });
 
-export const statusbarHeight = Platform.select({
+export const statusBarHeight = Platform.select({
   android: StatusBar.currentHeight ?? 24,
   default: 44,
 });
 
-export const common = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: colors.bg,
-  },
-});
+/** Touch targets must never be smaller than this (design.md §12). */
+export const MIN_TOUCH = 48;

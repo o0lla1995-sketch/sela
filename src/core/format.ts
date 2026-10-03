@@ -105,6 +105,32 @@ export function nextInvoiceNumber(
   };
 }
 
+/** Relative Arabic time: "الآن" / "قبل 5 دقائق" / "قبل ساعتين" / date. */
+export function relativeTime(value: string): string {
+  if (!value) return '';
+  const then = new Date(value.replace(' ', 'T'));
+  if (Number.isNaN(then.getTime())) return value;
+  const diffMs = Date.now() - then.getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return 'الآن';
+  if (minutes < 60) {
+    return minutes === 1 ? 'قبل دقيقة' : `قبل ${minutes} دقيقة`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    if (hours === 1) return 'قبل ساعة';
+    if (hours === 2) return 'قبل ساعتين';
+    return `قبل ${hours} ساعة`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    if (days === 1) return 'قبل يوم';
+    if (days === 2) return 'قبل يومين';
+    return `قبل ${days} أيام`;
+  }
+  return formatDate(value.split(' ')[0]);
+}
+
 /** Valid, readable number from arbitrary text input. */
 export function parseNumber(input: string): number {
   const cleaned = input.replace(/[^\d.\-]/g, '');

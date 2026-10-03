@@ -1,42 +1,34 @@
 /**
- * App root — initialization pipeline + navigation host.
+ * App root — سيلا (Sela).
  * ─────────────────────────────────────────────────────────────────
- * Boot order matters:
- *  1. SQLite schema bootstrap (blocking — nothing works without it)
+ * Boot order:
+ *  1. SQLite schema bootstrap + migrations (blocking)
  *  2. Catalog + embeddings index refresh
- *  3. TFLite vision model load (async — screens degrade gracefully)
- *  4. Printer auto-reconnect (silent best-effort)
+ *  3. Stock alerts evaluation (notifications)
+ *  4. TFLite vision model load (async — manual fallback if it fails)
+ *  5. Printer auto-reconnect (silent best-effort)
+ *
+ * Everything renders inside a root ErrorBoundary — a crash anywhere
+ * shows a recovery screen instead of a black activity.
  */
 import React, {useEffect, useState} from 'react';
-import {
-  StatusBar,
-  StyleSheet,
-  Text,
-  View,
-  ActivityIndicator,
-} from 'react-native';
+import {ActivityIndicator, StatusBar, StyleSheet, Text, View} from 'react-native';
+import {SafeAreaProvider} from 'react-native-safe-area-context';
 import {GestureHandlerRootView} from 'react-native-gesture-handler';
 
-import {HomeScreen} from './src/screens/HomeScreen';
-import {PosScreen} from './src/screens/PosScreen';
-import {InventoryScreen} from './src/screens/inventory/InventoryScreen';
-import {ProductFormScreen} from './src/screens/inventory/ProductFormScreen';
-import {ReportsScreen} from './src/screens/reports/ReportsScreen';
-import {PrinterSettingsScreen} from './src/screens/printer/PrinterSettingsScreen';
-import {SettingsScreen} from './src/screens/settings/SettingsScreen';
-import {DiagnosticsScreen} from './src/screens/settings/DiagnosticsScreen';
-
-import {Toaster} from './src/components/ui';
-import {useNavigation} from './src/core/navigation';
+import {RootNavigator} from './src/navigation/RootNavigator';
+import {Toaster as UIToaster} from './src/components/ui';
+import {ErrorBoundary as Boundary} from './src/components/ErrorBoundary';
 import {initDatabase} from './src/database/connection';
 import {useCatalogStore} from './src/stores/catalogStore';
 import {useCartStore} from './src/stores/cartStore';
 import {useSettingsStore} from './src/stores/settingsStore';
 import {usePrinterStore} from './src/stores/printerStore';
 import {VisionRecognitionService} from './src/services/vision/VisionRecognitionService';
+import {StockAlertsService} from './src/services/StockAlertsService';
 import {logDiag} from './src/core/diagnostics';
-import {colors, spacing, typography, statusbarHeight} from './src/core/theme';
-import {APP_NAME} from './src/core/config';
+import {colors, fonts, spacing, typography} from './src/core/theme';
+import {APP_NAME, APP_VERSION} from './src/core/config';
 
 type BootState = 'booting' | 'ready' | 'error';
 
@@ -46,7 +38,7 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     let mounted = true;
-    const boot = async () => {
+    const bootAsync = async () => {
       try {
         // 1. Database schema (must succeed).
         await initDatabase();
@@ -54,20 +46,29 @@ export default function App(): React.JSX.Element {
         // 2. Catalog & vision index.
         await useCatalogStore.getState().refresh();
 
-        // 3. Vision model — failure keeps the app usable manually.
+        // 3. Stock alerts (best-effort, never blocks boot).
+        try {
+          await StockAlertsService.evaluate();
+        } catch {
+          // Notifications are never fatal.
+        }
+
+        // 4. Vision model — failure keeps the app usable manually.
         await VisionRecognitionService.loadModel();
 
-        // 4. Apply default pricing mode to a fresh cart.
+        // 5. Apply default pricing mode to a fresh cart.
         const settings = useSettingsStore.getState().settings;
         const cart = useCartStore.getState();
         if (cart.lines.length === 0) {
           cart.setPricingMode(settings.defaultPricingMode);
         }
 
-        // 5. Silent printer auto-reconnect.
+        // 6. Silent printer auto-reconnect.
         void usePrinterStore.getState().connectSaved();
 
-        if (mounted) setBoot('ready');
+        if (mounted) {
+          setBoot('ready');
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logDiag('boot', `فشل إقلاع التطبيق: ${message}`, 'error');
@@ -77,60 +78,39 @@ export default function App(): React.JSX.Element {
         }
       }
     };
-    void boot();
+    void bootAsync();
     return () => {
       mounted = false;
     };
   }, []);
 
-  const current = useNavigation(state => state.current);
-
   return (
     <GestureHandlerRootView style={styles.root}>
-      <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
-      <View style={styles.safe}>
-        {boot === 'booting' ? (
-          <BootSplash />
-        ) : boot === 'error' ? (
-          <BootError message={bootError ?? 'خطأ غير معروف'} />
-        ) : (
-          <View style={styles.screenHost}>
-            {renderScreen(current.name, current.params?.productId)}
-          </View>
-        )}
-        <Toaster />
-      </View>
+      <SafeAreaProvider>
+        <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
+        <Boundary label="التطبيق">
+          {boot === 'booting' ? (
+            <BootSplash />
+          ) : boot === 'error' ? (
+            <BootError message={bootError ?? 'خطأ غير معروف'} />
+          ) : (
+            <RootNavigator />
+          )}
+          <UIToaster />
+        </Boundary>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
-}
-
-function renderScreen(name: string, productId?: number): React.JSX.Element {
-  switch (name) {
-    case 'pos':
-      return <PosScreen />;
-    case 'inventory':
-      return <InventoryScreen />;
-    case 'product-form':
-      return <ProductFormScreen productId={productId} />;
-    case 'reports':
-      return <ReportsScreen />;
-    case 'printer':
-      return <PrinterSettingsScreen />;
-    case 'settings':
-      return <SettingsScreen />;
-    case 'diagnostics':
-      return <DiagnosticsScreen />;
-    case 'home':
-    default:
-      return <HomeScreen />;
-  }
 }
 
 function BootSplash(): React.JSX.Element {
   return (
     <View style={styles.center}>
+      <View style={styles.splashMark}>
+        <Text style={styles.splashGlyph}>س</Text>
+      </View>
       <Text style={styles.splashTitle}>{APP_NAME}</Text>
-      <Text style={styles.splashSubtitle}>نقطة بيع ذكية — يعمل بدون إنترنت</Text>
+      <Text style={styles.splashSubtitle}>نقطة بيع ذكية — تعمل بلا إنترنت</Text>
       <ActivityIndicator color={colors.accent} size="large" style={{marginTop: spacing.xl}} />
     </View>
   );
@@ -139,11 +119,14 @@ function BootSplash(): React.JSX.Element {
 function BootError({message}: {message: string}): React.JSX.Element {
   return (
     <View style={styles.center}>
-      <Text style={styles.errorEmoji}>⚠️</Text>
+      <View style={styles.splashMark}>
+        <Text style={styles.splashGlyph}>س</Text>
+      </View>
       <Text style={styles.errorTitle}>تعذّر تشغيل التطبيق</Text>
       <Text style={styles.errorText}>{message}</Text>
       <Text style={styles.errorText}>
-        أعد تشغيل التطبيق — إذا استمرت المشكلة استخدم شاشة التشخيص من الإعدادات
+        أعد تشغيل التطبيق — إذا استمرت المشكلة جرّب «مسح البيانات» من إعدادات
+        أندرويد ثم أعد فتح التطبيق
       </Text>
     </View>
   );
@@ -154,14 +137,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.bg,
   },
-  safe: {
-    flex: 1,
-    backgroundColor: colors.bg,
-    paddingTop: statusbarHeight,
-  },
-  screenHost: {
-    flex: 1,
-  },
   center: {
     flex: 1,
     alignItems: 'center',
@@ -169,25 +144,42 @@ const styles = StyleSheet.create({
     padding: spacing.xl,
     backgroundColor: colors.bg,
   },
+  splashMark: {
+    width: 92,
+    height: 92,
+    borderRadius: 28,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.lg,
+  },
+  splashGlyph: {
+    color: colors.onAccent,
+    fontFamily: fonts.black,
+    fontSize: 52,
+    lineHeight: 64,
+    marginTop: 6,
+  },
   splashTitle: {
-    color: colors.accent,
+    color: colors.text,
+    fontFamily: fonts.black,
     fontSize: 32,
-    fontWeight: '900',
   },
   splashSubtitle: {
     color: colors.textDim,
+    fontFamily: fonts.regular,
     fontSize: typography.caption,
-    marginTop: spacing.sm,
+    marginTop: spacing.xs,
   },
-  errorEmoji: {fontSize: 48, marginBottom: spacing.md},
   errorTitle: {
     color: colors.danger,
+    fontFamily: fonts.black,
     fontSize: typography.heading,
-    fontWeight: '900',
     marginBottom: spacing.md,
   },
   errorText: {
     color: colors.textDim,
+    fontFamily: fonts.regular,
     fontSize: typography.caption,
     textAlign: 'center',
     lineHeight: 22,

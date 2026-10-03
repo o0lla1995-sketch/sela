@@ -52,7 +52,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SmartVisionPOS-APK
+          name: Sela-APK
           path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 90
 
@@ -63,5 +63,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             android/app/build/outputs/apk/release/app-release.apk \
-            --title "Smart Vision POS $GITHUB_REF_NAME" \
+            --title "سيلا Sela $GITHUB_REF_NAME" \
             --generate-notes

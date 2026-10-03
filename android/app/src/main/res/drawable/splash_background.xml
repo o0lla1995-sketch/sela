@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cold-start splash: charcoal canvas + centered Sela mark (see splash_logo) -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_bg" />
+    <item android:gravity="center">
+        <bitmap android:src="@drawable/splash_logo"
+                android:gravity="center"
+                android:tileMode="disabled" />
+    </item>
+</layer-list>

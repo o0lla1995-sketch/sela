@@ -1,25 +1,31 @@
 /**
- * Shared UI kit — Bold Commercial Dark theme.
- * Big tap targets, high contrast, Arabic-first layout.
+ * سيلا UI kit — components per design.md §8.
+ * ─────────────────────────────────────────────────────────────────
+ * AppHeader / AppButton / Card / Badge / Segmented / EmptyState /
+ * StatCard / Field / Switch row / Stepper / Toaster.
+ * All Tajawal, layered surfaces, 48dp touch targets, zero emojis.
  */
-import React, {useState, useCallback} from 'react';
+import React from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  TextInput,
   ActivityIndicator,
-  Modal,
-  Pressable,
-  ScrollView,
+  I18nManager,
   KeyboardTypeOptions,
+  Pressable,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
   ViewStyle,
 } from 'react-native';
-import {colors, spacing, radius, typography, shadows} from '../core/theme';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {useNavigation} from '@react-navigation/native';
+import {Icon, IconChip, type IconName} from './Icon';
+import {useToastStore, type ToastKind} from '../stores/toastStore';
+import {useNotificationsStore} from '../stores/notificationsStore';
+import {colors, fonts, radius, shadows, spacing, statusBarHeight, typography} from '../core/theme';
 import {formatMoney} from '../core/format';
-import {useToastStore} from '../stores/toastStore';
-import {useNavigation} from '../core/navigation';
 
 // ────────────────────────────────────────────────────────────────
 // Screen scaffolding
@@ -29,30 +35,77 @@ export function Screen({children}: {children: React.ReactNode}) {
   return <View style={styles.screen}>{children}</View>;
 }
 
-export function ScreenHeader({
+export function AppHeader({
   title,
   subtitle,
   showBack = false,
+  showBell = true,
+  right,
 }: {
   title: string;
   subtitle?: string;
   showBack?: boolean;
+  showBell?: boolean;
+  right?: React.ReactNode;
 }) {
-  const pop = useNavigation(state => state.pop);
+  const navigation = useNavigation();
+  const unreadCount = useNotificationsStore(state => state.unreadCount);
+  const canGoBack = navigation.canGoBack();
+
   return (
-    <View style={styles.header}>
-      {showBack ? (
-        <TouchableOpacity style={styles.backButton} onPress={pop} hitSlop={{top: 12, bottom: 12, left: 12, right: 12}}>
-          <Text style={styles.backIcon}>›</Text>
-        </TouchableOpacity>
-      ) : (
-        <View style={styles.backPlaceholder} />
-      )}
-      <View style={styles.headerTextWrap}>
-        <Text style={styles.headerTitle}>{title}</Text>
-        {subtitle ? <Text style={styles.headerSubtitle}>{subtitle}</Text> : null}
+    <View style={styles.headerRoot}>
+      <View style={styles.headerRow}>
+        {showBack && canGoBack ? (
+          <TouchableOpacity
+            style={styles.headerIconBtn}
+            onPress={() => navigation.goBack()}
+            hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
+            <Icon
+              name={I18nManager.isRTL ? 'chevronRight' : 'chevronLeft'}
+              size={22}
+              color={colors.text}
+            />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.headerIconBtn} pointerEvents="none">
+            <Icon name="sparkles" size={20} color={colors.accent} />
+          </View>
+        )}
+
+        <View style={styles.headerTextWrap}>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {title}
+          </Text>
+          {subtitle ? (
+            <Text style={styles.headerSubtitle} numberOfLines={1}>
+              {subtitle}
+            </Text>
+          ) : null}
+        </View>
+
+        <View style={styles.headerActions}>
+          {right}
+          {showBell ? (
+            <TouchableOpacity
+              style={styles.headerIconBtn}
+              onPress={() => navigation.navigate('Notifications' as never)}
+              hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
+              <Icon
+                name={unreadCount > 0 ? 'bell' : 'bellOff'}
+                size={20}
+                color={unreadCount > 0 ? colors.accent : colors.textDim}
+              />
+              {unreadCount > 0 ? (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </Text>
+                </View>
+              ) : null}
+            </TouchableOpacity>
+          ) : null}
+        </View>
       </View>
-      <View style={styles.backPlaceholder} />
     </View>
   );
 }
@@ -61,7 +114,7 @@ export function ScreenHeader({
 // Buttons
 // ────────────────────────────────────────────────────────────────
 
-type ButtonVariant = 'primary' | 'ghost' | 'danger' | 'success';
+type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
 
 export function AppButton({
   title,
@@ -70,6 +123,7 @@ export function AppButton({
   disabled = false,
   loading = false,
   small = false,
+  icon,
   style,
 }: {
   title: string;
@@ -78,37 +132,79 @@ export function AppButton({
   disabled?: boolean;
   loading?: boolean;
   small?: boolean;
+  icon?: IconName;
   style?: ViewStyle;
 }) {
-  const backgroundStyle =
+  const bg =
     variant === 'primary'
-      ? styles.buttonPrimary
+      ? styles.btnPrimary
+      : variant === 'secondary'
+      ? styles.btnSecondary
       : variant === 'danger'
-      ? styles.buttonDanger
+      ? styles.btnDanger
       : variant === 'success'
-      ? styles.buttonSuccess
-      : styles.buttonGhost;
+      ? styles.btnSuccess
+      : styles.btnGhost;
 
-  const textStyle =
-    variant === 'ghost' ? styles.buttonGhostText : styles.buttonText;
+  const textColor =
+    variant === 'primary' || variant === 'success'
+      ? colors.onAccent
+      : variant === 'secondary'
+      ? colors.text
+      : variant === 'danger'
+      ? colors.danger
+      : colors.accent;
 
   return (
     <TouchableOpacity
-      style={[
-        styles.button,
-        small && styles.buttonSmall,
-        backgroundStyle,
-        (disabled || loading) && styles.buttonDisabled,
-        style,
-      ]}
+      style={[styles.button, small && styles.buttonSmall, bg, (disabled || loading) && styles.buttonDisabled, style]}
       onPress={onPress}
       disabled={disabled || loading}
-      activeOpacity={0.75}>
+      activeOpacity={0.8}>
       {loading ? (
-        <ActivityIndicator color={variant === 'ghost' ? colors.accent : '#FFFFFF'} />
+        <ActivityIndicator
+          size="small"
+          color={variant === 'ghost' || variant === 'danger' || variant === 'secondary' ? colors.accent : colors.onAccent}
+        />
       ) : (
-        <Text style={[textStyle, small && styles.buttonSmallText]}>{title}</Text>
+        <>
+          {icon != null ? <Icon name={icon} size={small ? 15 : 18} color={textColor} /> : null}
+          <Text style={[styles.buttonText, small && styles.buttonSmallText, {color: textColor}]}>
+            {title}
+          </Text>
+        </>
       )}
+    </TouchableOpacity>
+  );
+}
+
+export function IconButton({
+  name,
+  onPress,
+  size = 40,
+  color = colors.text,
+  bg,
+  disabled,
+}: {
+  name: IconName;
+  onPress: () => void;
+  size?: number;
+  color?: string;
+  bg?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <TouchableOpacity
+      style={[
+        styles.iconButton,
+        {width: size, height: size, borderRadius: size / 2},
+        bg != null ? {backgroundColor: bg} : null,
+        disabled && styles.buttonDisabled,
+      ]}
+      onPress={onPress}
+      disabled={disabled}
+      activeOpacity={0.8}>
+      <Icon name={name} size={Math.round(size * 0.48)} color={color} />
     </TouchableOpacity>
   );
 }
@@ -136,6 +232,30 @@ export function Card({
   return <View style={[styles.card, style]}>{children}</View>;
 }
 
+export function SectionTitle({
+  title,
+  hint,
+  action,
+}: {
+  title: string;
+  hint?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <View style={styles.sectionRow}>
+      <View style={{flex: 1}}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {hint ? <Text style={styles.sectionHint}>{hint}</Text> : null}
+      </View>
+      {action}
+    </View>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────
+// Data display
+// ────────────────────────────────────────────────────────────────
+
 export function MoneyText({
   value,
   big = false,
@@ -148,14 +268,52 @@ export function MoneyText({
   return (
     <Text
       style={[
-        styles.money,
-        big && styles.moneyBig,
-        color != null ? {color} : undefined,
+        big ? styles.moneyBig : styles.money,
+        color != null ? {color} : null,
       ]}
-      adjustsFontSizeToFit
       numberOfLines={1}>
       {formatMoney(value)}
     </Text>
+  );
+}
+
+type StatTone = 'accent' | 'success' | 'danger' | 'neutral' | 'info';
+
+export function StatCard({
+  label,
+  value,
+  tone = 'neutral',
+  icon,
+}: {
+  label: string;
+  value: string;
+  tone?: StatTone;
+  icon?: IconName;
+}) {
+  const valueColor =
+    tone === 'accent'
+      ? colors.accent
+      : tone === 'success'
+      ? colors.success
+      : tone === 'danger'
+      ? colors.danger
+      : tone === 'info'
+      ? colors.info
+      : colors.text;
+  return (
+    <View style={styles.statCard}>
+      {icon != null ? (
+        <View style={styles.statIconWrap}>
+          <Icon name={icon} size={16} color={valueColor} />
+        </View>
+      ) : null}
+      <Text style={[styles.statValue, {color: valueColor}]} numberOfLines={1}>
+        {value}
+      </Text>
+      <Text style={styles.statLabel} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
   );
 }
 
@@ -164,78 +322,56 @@ export function Badge({
   tone = 'neutral',
 }: {
   label: string;
-  tone?: 'neutral' | 'success' | 'warning' | 'danger' | 'accent';
+  tone?: 'success' | 'danger' | 'warning' | 'accent' | 'neutral' | 'info';
 }) {
-  const toneStyle =
+  const style =
     tone === 'success'
-      ? styles.badgeSuccess
-      : tone === 'warning'
-      ? styles.badgeWarning
+      ? [styles.badge, {backgroundColor: colors.successSoft}, {color: colors.success}]
       : tone === 'danger'
-      ? styles.badgeDanger
+      ? [styles.badge, {backgroundColor: colors.dangerSoft}, {color: colors.danger}]
+      : tone === 'warning'
+      ? [styles.badge, {backgroundColor: colors.warningSoft}, {color: colors.warning}]
       : tone === 'accent'
-      ? styles.badgeAccent
-      : styles.badgeNeutral;
-  const toneText =
+      ? [styles.badge, {backgroundColor: colors.accentSoft}, {color: colors.accent}]
+      : tone === 'info'
+      ? [styles.badge, {backgroundColor: colors.infoSoft}, {color: colors.info}]
+      : [styles.badge, {backgroundColor: colors.surfaceHi}, {color: colors.textDim}];
+  const textColor =
     tone === 'success'
-      ? styles.badgeSuccessText
-      : tone === 'warning'
-      ? styles.badgeWarningText
+      ? colors.success
       : tone === 'danger'
-      ? styles.badgeDangerText
+      ? colors.danger
+      : tone === 'warning'
+      ? colors.warning
       : tone === 'accent'
-      ? styles.badgeAccentText
-      : styles.badgeNeutralText;
+      ? colors.accent
+      : tone === 'info'
+      ? colors.info
+      : colors.textDim;
   return (
-    <View style={[styles.badge, toneStyle]}>
-      <Text style={[styles.badgeText, toneText]}>{label}</Text>
+    <View style={style}>
+      <Text style={[styles.badgeText, {color: textColor}]}>{label}</Text>
     </View>
   );
 }
 
 export function EmptyState({
+  icon = 'inbox',
   title,
   subtitle,
-  emoji = '📦',
+  action,
 }: {
+  icon?: IconName;
   title: string;
   subtitle?: string;
-  emoji?: string;
+  action?: React.ReactNode;
 }) {
   return (
     <View style={styles.empty}>
-      <Text style={styles.emptyEmoji}>{emoji}</Text>
+      <IconChip name={icon} chipSize={64} size={28} bg={colors.accentSoft} color={colors.accent} />
       <Text style={styles.emptyTitle}>{title}</Text>
-      {subtitle ? <Text style={styles.emptySubtitle}>{subtitle}</Text> : null}
-    </View>
-  );
-}
-
-export function StatCard({
-  label,
-  value,
-  tone = 'neutral',
-}: {
-  label: string;
-  value: string;
-  tone?: 'neutral' | 'success' | 'accent' | 'danger';
-}) {
-  const valueColor =
-    tone === 'success'
-      ? colors.success
-      : tone === 'accent'
-      ? colors.accent
-      : tone === 'danger'
-      ? colors.danger
-      : colors.text;
-  return (
-    <View style={styles.statCard}>
-      <Text style={styles.statLabel} numberOfLines={1}>
-        {label}
-      </Text>
-      <Text style={[styles.statValue, {color: valueColor}]} numberOfLines={1} adjustsFontSizeToFit>
-        {value}
-      </Text>
+      {subtitle ? <Text style={styles.emptyText}>{subtitle}</Text> : null}
+      {action ? <View style={{marginTop: spacing.md}}>{action}</View> : null}
     </View>
   );
 }
@@ -249,8 +385,10 @@ export function Field({
   value,
   onChangeText,
   placeholder,
-  keyboardType = 'default',
+  keyboardType,
   suffix,
+  multiline = false,
+  numberOfLines = 1,
 }: {
   label: string;
   value: string;
@@ -258,19 +396,24 @@ export function Field({
   placeholder?: string;
   keyboardType?: KeyboardTypeOptions;
   suffix?: string;
+  multiline?: boolean;
+  numberOfLines?: number;
 }) {
   return (
     <View style={styles.fieldWrap}>
       <Text style={styles.fieldLabel}>{label}</Text>
       <View style={styles.fieldRow}>
         <TextInput
-          style={styles.fieldInput}
+          style={[styles.fieldInput, multiline && styles.fieldMultiline]}
           value={value}
           onChangeText={onChangeText}
           placeholder={placeholder}
           placeholderTextColor={colors.textFaint}
           keyboardType={keyboardType}
-          textAlign="right"
+          multiline={multiline}
+          numberOfLines={numberOfLines}
+          textAlign={I18nManager.isRTL ? 'right' : 'left'}
+          textAlignVertical={multiline ? 'top' : 'center'}
         />
         {suffix ? <Text style={styles.fieldSuffix}>{suffix}</Text> : null}
       </View>
@@ -278,25 +421,62 @@ export function Field({
   );
 }
 
-export function Segmented<T extends string>({
-  options,
+export function SearchBar({
   value,
-  onChange,
+  onChangeText,
+  placeholder,
 }: {
-  options: {value: T; label: string}[];
-  value: T;
-  onChange: (value: T) => void;
+  value: string;
+  onChangeText: (text: string) => void;
+  placeholder?: string;
 }) {
   return (
-    <View style={styles.segmentWrap}>
+    <View style={styles.searchWrap}>
+      <Icon name="search" size={18} color={colors.textFaint} />
+      <TextInput
+        style={styles.searchInput}
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder ?? 'بحث…'}
+        placeholderTextColor={colors.textFaint}
+        textAlign={I18nManager.isRTL ? 'right' : 'left'}
+      />
+      {value.length > 0 ? (
+        <TouchableOpacity onPress={() => onChangeText('')} hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+          <Icon name="x" size={16} color={colors.textDim} />
+        </TouchableOpacity>
+      ) : null}
+    </View>
+  );
+}
+
+export function Segmented<T extends string | number>({
+  value,
+  onChange,
+  options,
+  compact = false,
+}: {
+  value: T;
+  onChange: (value: T) => void;
+  options: {value: T; label: string}[];
+  compact?: boolean;
+}) {
+  return (
+    <View style={[styles.segmented, compact && styles.segmentedCompact]}>
       {options.map(option => {
         const active = option.value === value;
         return (
           <TouchableOpacity
-            key={option.value}
-            style={[styles.segmentItem, active && styles.segmentItemActive]}
-            onPress={() => onChange(option.value)}>
-            <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+            key={String(option.value)}
+            style={[styles.segItem, active && styles.segItemActive]}
+            onPress={() => onChange(option.value)}
+            activeOpacity={0.8}>
+            <Text
+              style={[
+                compact ? styles.segTextCompact : styles.segText,
+                active && styles.segTextActive,
+              ]}
+              numberOfLines={1}>
               {option.label}
             </Text>
           </TouchableOpacity>
@@ -306,46 +486,78 @@ export function Segmented<T extends string>({
   );
 }
 
-// ────────────────────────────────────────────────────────────────
-// Dialogs
-// ────────────────────────────────────────────────────────────────
-
-export function ConfirmDialog({
-  visible,
-  title,
-  message,
-  confirmLabel = 'تأكيد',
-  danger = false,
-  onConfirm,
-  onCancel,
+export function SwitchRow({
+  label,
+  hint,
+  value,
+  onValueChange,
+  icon,
 }: {
-  visible: boolean;
-  title: string;
-  message: string;
-  confirmLabel?: string;
-  danger?: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
+  label: string;
+  hint?: string;
+  value: boolean;
+  onValueChange: (value: boolean) => void;
+  icon?: IconName;
 }) {
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
-      <View style={styles.dialogBackdrop}>
-        <View style={styles.dialogCard}>
-          <Text style={styles.dialogTitle}>{title}</Text>
-          <Text style={styles.dialogMessage}>{message}</Text>
-          <View style={styles.dialogButtons}>
-            <AppButton title="إلغاء" variant="ghost" small onPress={onCancel} style={{flex: 1}} />
-            <AppButton
-              title={confirmLabel}
-              variant={danger ? 'danger' : 'primary'}
-              small
-              onPress={onConfirm}
-              style={{flex: 1}}
-            />
-          </View>
+    <View style={styles.switchRow}>
+      {icon != null ? (
+        <View style={styles.switchIconWrap}>
+          <Icon name={icon} size={17} color={colors.accent} />
         </View>
+      ) : null}
+      <View style={{flex: 1}}>
+        <Text style={styles.switchLabel}>{label}</Text>
+        {hint ? <Text style={styles.switchHint}>{hint}</Text> : null}
       </View>
-    </Modal>
+      <Switch
+        value={value}
+        onValueChange={onValueChange}
+        trackColor={{false: colors.surfaceHi, true: colors.accent}}
+        thumbColor="#FFFFFF"
+      />
+    </View>
+  );
+}
+
+export function Stepper({
+  value,
+  onIncrement,
+  onDecrement,
+  min = 0,
+  decrementDanger = false,
+}: {
+  value: number;
+  onIncrement: () => void;
+  onDecrement: () => void;
+  min?: number;
+  decrementDanger?: boolean;
+}) {
+  return (
+    <View style={styles.stepper}>
+      <TouchableOpacity
+        style={[styles.stepperBtn, styles.stepperBtnInc]}
+        onPress={onIncrement}
+        activeOpacity={0.8}>
+        <Icon name="plus" size={17} color={colors.onAccent} />
+      </TouchableOpacity>
+      <Text style={styles.stepperValue}>{value}</Text>
+      <TouchableOpacity
+        style={[
+          styles.stepperBtn,
+          decrementDanger && value <= min + 1
+            ? {backgroundColor: colors.dangerSoft, borderColor: colors.danger}
+            : styles.stepperBtnDec,
+        ]}
+        onPress={onDecrement}
+        activeOpacity={0.8}>
+        <Icon
+          name="minus"
+          size={17}
+          color={decrementDanger && value <= min + 1 ? colors.danger : colors.text}
+        />
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -353,22 +565,32 @@ export function ConfirmDialog({
 // Toaster
 // ────────────────────────────────────────────────────────────────
 
+const TOAST_ICON: Record<ToastKind, IconName> = {
+  success: 'checkCircle',
+  error: 'alert',
+  info: 'info',
+};
+
 export function Toaster() {
   const toasts = useToastStore(state => state.toasts);
   const dismiss = useToastStore(state => state.dismiss);
-  if (toasts.length === 0) return null;
+  const insets = useSafeAreaInsets();
+
+  if (toasts.length === 0) {
+    return null;
+  }
+
   return (
-    <View style={styles.toasterWrap} pointerEvents="box-none">
+    <View
+      style={[styles.toasterWrap, {top: (statusBarHeight ?? 24) + insets.top + 4}]}
+      pointerEvents="box-none">
       {toasts.slice(-3).map(item => (
         <TouchableOpacity
           key={item.id}
-          style={[
-            styles.toast,
-            item.kind === 'success' && styles.toastSuccess,
-            item.kind === 'error' && styles.toastError,
-          ]}
+          style={[styles.toast, {borderRightColor: toastColor(item.kind)}]}
           onPress={() => dismiss(item.id)}
           activeOpacity={0.9}>
+          <Icon name={TOAST_ICON[item.kind]} size={19} color={toastColor(item.kind)} />
           <Text style={styles.toastText}>{item.message}</Text>
         </TouchableOpacity>
       ))}
@@ -376,84 +598,12 @@ export function Toaster() {
   );
 }
 
-// ────────────────────────────────────────────────────────────────
-// Horizontal chips row (categories / filters)
-// ────────────────────────────────────────────────────────────────
-
-export function ChipsRow<T extends string | number>({
-  options,
-  value,
-  onChange,
-}: {
-  options: {value: T; label: string}[];
-  value: T;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={styles.chipsContent}
-      style={styles.chipsRow}>
-      {options.map(option => {
-        const active = option.value === value;
-        return (
-          <TouchableOpacity
-            key={String(option.value)}
-            style={[styles.chip, active && styles.chipActive]}
-            onPress={() => onChange(option.value)}>
-            <Text style={[styles.chipText, active && styles.chipTextActive]}>
-              {option.label}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
-    </ScrollView>
-  );
+function toastColor(kind: ToastKind): string {
+  return kind === 'success' ? colors.success : kind === 'error' ? colors.danger : colors.info;
 }
 
-export function useConfirm() {
-  const [state, setState] = useState<{
-    visible: boolean;
-    title: string;
-    message: string;
-    danger: boolean;
-    confirmLabel: string;
-    onConfirm: () => void;
-  }>({
-    visible: false,
-    title: '',
-    message: '',
-    danger: false,
-    confirmLabel: 'تأكيد',
-    onConfirm: () => undefined,
-  });
-
-  const ask = useCallback(
-    (title: string, message: string, onConfirm: () => void, danger = false, confirmLabel = 'تأكيد') => {
-      setState({visible: true, title, message, danger, confirmLabel, onConfirm});
-    },
-    [],
-  );
-
-  const dialog = (
-    <ConfirmDialog
-      visible={state.visible}
-      title={state.title}
-      message={state.message}
-      danger={state.danger}
-      confirmLabel={state.confirmLabel}
-      onConfirm={() => {
-        state.onConfirm();
-        setState(prev => ({...prev, visible: false}));
-      }}
-      onCancel={() => setState(prev => ({...prev, visible: false}))}
-    />
-  );
-
-  return {ask, dialog};
-}
-
+// ────────────────────────────────────────────────────────────────
+// Styles
 // ────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
@@ -461,32 +611,30 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.bg,
   },
-  header: {
+
+  // Header
+  headerRoot: {
+    backgroundColor: colors.bg,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderSoft,
+    paddingTop: statusBarHeight,
+  },
+  headerRow: {
+    height: 56,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.md,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.md,
-    backgroundColor: colors.surface,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
+    gap: spacing.sm,
   },
-  backButton: {
-    width: 44,
-    height: 44,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceAlt,
+  headerIconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  backIcon: {
-    color: colors.accent,
-    fontSize: 30,
-    fontWeight: '700',
-    marginTop: -4,
-  },
-  backPlaceholder: {
-    width: 44,
   },
   headerTextWrap: {
     flex: 1,
@@ -494,274 +642,337 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     color: colors.text,
+    fontFamily: fonts.black,
     fontSize: typography.heading,
-    fontWeight: '800',
   },
   headerSubtitle: {
     color: colors.textDim,
-    fontSize: typography.caption,
-    marginTop: 2,
+    fontFamily: fonts.regular,
+    fontSize: typography.small,
+    marginTop: -2,
   },
-  button: {
-    borderRadius: radius.lg,
+  headerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    alignItems: 'center',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: -3,
+    left: -3,
+    minWidth: 17,
+    height: 17,
+    borderRadius: 9,
+    backgroundColor: colors.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: 4,
+    borderWidth: 2,
+    borderColor: colors.bg,
+  },
+  bellBadgeText: {
+    color: colors.onAccent,
+    fontSize: 9,
+    fontFamily: fonts.bold,
+  },
+
+  // Buttons
+  button: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    minHeight: 50,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.lg,
   },
   buttonSmall: {
-    paddingVertical: 9,
+    minHeight: 38,
     paddingHorizontal: spacing.md,
+    borderRadius: radius.sm,
   },
-  buttonPrimary: {
-    backgroundColor: colors.accent,
-  },
-  buttonDanger: {
-    backgroundColor: colors.danger,
-  },
-  buttonSuccess: {
-    backgroundColor: colors.success,
-  },
-  buttonGhost: {
-    backgroundColor: colors.surfaceAlt,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  buttonDisabled: {
-    opacity: 0.45,
-  },
+  btnPrimary: {backgroundColor: colors.accent},
+  btnSecondary: {backgroundColor: colors.surfaceHi, borderWidth: 1, borderColor: colors.border},
+  btnDanger: {backgroundColor: colors.dangerSoft, borderWidth: 1, borderColor: colors.danger},
+  btnSuccess: {backgroundColor: colors.success},
+  btnGhost: {backgroundColor: colors.accentSofter, borderWidth: 1, borderColor: colors.accentDark},
+  buttonDisabled: {opacity: 0.45},
   buttonText: {
-    color: '#FFFFFF',
+    fontFamily: fonts.bold,
     fontSize: typography.body,
-    fontWeight: '800',
   },
   buttonSmallText: {
     fontSize: typography.caption,
   },
-  buttonGhostText: {
-    color: colors.text,
-    fontSize: typography.body,
-    fontWeight: '700',
+  iconButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
+
+  // Surfaces
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
     padding: spacing.lg,
-    ...shadows.card,
   },
+  sectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  sectionTitle: {
+    color: colors.text,
+    fontFamily: fonts.black,
+    fontSize: typography.heading,
+  },
+  sectionHint: {
+    color: colors.textFaint,
+    fontFamily: fonts.regular,
+    fontSize: typography.small,
+    marginTop: 1,
+  },
+
+  // Data display
   money: {
     color: colors.text,
-    fontSize: typography.money,
-    fontWeight: '800',
+    fontFamily: fonts.bold,
+    fontSize: typography.body,
     fontVariant: ['tabular-nums'],
   },
   moneyBig: {
-    fontSize: typography.moneyBig,
     color: colors.accent,
-  },
-  badge: {
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-  },
-  badgeNeutral: {backgroundColor: colors.surfaceAlt},
-  badgeSuccess: {backgroundColor: colors.successSoft},
-  badgeWarning: {backgroundColor: colors.warningSoft},
-  badgeDanger: {backgroundColor: colors.dangerSoft},
-  badgeAccent: {backgroundColor: colors.accentSoft},
-  badgeText: {
-    fontSize: typography.small,
-    fontWeight: '700',
-  },
-  badgeNeutralText: {color: colors.textDim},
-  badgeSuccessText: {color: colors.success},
-  badgeWarningText: {color: colors.warning},
-  badgeDangerText: {color: colors.danger},
-  badgeAccentText: {color: colors.accent},
-  empty: {
-    alignItems: 'center',
-    paddingVertical: spacing.xxl,
-    paddingHorizontal: spacing.xl,
-  },
-  emptyEmoji: {
-    fontSize: 44,
-    marginBottom: spacing.md,
-  },
-  emptyTitle: {
-    color: colors.text,
-    fontSize: typography.body,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  emptySubtitle: {
-    color: colors.textDim,
-    fontSize: typography.caption,
-    textAlign: 'center',
-    marginTop: spacing.sm,
-    lineHeight: 20,
+    fontFamily: fonts.black,
+    fontSize: typography.display,
+    fontVariant: ['tabular-nums'],
   },
   statCard: {
     flex: 1,
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    marginHorizontal: 4,
+    borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.borderSoft,
+    padding: spacing.md,
+    gap: 2,
   },
-  statLabel: {
-    color: colors.textDim,
-    fontSize: typography.small,
-    marginBottom: 4,
+  statIconWrap: {
+    marginBottom: spacing.xs,
   },
   statValue: {
     color: colors.text,
-    fontSize: 17,
-    fontWeight: '800',
+    fontFamily: fonts.black,
+    fontSize: 21,
     fontVariant: ['tabular-nums'],
   },
+  statLabel: {
+    color: colors.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.small,
+  },
+  badge: {
+    borderRadius: radius.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    alignSelf: 'flex-start',
+  },
+  badgeText: {
+    fontFamily: fonts.bold,
+    fontSize: typography.micro,
+  },
+  empty: {
+    alignItems: 'center',
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.xl,
+    gap: spacing.xs,
+  },
+  emptyTitle: {
+    color: colors.text,
+    fontFamily: fonts.bold,
+    fontSize: typography.body,
+    marginTop: spacing.sm,
+  },
+  emptyText: {
+    color: colors.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.caption,
+    textAlign: 'center',
+    lineHeight: 21,
+  },
+
+  // Inputs
   fieldWrap: {
-    marginBottom: spacing.lg,
+    gap: 6,
   },
   fieldLabel: {
     color: colors.textDim,
-    fontSize: typography.caption,
-    marginBottom: 6,
-    fontWeight: '700',
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
   },
   fieldRow: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
+    borderRadius: radius.sm,
     paddingHorizontal: spacing.md,
   },
   fieldInput: {
     flex: 1,
     color: colors.text,
+    fontFamily: fonts.medium,
     fontSize: typography.body,
     paddingVertical: 12,
-    fontWeight: '600',
+  },
+  fieldMultiline: {
+    minHeight: 84,
   },
   fieldSuffix: {
     color: colors.textDim,
-    fontSize: typography.body,
-    marginLeft: spacing.sm,
+    fontFamily: fonts.bold,
+    fontSize: typography.caption,
   },
-  segmentWrap: {
+  searchWrap: {
     flexDirection: 'row',
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.lg,
-    padding: 4,
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-  },
-  segmentItem: {
-    flex: 1,
-    paddingVertical: 10,
     borderRadius: radius.md,
-    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    height: 46,
   },
-  segmentItemActive: {
+  searchInput: {
+    flex: 1,
+    color: colors.text,
+    fontFamily: fonts.medium,
+    fontSize: typography.caption,
+    paddingVertical: 0,
+  },
+
+  // Segmented
+  segmented: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 3,
+  },
+  segmentedCompact: {
+    borderRadius: radius.sm,
+  },
+  segItem: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 9,
+    borderRadius: radius.sm,
+  },
+  segItemActive: {
     backgroundColor: colors.accent,
   },
-  segmentText: {
+  segText: {
     color: colors.textDim,
+    fontFamily: fonts.bold,
     fontSize: typography.caption,
-    fontWeight: '700',
   },
-  segmentTextActive: {
-    color: '#FFFFFF',
+  segTextActive: {
+    color: colors.onAccent,
   },
-  dialogBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.72)',
+  segTextCompact: {
+    color: colors.textDim,
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+  },
+
+  // Switch row
+  switchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  switchIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: colors.accentSoft,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: spacing.xl,
   },
-  dialogCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.xl,
-    padding: spacing.xl,
-    width: '100%',
-  },
-  dialogTitle: {
+  switchLabel: {
     color: colors.text,
-    fontSize: typography.heading,
-    fontWeight: '800',
-    textAlign: 'center',
-    marginBottom: spacing.md,
+    fontFamily: fonts.bold,
+    fontSize: typography.caption,
   },
-  dialogMessage: {
-    color: colors.textDim,
-    fontSize: typography.body,
-    textAlign: 'center',
-    lineHeight: 24,
-    marginBottom: spacing.xl,
+  switchHint: {
+    color: colors.textFaint,
+    fontFamily: fonts.regular,
+    fontSize: typography.small,
+    marginTop: 1,
   },
-  dialogButtons: {
+
+  // Stepper
+  stepper: {
     flexDirection: 'row',
-    gap: spacing.md,
+    alignItems: 'center',
+    gap: spacing.sm,
   },
+  stepperBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepperBtnInc: {
+    backgroundColor: colors.accent,
+  },
+  stepperBtnDec: {
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  stepperValue: {
+    color: colors.text,
+    fontFamily: fonts.black,
+    fontSize: typography.body,
+    minWidth: 30,
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+
+  // Toaster
   toasterWrap: {
     position: 'absolute',
-    bottom: 28,
     left: spacing.lg,
     right: spacing.lg,
-    gap: 8,
+    gap: spacing.sm,
   },
   toast: {
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
+    ...shadows.floating,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.surfaceHi,
     borderWidth: 1,
-    borderRadius: radius.lg,
-    paddingVertical: 12,
-    paddingHorizontal: spacing.lg,
-  },
-  toastSuccess: {
-    borderColor: colors.success,
-    backgroundColor: '#12291C',
-  },
-  toastError: {
-    borderColor: colors.danger,
-    backgroundColor: '#2C1416',
+    borderColor: colors.border,
+    borderRightWidth: 4,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 13,
   },
   toastText: {
+    flex: 1,
     color: colors.text,
+    fontFamily: fonts.bold,
     fontSize: typography.caption,
-    textAlign: 'center',
-    fontWeight: '700',
-  },
-  chipsRow: {
-    flexGrow: 0,
-  },
-  chipsContent: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    gap: 8,
-  },
-  chip: {
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.xl,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  chipActive: {
-    backgroundColor: colors.accentSoft,
-    borderColor: colors.accent,
-  },
-  chipText: {
-    color: colors.textDim,
-    fontSize: typography.caption,
-    fontWeight: '700',
-  },
-  chipTextActive: {
-    color: colors.accent,
+    lineHeight: 19,
   },
 });

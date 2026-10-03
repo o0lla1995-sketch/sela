@@ -8,6 +8,7 @@
 import {requirePlatformUtils} from '../native/nativeBridge';
 import {ReportService} from './ReportService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
+import {SaleRepo} from '../database/repositories/SaleRepo';
 import {localToday} from '../core/format';
 import type {ReportRangeKey, DateRange, Product} from '../core/types';
 
@@ -180,5 +181,38 @@ export const ExportService = {
       ],
     ];
     return exportRows('inventory', rows, format);
+  },
+
+  /** Full local backup: inventory + recent sales in one CSV file. */
+  async exportBackup(): Promise<string> {
+    const products: Product[] = await ProductRepo.list();
+    const sales = await SaleRepo.listRecent(500);
+    const rows: (string | number)[][] = [
+      ['نسخة احتياطية - سيلا', ''],
+      ['', ''],
+      ['المنتجات', ''],
+      ['اسم المنتج', 'التكلفة', 'المفرق', 'الجملة', 'الكمية', 'حد التنبيه'],
+      ...products.map(p => [
+        p.name,
+        p.cost_price.toFixed(2),
+        p.retail_price.toFixed(2),
+        p.wholesale_price.toFixed(2),
+        p.stock_quantity,
+        p.low_stock_threshold ?? '',
+      ]),
+      ['', ''],
+      ['آخر المبيعات', ''],
+      ['رقم الفاتورة', 'الإجمالي', 'التكلفة', 'الربح', 'الخصم', 'النوع', 'التاريخ'],
+      ...sales.map(s => [
+        s.invoice_number,
+        s.total_amount.toFixed(2),
+        s.total_cost.toFixed(2),
+        s.total_profit.toFixed(2),
+        s.discount.toFixed(2),
+        s.payment_type,
+        s.created_at,
+      ]),
+    ];
+    return exportRows('sela_backup', rows, 'csv');
   },
 };

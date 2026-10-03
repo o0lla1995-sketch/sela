@@ -17,7 +17,7 @@ import {
   Card,
   EmptyState,
   Screen,
-  ScreenHeader,
+  AppHeader,
   Segmented,
 } from '../../components/ui';
 import {usePrinterStore} from '../../stores/printerStore';
@@ -156,7 +156,7 @@ export function PrinterSettingsScreen() {
 
   return (
     <Screen>
-      <ScreenHeader title="الطابعة الحرارية" subtitle="بلوتوث ESC/POS" showBack />
+      <AppHeader title="الطابعة الحرارية" subtitle="بلوتوث ESC/POS" showBack />
       <ScrollView
         contentContainerStyle={styles.content}
         refreshControl={

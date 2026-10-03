@@ -16,6 +16,9 @@ export const KEYS = {
   invoiceDay: 'invoice_day_v1',
   savedPrinter: 'saved_printer_v1',
   seededFlag: 'db_seeded_v1',
+  notifications: 'notifications_v1',
+  stockAlertLedger: 'stock_alert_ledger_v1',
+  schemaVersion: 'db_schema_version',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {

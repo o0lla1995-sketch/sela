@@ -15,6 +15,7 @@ function rowToProduct(row: Record<string, unknown>): Product {
     stock_quantity: Number(row.stock_quantity ?? 0),
     category_id: row.category_id == null ? null : Number(row.category_id),
     image_uri: row.image_uri == null ? null : String(row.image_uri),
+    low_stock_threshold: row.low_stock_threshold == null ? null : Number(row.low_stock_threshold),
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -27,6 +28,7 @@ export interface ProductInput {
   stock_quantity: number;
   category_id: number | null;
   image_uri: string | null;
+  low_stock_threshold?: number | null;
 }
 
 export const ProductRepo = {
@@ -74,8 +76,8 @@ export const ProductRepo = {
     }
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
@@ -84,6 +86,7 @@ export const ProductRepo = {
         Math.trunc(input.stock_quantity),
         input.category_id,
         input.image_uri,
+        input.low_stock_threshold ?? null,
         localNow(),
       ],
     );
@@ -102,7 +105,7 @@ export const ProductRepo = {
     await getDb().execute(
       `UPDATE products SET
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
-        stock_quantity = ?, category_id = ?, image_uri = ?
+        stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?
        WHERE id = ?`,
       [
         name,
@@ -112,6 +115,7 @@ export const ProductRepo = {
         Math.trunc(input.stock_quantity),
         input.category_id,
         input.image_uri,
+        input.low_stock_threshold ?? null,
         id,
       ],
     );

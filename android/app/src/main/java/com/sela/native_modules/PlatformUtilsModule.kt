@@ -1,4 +1,4 @@
-package com.smartvisionpos.native_modules
+package com.sela.native_modules
 
 import android.content.ContentValues
 import android.media.AudioManager

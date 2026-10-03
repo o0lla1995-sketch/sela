@@ -7,7 +7,7 @@
 import {open, type DB} from '@op-engineering/op-sqlite';
 import {DB_NAME} from '../core/config';
 import {logDiag} from '../core/diagnostics';
-import {storage, KEYS} from '../storage/storage';
+import {storage, getNumber, KEYS} from '../storage/storage';
 
 let db: DB | null = null;
 
@@ -32,6 +32,7 @@ const DDL_STATEMENTS: string[] = [
     stock_quantity INTEGER NOT NULL DEFAULT 0,
     category_id INTEGER,
     image_uri TEXT,
+    low_stock_threshold INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(category_id) REFERENCES categories(id)
   )`,
@@ -81,6 +82,33 @@ const DEFAULT_CATEGORIES: string[] = [
 ];
 
 /**
+ * Forward-only schema migrations, versioned in MMKV.
+ * v2 (Sela 2.0): products.low_stock_threshold for per-product alerts.
+ */
+async function applyMigrations(database: DB): Promise<void> {
+  const storedVersion = getNumber(KEYS.schemaVersion, 0);
+  let version: number = storedVersion > 0 ? storedVersion : 1;
+
+  if (version < 2) {
+    const existing = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'low_stock_threshold'",
+    );
+    const hasColumn = (existing.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasColumn) {
+      await database.execute(
+        'ALTER TABLE products ADD COLUMN low_stock_threshold INTEGER',
+      );
+      logDiag('db', 'ترحيل v2: أُضيف عمود حد المخزون المنخفض');
+    }
+    version = 2;
+  }
+
+  if (version !== storedVersion) {
+    storage.set(KEYS.schemaVersion, version as number);
+  }
+}
+
+/**
  * Opens the database, applies the schema and seeds default categories.
  * Safe to call multiple times (idempotent).
  */
@@ -98,6 +126,8 @@ export async function initDatabase(): Promise<void> {
     for (const statement of DDL_STATEMENTS) {
       await db.execute(statement);
     }
+
+    await applyMigrations(db);
 
     const seeded = storage.getBoolean(KEYS.seededFlag);
     if (!seeded) {

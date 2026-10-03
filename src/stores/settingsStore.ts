@@ -9,6 +9,7 @@ import {
   DEFAULT_MATCH_THRESHOLD,
   DEFAULT_RECOGNITION_COOLDOWN_MS,
   CODEPAGE_CP1256,
+  DEFAULT_LOW_STOCK_THRESHOLD,
 } from '../core/config';
 import type {PricingMode} from '../core/types';
 
@@ -29,10 +30,14 @@ export interface AppSettings {
   /** Saved printer */
   printerAddress: string | null;
   printerName: string | null;
+  /** Stock alerts */
+  stockAlertsEnabled: boolean;
+  lowStockDefaultThreshold: number;
+  systemNotificationsEnabled: boolean;
 }
 
 const DEFAULTS: AppSettings = {
-  storeName: 'متجر Smart Vision',
+  storeName: 'متجر سيلا',
   storePhone: '',
   footerMessage: 'شكراً لتعاملكم معنا — لا يوجد إرجاع أو استبدال بعد الفاتورة',
   defaultPricingMode: 'RETAIL',
@@ -45,6 +50,9 @@ const DEFAULTS: AppSettings = {
   showProfitOnReceipt: false,
   printerAddress: null,
   printerName: null,
+  stockAlertsEnabled: true,
+  lowStockDefaultThreshold: DEFAULT_LOW_STOCK_THRESHOLD,
+  systemNotificationsEnabled: true,
 };
 
 interface SettingsState {

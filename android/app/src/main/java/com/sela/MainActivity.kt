@@ -1,5 +1,6 @@
-package com.smartvisionpos
+package com.sela
 
+import android.os.Bundle
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
@@ -11,7 +12,7 @@ class MainActivity : ReactActivity() {
    * Returns the name of the main component registered from JavaScript. This is used to schedule
    * rendering of the component.
    */
-  override fun getMainComponentName(): String = "SmartVisionPos"
+  override fun getMainComponentName(): String = "Sela"
 
   /**
    * Returns the instance of the [ReactActivityDelegate]. We use [DefaultReactActivityDelegate]
@@ -19,4 +20,11 @@ class MainActivity : ReactActivity() {
    */
   override fun createReactActivityDelegate(): ReactActivityDelegate =
       DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    // SelaSplash theme is set in AndroidManifest — keep it on the window until
+    // React paints the first frame, then let the default theme take over.
+    setTheme(R.style.AppTheme)
+    super.onCreate(savedInstanceState)
+  }
 }

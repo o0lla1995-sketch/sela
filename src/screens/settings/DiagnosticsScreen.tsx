@@ -4,7 +4,7 @@
  */
 import React, {useEffect, useState} from 'react';
 import {View, Text, StyleSheet, ScrollView} from 'react-native';
-import {Badge, Card, Screen, ScreenHeader, AppButton} from '../../components/ui';
+import {Badge, Card, Screen, AppHeader, AppButton} from '../../components/ui';
 import {VisionRecognitionService} from '../../services/vision/VisionRecognitionService';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
@@ -62,7 +62,7 @@ export function DiagnosticsScreen() {
 
   return (
     <Screen>
-      <ScreenHeader title="التشخيص وسجل النظام" subtitle="فحص ذاتي شامل" showBack />
+      <AppHeader title="التشخيص وسجل النظام" subtitle="فحص ذاتي شامل" showBack />
       <ScrollView contentContainerStyle={styles.content}>
         {/* ── Vision model ─────────────────────────────────────── */}
         <Card>

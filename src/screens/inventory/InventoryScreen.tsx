@@ -1,537 +1,335 @@
 /**
- * InventoryScreen — قائمة المنتجات مع البحث والفلترة حسب الفئة،
- * وإدارة الفئات نفسها.
+ * InventoryScreen — المخزون (design.md §9.3).
+ * Search + category chips + product rows with live stock badges.
  */
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useMemo, useState} from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
   Image,
-  Modal,
   ScrollView,
-  Keyboard,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import {
-  AppButton,
-  Badge,
-  EmptyState,
-  Screen,
-  ScreenHeader,
-  useConfirm,
-} from '../../components/ui';
+import {useFocusEffect, useNavigation} from '@react-navigation/native';
+import {AppButton, AppHeader, EmptyState, SearchBar} from '../../components/ui';
+import {Icon} from '../../components/Icon';
 import {useCatalogStore} from '../../stores/catalogStore';
-import {useNavigation} from '../../core/navigation';
-import {ProductRepo} from '../../database/repositories/ProductRepo';
-import {CategoryRepo} from '../../database/repositories/CategoryRepo';
-import {requirePlatformUtils} from '../../native/nativeBridge';
-import {useToastStore} from '../../stores/toastStore';
-import {colors, radius, spacing, typography} from '../../core/theme';
-import {ANGLE_LABELS} from '../../core/config';
+import {useSettingsStore} from '../../stores/settingsStore';
+import {colors, fonts, radius, spacing, typography} from '../../core/theme';
 import {formatMoney} from '../../core/format';
-import type {Product} from '../../core/types';
+import {stockStateOf, type Product} from '../../core/types';
+
+type CategoryFilter = number | 'all';
 
 export function InventoryScreen() {
-  const push = useNavigation(state => state.push);
   const products = useCatalogStore(state => state.products);
   const categories = useCatalogStore(state => state.categories);
+  const loading = useCatalogStore(state => state.loading);
   const refresh = useCatalogStore(state => state.refresh);
-  const toast = useToastStore(state => state.show);
-  const {ask, dialog} = useConfirm();
+  const settings = useSettingsStore(state => state.settings);
 
   const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<number | 'all'>('all');
-  const [categoryModalVisible, setCategoryModalVisible] = useState(false);
+  const [filter, setFilter] = useState<CategoryFilter>('all');
 
-  const load = useCallback(async () => {
-    try {
-      const list = await ProductRepo.list({
-        search,
-        categoryId: categoryFilter,
-      });
-      useCatalogStore.setState({products: list});
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      toast(message, 'error');
-    }
-  }, [search, categoryFilter, toast]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      void load();
-    }, 220);
-    return () => clearTimeout(timer);
-  }, [load]);
-
-  const categoryChips = useMemo(
-    () => [
-      {value: 'all' as const, label: 'الكل'},
-      ...categories.map(category => ({
-        value: category.id,
-        label: category.name,
-      })),
-    ],
-    [categories],
+  useFocusEffect(
+    useCallback(() => {
+      void refresh();
+    }, [refresh]),
   );
 
-  const deleteProduct = useCallback(
+  const filtered = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return products.filter(product => {
+      if (filter !== 'all' && product.category_id !== filter) {
+        return false;
+      }
+      if (query && !product.name.toLowerCase().includes(query)) {
+        return false;
+      }
+      return true;
+    });
+  }, [products, search, filter]);
+
+  const stockBadge = useCallback(
     (product: Product) => {
-      ask(
-        'حذف المنتج',
-        `سيتم حذف "${product.name}" مع بصماته البصرية وصوره نهائياً. هل أنت متأكد؟`,
-        async () => {
-          try {
-            const dir = await imagesDir();
-            for (const angle of ANGLE_LABELS) {
-              try {
-                await requirePlatformUtils().deleteFile(
-                  `${dir}/product_${product.id}_${angle}.jpg`,
-                );
-              } catch {
-                // Missing image file is fine.
-              }
-            }
-            await ProductRepo.remove(product.id);
-            await refresh();
-            toast('تم حذف المنتج', 'success');
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            toast(message, 'error');
-          }
-        },
-        true,
-        'حذف نهائي',
-      );
+      const state = stockStateOf(product, settings.lowStockDefaultThreshold);
+      if (state === 'out') {
+        return {label: 'نفد', tone: 'danger' as const};
+      }
+      if (state === 'low') {
+        return {label: `${product.stock_quantity} منخفض`, tone: 'warning' as const};
+      }
+      return {label: `${product.stock_quantity}`, tone: 'success' as const};
     },
-    [ask, refresh, toast],
+    [settings.lowStockDefaultThreshold],
   );
 
   return (
-    <Screen>
-      <ScreenHeader
+    <InventoryLayout
+      products={filtered}
+      allProducts={products}
+      categories={categories}
+      loading={loading}
+      search={search}
+      setSearch={setSearch}
+      filter={filter}
+      setFilter={setFilter}
+      badge={stockBadge}
+      onRefresh={refresh}
+    />
+  );
+}
+
+
+function InventoryLayout({
+  products,
+  allProducts,
+  categories,
+  loading,
+  search,
+  setSearch,
+  filter,
+  setFilter,
+  badge,
+  onRefresh,
+}: {
+  products: Product[];
+  allProducts: Product[];
+  categories: {id: number; name: string}[];
+  loading: boolean;
+  search: string;
+  setSearch: (value: string) => void;
+  filter: CategoryFilter;
+  setFilter: (value: CategoryFilter) => void;
+  badge: (product: Product) => {label: string; tone: 'danger' | 'warning' | 'success'};
+  onRefresh: () => Promise<void>;
+}) {
+  const navigation = useNavigation<any>();
+  const lowCount = allProducts.filter(
+    product => stockStateOf(product, 5) !== 'ok',
+  ).length;
+
+  return (
+    <View style={styles.screen}>
+      <AppHeader
         title="المخزون"
-        subtitle={`${products.length} منتج — ${categories.length} فئة`}
-        showBack
+        subtitle={`${allProducts.length} منتج`}
+        showBack={false}
+        right={
+          <AppButton
+            small
+            title="منتج جديد"
+            icon="plus"
+            onPress={() => navigation.navigate('ProductForm', {})}
+          />
+        }
       />
+
       <View style={styles.body}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="ابحث باسم المنتج…"
-          placeholderTextColor={colors.textFaint}
+        <SearchBar
           value={search}
           onChangeText={setSearch}
-          textAlign="right"
+          placeholder="ابحث بالاسم…"
         />
 
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipsContent}
-          style={styles.chipsRow}>
-          {categoryChips.map(chip => {
-            const active = chip.value === categoryFilter;
-            return (
-              <TouchableOpacity
-                key={String(chip.value)}
-                style={[styles.chip, active && styles.chipActive]}
-                onPress={() => setCategoryFilter(chip.value)}>
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                  {chip.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
+          contentContainerStyle={{gap: spacing.sm, paddingVertical: 2}}>
+          <FilterChip
+            label="الكل"
+            active={filter === 'all'}
+            onPress={() => setFilter('all')}
+          />
+          {categories.map(category => (
+            <FilterChip
+              key={category.id}
+              label={category.name}
+              active={filter === category.id}
+              onPress={() => setFilter(category.id)}
+            />
+          ))}
         </ScrollView>
 
-        <FlatList
-          data={products}
-          keyExtractor={item => String(item.id)}
-          contentContainerStyle={styles.listContent}
-          keyboardShouldPersistTaps="handled"
-          renderItem={({item}) => (
-            <ProductRow
-              product={item}
-              onEdit={() => push('product-form', {productId: item.id})}
-              onDelete={() => deleteProduct(item)}
-            />
-          )}
-          ListEmptyComponent={
-            <EmptyState
-              title="لا توجد منتجات"
-              subtitle="أضف أول منتج مع بصمته البصرية الثلاثية لتبدأ البيع الذكي"
-              emoji="📦"
-            />
-          }
-        />
-
-        <View style={styles.bottomActions}>
-          <AppButton
-            title="➕ منتج جديد"
-            onPress={() => push('product-form')}
-            style={{flex: 1}}
+        {products.length === 0 ? (
+          <EmptyState
+            icon="box"
+            title={allProducts.length === 0 ? 'المخزون فارغ' : 'لا نتائج'}
+            subtitle={
+              allProducts.length === 0
+                ? 'أضف أول منتج مع التقاط بصمته البصرية من ثلاث زوايا'
+                : 'جرّب كلمة بحث مختلفة أو تصنيفاً آخر'
+            }
+            action={
+              allProducts.length === 0 ? (
+                <AppButton
+                  small
+                  title="إضافة منتج"
+                  icon="plus"
+                  onPress={() => navigation.navigate('ProductForm', {})}
+                />
+              ) : undefined
+            }
           />
-          <AppButton
-            title="إدارة الفئات"
-            variant="ghost"
-            onPress={() => setCategoryModalVisible(true)}
-            style={{flex: 1}}
-          />
-        </View>
+        ) : (
+          <ScrollView
+            contentContainerStyle={{gap: spacing.sm, paddingBottom: spacing.xxl}}
+            showsVerticalScrollIndicator={false}>
+            {products.map(product => {
+              const stock = badge(product);
+              return (
+                <TouchableOpacity
+                  key={product.id}
+                  style={styles.row}
+                  activeOpacity={0.75}
+                  onPress={() =>
+                    navigation.navigate('ProductForm', {productId: product.id})
+                  }>
+                  {product.image_uri ? (
+                    <Image
+                      source={{uri: `file://${product.image_uri}`}}
+                      style={styles.thumb}
+                    />
+                  ) : (
+                    <View style={[styles.thumb, styles.thumbFallback]}>
+                      <Icon name="box" size={20} color={colors.accent} />
+                    </View>
+                  )}
+                  <View style={{flex: 1}}>
+                    <Text style={styles.name} numberOfLines={1}>
+                      {product.name}
+                    </Text>
+                    <Text style={styles.meta} numberOfLines={1}>
+                      مفرق {formatMoney(product.retail_price)} · جملة{' '}
+                      {formatMoney(product.wholesale_price)}
+                    </Text>
+                  </View>
+                  <View style={styles.rowEnd}>
+                    <View
+                      style={[
+                        styles.stockBadge,
+                        stock.tone === 'danger'
+                          ? {backgroundColor: colors.dangerSoft}
+                          : stock.tone === 'warning'
+                          ? {backgroundColor: colors.warningSoft}
+                          : {backgroundColor: colors.successSoft},
+                      ]}>
+                      <Text
+                        style={[
+                          styles.stockText,
+                          stock.tone === 'danger'
+                            ? {color: colors.danger}
+                            : stock.tone === 'warning'
+                            ? {color: colors.warning}
+                            : {color: colors.success},
+                        ]}>
+                        {stock.label}
+                      </Text>
+                    </View>
+                    <Icon name="chevronLeft" size={16} color={colors.textFaint} />
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
       </View>
-
-      <CategoriesModal
-        visible={categoryModalVisible}
-        onClose={() => setCategoryModalVisible(false)}
-      />
-      {dialog}
-    </Screen>
+    </View>
   );
 }
 
-// ────────────────────────────────────────────────────────────────
-// Product row
-// ────────────────────────────────────────────────────────────────
-
-function ProductRow({
-  product,
-  onEdit,
-  onDelete,
+function FilterChip({
+  label,
+  active,
+  onPress,
 }: {
-  product: Product;
-  onEdit: () => void;
-  onDelete: () => void;
+  label: string;
+  active: boolean;
+  onPress: () => void;
 }) {
-  const [imagePath, setImagePath] = useState<string | null>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    const check = async () => {
-      try {
-        const dir = await imagesDir();
-        const candidate = `${dir}/product_${product.id}_front.jpg`;
-        const exists = await requirePlatformUtils().fileExists(candidate);
-        if (mounted) setImagePath(exists ? candidate : null);
-      } catch {
-        if (mounted) setImagePath(null);
-      }
-    };
-    void check();
-    return () => {
-      mounted = false;
-    };
-  }, [product.id]);
-
-  const stockTone =
-    product.stock_quantity <= 0
-      ? 'danger'
-      : product.stock_quantity <= 5
-      ? 'warning'
-      : 'success';
-
   return (
-    <TouchableOpacity style={styles.row} onPress={onEdit} activeOpacity={0.85}>
-      <View style={styles.rowImageWrap}>
-        {imagePath ? (
-          <Image source={{uri: `file://${imagePath}`}} style={styles.rowImage} />
-        ) : (
-          <Text style={styles.rowImagePlaceholder}>📦</Text>
-        )}
-      </View>
-      <View style={styles.rowInfo}>
-        <Text style={styles.rowName} numberOfLines={1}>
-          {product.name}
-        </Text>
-        <View style={styles.rowPrices}>
-          <Text style={styles.rowPrice}>
-            مفرق: {formatMoney(product.retail_price)}
-          </Text>
-          <Text style={styles.rowPriceDim}>
-            جملة: {formatMoney(product.wholesale_price)}
-          </Text>
-        </View>
-      </View>
-      <View style={styles.rowEnd}>
-        <Badge label={`متوفر: ${product.stock_quantity}`} tone={stockTone} />
-        <TouchableOpacity
-          onPress={onDelete}
-          hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
-          <Text style={styles.rowDelete}>حذف</Text>
-        </TouchableOpacity>
-      </View>
+    <TouchableOpacity
+      style={[styles.chip, active && styles.chipActive]}
+      onPress={onPress}
+      activeOpacity={0.8}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>
+        {label}
+      </Text>
     </TouchableOpacity>
   );
 }
 
-// ────────────────────────────────────────────────────────────────
-// Categories management modal
-// ────────────────────────────────────────────────────────────────
-
-function CategoriesModal({
-  visible,
-  onClose,
-}: {
-  visible: boolean;
-  onClose: () => void;
-}) {
-  const categories = useCatalogStore(state => state.categories);
-  const products = useCatalogStore(state => state.products);
-  const refresh = useCatalogStore(state => state.refresh);
-  const toast = useToastStore(state => state.show);
-
-  const [newName, setNewName] = useState('');
-  const [renamingId, setRenamingId] = useState<number | null>(null);
-  const [renameText, setRenameText] = useState('');
-  const nameInputRef = useRef<TextInput>(null);
-
-  const countFor = (id: number) =>
-    products.filter(product => product.category_id === id).length;
-
-  const addCategory = async () => {
-    const name = newName.trim();
-    if (!name) {
-      toast('اكتب اسم الفئة أولاً', 'error');
-      return;
-    }
-    try {
-      await CategoryRepo.create(name);
-      setNewName('');
-      Keyboard.dismiss();
-      await refresh();
-      toast('تمت إضافة الفئة', 'success');
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), 'error');
-    }
-  };
-
-  const applyRename = async () => {
-    if (renamingId == null) return;
-    const name = renameText.trim();
-    if (!name) {
-      toast('اسم الفئة فارغ', 'error');
-      return;
-    }
-    try {
-      await CategoryRepo.rename(renamingId, name);
-      setRenamingId(null);
-      setRenameText('');
-      await refresh();
-      toast('تم تحديث اسم الفئة', 'success');
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), 'error');
-    }
-  };
-
-  const removeCategory = async (id: number, name: string) => {
-    try {
-      await CategoryRepo.remove(id);
-      await refresh();
-      toast(`تم حذف فئة "${name}"`, 'success');
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), 'error');
-    }
-  };
-
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={styles.modalRoot}>
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>إدارة الفئات</Text>
-          <TouchableOpacity onPress={onPressClose(onClose)}>
-            <Text style={styles.modalClose}>إغلاق</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.modalAddRow}>
-          <TextInput
-            ref={nameInputRef}
-            style={styles.modalInput}
-            placeholder="اسم الفئة الجديدة…"
-            placeholderTextColor={colors.textFaint}
-            value={newName}
-            onChangeText={setNewName}
-            textAlign="right"
-          />
-          <AppButton title="إضافة" small onPress={addCategory} />
-        </View>
-
-        <FlatList
-          data={categories}
-          keyExtractor={item => String(item.id)}
-          contentContainerStyle={styles.modalList}
-          renderItem={({item}) => (
-            <View style={styles.modalRow}>
-              {renamingId === item.id ? (
-                <>
-                  <TextInput
-                    style={[styles.modalInput, {flex: 1}]}
-                    value={renameText}
-                    onChangeText={setRenameText}
-                    textAlign="right"
-                    autoFocus
-                  />
-                  <TouchableOpacity
-                    style={styles.modalAction}
-                    onPress={applyRename}>
-                    <Text style={styles.modalActionSave}>حفظ</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.modalAction}
-                    onPress={() => setRenamingId(null)}>
-                    <Text style={styles.modalActionCancel}>إلغاء</Text>
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <>
-                  <View style={{flex: 1}}>
-                    <Text style={styles.modalRowName}>{item.name}</Text>
-                    <Text style={styles.modalRowCount}>
-                      {countFor(item.id)} منتج
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.modalAction}
-                    onPress={() => {
-                      setRenamingId(item.id);
-                      setRenameText(item.name);
-                    }}>
-                    <Text style={styles.modalActionEdit}>تعديل</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.modalAction}
-                    onPress={() => removeCategory(item.id, item.name)}>
-                    <Text style={styles.modalActionDelete}>حذف</Text>
-                  </TouchableOpacity>
-                </>
-              )}
-            </View>
-          )}
-          ListEmptyComponent={
-            <EmptyState title="لا توجد فئات" emoji="🏷️" />
-          }
-        />
-      </View>
-    </Modal>
-  );
-}
-
-function onPressClose(onClose: () => void) {
-  return onClose;
-}
-
-// ────────────────────────────────────────────────────────────────
-
-/** Cached app files dir for catalogue images. */
-let cachedImagesDir: string | null = null;
-export async function imagesDir(): Promise<string> {
-  if (cachedImagesDir != null) return cachedImagesDir;
-  const base = await requirePlatformUtils().getFilesDir();
-  const dir = `${base}/product_images`;
-  await requirePlatformUtils().makeDir(dir);
-  cachedImagesDir = dir;
-  return dir;
-}
-
 const styles = StyleSheet.create({
-  body: {flex: 1, padding: spacing.md, gap: spacing.sm},
-  searchInput: {
-    backgroundColor: colors.surfaceAlt,
+  screen: {flex: 1, backgroundColor: colors.bg},
+  body: {
+    flex: 1,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  chip: {
+    backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.md,
-    color: colors.text,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 10,
-    fontSize: typography.caption,
-  },
-  chipsRow: {flexGrow: 0},
-  chipsContent: {paddingVertical: 2, gap: 8},
-  chip: {
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.xl,
+    borderRadius: radius.pill,
     paddingHorizontal: spacing.lg,
     paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
   },
-  chipActive: {backgroundColor: colors.accentSoft, borderColor: colors.accent},
-  chipText: {color: colors.textDim, fontSize: typography.caption, fontWeight: '700'},
-  chipTextActive: {color: colors.accent},
-  listContent: {gap: spacing.sm, paddingBottom: spacing.sm},
+  chipActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  chipText: {
+    color: colors.textDim,
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+  },
+  chipTextActive: {color: colors.onAccent},
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.md,
     gap: spacing.md,
-  },
-  rowImageWrap: {
-    width: 52,
-    height: 52,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
     borderRadius: radius.md,
+    padding: spacing.md,
+  },
+  thumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
     backgroundColor: colors.surfaceAlt,
+  },
+  thumbFallback: {
     alignItems: 'center',
     justifyContent: 'center',
-    overflow: 'hidden',
   },
-  rowImage: {width: 52, height: 52},
-  rowImagePlaceholder: {fontSize: 24},
-  rowInfo: {flex: 1, gap: 4},
-  rowName: {color: colors.text, fontWeight: '800', fontSize: typography.caption},
-  rowPrices: {flexDirection: 'row', gap: spacing.md},
-  rowPrice: {color: colors.accent, fontSize: typography.small, fontWeight: '700'},
-  rowPriceDim: {color: colors.textDim, fontSize: typography.small},
-  rowEnd: {alignItems: 'flex-end', gap: 8},
-  rowDelete: {color: colors.danger, fontSize: typography.small, fontWeight: '700'},
-  bottomActions: {flexDirection: 'row', gap: spacing.md, paddingTop: spacing.sm},
-  modalRoot: {flex: 1, backgroundColor: colors.bg, paddingTop: spacing.xl},
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.md,
-  },
-  modalTitle: {color: colors.text, fontSize: typography.heading, fontWeight: '900'},
-  modalClose: {color: colors.accent, fontWeight: '800', fontSize: typography.body},
-  modalAddRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    marginBottom: spacing.md,
-  },
-  modalInput: {
-    flex: 1,
-    backgroundColor: colors.surfaceAlt,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
+  name: {
     color: colors.text,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 8,
+    fontFamily: fonts.bold,
     fontSize: typography.caption,
   },
-  modalList: {paddingHorizontal: spacing.lg, gap: spacing.sm, paddingBottom: spacing.xxl},
-  modalRow: {
+  meta: {
+    color: colors.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
+  },
+  rowEnd: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.md,
     gap: spacing.sm,
   },
-  modalRowName: {color: colors.text, fontWeight: '800', fontSize: typography.caption},
-  modalRowCount: {color: colors.textDim, fontSize: typography.small, marginTop: 2},
-  modalAction: {paddingHorizontal: 6},
-  modalActionEdit: {color: colors.info, fontWeight: '700', fontSize: typography.small},
-  modalActionDelete: {color: colors.danger, fontWeight: '700', fontSize: typography.small},
-  modalActionSave: {color: colors.success, fontWeight: '700', fontSize: typography.small},
-  modalActionCancel: {color: colors.textDim, fontWeight: '700', fontSize: typography.small},
+  stockBadge: {
+    borderRadius: radius.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  stockText: {
+    fontFamily: fonts.bold,
+    fontSize: typography.micro,
+    fontVariant: ['tabular-nums'],
+  },
 });

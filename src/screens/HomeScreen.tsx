@@ -1,278 +1,363 @@
 /**
- * HomeScreen — dashboard with quick stats and navigation tiles.
+ * HomeScreen — لوحة المتجر (design.md §9.1).
+ * Today's KPIs, stock alerts strip, quick actions and the latest
+ * invoices — everything a shop owner glances at between customers.
  */
-import React, {useEffect, useState} from 'react';
-import {View, Text, StyleSheet, ScrollView, TouchableOpacity} from 'react-native';
-import {
-  Card,
-  Screen,
-  StatCard,
-  Badge,
-} from '../components/ui';
-import {useNavigation} from '../core/navigation';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import {ScrollView, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import {useNavigation} from '@react-navigation/native';
+import {AppButton, AppHeader, Badge, Card, EmptyState, SectionTitle, StatCard} from '../components/ui';
+import {Icon, IconChip, type IconName} from '../components/Icon';
+import {ReportService, type ReportBundle} from '../services/ReportService';
+import {StockAlertsService} from '../services/StockAlertsService';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
-import {ReportRepo} from '../database/repositories/ReportRepo';
-import {colors, radius, spacing, typography} from '../core/theme';
-import {localToday} from '../core/format';
-import {APP_NAME} from '../core/config';
 import {usePrinterStore} from '../stores/printerStore';
+import {colors, fonts, radius, spacing, typography} from '../core/theme';
+import {formatMoney, relativeTime} from '../core/format';
+import {APP_NAME, APP_VERSION} from '../core/config';
+import {SaleRepo} from '../database/repositories/SaleRepo';
 
-interface Tile {
+const QUICK_ACTIONS: {
   key: string;
-  title: string;
-  subtitle: string;
-  emoji: string;
-  screen: 'pos' | 'inventory' | 'reports' | 'printer' | 'settings';
-  tone: string;
-}
-
-const TILES: Tile[] = [
-  {
-    key: 'pos',
-    title: 'نقطة البيع',
-    subtitle: 'بيع بالتعرف البصري',
-    emoji: '🛒',
-    screen: 'pos',
-    tone: colors.accent,
-  },
-  {
-    key: 'inventory',
-    title: 'المخزون',
-    subtitle: 'المنتجات والفئات',
-    emoji: '📦',
-    screen: 'inventory',
-    tone: colors.info,
-  },
-  {
-    key: 'reports',
-    title: 'التقارير',
-    subtitle: 'المبيعات والأرباح',
-    emoji: '📊',
-    screen: 'reports',
-    tone: colors.success,
-  },
-  {
-    key: 'printer',
-    title: 'الطابعة',
-    subtitle: 'بلوتوث وفواتير',
-    emoji: '🖨️',
-    screen: 'printer',
-    tone: colors.warning,
-  },
-  {
-    key: 'settings',
-    title: 'الإعدادات',
-    subtitle: 'تخصيص النظام',
-    emoji: '⚙️',
-    screen: 'settings',
-    tone: colors.textDim,
-  },
+  label: string;
+  icon: IconName;
+  target: 'Pos' | 'ProductForm' | 'PrinterSettings' | 'Reports';
+  accent?: boolean;
+}[] = [
+  {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
+  {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
+  {key: 'printer', label: 'الطابعة', icon: 'printer', target: 'PrinterSettings'},
+  {key: 'reports', label: 'التقارير', icon: 'chart', target: 'Reports'},
 ];
 
 export function HomeScreen() {
-  const push = useNavigation(state => state.push);
+  const navigation = useNavigation<any>();
   const settings = useSettingsStore(state => state.settings);
-  const productsCount = useCatalogStore(state => state.products.length);
-  const embeddingsCount = useCatalogStore(state => state.embeddingsCount);
-  const refresh = useCatalogStore(state => state.refresh);
   const printerStatus = usePrinterStore(state => state.status);
+  const printerName = usePrinterStore(state => state.deviceName);
+  const products = useCatalogStore(state => state.products);
+  const refreshCatalog = useCatalogStore(state => state.refresh);
 
-  const [today, setToday] = useState({revenue: 0, profit: 0, invoices: 0});
+  const [bundle, setBundle] = useState<ReportBundle | null>(null);
+  const [recentSales, setRecentSales] = useState<
+    {id: number; invoice_number: string; total_amount: number; created_at: string}[]
+  >([]);
+
+  const loadData = useCallback(async () => {
+    try {
+      const [todayBundle, latest] = await Promise.all([
+        ReportService.loadBundle('today'),
+        SaleRepo.listRecent(3),
+      ]);
+      setBundle(todayBundle);
+      setRecentSales(latest);
+    } catch {
+      // Dashboard is informational — previous data stays shown.
+    }
+  }, []);
 
   useEffect(() => {
-    let mounted = true;
-    const load = async () => {
-      try {
-        const day = localToday();
-        const summary = await ReportRepo.summary({from: day, to: day});
-        if (mounted) {
-          setToday({
-            revenue: summary.revenue,
-            profit: summary.netProfit,
-            invoices: summary.invoicesCount,
-          });
-        }
-      } catch {
-        // Dashboard is decorative — keep zeros on failure.
-      }
-    };
-    void load();
-    void refresh();
-    return () => {
-      mounted = false;
-    };
-  }, [refresh]);
+    const unsubscribe = navigation.addListener('focus', () => {
+      void loadData();
+      void StockAlertsService.evaluate();
+    });
+    return unsubscribe;
+  }, [navigation, loadData]);
+
+  const alerts = useMemo(() => StockAlertsService.activeAlerts(8), [products]);
 
   return (
-    <Screen>
-      <ScrollView contentContainerStyle={styles.content}>
-        {/* ── Brand header ──────────────────────────────────── */}
-        <View style={styles.brandRow}>
-          <View>
-            <Text style={styles.brandTitle}>{APP_NAME}</Text>
-            <Text style={styles.brandSubtitle}>
-              نقطة بيع ذكية — تعرف بصري محلي 100%
-            </Text>
-          </View>
-          <Badge
-            label={printerStatus === 'connected' ? 'طابعة متصلة' : 'بدون طابعة'}
-            tone={printerStatus === 'connected' ? 'success' : 'neutral'}
-          />
-        </View>
+    <View style={styles.screen}>
+      <AppHeader title={APP_NAME} subtitle="لوحة المتجر" showBack={false} />
 
-        {/* ── Today stats ───────────────────────────────────── */}
-        <View style={styles.statsRow}>
-          <StatCard label="مبيعات اليوم" value={`${today.revenue.toFixed(2)} ₪`} tone="accent" />
-          <StatCard
-            label="أرباح اليوم"
-            value={`${today.profit.toFixed(2)} ₪`}
-            tone={today.profit >= 0 ? 'success' : 'danger'}
-          />
-          <StatCard label="فواتير اليوم" value={String(today.invoices)} />
-        </View>
-
-        {/* ── Quick sale CTA ────────────────────────────────── */}
-        <Card style={styles.ctaCard} onPress={() => push('pos')}>
-          <View style={styles.ctaRow}>
-            <View style={styles.ctaIconWrap}>
-              <Text style={styles.ctaIcon}>📷</Text>
-            </View>
-            <View style={styles.ctaTextWrap}>
-              <Text style={styles.ctaTitle}>ابدأ البيع الآن</Text>
-              <Text style={styles.ctaSubtitle}>
-                وجّه الكاميرا للمنتج — يُضاف تلقائياً للسلة
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {/* ── Store welcome card ─────────────────────────────── */}
+        <Card style={styles.welcome}>
+          <View style={styles.welcomeRow}>
+            <IconChip name="store" chipSize={46} size={22} bg={colors.accentSoft} color={colors.accent} />
+            <View style={{flex: 1}}>
+              <Text style={styles.storeName} numberOfLines={1}>
+                {settings.storeName}
+              </Text>
+              <Text style={styles.storeMeta}>
+                {products.length} منتج · البيع الافتراضي{' '}
+                {settings.defaultPricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}
               </Text>
             </View>
-            <Text style={styles.ctaArrow}>›</Text>
+            <Badge
+              label={
+                printerStatus === 'connected'
+                  ? 'الطابعة متصلة'
+                  : printerStatus === 'connecting'
+                  ? 'جارٍ الاتصال'
+                  : 'بدون طابعة'
+              }
+              tone={printerStatus === 'connected' ? 'success' : 'neutral'}
+            />
           </View>
         </Card>
 
-        {/* ── Tiles grid ────────────────────────────────────── */}
-        <View style={styles.grid}>
-          {TILES.map(tile => (
+        {/* ── Today KPIs ─────────────────────────────────────── */}
+        <SectionTitle title="ملخص اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
+        <View style={styles.statsGrid}>
+          <StatCard
+            label="مبيعات اليوم"
+            value={formatMoney(bundle?.summary.revenue ?? 0)}
+            tone="accent"
+            icon="wallet"
+          />
+          <StatCard
+            label="صافي الربح"
+            value={formatMoney(bundle?.summary.netProfit ?? 0)}
+            tone={(bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'}
+            icon="chart"
+          />
+          <StatCard
+            label="عدد الفواتير"
+            value={String(bundle?.summary.invoicesCount ?? 0)}
+            icon="inbox"
+          />
+          <StatCard
+            label="القطع المبيعة"
+            value={String(bundle?.summary.itemsCount ?? 0)}
+            icon="box"
+          />
+        </View>
+
+        {/* ── Stock alerts ───────────────────────────────────── */}
+        {alerts.length > 0 ? (
+          <>
+            <SectionTitle
+              title="تنبيهات المخزون"
+              hint="منتجات تحتاج إعادة تزويد"
+              action={
+                <TouchableOpacity
+                  onPress={() => navigation.navigate('Notifications' as never)}>
+                  <Text style={styles.seeAll}>عرض الكل</Text>
+                </TouchableOpacity>
+              }
+            />
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{gap: spacing.sm, paddingBottom: spacing.xs}}>
+              {alerts.map(({product, state}) => (
+                <TouchableOpacity
+                  key={product.id}
+                  style={[
+                    styles.alertCard,
+                    {borderColor: state === 'out' ? colors.danger : colors.warning},
+                  ]}
+                  onPress={() =>
+                    navigation.navigate('ProductForm', {productId: product.id})
+                  }>
+                  <Icon
+                    name={state === 'out' ? 'packageMinus' : 'alert'}
+                    size={17}
+                    color={state === 'out' ? colors.danger : colors.warning}
+                  />
+                  <View style={{flex: 1, minWidth: 120}}>
+                    <Text style={styles.alertName} numberOfLines={1}>
+                      {product.name}
+                    </Text>
+                    <Text style={styles.alertQty}>
+                      {state === 'out' ? 'نفد المخزون' : `${product.stock_quantity} قطعة متبقية`}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </>
+        ) : null}
+
+        {/* ── Quick actions ──────────────────────────────────── */}
+        <SectionTitle title="إجراءات سريعة" />
+        <View style={styles.quickGrid}>
+          {QUICK_ACTIONS.map(action => (
             <TouchableOpacity
-              key={tile.key}
-              style={[styles.tile, {borderColor: tile.tone}]}
-              activeOpacity={0.8}
-              onPress={() => push(tile.screen)}>
-              <Text style={styles.tileEmoji}>{tile.emoji}</Text>
-              <Text style={styles.tileTitle}>{tile.title}</Text>
-              <Text style={styles.tileSubtitle}>{tile.subtitle}</Text>
+              key={action.key}
+              style={[
+                styles.quickCard,
+                action.accent ? {backgroundColor: colors.accent, borderColor: colors.accent} : null,
+              ]}
+              onPress={() =>
+                navigation.navigate(
+                  action.target as never,
+                  action.target === 'ProductForm' ? {} : undefined,
+                )
+              }
+              activeOpacity={0.8}>
+              <Icon
+                name={action.icon}
+                size={26}
+                color={action.accent ? colors.onAccent : colors.accent}
+              />
+              <Text
+                style={[
+                  styles.quickLabel,
+                  action.accent ? {color: colors.onAccent} : null,
+                ]}>
+                {action.label}
+              </Text>
             </TouchableOpacity>
           ))}
         </View>
 
-        {/* ── System snapshot ───────────────────────────────── */}
-        <Card style={styles.snapshotCard}>
-          <Text style={styles.snapshotTitle}>حالة النظام</Text>
-          <View style={styles.snapshotRow}>
-            <Text style={styles.snapshotLabel}>المنتجات المسجلة</Text>
-            <Text style={styles.snapshotValue}>{productsCount}</Text>
-          </View>
-          <View style={styles.snapshotRow}>
-            <Text style={styles.snapshotLabel}>البصمات البصرية</Text>
-            <Text style={styles.snapshotValue}>{embeddingsCount}</Text>
-          </View>
-          <View style={styles.snapshotRow}>
-            <Text style={styles.snapshotLabel}>وضع التسعير الافتراضي</Text>
-            <Text style={styles.snapshotValue}>
-              {settings.defaultPricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}
-            </Text>
-          </View>
-          <View style={styles.snapshotRow}>
-            <Text style={styles.snapshotLabel}>عتبة التطابق</Text>
-            <Text style={styles.snapshotValue}>
-              {(settings.matchThreshold * 100).toFixed(0)}%
-            </Text>
-          </View>
-        </Card>
+        {/* ── Recent invoices ────────────────────────────────── */}
+        <SectionTitle title="آخر الفواتير" />
+        {recentSales.length === 0 ? (
+          <Card>
+            <EmptyState
+              icon="inbox"
+              title="لا توجد فواتير بعد"
+              subtitle="أول بيع سيظهر هنا — ابدأ من شاشة نقطة البيع"
+              action={
+                <AppButton small title="ابدأ البيع" icon="cart" onPress={() => navigation.navigate('Pos' as never)} />
+              }
+            />
+          </Card>
+        ) : (
+          <Card style={{padding: 0, overflow: 'hidden'}}>
+            {recentSales.map((sale, index) => (
+              <View
+                key={sale.id}
+                style={[
+                  styles.saleRow,
+                  index < recentSales.length - 1 ? styles.saleRowBorder : null,
+                ]}>
+                <View style={styles.saleInvoiceIcon}>
+                  <Icon name="inbox" size={16} color={colors.textDim} />
+                </View>
+                <View style={{flex: 1}}>
+                  <Text style={styles.saleInvoice}>{sale.invoice_number}</Text>
+                  <Text style={styles.saleTime}>{relativeTime(sale.created_at)}</Text>
+                </View>
+                <Text style={styles.saleAmount}>{formatMoney(sale.total_amount)}</Text>
+              </View>
+            ))}
+          </Card>
+        )}
+
+        <Text style={styles.version}>سيلا الإصدار {APP_VERSION} · يعمل دون إنترنت</Text>
       </ScrollView>
-    </Screen>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: {flex: 1, backgroundColor: colors.bg},
   content: {
     padding: spacing.lg,
-    paddingTop: spacing.xl,
-    gap: spacing.lg,
-  },
-  brandRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  brandTitle: {
-    color: colors.accent,
-    fontSize: 28,
-    fontWeight: '900',
-  },
-  brandSubtitle: {
-    color: colors.textDim,
-    fontSize: typography.caption,
-    marginTop: 4,
-  },
-  statsRow: {
-    flexDirection: 'row',
-    marginHorizontal: -4,
-  },
-  ctaCard: {
-    backgroundColor: colors.accent,
-    borderWidth: 0,
-  },
-  ctaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: spacing.md,
+    paddingBottom: spacing.xxl,
   },
-  ctaIconWrap: {
-    width: 54,
-    height: 54,
-    borderRadius: radius.lg,
-    backgroundColor: 'rgba(0,0,0,0.25)',
-    alignItems: 'center',
-    justifyContent: 'center',
+  welcome: {paddingVertical: spacing.md},
+  welcomeRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.md},
+  storeName: {
+    color: colors.text,
+    fontFamily: fonts.black,
+    fontSize: typography.body,
   },
-  ctaIcon: {fontSize: 28},
-  ctaTextWrap: {flex: 1},
-  ctaTitle: {color: '#FFFFFF', fontSize: typography.heading, fontWeight: '900'},
-  ctaSubtitle: {color: 'rgba(255,255,255,0.85)', fontSize: typography.caption, marginTop: 2},
-  ctaArrow: {color: '#FFFFFF', fontSize: 34, fontWeight: '900'},
-  grid: {
+  storeMeta: {
+    color: colors.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.small,
+    marginTop: 2,
+  },
+  statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: spacing.md,
+    gap: spacing.sm,
   },
-  tile: {
-    width: '31%',
-    aspectRatio: 0.9,
+  statCard: {minWidth: '48%'},
+  seeAll: {
+    color: colors.accent,
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+  },
+  alertCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
     backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    maxWidth: 250,
+  },
+  alertName: {
+    color: colors.text,
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+  },
+  alertQty: {
+    color: colors.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    marginTop: 1,
+  },
+  quickGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  quickCard: {
+    width: '48.3%',
+    minHeight: 92,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
     borderRadius: radius.lg,
-    borderWidth: 2,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+  },
+  quickLabel: {
+    color: colors.text,
+    fontFamily: fonts.bold,
+    fontSize: typography.caption,
+  },
+  saleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 12,
+  },
+  saleRowBorder: {borderBottomWidth: 1, borderBottomColor: colors.borderSoft},
+  saleInvoiceIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: colors.surfaceAlt,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: spacing.sm,
-    gap: 6,
   },
-  tileEmoji: {fontSize: 30},
-  tileTitle: {color: colors.text, fontWeight: '800', fontSize: typography.caption},
-  tileSubtitle: {
-    color: colors.textDim,
-    fontSize: 10,
-    textAlign: 'center',
-  },
-  snapshotCard: {gap: 10},
-  snapshotTitle: {
+  saleInvoice: {
     color: colors.text,
-    fontWeight: '800',
-    fontSize: typography.body,
-    marginBottom: 4,
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+    fontVariant: ['tabular-nums'],
   },
-  snapshotRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  saleTime: {
+    color: colors.textFaint,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
   },
-  snapshotLabel: {color: colors.textDim, fontSize: typography.caption},
-  snapshotValue: {color: colors.text, fontWeight: '700', fontSize: typography.caption},
+  saleAmount: {
+    color: colors.accent,
+    fontFamily: fonts.black,
+    fontSize: typography.caption,
+    fontVariant: ['tabular-nums'],
+  },
+  version: {
+    color: colors.textFaint,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    textAlign: 'center',
+    marginTop: spacing.md,
+  },
 });
