@@ -29,8 +29,8 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactContext
 import com.facebook.react.bridge.WritableMap
-import com.facebook.react.uimanager.ThemedReactContext
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
@@ -78,7 +78,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * barcode mode without a rebind.
  */
 class SelaCameraView(
-    private val reactContext: ThemedReactContext,
+    reactContext: ReactContext,
 ) : FrameLayout(reactContext) {
 
     companion object {
@@ -175,7 +175,11 @@ class SelaCameraView(
         mainHandler.post {
             try {
                 previewView.previewStreamState.observeForever { state ->
-                    previewLive.set(state == PreviewView.StreamState.LIVE)
+                    // camera-view 1.3.4: the constant is STREAMING
+                    // (renamed to LIVE only in 1.4.0).
+                    previewLive.set(
+                        state == PreviewView.StreamState.STREAMING
+                    )
                 }
             } catch (_: Exception) {
                 // Non-fatal — bound-flag polling still covers us.

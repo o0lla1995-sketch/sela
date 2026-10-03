@@ -194,7 +194,7 @@ class SelaCameraModule(reactContext: ReactApplicationContext) :
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED
         )
         // Provider init (safe off-main; the future does the work).
-        val provider: androidx.camera.lifecycle.ProcessCameraProvider?
+        var provider: androidx.camera.lifecycle.ProcessCameraProvider? = null
         try {
             provider = androidx.camera.lifecycle.ProcessCameraProvider
                 .getInstance(ctx)
@@ -225,9 +225,7 @@ class SelaCameraModule(reactContext: ReactApplicationContext) :
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             var testView: SelaCameraView? = null
             try {
-                testView = SelaCameraView(
-                    com.facebook.react.uimanager.ThemedReactContext(ctx)
-                )
+                testView = SelaCameraView(ctx)
                 val bindOk = testView.diagnosticBind(provider)
                 report.putBoolean("previewBindOk", bindOk)
                 report.putString(
