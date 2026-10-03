@@ -26,6 +26,7 @@ import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.math.max
 
 /**
  * ThermalPrinterModule
