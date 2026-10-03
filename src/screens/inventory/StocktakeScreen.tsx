@@ -13,6 +13,7 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Alert,
+  Keyboard,
   ScrollView,
   StyleSheet,
   Text,
@@ -72,6 +73,24 @@ export function StocktakeScreen() {
   const [starting, setStarting] = useState(false);
   const [reportSession, setReportSession] = useState<Stocktake | null>(null);
   const [reportItems, setReportItems] = useState<StocktakeItem[] | null>(null);
+  // v8.2 (round-11 #5): while the count keyboard is open, the whole
+  // screen works for the LIST — stats, search, filters and the
+  // bottom bar fold away so the merchant sees the maximum number of
+  // counting rows while typing.
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () =>
+      setKeyboardOpen(true),
+    );
+    const hide = Keyboard.addListener('keyboardDidHide', () =>
+      setKeyboardOpen(false),
+    );
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   /** Count-input chain (round-8): "next" on the keyboard jumps to
    *  the NEXT product's count field — counting flows row by row
@@ -454,69 +473,81 @@ export function StocktakeScreen() {
 
       <View style={styles.body}>
         {/* v8.1 compact progress strip — ONE slim bar (~52dp) replaces
-            the three tall stat cards that ate the counting list. */}
-        <View style={styles.miniStats}>
-          <MiniStat
-            tone="success"
-            label="مطابق"
-            value={String(summary?.matchedItems ?? 0)}
-          />
-          <View style={styles.miniStatDivider} />
-          <MiniStat
-            tone="danger"
-            label="نقص"
-            value={String(summary?.shortageItems ?? 0)}
-          />
-          <View style={styles.miniStatDivider} />
-          <MiniStat
-            tone="info"
-            label="زيادة"
-            value={String(summary?.surplusItems ?? 0)}
-          />
-        </View>
-
-        <SearchBar
-          value={search}
-          onChangeText={setSearch}
-          placeholder="ابحث بالاسم أو امسح الباركود…"
-        />
-
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{gap: spacing.sm, paddingVertical: 2}}>
-          <FilterChip
-            label="الكل"
-            active={categoryFilter === 'all'}
-            onPress={() => setCategoryFilter('all')}
-          />
-          {categories.map(cat => (
-            <FilterChip
-              key={cat.id}
-              label={cat.name}
-              active={categoryFilter === cat.id}
-              onPress={() => setCategoryFilter(cat.id)}
+            the three tall stat cards that ate the counting list.
+            v8.2: hidden while the count keyboard is open. */}
+        {!keyboardOpen ? (
+          <View style={styles.miniStats}>
+            <MiniStat
+              tone="success"
+              label="مطابق"
+              value={String(summary?.matchedItems ?? 0)}
             />
-          ))}
-        </ScrollView>
+            <View style={styles.miniStatDivider} />
+            <MiniStat
+              tone="danger"
+              label="نقص"
+              value={String(summary?.shortageItems ?? 0)}
+            />
+            <View style={styles.miniStatDivider} />
+            <MiniStat
+              tone="info"
+              label="زيادة"
+              value={String(summary?.surplusItems ?? 0)}
+            />
+          </View>
+        ) : null}
 
-        <TouchableOpacity
-          style={styles.pendingToggle}
-          onPress={() => setOnlyPending(value => !value)}
-          activeOpacity={0.8}>
-          <Icon
-            name={onlyPending ? 'check' : 'list'}
-            size={15}
-            color={onlyPending ? c.onAccent : c.textDim}
+        {!keyboardOpen ? (
+          <SearchBar
+            value={search}
+            onChangeText={setSearch}
+            placeholder="ابحث بالاسم أو امسح الباركود…"
           />
-          <Text
-            style={[
-              styles.pendingText,
-              {color: onlyPending ? c.onAccent : c.textDim},
-            ]}>
-            {onlyPending ? 'إظهار الكل' : 'المنتجات غير المعدودة فقط'}
-          </Text>
-        </TouchableOpacity>
+        ) : null}
+
+        {/* v8.2 (round-11 #5): ONE tight filters block — the chips row
+            and the uncounted-only toggle sit together with a hairline
+            gap (the old body-level gap left a hole between them).
+            Folds away while the keyboard is open. */}
+        {!keyboardOpen ? (
+          <View style={styles.filtersBlock}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{gap: 6, paddingVertical: 2}}>
+              <FilterChip
+                label="الكل"
+                active={categoryFilter === 'all'}
+                onPress={() => setCategoryFilter('all')}
+              />
+              {categories.map(cat => (
+                <FilterChip
+                  key={cat.id}
+                  label={cat.name}
+                  active={categoryFilter === cat.id}
+                  onPress={() => setCategoryFilter(cat.id)}
+                />
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.pendingToggle}
+              onPress={() => setOnlyPending(value => !value)}
+              activeOpacity={0.8}>
+              <Icon
+                name={onlyPending ? 'check' : 'list'}
+                size={15}
+                color={onlyPending ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.pendingText,
+                  {color: onlyPending ? c.onAccent : c.textDim},
+                ]}>
+                {onlyPending ? 'إظهار الكل' : 'المنتجات غير المعدودة فقط'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
 
         {filteredItems.length === 0 ? (
           <EmptyState
@@ -528,7 +559,9 @@ export function StocktakeScreen() {
           <ScrollView
             contentContainerStyle={{
               gap: spacing.sm,
-              paddingBottom: spacing.xxl,
+              // v8.2: tight bottom padding while typing — every
+              // millimeter above the keyboard shows counting rows.
+              paddingBottom: keyboardOpen ? spacing.md : spacing.xxl,
             }}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled">
@@ -550,23 +583,25 @@ export function StocktakeScreen() {
           </ScrollView>
         )}
 
-        <View style={styles.bottomBar}>
-          <AppButton
-            title="إلغاء الجرد"
-            variant="danger"
-            icon="x"
-            small
-            style={{flex: 1}}
-            onPress={cancelSession}
-          />
-          <AppButton
-            title="إنهاء الجرد وتطبيق النتائج"
-            icon="check"
-            small
-            style={{flex: 2}}
-            onPress={completeSession}
-          />
-        </View>
+        {!keyboardOpen ? (
+          <View style={styles.bottomBar}>
+            <AppButton
+              title="إلغاء الجرد"
+              variant="danger"
+              icon="x"
+              small
+              style={{flex: 1}}
+              onPress={cancelSession}
+            />
+            <AppButton
+              title="إنهاء الجرد وتطبيق النتائج"
+              icon="check"
+              small
+              style={{flex: 2}}
+              onPress={completeSession}
+            />
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -877,6 +912,11 @@ const useStyles = makeStyles(c =>
       alignSelf: 'stretch',
       backgroundColor: c.borderSoft,
       marginVertical: 2,
+    },
+    /** v8.2 (round-11 #5): chips + uncounted toggle grouped in ONE
+     *  tight block — no stray gap between them. */
+    filtersBlock: {
+      gap: 6,
     },
     pendingToggle: {
       flexDirection: 'row',

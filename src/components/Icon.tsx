@@ -32,6 +32,7 @@ export type IconName =
   | 'chevronLeft'
   | 'chevronRight'
   | 'chevronDown'
+  | 'moreVertical'
   | 'check'
   | 'checkCircle'
   | 'x'
@@ -215,6 +216,8 @@ const P: Record<IconName, React.ReactNode> = {
   chevronLeft: <Path d="m14.5 5.5-6.5 6.5 6.5 6.5" />,
   chevronRight: <Path d="m9.5 5.5 6.5 6.5-6.5 6.5" />,
   chevronDown: <Path d="m5.5 9.5 6.5 6.5 6.5-6.5" />,
+  /** v8.2: three-dot overflow menu (Inventory quick actions). */
+  moreVertical: <Path d="M12 5.5v.01M12 12v.01M12 18.5v.01" strokeWidth={3} />,
   check: <Path d="m5 12.8 4.6 4.6L19 6.8" />,
   checkCircle: (
     <G>

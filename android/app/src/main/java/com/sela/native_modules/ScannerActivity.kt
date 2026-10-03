@@ -1,11 +1,16 @@
 package com.sela.native_modules
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
@@ -26,8 +31,12 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.core.util.Size
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
@@ -41,6 +50,7 @@ import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 
 /**
  * ScannerActivity — محرك المسح المنفصل (v8).
@@ -73,13 +83,26 @@ import java.util.concurrent.atomic.AtomicInteger
  *                   TFLite embedding pipeline (no frame processors
  *                   anywhere in the app).
  *
+ *  v8.2 (round-11):
+ *   • RUNTIME PERMISSION — the activity now ASKS for the camera on
+ *     first launch instead of dying with "إذن الكاميرا غير ممنوح"
+ *     (round-11 #1). Permanent denial offers the system settings
+ *     page directly.
+ *   • CONTINUOUS VISUAL SESSION — photo mode + "continuous" extra:
+ *     the activity auto-captures on a calm cadence (no shutter press
+ *     needed), streams every photo to JS ("selaScanVisual" event)
+ *     and STAYS OPEN; JS reports each recognition outcome back and
+ *     the window itself celebrates with a banner + vibrate + green
+ *     flash (round-11 #2: the merchant waves product after product
+ *     and each one jumps into the cart by itself).
+ *
  *  JS contract (SelaScannerModule):
  *   • opens with  intent extra "mode" = "barcode" | "photo",
- *     optional extra "continuous" = true (barcode only).
+ *     optional extra "continuous" = true (both engines).
  *   • returns     "code" (barcode) or "path" (photo) or "error";
  *     a CONTINUOUS session returns {cancelled:true} when closed —
  *     each read is already delivered live via the
- *     "selaScanBarcode" JS event (v8.1 multi-scan).
+ *     "selaScanBarcode" / "selaScanVisual" JS events.
  *   • cancel      = user pressed إغلاق / back
  */
 class ScannerActivity : Activity() {
@@ -93,9 +116,27 @@ class ScannerActivity : Activity() {
         const val MODE_BARCODE = "barcode"
         const val MODE_PHOTO = "photo"
 
-        /** v8.1: sink the module registers so a continuous session can
-         *  stream each read to JS instantly ("selaScanBarcode" event). */
+        /** v8.1: sink the module registers so a continuous barcode
+         *  session can stream each read to JS ("selaScanBarcode"). */
         @JvmStatic var continuousSink: ((code: String) -> Unit)? = null
+
+        /** v8.2: sink for the continuous VISUAL session — every auto
+         *  or manual photo path streams to JS ("selaScanVisual"). */
+        @JvmStatic var visualSink: ((path: String, auto: Boolean) -> Unit)? = null
+
+        /** v8.2: JS reports each recognition outcome so the scanner
+         *  window itself can celebrate / hint in real time.
+         *  kind: "added" | "dup" | "miss". */
+        @JvmStatic var visualFeedback: ((kind: String, name: String, score: Double) -> Unit)? = null
+
+        /** v8.2: auto-capture cadence for the continuous visual
+         *  session — shot → settle → next. ~2s + capture latency
+         *  gives the merchant time to swap products between shots
+         *  while never feeling slow at the counter. */
+        private const val VISUAL_AUTO_INTERVAL_MS = 2000L
+
+        /** Camera permission request code (round-11 #1). */
+        private const val REQUEST_CAMERA = 71020
 
         /** Same formats the old engine accepted — all offline. */
         private val BARCODE_FORMATS = BarcodeScannerOptions.Builder()
@@ -137,10 +178,12 @@ class ScannerActivity : Activity() {
         intent?.getStringExtra(EXTRA_MODE) != MODE_PHOTO
     }
 
-    /** v8.1 continuous multi-scan (barcode only): never auto-close;
-     *  stream every deduped read to JS and keep scanning. */
+    /** v8.1 continuous multi-scan (barcode): never auto-close; every
+     *  deduped read streams to JS. v8.2: the VISUAL engine gains the
+     *  same session style — auto-captures stream photo paths and the
+     *  session keeps running until the merchant closes it. */
     private val isContinuous: Boolean by lazy {
-        isBarcodeMode && intent?.getBooleanExtra(EXTRA_CONTINUOUS, false) == true
+        intent?.getBooleanExtra(EXTRA_CONTINUOUS, false) == true
     }
 
     // ── Camera ────────────────────────────────────────────────
@@ -156,6 +199,16 @@ class ScannerActivity : Activity() {
     private var lastCode: String? = null
     private var lastCodeAt = 0L
 
+    /** v8.2: continuous VISUAL session state — auto-capture loop,
+     *  ping-pong photo files and the recognized-products counter. */
+    private val mainHandler = android.os.Handler(mainLooper)
+    private val autoShotRunnable = Runnable { startAutoCapture() }
+    private var captureInFlight = false
+    private var pingPongFlip = false
+    private var sessionPhotoA: File? = null
+    private var sessionPhotoB: File? = null
+    private val visualAdds = AtomicInteger(0)
+
     /** The lifecycle the camera binds to — driven by this activity. */
     private val cameraHost = Host()
 
@@ -165,6 +218,8 @@ class ScannerActivity : Activity() {
     private lateinit var torchButton: TextView
     private lateinit var flashOverlay: View
     private lateinit var statusChip: TextView
+    /** v8.2: the live "أُضيف للسلة: …" recognition banner. */
+    private var recognizerBanner: TextView? = null
 
     // ═══════════════════════════════════════════════════════════
     // Lifecycle
@@ -173,38 +228,125 @@ class ScannerActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA)
+        // v8.2 (round-11 #1): ASK for the camera the first time — the
+        // app used to die instantly with "فعّله من إعدادات النظام"
+        // because nothing ever requested the permission at runtime.
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            finishWithError("إذن الكاميرا غير ممنوح — فعّله من إعدادات النظام")
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA
+            )
             return
         }
+        onReady()
+    }
 
+    /** Everything that happens once the camera permission is in hand. */
+    private fun onReady() {
         buildUi()
         setContentView(root)
         bindCamera()
+        if (isContinuous && !isBarcodeMode) {
+            // JS streams recognition outcomes back — show them live.
+            ScannerActivity.visualFeedback = { kind, name, score ->
+                runOnUiThread { showRecognizerBanner(kind, name, score) }
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_CAMERA) {
+            return
+        }
+        if (grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
+            onReady()
+            return
+        }
+        if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+            // Soft denial — explain once, then ask again.
+            AlertDialog.Builder(this)
+                .setTitle("إذن الكاميرا")
+                .setMessage(
+                    "سيلا يحتاج الكاميرا لمسح المنتجات — المسح البصري والباركود يعملان بها فقط."
+                )
+                .setPositiveButton("السماح") { _, _ ->
+                    ActivityCompat.requestPermissions(
+                        this, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA
+                    )
+                }
+                .setNegativeButton("إغلاق") { _, _ ->
+                    finishWithError("لم يُمنح إذن الكاميرا — فعّله من إعدادات النظام")
+                }
+                .show()
+        } else {
+            // Permanently denied — only the system settings page can fix it.
+            AlertDialog.Builder(this)
+                .setTitle("إذن الكاميرا مرفوض")
+                .setMessage(
+                    "فُعِّل إذن الكاميرا من إعدادات النظام:\nالتطبيقات ← سيلا ← الأذونات ← الكاميرا."
+                )
+                .setPositiveButton("فتح الإعدادات") { _, _ ->
+                    runCatching {
+                        startActivity(
+                            Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", packageName, null)
+                            )
+                        )
+                    }
+                    finishWithError("لم يُمنح إذن الكاميرا — فعّله من الإعدادات ثم أعد المسح")
+                }
+                .setNegativeButton("إغلاق") { _, _ ->
+                    finishWithError("لم يُمنح إذن الكاميرا — فعّله من إعدادات النظام")
+                }
+                .show()
+        }
     }
 
     override fun onStart() {
         super.onStart()
         cameraHost.resume()
+        // v8.2: resume the visual auto-capture loop after the window
+        // comes back to the front (e.g. after the permission dialog).
+        if (isContinuous && !isBarcodeMode && cameraProvider != null) {
+            scheduleNextAutoCapture(800)
+        }
     }
 
     override fun onStop() {
         super.onStop()
         cameraHost.pause()
+        // The camera is unbound while stopped — pause the auto loop.
+        mainHandler.removeCallbacks(autoShotRunnable)
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacks(autoShotRunnable)
         if (settled.compareAndSet(false, true)) {
             // Guarantee the JS promise never hangs if the system kills us.
             finishWithError("أُغلق الماسح قبل إكمال العملية")
         }
-        // v8.1: a continuous session is over — drop the stream sink so
-        // a stale activity can never leak reads into a new session.
         if (isContinuous) {
-            ScannerActivity.continuousSink = null
+            if (isBarcodeMode) {
+                // The barcode session is over — drop the stream sink so
+                // a stale activity can never leak reads into a new session.
+                ScannerActivity.continuousSink = null
+            } else {
+                ScannerActivity.visualSink = null
+                ScannerActivity.visualFeedback = null
+                // Ping-pong scratch files belong to this session only.
+                runCatching { sessionPhotoA?.delete() }
+                runCatching { sessionPhotoB?.delete() }
+            }
         }
         cameraHost.destroy()
         runCatching { scannerClient.close() }
@@ -277,7 +419,8 @@ class ScannerActivity : Activity() {
         }
         statusChip = chip(
             when {
-                isContinuous -> "مسح متعدد · 0"
+                isContinuous && isBarcodeMode -> "مسح متعدد · 0"
+                isContinuous -> "مسح بصري متواصل · 0"
                 isBarcodeMode -> "ماسح الباركود"
                 else -> "المسح البصري"
             },
@@ -347,10 +490,51 @@ class ScannerActivity : Activity() {
                     dp(56), dp(56), Gravity.CENTER
                 )
             })
-            shutter.setOnClickListener { capturePhoto() }
+            shutter.setOnClickListener { manualShot() }
             root.addView(shutter)
 
-            root.addView(hintView("عبّئ الإطار بالمنتج ثم اضغط زر التصوير"))
+            // v8.2: the live recognition banner — JS reports every
+            // outcome and the scanner window itself celebrates:
+            // green "أُضيف للسلة: …" on a confident add, a neutral
+            // "مضاف بالفعل" on a suppressed duplicate, an amber hint
+            // when nothing matched.
+            recognizerBanner = TextView(this).apply {
+                visibility = View.GONE
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setPadding(dp(18), dp(11), dp(18), dp(11))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(14).toFloat()
+                    setColor(Color.parseColor("#E622C55E"))
+                }
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                )
+            }.also { banner ->
+                banner.setOnApplyWindowInsetsListener { v, insets ->
+                    val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
+                        .getInsets(WindowInsetsCompat.Type.systemBars())
+                    (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
+                        bars.bottom + dp(168)
+                    v.requestLayout()
+                    insets
+                }
+            }
+            root.addView(recognizerBanner)
+
+            root.addView(
+                hintView(
+                    if (isContinuous) {
+                        "وجّه الكاميرا نحو المنتج — يُضاف للسلة تلقائياً عند التعرف عليه"
+                    } else {
+                        "عبّئ الإطار بالمنتج ثم اضغط زر التصوير"
+                    }
+                )
+            )
         }
     }
 
@@ -462,14 +646,16 @@ class ScannerActivity : Activity() {
                 provider.unbindAll()
                 provider.bindToLifecycle(cameraHost, selector, preview, analysis)
             } else {
-                val capture = ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                    .build()
-                    .also { imageCapture = it }
+                val capture = buildPhotoCapture()
                 provider.unbindAll()
                 provider.bindToLifecycle(cameraHost, selector, preview, capture)
             }
             applyTorch()
+            // v8.2: the visual auto-capture loop starts once the camera
+            // is genuinely live (first successful bind).
+            if (isContinuous && !isBarcodeMode) {
+                scheduleNextAutoCapture(1400)
+            }
         } catch (firstError: Exception) {
             // Bind ladder: retry once after 600ms, then surface the
             // real error class (never a silent black screen again).
@@ -488,11 +674,13 @@ class ScannerActivity : Activity() {
                                 cameraHost, selector, preview, analysis
                             )
                         } else {
-                            val capture = ImageCapture.Builder().build()
-                                .also { imageCapture = it }
+                            val capture = buildPhotoCapture()
                             provider.bindToLifecycle(cameraHost, selector, preview, capture)
                         }
                         applyTorch()
+                        if (isContinuous && !isBarcodeMode) {
+                            scheduleNextAutoCapture(1400)
+                        }
                     } catch (secondError: Exception) {
                         finishWithError(
                             "فشل تشغيل الكاميرا: " +
@@ -583,28 +771,134 @@ class ScannerActivity : Activity() {
 
     // ── Photo engine ──────────────────────────────────────────
 
-    private fun capturePhoto() {
+    /**
+     * v8.2: one builder for both photo flows. The continuous session
+     * caps the stream at ~1MP — the embedder only needs a 224px
+     * center crop, so auto-capture cycles stay fast and light on
+     * budget HALs (single-shot enrollment keeps full quality).
+     */
+    private fun buildPhotoCapture(): ImageCapture {
+        val builder = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+        if (isContinuous) {
+            runCatching {
+                builder.setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(1280, 960),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+                )
+            }
+        }
+        return builder.build().also { imageCapture = it }
+    }
+
+    /**
+     * v8.2 photo scratch files: the continuous session OVERWRITES two
+     * ping-pong files instead of piling up hundreds of JPEGs — the
+     * 2s cadence means JS has long finished with one file before the
+     * next shot touches the other. Single-shot enrollment keeps the
+     * classic timestamped file (its path survives the activity).
+     */
+    private fun nextPhotoFile(): File {
+        val dir = File(filesDir, "scans").apply { mkdirs() }
+        if (!isContinuous) {
+            return File(dir, "scan_${System.currentTimeMillis()}.jpg")
+        }
+        pingPongFlip = !pingPongFlip
+        return if (pingPongFlip) {
+            sessionPhotoA ?: File(dir, "session_a.jpg").also { sessionPhotoA = it }
+        } else {
+            sessionPhotoB ?: File(dir, "session_b.jpg").also { sessionPhotoB = it }
+        }
+    }
+
+    /** Manual shutter press — a deliberate action: capture NOW and
+     *  restart the auto cycle from this moment. */
+    private fun manualShot() {
+        if (isContinuous && !isBarcodeMode) {
+            mainHandler.removeCallbacks(autoShotRunnable)
+            capturePhoto(auto = false)
+        } else {
+            capturePhoto(auto = false)
+        }
+    }
+
+    /** v8.2 auto-capture cadence: shot → settle → next. The pause
+     *  after each shot gives the merchant time to swap products. */
+    private fun scheduleNextAutoCapture(delayMs: Long) {
+        if (settled.get() || !isContinuous || isBarcodeMode) {
+            return
+        }
+        mainHandler.removeCallbacks(autoShotRunnable)
+        mainHandler.postDelayed(autoShotRunnable, delayMs)
+    }
+
+    private fun startAutoCapture() {
+        if (settled.get() || !isContinuous || isBarcodeMode) {
+            return
+        }
+        if (captureInFlight) {
+            scheduleNextAutoCapture(900)
+            return
+        }
+        capturePhoto(auto = true)
+    }
+
+    private fun capturePhoto(auto: Boolean) {
         val capture = imageCapture
         if (capture == null || settled.get()) {
             return
         }
-        vibrate(25)
-        val dir = File(filesDir, "scans").apply { mkdirs() }
-        val file = File(dir, "scan_${System.currentTimeMillis()}.jpg")
+        if (isContinuous) {
+            if (captureInFlight) {
+                return
+            }
+            captureInFlight = true
+            vibrate(20)
+        } else {
+            vibrate(25)
+        }
+        val file = nextPhotoFile()
         val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
         capture.takePicture(
             outputOptions,
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    if (settled.compareAndSet(false, true)) {
+                    if (isContinuous) {
+                        captureInFlight = false
+                        if (settled.get()) {
+                            return
+                        }
+                        flash(Color.parseColor("#26FFFFFF"), 110)
+                        // Stream to JS (the emitter is thread-safe) and
+                        // keep the session RUNNING — the merchant waves
+                        // product after product without leaving the camera.
+                        runCatching {
+                            ScannerActivity.visualSink?.invoke(file.absolutePath, auto)
+                        }
+                        scheduleNextAutoCapture(VISUAL_AUTO_INTERVAL_MS)
+                    } else if (settled.compareAndSet(false, true)) {
                         flash(Color.parseColor("#66FFFFFF"), 140)
                         setResultAndFinish(path = file.absolutePath)
                     }
                 }
 
                 override fun onError(error: ImageCaptureException) {
-                    if (settled.compareAndSet(false, true)) {
+                    if (isContinuous) {
+                        captureInFlight = false
+                        if (settled.get()) {
+                            return
+                        }
+                        // Back off briefly and try again — one failed
+                        // shot must never end the session.
+                        scheduleNextAutoCapture(1500)
+                    } else if (settled.compareAndSet(false, true)) {
                         finishWithError(
                             "فشل التقاط الصورة: ${error.javaClass.simpleName}" +
                                 (error.message?.let { " — $it" } ?: "")
@@ -613,6 +907,53 @@ class ScannerActivity : Activity() {
                 }
             }
         )
+    }
+
+    /**
+     * v8.2: JS reports each recognition outcome (added / dup / miss)
+     * and the scanner window reacts in real time — banner, vibration,
+     * green flash and the session counter. This is what makes the
+     * continuous visual session feel alive at the counter.
+     */
+    private fun showRecognizerBanner(kind: String, name: String, score: Double) {
+        val banner = recognizerBanner ?: return
+        val background = banner.background as? GradientDrawable
+        when (kind) {
+            "added" -> {
+                val pct = (score * 100).roundToInt()
+                banner.text = if (name.isNotBlank()) {
+                    "أُضيف للسلة: $name · $pct%"
+                } else {
+                    "أُضيف للسلة"
+                }
+                background?.setColor(Color.parseColor("#E622C55E"))
+                banner.setTextColor(Color.WHITE)
+                visualAdds.incrementAndGet()
+                statusChip.text = "مسح بصري متواصل · ${visualAdds.get()}"
+                vibrate(40)
+                flash(Color.parseColor("#3322C55E"), 220)
+            }
+            "dup" -> {
+                banner.text = "$name — مضاف بالفعل في السلة"
+                background?.setColor(Color.parseColor("#D91C1C22"))
+                banner.setTextColor(Color.parseColor("#E7E7EA"))
+                vibrate(15)
+            }
+            else -> {
+                banner.text = "لم يتم التعرف — قرّب الكاميرا أو حسّن الإضاءة"
+                background?.setColor(Color.parseColor("#E68A5A00"))
+                banner.setTextColor(Color.WHITE)
+            }
+        }
+        banner.animate().cancel()
+        banner.visibility = View.VISIBLE
+        banner.alpha = 1f
+        banner.animate()
+            .alpha(0f)
+            .setStartDelay(1500)
+            .setDuration(400)
+            .withEndAction { banner.visibility = View.GONE }
+            .start()
     }
 
     // ── Torch ─────────────────────────────────────────────────

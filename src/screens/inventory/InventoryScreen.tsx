@@ -15,6 +15,7 @@ import {
   View,
 } from 'react-native';
 import {useFocusEffect, useNavigation} from '@react-navigation/native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {AppButton, AppHeader, EmptyState, SearchBar} from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {useCatalogStore} from '../../stores/catalogStore';
@@ -42,6 +43,11 @@ export function InventoryScreen() {
 
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<CategoryFilter>('all');
+  // v8.2 (round-11 #4): the big top quick-action buttons are GONE —
+  // الجرد / التصنيفات / الوحدات now live in a compact overflow menu
+  // behind the ⋮ header button, so the product list starts right
+  // under the search.
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -98,6 +104,8 @@ export function InventoryScreen() {
       lowCount={lowCount}
       defaultThreshold={settings.lowStockDefaultThreshold}
       onRefresh={refresh}
+      menuOpen={menuOpen}
+      setMenuOpen={setMenuOpen}
     />
   );
 }
@@ -115,6 +123,8 @@ function InventoryLayout({
   lowCount,
   defaultThreshold,
   onRefresh: _onRefresh,
+  menuOpen,
+  setMenuOpen,
 }: {
   products: Product[];
   allProducts: Product[];
@@ -128,10 +138,13 @@ function InventoryLayout({
   lowCount: number;
   defaultThreshold: number;
   onRefresh: () => Promise<void>;
+  menuOpen: boolean;
+  setMenuOpen: (value: boolean) => void;
 }) {
   const c = useThemeColors();
   const styles = useStyles();
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
 
   return (
     <View style={styles.screen}>
@@ -142,38 +155,66 @@ function InventoryLayout({
         }`}
         showBack={false}
         right={
-          <AppButton
-            small
-            title="منتج"
-            icon="plus"
-            onPress={() => navigation.navigate('ProductForm', {})}
-          />
+          <View style={styles.headerActions}>
+            <AppButton
+              small
+              title="منتج"
+              icon="plus"
+              onPress={() => navigation.navigate('ProductForm', {})}
+            />
+            {/* v8.2: ⋮ — الجرد / التصنيفات / الوحدات live here now
+                (round-11 #4: the top quick-action buttons were
+                removed; the list starts right under the search). */}
+            <TouchableOpacity
+              style={styles.menuBtn}
+              onPress={() => setMenuOpen(true)}
+              activeOpacity={0.75}
+              hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+              <Icon name="moreVertical" size={18} color={c.text} />
+            </TouchableOpacity>
+          </View>
         }
       />
 
-      <View style={styles.body}>
-        {/* ── Quick actions ─────────────────────────────────── */}
-        <View style={styles.quickRow}>
-          <QuickAction
-            icon="clipboard"
-            label="الجرد"
-            hint="جلسة جرد كاملة"
-            onPress={() => navigation.navigate('Stocktake' as never)}
-          />
-          <QuickAction
-            icon="shapes"
-            label="التصنيفات"
-            hint="إدارة التصنيفات"
-            onPress={() => navigation.navigate('ManageCategories' as never)}
-          />
-          <QuickAction
-            icon="scale"
-            label="الوحدات"
-            hint="كرتونة، كيلو…"
-            onPress={() => navigation.navigate('ManageUnits' as never)}
-          />
-        </View>
+      {/* v8.2 overflow menu — tap anywhere to dismiss. */}
+      {menuOpen ? (
+        <TouchableOpacity
+          style={styles.menuBackdrop}
+          activeOpacity={1}
+          onPress={() => setMenuOpen(false)}>
+          <View style={[styles.menuSheet, {marginTop: insets.top + 62}]}>
+            <MenuItem
+              icon="clipboard"
+              label="الجرد"
+              hint="جلسة جرد كاملة للمخزون"
+              onPress={() => {
+                setMenuOpen(false);
+                navigation.navigate('Stocktake' as never);
+              }}
+            />
+            <MenuItem
+              icon="shapes"
+              label="التصنيفات"
+              hint="إدارة تصنيفات المنتجات"
+              onPress={() => {
+                setMenuOpen(false);
+                navigation.navigate('ManageCategories' as never);
+              }}
+            />
+            <MenuItem
+              icon="scale"
+              label="الوحدات"
+              hint="كرتونة، كيس، كيلوغرام…"
+              onPress={() => {
+                setMenuOpen(false);
+                navigation.navigate('ManageUnits' as never);
+              }}
+            />
+          </View>
+        </TouchableOpacity>
+      ) : null}
 
+      <View style={styles.body}>
         <SearchBar
           value={search}
           onChangeText={setSearch}
@@ -315,7 +356,10 @@ function InventoryLayout({
   );
 }
 
-function QuickAction({
+/** v8.2 overflow-menu row (round-11 #4: the three big quick-action
+ *  buttons were removed from the body — their destinations live
+ *  here now, one compact tap away in the header). */
+function MenuItem({
   icon,
   label,
   hint,
@@ -330,18 +374,19 @@ function QuickAction({
   const styles = useStyles();
   return (
     <TouchableOpacity
-      style={styles.quickAction}
+      style={styles.menuItem}
       onPress={onPress}
       activeOpacity={0.75}>
-      <View style={[styles.quickIcon, {backgroundColor: c.accentSoft}]}>
-        <Icon name={icon} size={19} color={c.accent} />
+      <View style={[styles.menuIcon, {backgroundColor: c.accentSoft}]}>
+        <Icon name={icon} size={18} color={c.accent} />
       </View>
       <View style={{flex: 1}}>
-        <Text style={styles.quickLabel}>{label}</Text>
-        <Text style={styles.quickHint} numberOfLines={1}>
+        <Text style={styles.menuLabel}>{label}</Text>
+        <Text style={styles.menuHint} numberOfLines={1}>
           {hint}
         </Text>
       </View>
+      <Icon name="chevronLeft" size={16} color={c.textFaint} />
     </TouchableOpacity>
   );
 }
@@ -396,34 +441,61 @@ const useStyles = makeStyles(c =>
       padding: spacing.lg,
       gap: spacing.md,
     },
-    quickRow: {
-      flexDirection: 'row',
-      gap: spacing.sm,
-    },
-    quickAction: {
-      flex: 1,
+    // v8.2 (round-11 #4): header overflow menu — replaces the three
+    // tall quick-action cards that used to push the list down.
+    headerActions: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
+      gap: spacing.xs,
+    },
+    menuBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
       backgroundColor: c.surface,
       borderWidth: 1,
-      borderColor: c.borderSoft,
-      borderRadius: radius.md,
-      padding: spacing.md,
-    },
-    quickIcon: {
-      width: 38,
-      height: 38,
-      borderRadius: 11,
+      borderColor: c.border,
       alignItems: 'center',
       justifyContent: 'center',
     },
-    quickLabel: {
+    menuBackdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(3,3,6,0.5)',
+      zIndex: 20,
+    },
+    menuSheet: {
+      position: 'absolute',
+      alignSelf: 'flex-start',
+      marginHorizontal: spacing.md,
+      minWidth: 240,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      padding: spacing.xs,
+      gap: 2,
+      elevation: 12,
+    },
+    menuItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      borderRadius: radius.sm,
+      padding: spacing.md,
+    },
+    menuIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    menuLabel: {
       color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
-    quickHint: {
+    menuHint: {
       color: c.textFaint,
       fontFamily: fonts.regular,
       fontSize: typography.micro,

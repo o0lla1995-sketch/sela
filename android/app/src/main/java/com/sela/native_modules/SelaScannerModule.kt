@@ -44,6 +44,8 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         private const val REQUEST_SCAN = 47831
         /** v8.1: event name for live barcode reads in a continuous session. */
         private const val BARCODE_READ_EVENT = "selaScanBarcode"
+        /** v8.2: event name for live photo paths in a continuous VISUAL session. */
+        private const val VISUAL_PHOTO_EVENT = "selaScanVisual"
     }
 
     private var pendingPromise: Promise? = null
@@ -73,7 +75,7 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * v8.1 continuous multi-scan session (barcode engine only).
+     * v8.1 continuous multi-scan session (barcode engine).
      * Every deduped read is streamed to JS as a "selaScanBarcode"
      * event; the promise resolves {cancelled:true} when the merchant
      * closes the scanner. Separate @ReactMethod so the positional
@@ -86,6 +88,32 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
             continuous = true,
             promise = promise
         )
+    }
+
+    /**
+     * v8.2 continuous VISUAL multi-scan session (photo engine):
+     * the native window auto-captures without a shutter press, every
+     * photo streams to JS as a "selaScanVisual" event {path, auto},
+     * and the session stays open until the merchant closes it.
+     */
+    @ReactMethod
+    fun openScannerVisualContinuous(promise: Promise) {
+        launchScanner(
+            ScannerActivity.MODE_PHOTO,
+            continuous = true,
+            promise = promise
+        )
+    }
+
+    /**
+     * v8.2: JS reports each recognition outcome back INTO the live
+     * scanner window (banner + vibrate + flash + counter).
+     * kind: "added" | "dup" | "miss".
+     */
+    @ReactMethod
+    fun reportVisualResult(kind: String, name: String, score: Double) {
+        val sink = ScannerActivity.visualFeedback ?: return
+        runCatching { sink(kind, name, score) }
     }
 
     private fun launchScanner(mode: String, continuous: Boolean, promise: Promise) {
@@ -102,7 +130,13 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         pendingPromise = promise
         if (continuous) {
             // Stream sink — must exist before the activity can read.
-            ScannerActivity.continuousSink = { code -> emitBarcodeRead(code) }
+            if (mode == ScannerActivity.MODE_PHOTO) {
+                ScannerActivity.visualSink = { path, auto ->
+                    emitVisualPhoto(path, auto)
+                }
+            } else {
+                ScannerActivity.continuousSink = { code -> emitBarcodeRead(code) }
+            }
         }
         try {
             val intent = Intent(activity, ScannerActivity::class.java)
@@ -119,6 +153,8 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         } catch (error: Exception) {
             if (continuous) {
                 ScannerActivity.continuousSink = null
+                ScannerActivity.visualSink = null
+                ScannerActivity.visualFeedback = null
             }
             pendingPromise = null
             promise.reject(
@@ -140,6 +176,19 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** v8.2: live visual photo stream → JS event. Safe from any thread. */
+    private fun emitVisualPhoto(path: String, auto: Boolean) {
+        runCatching {
+            val params = Arguments.createMap().apply {
+                putString("path", path)
+                putBoolean("auto", auto)
+            }
+            reactApplicationContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit(VISUAL_PHOTO_EVENT, params)
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════
     // ActivityEventListener
     // ═══════════════════════════════════════════════════════════
@@ -155,9 +204,11 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         }
         val promise = pendingPromise ?: return
         pendingPromise = null
-        // v8.1: the continuous session is over — drop the stream sink
-        // immediately so no stale read can leak into the next session.
+        // v8.1/v8.2: the continuous session is over — drop every stream
+        // sink immediately so no stale read can leak into a new session.
         ScannerActivity.continuousSink = null
+        ScannerActivity.visualSink = null
+        ScannerActivity.visualFeedback = null
 
         try {
             if (resultCode == Activity.RESULT_OK) {

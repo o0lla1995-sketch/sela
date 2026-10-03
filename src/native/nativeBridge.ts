@@ -101,6 +101,20 @@ interface SelaScannerNativeModule {
     code?: string;
     path?: string;
   }>;
+  /** v8.2: opens the continuous VISUAL multi-scan session — the
+   *  native window auto-captures and streams each photo path as a
+   *  "selaScanVisual" event {path, auto} until the merchant closes it. */
+  openScannerVisualContinuous(): Promise<{
+    cancelled?: boolean;
+    path?: string;
+  }>;
+  /** v8.2: reports each recognition outcome back INTO the live
+   *  scanner window (banner + vibrate + flash + counter). */
+  reportVisualResult(
+    kind: 'added' | 'dup' | 'miss',
+    name: string,
+    score: number,
+  ): void;
   /** Headless camera self-test → every step's outcome. */
   runDiagnostics(): Promise<{
     permissionGranted: boolean;

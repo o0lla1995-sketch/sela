@@ -23,8 +23,13 @@ export const NORM_STD = 127.5;
  */
 export const DEFAULT_MATCH_THRESHOLD = 0.78;
 
-/** Minimum time between two auto-adds of the SAME product (ms). */
-export const DEFAULT_RECOGNITION_COOLDOWN_MS = 1500;
+/** Minimum time between two auto-adds of the SAME product (ms).
+ *  v8.2: 1500 → 3500 — the ambient visual auto-capture keeps seeing
+ *  the same product while it sits in front of the lens; a 3.5s
+ *  window prevents runaway re-adds while "hold it a moment longer"
+ *  still buys a second unit. A deliberate MANUAL shutter press
+ *  always adds instantly (bypasses the window). */
+export const DEFAULT_RECOGNITION_COOLDOWN_MS = 3500;
 
 /** Scanner engine selected by the merchant from Settings. */
 export type ScannerMode = 'barcode' | 'visual' | 'both';
@@ -104,9 +109,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '8.1.0';
+export const APP_VERSION = '8.2.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 10;
+export const APP_BUILD_CODE = 11;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

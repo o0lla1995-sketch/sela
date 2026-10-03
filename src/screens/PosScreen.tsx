@@ -16,19 +16,20 @@ import {
   Dimensions,
   Image,
   Keyboard,
+  LayoutAnimation,
   Modal,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  Vibration,
+  UIManager,
   View,
 } from 'react-native';
 import {useNavigation} from '@react-navigation/native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {
   AppButton,
-  AppHeader,
   Badge,
   EmptyState,
   MoneyText,
@@ -46,9 +47,18 @@ import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {findTopMatches} from '../services/vision/embedding';
-import {scanBarcodeContinuous, capturePhoto} from '../services/vision/scanFlow';
-import {requirePlatformUtils} from '../native/nativeBridge';
-import {BASE_UNIT_NAME, type ScannerMode} from '../core/config';
+import {
+  cameraPermissionMessage,
+  ensureCameraPermission,
+  scanBarcodeContinuous,
+  scanVisualContinuous,
+} from '../services/vision/scanFlow';
+import {requirePlatformUtils, SelaScannerNative} from '../native/nativeBridge';
+import {
+  BASE_UNIT_NAME,
+  DEFAULT_RECOGNITION_COOLDOWN_MS,
+  type ScannerMode,
+} from '../core/config';
 import {
   fonts,
   makeStyles,
@@ -72,6 +82,7 @@ export function PosScreen() {
   const c = useThemeColors();
   const styles = useStyles();
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
 
   const lines = useCartStore(state => state.lines);
   const pricingMode = useCartStore(state => state.pricingMode);
@@ -97,19 +108,13 @@ export function PosScreen() {
   const [discountText, setDiscountText] = useState('');
   // v8: the scanner is a NATIVE full-screen activity — no in-RN
   // camera state left. scanBusy guards the launch, enginePicker is
-  // the "which engine?" sheet (scannerMode = both), and visionResult
-  // is the photo → top-matches result sheet.
+  // the "which engine?" sheet (scannerMode = both).
   const [scanBusy, setScanBusy] = useState(false);
   const [enginePickerOpen, setEnginePickerOpen] = useState(false);
-  // v8.1: the sheet now tracks WHICH product was added (addedName)
-  // instead of a boolean — a manual pick keeps the sheet open so the
-  // merchant can keep scanning more products in one session.
-  const [visionResult, setVisionResult] = useState<{
-    photoPath: string;
-    matches: {product: Product; score: number}[];
-    addedName: string | null;
-    addedScore: number | null;
-  } | null>(null);
+  // v8.2 (round-11 #3): cart expand toggle — the cart grows to fill
+  // the whole screen (grid folds away) so the merchant can review a
+  // long sale comfortably, then shrinks back to keep selling.
+  const [cartExpanded, setCartExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [unitPickerLine, setUnitPickerLine] = useState<CartLine | null>(null);
   const [unitPickerRows, setUnitPickerRows] = useState<ProductUnit[] | null>(
@@ -127,6 +132,14 @@ export function PosScreen() {
       setDiscountText('');
     }
   }, [discount]);
+
+  // v8.2: a sale that empties the cart also folds the expanded view
+  // back down — the grid must return for the next customer.
+  useEffect(() => {
+    if (cartExpanded && lines.length === 0) {
+      setCartExpanded(false);
+    }
+  }, [lines.length, cartExpanded]);
 
   const beep = useCallback(() => {
     if (!settings.soundEnabled) {
@@ -151,74 +164,120 @@ export function PosScreen() {
     [addProduct, pricingMode, beep, toast],
   );
 
-  /** v8: photo engine → embed → top matches → auto-add or sheet.
-   *  v8.1: confident matches auto-add and the sheet stays open with
-   *  "مسح أخرى" — continuous multi-scan in one session. */
+  /** v8.2 CONTINUOUS visual session: the native engine AUTO-captures
+   *  (no shutter press per product — round-11 #2), every photo
+   *  streams back here and each confident match jumps into the cart
+   *  BY ITSELF. The merchant waves product after product in front of
+   *  the camera and watches the session counter; a deliberate manual
+   *  shutter press adds instantly (bypasses the same-product window).
+   *  The old post-scan result sheet is GONE — a Modal opened right
+   *  after the native scanner window closed was what blacked the
+   *  screen on this device; the flow now stays 100% inside the
+   *  native window until the merchant closes it. */
   const runVisionScan = useCallback(async () => {
     if (scanBusy) {
       return;
     }
-    setScanBusy(true);
+    const permission = await ensureCameraPermission();
+    if (permission !== 'granted') {
+      toast(cameraPermissionMessage(permission), 'error');
+      return;
+    }
+    const index = useCatalogStore.getState().embeddingsIndex;
+    if (index == null || index.ids.length === 0) {
+      toast(
+        'لا توجد بصمات بصرية محفوظة — سجّل صور المنتجات من شاشة المنتج أولاً',
+        'error',
+      );
+      return;
+    }
     try {
-      const photoPath = await capturePhoto();
-      if (photoPath == null) {
-        return; // Merchant closed the native scanner.
-      }
       await VisionRecognitionService.loadModel();
-      const vector = await VisionRecognitionService.embedPhoto(photoPath);
-      const index = useCatalogStore.getState().embeddingsIndex;
-      if (index == null || index.ids.length === 0) {
-        toast(
-          'لا توجد بصمات بصرية محفوظة — سجّل صور المنتجات من شاشة المنتج أولاً',
-          'error',
-        );
-        return;
-      }
-      const top = findTopMatches(vector, index.flat, index.ids, index.dim, 5);
-      const allProducts = useCatalogStore.getState().products;
-      const matches = top
-        .map(match => ({
-          product: allProducts.find(p => p.id === match.productId),
-          score: match.score,
-        }))
-        .filter(
-          (match): match is {product: Product; score: number} =>
-            match.product != null,
-        );
-      if (matches.length === 0) {
-        toast('لم يتم التعرف على المنتج — جرّب زاوية أو إضاءة أفضل', 'error');
-        return;
-      }
-      const threshold = settings.matchThreshold;
-      const best = matches[0];
-      if (best.score >= threshold) {
-        // Confident match → straight into the cart, like a barcode.
-        const result = addProduct(
-          best.product,
-          useCartStore.getState().pricingMode,
-          null,
-        );
-        if (result.added) {
-          Vibration.vibrate(40);
-          beep();
-        } else if (result.reason) {
-          toast(result.reason, 'error');
+    } catch {
+      // embedPhoto below will surface a readable error instead.
+    }
+    setScanBusy(true);
+    let added = 0;
+    const addErrors: string[] = [];
+    const lastAddAt = new Map<number, number>();
+    let processing = false;
+    try {
+      await scanVisualContinuous((photoPath, auto) => {
+        if (processing) {
+          // One recognition at a time — the native loop's own cadence
+          // leaves plenty of slack between photos.
+          return;
         }
-        setVisionResult({
-          photoPath,
-          matches: matches.slice(1),
-          addedName: best.product.name,
-          addedScore: best.score,
-        });
-      } else {
-        // Below threshold → merchant picks from the top matches.
-        setVisionResult({
-          photoPath,
-          matches,
-          addedName: null,
-          addedScore: null,
-        });
-      }
+        processing = true;
+        void (async () => {
+          try {
+            const vector = await VisionRecognitionService.embedPhoto(photoPath);
+            const live = useCatalogStore.getState().embeddingsIndex;
+            if (live == null || live.ids.length === 0) {
+              return;
+            }
+            const best = findTopMatches(
+              vector,
+              live.flat,
+              live.ids,
+              live.dim,
+              1,
+            )[0];
+            const product =
+              best == null
+                ? undefined
+                : useCatalogStore
+                    .getState()
+                    .products.find(entry => entry.id === best.productId);
+            const threshold =
+              useSettingsStore.getState().settings.matchThreshold;
+            if (best == null || product == null || best.score < threshold) {
+              SelaScannerNative?.reportVisualResult('miss', '', 0);
+              return;
+            }
+            const now = Date.now();
+            const last = lastAddAt.get(product.id);
+            if (
+              auto &&
+              last != null &&
+              now - last < DEFAULT_RECOGNITION_COOLDOWN_MS
+            ) {
+              // Same product still in front of the lens — acknowledge
+              // without adding (manual shutter bypasses this).
+              SelaScannerNative?.reportVisualResult(
+                'dup',
+                product.name,
+                best.score,
+              );
+              return;
+            }
+            const result = addProduct(
+              product,
+              useCartStore.getState().pricingMode,
+              null,
+            );
+            if (result.added) {
+              added++;
+              lastAddAt.set(product.id, now);
+              beep();
+              SelaScannerNative?.reportVisualResult(
+                'added',
+                product.name,
+                best.score,
+              );
+            } else {
+              SelaScannerNative?.reportVisualResult('miss', '', 0);
+              if (result.reason != null && !addErrors.includes(result.reason)) {
+                addErrors.push(result.reason);
+              }
+            }
+          } catch {
+            SelaScannerNative?.reportVisualResult('miss', '', 0);
+          } finally {
+            processing = false;
+          }
+        })();
+      });
     } catch (error) {
       toast(
         error instanceof Error ? error.message : 'فشل المسح البصري',
@@ -226,8 +285,19 @@ export function PosScreen() {
       );
     } finally {
       setScanBusy(false);
+      if (added > 0) {
+        toast(
+          `انتهت الجلسة — أُضيف ${added} ${
+            added === 1 ? 'منتج' : 'منتجات'
+          } إلى السلة`,
+          'success',
+        );
+      }
+      if (addErrors.length > 0) {
+        toast(addErrors[0], 'error');
+      }
     }
-  }, [scanBusy, addProduct, beep, toast, settings.matchThreshold]);
+  }, [scanBusy, addProduct, beep, toast]);
 
   /**
    * Barcode read → exact product lookup → cart or create prompt.
@@ -453,7 +523,6 @@ export function PosScreen() {
         });
         clear();
         setDiscountText('');
-        setVisionResult(null);
         void refreshCatalog();
         toast(
           `تم إتمام البيع بنجاح ${withPrint ? 'وإرساله للطابعة' : ''}`,
@@ -521,21 +590,26 @@ export function PosScreen() {
       ? 'بصري'
       : 'مسح';
 
+  /** v8.2 (round-11 #3): grow the cart to the whole screen / fold it
+   *  back — smooth LayoutAnimation keeps the transition classy. */
+  const toggleCartExpanded = useCallback(() => {
+    try {
+      if (UIManager.setLayoutAnimationEnabledExperimental != null) {
+        UIManager.setLayoutAnimationEnabledExperimental(true);
+      }
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    } catch {
+      // Cosmetic only — never block the toggle.
+    }
+    setCartExpanded(value => !value);
+  }, []);
+
   return (
     <View style={styles.screen}>
-      <AppHeader
-        title="نقطة البيع"
-        subtitle={settings.storeName}
-        showBack={false}
-        right={
-          <Badge
-            label={pricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}
-            tone={pricingMode === 'WHOLESALE' ? 'accent' : 'success'}
-          />
-        }
-      />
-
-      <View style={styles.body}>
+      {/* v8.2 (round-11 #3): NO top header — every millimeter of the
+          screen works for the product grid and the cart. The pricing
+          mode is already visible in the Segmented control. */}
+      <View style={[styles.body, {paddingTop: insets.top + spacing.sm}]}>
         {/* ── Pricing mode + search + scan ─────────────────── */}
         <View style={styles.controlsRow}>
           <Segmented
@@ -567,88 +641,91 @@ export function PosScreen() {
           </View>
         </View>
 
-        {/* ── Products grid ────────────────────────────────── */}
-        {products.length === 0 ? (
-          <EmptyState
-            icon="box"
-            title="لا توجد منتجات بعد"
-            subtitle="أضف أول منتج مع بصمته البصرية أو باركوده من شاشة المخزون"
-          />
-        ) : (
-          <ScrollView
-            style={{flex: 1}}
-            contentContainerStyle={styles.grid}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled">
-            {filteredProducts.length === 0 ? (
-              <View style={{paddingTop: spacing.xl}}>
-                <EmptyState
-                  icon="search"
-                  title="لا نتائج"
-                  subtitle={`لا منتج يطابق «${search}»`}
-                />
-              </View>
-            ) : (
-              filteredProducts.map(product => {
-                const stockState = stockStateOf(
-                  product,
-                  settings.lowStockDefaultThreshold,
-                );
-                return (
-                  <TouchableOpacity
-                    key={product.id}
-                    style={styles.tile}
-                    onPress={() => tryAdd(product)}
-                    activeOpacity={0.75}>
-                    {product.image_uri ? (
-                      <Image
-                        source={{uri: `file://${product.image_uri}`}}
-                        style={styles.tileImage}
-                      />
-                    ) : (
-                      <View
-                        style={[styles.tileImage, styles.tileImageFallback]}>
-                        <Icon name="box" size={20} color={c.accent} />
-                      </View>
-                    )}
-                    <Text style={styles.tileName} numberOfLines={1}>
-                      {product.name}
-                    </Text>
-                    <Text style={styles.tilePrice}>
-                      {formatMoney(priceOf(product))}
-                    </Text>
-                    <View style={styles.tileStockRow}>
-                      <View
-                        style={[
-                          styles.stockDot,
-                          {
-                            backgroundColor:
-                              stockState === 'out'
-                                ? c.danger
-                                : stockState === 'low'
-                                ? c.warning
-                                : c.success,
-                          },
-                        ]}
-                      />
-                      <Text style={styles.tileStock}>
-                        {stockState === 'out'
-                          ? 'نفد'
-                          : `${product.stock_quantity} ${BASE_UNIT_NAME}`}
+        {/* ── Products grid (hidden while the cart is expanded —
+            round-11 #3: the expanded cart IS the workspace) ── */}
+        {!cartExpanded &&
+          (products.length === 0 ? (
+            <EmptyState
+              icon="box"
+              title="لا توجد منتجات بعد"
+              subtitle="أضف أول منتج مع بصمته البصرية أو باركوده من شاشة المخزون"
+            />
+          ) : (
+            <ScrollView
+              style={{flex: 1}}
+              contentContainerStyle={styles.grid}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled">
+              {filteredProducts.length === 0 ? (
+                <View style={{paddingTop: spacing.xl}}>
+                  <EmptyState
+                    icon="search"
+                    title="لا نتائج"
+                    subtitle={`لا منتج يطابق «${search}»`}
+                  />
+                </View>
+              ) : (
+                filteredProducts.map(product => {
+                  const stockState = stockStateOf(
+                    product,
+                    settings.lowStockDefaultThreshold,
+                  );
+                  return (
+                    <TouchableOpacity
+                      key={product.id}
+                      style={styles.tile}
+                      onPress={() => tryAdd(product)}
+                      activeOpacity={0.75}>
+                      {product.image_uri ? (
+                        <Image
+                          source={{uri: `file://${product.image_uri}`}}
+                          style={styles.tileImage}
+                        />
+                      ) : (
+                        <View
+                          style={[styles.tileImage, styles.tileImageFallback]}>
+                          <Icon name="box" size={20} color={c.accent} />
+                        </View>
+                      )}
+                      <Text style={styles.tileName} numberOfLines={1}>
+                        {product.name}
                       </Text>
-                      {product.barcode ? (
-                        <Icon name="barcode" size={11} color={c.textFaint} />
-                      ) : null}
-                    </View>
-                  </TouchableOpacity>
-                );
-              })
-            )}
-          </ScrollView>
-        )}
+                      <Text style={styles.tilePrice}>
+                        {formatMoney(priceOf(product))}
+                      </Text>
+                      <View style={styles.tileStockRow}>
+                        <View
+                          style={[
+                            styles.stockDot,
+                            {
+                              backgroundColor:
+                                stockState === 'out'
+                                  ? c.danger
+                                  : stockState === 'low'
+                                  ? c.warning
+                                  : c.success,
+                            },
+                          ]}
+                        />
+                        <Text style={styles.tileStock}>
+                          {stockState === 'out'
+                            ? 'نفد'
+                            : `${product.stock_quantity} ${BASE_UNIT_NAME}`}
+                        </Text>
+                        {product.barcode ? (
+                          <Icon name="barcode" size={11} color={c.textFaint} />
+                        ) : null}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+            </ScrollView>
+          ))}
 
         {/* ── Cart panel ───────────────────────────────────── */}
-        <View style={styles.cartPanel}>
+        <View
+          style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
           {lines.length === 0 ? (
             <View style={styles.cartEmptyRow}>
               <Icon name="cart" size={18} color={c.textFaint} />
@@ -664,9 +741,26 @@ export function PosScreen() {
             </View>
           ) : (
             <>
-              {/* Compact header: title + live count + EMPTY button
-                  (round-8: "لا يوجد زر إلغاء أو تفريغ السلة"). */}
+              {/* Compact header: expand toggle + title + live count +
+                  EMPTY button (round-8). v8.2 (round-11 #3): تكبير
+                  grows the cart to the full screen, تصغير folds it
+                  back — reviewing a long sale is now comfortable. */}
               <View style={styles.cartHeaderRow}>
+                <TouchableOpacity
+                  style={styles.expandBtn}
+                  onPress={toggleCartExpanded}
+                  activeOpacity={0.75}
+                  hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
+                  <View
+                    style={{
+                      transform: [{rotate: cartExpanded ? '0deg' : '180deg'}],
+                    }}>
+                    <Icon name="chevronDown" size={13} color={c.accent} />
+                  </View>
+                  <Text style={styles.expandBtnText}>
+                    {cartExpanded ? 'تصغير' : 'تكبير'}
+                  </Text>
+                </TouchableOpacity>
                 <View style={styles.cartHeaderTitle}>
                   <Icon name="cart" size={14} color={c.accent} />
                   <Text style={styles.cartHeaderText}>سلة البيع</Text>
@@ -681,7 +775,12 @@ export function PosScreen() {
                   <Text style={styles.clearCartText}>تفريغ</Text>
                 </TouchableOpacity>
               </View>
-              <View style={styles.cartLinesWrap}>
+              <View
+                style={
+                  cartExpanded
+                    ? styles.cartLinesWrapExpanded
+                    : styles.cartLinesWrap
+                }>
                 <ScrollView
                   style={{flex: 1}}
                   showsVerticalScrollIndicator={false}>
@@ -877,123 +976,13 @@ export function PosScreen() {
               <View style={{flex: 1}}>
                 <Text style={styles.engineRowTitle}>المسح البصري</Text>
                 <Text style={styles.engineRowMeta}>
-                  صوّر المنتج بالكاميرا ويتم التعرف عليه فوراً
+                  جلسة متواصلة — يُضاف المنتج للسلة تلقائياً عند التعرف عليه
                 </Text>
               </View>
               <Icon name="chevronLeft" size={18} color={c.textFaint} />
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
-      </Modal>
-
-      {/* ── v8 vision result sheet ────────────────────────────
-          Photo captured by the native engine → embedding → top
-          matches. Confident match = already added (green banner);
-          otherwise the merchant taps the right product. v8.1: a
-          manual pick KEEPS THE SHEET OPEN (addedName feedback) so a
-          whole multi-product scanning session happens in one place,
-          with the live cart total always visible. */}
-      <Modal
-        visible={visionResult != null}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setVisionResult(null)}>
-        <View style={styles.visionSheetOverlay}>
-          <TouchableOpacity
-            style={{flex: 1}}
-            activeOpacity={1}
-            onPress={() => setVisionResult(null)}
-          />
-          {visionResult != null ? (
-            <View style={styles.visionSheet}>
-              <View style={styles.visionSheetHandle} />
-              <Text style={styles.visionSheetTitle}>نتيجة المسح البصري</Text>
-              <Image
-                source={{uri: `file://${visionResult.photoPath}`}}
-                style={styles.visionPhoto}
-                resizeMode="cover"
-              />
-              {visionResult.addedName != null ? (
-                <View style={styles.visionAddedBanner}>
-                  <Icon name="checkCircle" size={15} color={c.success} />
-                  <Text style={styles.visionAddedText} numberOfLines={1}>
-                    أُضيف للسلة: {visionResult.addedName}
-                  </Text>
-                  {visionResult.addedScore != null ? (
-                    <Text style={styles.visionAddedScore}>
-                      {((visionResult.addedScore as number) * 100).toFixed(0)}%
-                    </Text>
-                  ) : null}
-                </View>
-              ) : (
-                <Text style={styles.visionPickHint}>
-                  التطابق غير مؤكد — اختر المنتج الصحيح:
-                </Text>
-              )}
-              <ScrollView
-                style={{maxHeight: 200}}
-                showsVerticalScrollIndicator={false}>
-                {visionResult.matches.map(match => (
-                  <VisionMatchRow
-                    key={match.product.id}
-                    product={match.product}
-                    score={match.score}
-                    onPress={() => {
-                      // v8.1: add and STAY OPEN — the merchant can pick
-                      // another candidate or scan the next product.
-                      tryAdd(match.product);
-                      setVisionResult(prev =>
-                        prev == null
-                          ? null
-                          : {
-                              ...prev,
-                              matches: prev.matches.filter(
-                                entry => entry.product.id !== match.product.id,
-                              ),
-                              addedName: match.product.name,
-                              addedScore: match.score,
-                            },
-                      );
-                    }}
-                  />
-                ))}
-                {visionResult.addedName != null &&
-                visionResult.matches.length === 0 ? (
-                  <Text style={styles.visionNoMore}>لا توجد مطابقات أخرى</Text>
-                ) : null}
-              </ScrollView>
-              {/* Live cart summary — the sale grows inside the sheet. */}
-              <View style={styles.visionCartRow}>
-                <View style={styles.visionCartInfo}>
-                  <Icon name="cart" size={14} color={c.accent} />
-                  <Text style={styles.visionCartText}>
-                    السلة: {totals.itemsCount} قطعة ·{' '}
-                    {formatMoney(totals.total)}
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.visionSheetActions}>
-                <AppButton
-                  small
-                  style={{flex: 1}}
-                  title="مسح أخرى"
-                  icon="camera"
-                  onPress={() => {
-                    setVisionResult(null);
-                    void runVisionScan();
-                  }}
-                />
-                <AppButton
-                  small
-                  style={{flex: 1}}
-                  variant="secondary"
-                  title="إغلاق"
-                  onPress={() => setVisionResult(null)}
-                />
-              </View>
-            </View>
-          ) : null}
-        </View>
       </Modal>
 
       {/* ── Unit picker sheet ──────────────────────────────── */}
@@ -1076,56 +1065,6 @@ export function PosScreen() {
 // ────────────────────────────────────────────────────────────────
 // Sub-components
 // ────────────────────────────────────────────────────────────────
-
-function VisionMatchRow({
-  product,
-  score,
-  onPress,
-}: {
-  product: Product;
-  score: number;
-  onPress: () => void;
-}) {
-  const c = useThemeColors();
-  const styles = useStyles();
-  return (
-    <TouchableOpacity
-      style={styles.visionMatchRow}
-      onPress={onPress}
-      activeOpacity={0.8}>
-      {product.image_uri ? (
-        <Image
-          source={{uri: `file://${product.image_uri}`}}
-          style={styles.visionMatchThumb}
-        />
-      ) : (
-        <View
-          style={[
-            styles.visionMatchThumb,
-            {
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: c.surfaceAlt,
-            },
-          ]}>
-          <Icon name="box" size={18} color={c.textDim} />
-        </View>
-      )}
-      <View style={{flex: 1}}>
-        <Text style={styles.visionMatchName} numberOfLines={1}>
-          {product.name}
-        </Text>
-        <Text style={styles.visionMatchMeta} numberOfLines={1}>
-          {formatMoney(product.retail_price)} · المتوفر {product.stock_quantity}{' '}
-          {BASE_UNIT_NAME}
-        </Text>
-      </View>
-      <View style={styles.visionScoreChip}>
-        <Text style={styles.visionScoreText}>{(score * 100).toFixed(0)}%</Text>
-      </View>
-    </TouchableOpacity>
-  );
-}
 
 function UnitOption({
   label,
@@ -1289,136 +1228,6 @@ const useStyles = makeStyles(c =>
       marginTop: 2,
     },
 
-    // v8 vision result sheet
-    visionSheetOverlay: {
-      flex: 1,
-      backgroundColor: c.overlay,
-      justifyContent: 'flex-end',
-    },
-    visionSheet: {
-      backgroundColor: c.surface,
-      borderTopLeftRadius: radius.lg + 4,
-      borderTopRightRadius: radius.lg + 4,
-      padding: spacing.lg,
-      gap: spacing.sm,
-      paddingBottom: spacing.xl,
-    },
-    visionSheetHandle: {
-      alignSelf: 'center',
-      width: 44,
-      height: 4,
-      borderRadius: 2,
-      backgroundColor: c.border,
-      marginBottom: 2,
-    },
-    visionSheetTitle: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.body,
-      textAlign: 'center',
-    },
-    visionPhoto: {
-      width: '100%',
-      height: 130,
-      borderRadius: radius.md,
-      backgroundColor: c.surfaceAlt,
-    },
-    visionAddedBanner: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      backgroundColor: c.successSoft,
-      borderRadius: radius.sm,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 7,
-    },
-    visionAddedText: {
-      flex: 1,
-      color: c.success,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-    },
-    visionAddedScore: {
-      color: c.success,
-      fontFamily: fonts.black,
-      fontSize: typography.small,
-      fontVariant: ['tabular-nums'],
-    },
-    visionPickHint: {
-      color: c.textDim,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-    },
-    visionMatchRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-      paddingVertical: 7,
-      borderBottomWidth: 1,
-      borderBottomColor: c.borderSoft,
-    },
-    visionMatchThumb: {
-      width: 40,
-      height: 40,
-      borderRadius: radius.sm,
-      backgroundColor: c.surfaceAlt,
-    },
-    visionMatchName: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.caption,
-    },
-    visionMatchMeta: {
-      color: c.textDim,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro + 1,
-      marginTop: 1,
-    },
-    visionScoreChip: {
-      backgroundColor: c.accentSofter,
-      borderRadius: radius.pill,
-      paddingHorizontal: 8,
-      paddingVertical: 3,
-    },
-    visionScoreText: {
-      color: c.accent,
-      fontFamily: fonts.black,
-      fontSize: typography.micro + 1,
-      fontVariant: ['tabular-nums'],
-    },
-    visionNoMore: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-      textAlign: 'center',
-      paddingVertical: spacing.md,
-    },
-    visionSheetActions: {
-      flexDirection: 'row',
-      gap: spacing.sm,
-    },
-    visionCartRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: c.surfaceAlt,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 7,
-    },
-    visionCartInfo: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 7,
-    },
-    visionCartText: {
-      color: c.text,
-      fontFamily: fonts.black,
-      fontSize: typography.small,
-      fontVariant: ['tabular-nums'],
-    },
-
     // Grid
     grid: {
       flexDirection: 'row',
@@ -1479,10 +1288,14 @@ const useStyles = makeStyles(c =>
     // tighter rows, compact 26px steppers, inline unit chips and
     // smaller quick-action chips — nothing overflows the panel.
     // v8.1: the lines wrap is the ONLY flexible child (flexShrink)
-    // inside the 42%-capped panel — with many products it shrinks
+    // inside the capped panel — with many products it shrinks
     // and scrolls INTERNALLY instead of pushing the discount row /
     // totals / بيع buttons out of the frame under the bottom tab bar
     // (round-10 #3).
+    // v8.2 (round-11 #3): maxHeight 42% → 50% and the lines wrap
+    // keeps a minHeight of TWO full rows — with many products the
+    // merchant ALWAYS sees at least two lines; the تكبير button
+    // then grows the cart to the whole screen (grid folds away).
     cartPanel: {
       backgroundColor: c.surface,
       borderTopWidth: 1,
@@ -1492,7 +1305,19 @@ const useStyles = makeStyles(c =>
       borderColor: c.borderSoft,
       padding: spacing.sm,
       gap: spacing.xs,
-      maxHeight: '42%',
+      maxHeight: '50%',
+    },
+    /** v8.2: the EXPANDED cart — fills the body (grid hidden). */
+    cartPanelExpanded: {
+      backgroundColor: c.surface,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.sm,
+      gap: spacing.xs,
+      flex: 1,
     },
     cartHeaderRow: {
       flexDirection: 'row',
@@ -1542,9 +1367,32 @@ const useStyles = makeStyles(c =>
       lineHeight: 18,
     },
     cartLinesWrap: {
+      // v8.2: minHeight = TWO full cart rows (~2 × 42dp) — the
+      // merchant always sees at least two products no matter how
+      // full the panel gets; above that the list scrolls internally.
       flexShrink: 1,
-      minHeight: 48,
+      minHeight: 88,
       overflow: 'hidden',
+    },
+    /** v8.2: expanded cart — the list takes ALL the freed space. */
+    cartLinesWrapExpanded: {
+      flex: 1,
+      minHeight: 88,
+      overflow: 'hidden',
+    },
+    expandBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      backgroundColor: c.accentSofter,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 3,
+    },
+    expandBtnText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
     },
     cartLine: {
       flexDirection: 'row',

@@ -10,18 +10,83 @@
  * v8.1 adds scanBarcodeContinuous(): a multi-scan session that never
  * auto-closes — each deduped read is delivered live to `onCode`, and
  * the promise resolves (null) when the merchant closes the scanner.
+ *
+ * v8.2 (round-11):
+ *  • ensureCameraPermission() — the app now ASKS for the camera at
+ *    runtime BEFORE the native window opens (round-11 #1: nothing
+ *    ever requested it, so first launch died with "إذن الكاميرا
+ *    غير ممنوح"). The native activity re-asks as a safety net.
+ *  • scanVisualContinuous() — the visual engine's multi-scan session:
+ *    the native window AUTO-captures (no shutter press per product),
+ *    every photo streams to `onPhoto`, and recognized products jump
+ *    into the cart by themselves (round-11 #2).
  */
-import {DeviceEventEmitter, EmitterSubscription} from 'react-native';
+import {
+  DeviceEventEmitter,
+  EmitterSubscription,
+  PermissionsAndroid,
+} from 'react-native';
 import {SelaScannerNative} from '../../native/nativeBridge';
 
 /** Native event streamed for every read during a continuous session. */
 const BARCODE_READ_EVENT = 'selaScanBarcode';
+/** Native event streamed for every photo in a continuous VISUAL session. */
+const VISUAL_PHOTO_EVENT = 'selaScanVisual';
+
+export type CameraPermissionResult = 'granted' | 'denied' | 'never_ask_again';
+
+/**
+ * v8.2: runtime CAMERA permission — called before ANY scanner window
+ * opens, so the very first launch shows the system dialog instead of
+ * an instant "permission not granted" failure.
+ */
+export async function ensureCameraPermission(): Promise<CameraPermissionResult> {
+  try {
+    const already = await PermissionsAndroid.check(
+      PermissionsAndroid.PERMISSIONS.CAMERA,
+    );
+    if (already) {
+      return 'granted';
+    }
+    const result = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.CAMERA,
+      {
+        title: 'إذن الكاميرا',
+        message:
+          'يحتاج سيلا إلى الكاميرا لمسح المنتجات — المسح البصري والباركود يعملان بها فقط',
+        buttonPositive: 'سماح',
+        buttonNegative: 'لاحقاً',
+      },
+    );
+    return result as CameraPermissionResult;
+  } catch {
+    return 'denied';
+  }
+}
+
+/** Readable Arabic message for a refused camera permission. */
+export function cameraPermissionMessage(
+  result: CameraPermissionResult,
+): string {
+  return result === 'never_ask_again'
+    ? 'إذن الكاميرا مرفوض نهائياً — فعّله من: الإعدادات ← التطبيقات ← سيلا ← الأذونات'
+    : 'لا يمكن فتح الماسح بدون إذن الكاميرا — امنح الإذن وحاول مجدداً';
+}
+
+/** Throws a readable Arabic error when the camera is not permitted. */
+async function requireCameraPermission(): Promise<void> {
+  const result = await ensureCameraPermission();
+  if (result !== 'granted') {
+    throw new Error(cameraPermissionMessage(result));
+  }
+}
 
 /** Opens the native BARCODE engine → code string, or null if closed. */
 export async function scanBarcode(): Promise<string | null> {
   if (SelaScannerNative == null) {
     throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
   }
+  await requireCameraPermission();
   const result = await SelaScannerNative.openScanner('barcode');
   if (result.cancelled || result.code == null) {
     return null;
@@ -39,6 +104,7 @@ export async function scanBarcodeContinuous(
   if (SelaScannerNative == null) {
     throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
   }
+  await requireCameraPermission();
   const listener: EmitterSubscription = DeviceEventEmitter.addListener(
     BARCODE_READ_EVENT,
     event => {
@@ -55,14 +121,47 @@ export async function scanBarcodeContinuous(
   }
 }
 
-/** Opens the native PHOTO engine → image path, or null if closed. */
+/** Opens the native PHOTO engine (single shot) → image path, or null. */
 export async function capturePhoto(): Promise<string | null> {
   if (SelaScannerNative == null) {
     throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
   }
+  await requireCameraPermission();
   const result = await SelaScannerNative.openScanner('photo');
   if (result.cancelled || result.path == null) {
     return null;
   }
   return result.path;
+}
+
+/**
+ * v8.2 continuous VISUAL multi-scan session (photo engine). The
+ * native window auto-captures on a calm cadence — no shutter press
+ * per product — and every photo fires `onPhoto(path, auto)` live;
+ * resolves when the merchant closes the scanner. Recognition and
+ * cart-adding happen in the `onPhoto` handler; the outcome is
+ * reported back via SelaScannerNative.reportVisualResult so the
+ * scanner window itself celebrates each add.
+ */
+export async function scanVisualContinuous(
+  onPhoto: (path: string, auto: boolean) => void,
+): Promise<void> {
+  if (SelaScannerNative == null) {
+    throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
+  }
+  await requireCameraPermission();
+  const listener: EmitterSubscription = DeviceEventEmitter.addListener(
+    VISUAL_PHOTO_EVENT,
+    event => {
+      const path = event?.path;
+      if (typeof path === 'string' && path.length > 0) {
+        onPhoto(path, event?.auto !== false);
+      }
+    },
+  );
+  try {
+    await SelaScannerNative.openScannerVisualContinuous();
+  } finally {
+    listener.remove();
+  }
 }
