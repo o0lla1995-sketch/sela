@@ -26,6 +26,10 @@ export type ScannerMode = 'barcode' | 'visual' | 'both';
 /** Pause between auto-scan cycles in the POS camera sheet (ms). */
 export const AUTO_SCAN_INTERVAL_MS = 900;
 
+/** Hard timeout around every native camera call — a hung camera can
+ *  never freeze the scan flow again (v3's fatal freeze). */
+export const CAPTURE_TIMEOUT_MS = 7000;
+
 /** Barcode re-scan guard: same code ignored for this long (ms). */
 export const BARCODE_DEDUPE_MS = 1600;
 
@@ -84,4 +88,39 @@ export const APP_NAME = 'sela';
 export const APP_NAME_AR = 'سيلا';
 
 /** App version shown in Settings → About. */
-export const APP_VERSION = '3.0.0';
+export const APP_VERSION = '4.0.0';
+
+// ─────────────────────────────────────────────────────────────
+// Subscription / licensing
+// ─────────────────────────────────────────────────────────────
+
+/** Default license-server base URL (owner's Coolify deployment).
+ *  Merchants can override it in the activation screen if the
+ *  management moves the server. */
+export const LICENSE_SERVER_URL = 'https://license.sela.app';
+
+/** Ed25519 PUBLIC key (hex) of the license server — licenses are
+ *  signed server-side and verified on-device; the private key never
+ *  leaves the server. Rotating the pair requires an app update. */
+export const LICENSE_PUBLIC_KEY_HEX =
+  '6ee513c1b7f0b057d970c6c2f4b33e5d026bc4c798b5a0b8bb72818d3197d103';
+
+/** Offline grace: hours an activated POS keeps working with no
+ *  server contact (POS must survive offline trading days). */
+export const LICENSE_GRACE_SOFT_HOURS = 72;
+
+/** After this many offline hours the app locks until it reaches
+ *  the server once (anti-crack: no eternal offline use). */
+export const LICENSE_GRACE_HARD_HOURS = 240;
+
+/** Wall-clock rollback beyond this (ms) counts as a tamper strike. */
+export const LICENSE_ROLLBACK_TOLERANCE_MS = 5 * 60 * 1000;
+
+/** Management contact shown on the activation + subscription
+ *  screens (server config overrides these when reachable). */
+export const LICENSE_CONTACT_FALLBACK = {
+  phone: '+972 59 000 0000',
+  whatsapp: '+972 59 000 0000',
+  email: 'abdalasela@gmail.com',
+  note: 'لشراء أو تجديد الاشتراك تواصل مع الإدارة عبر واتساب أو الهاتف',
+};

@@ -38,6 +38,48 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
   override fun getName(): String = NAME
 
   // ────────────────────────────────────────────────────────────────
+  // Device identity, anti-tamper timing & ABI
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Stable per-device identifier for license binding (ANDROID_ID —
+   * scoped to our app signature since Android 8, stable across
+   * reinstalls).
+   */
+  @ReactMethod
+  fun getDeviceId(promise: Promise) {
+    try {
+      val id = android.provider.Settings.Secure.getString(
+        reactContext.contentResolver,
+        android.provider.Settings.Secure.ANDROID_ID
+      )
+      if (id.isNullOrBlank()) {
+        promise.resolve("unknown-${Build.FINGERPRINT.hashCode()}")
+      } else {
+        promise.resolve(id)
+      }
+    } catch (e: Exception) {
+      promise.resolve("unknown-${Build.FINGERPRINT.hashCode()}")
+    }
+  }
+
+  /**
+   * Monotonic milliseconds since boot (SystemClock.elapsedRealtime).
+   * NOT affected by the user changing the phone's clock — the anchor
+   * of the subscription anti-tamper time checks.
+   */
+  @ReactMethod
+  fun getUptimeMs(promise: Promise) {
+    promise.resolve(android.os.SystemClock.elapsedRealtime().toDouble())
+  }
+
+  /** Primary ABI, e.g. "arm64-v8a" or "armeabi-v7a" (slow-device tuning). */
+  @ReactMethod
+  fun getAbi(promise: Promise) {
+    promise.resolve(Build.SUPPORTED_ABIS?.firstOrNull() ?: "unknown")
+  }
+
+  // ────────────────────────────────────────────────────────────────
   // Sounds
   // ────────────────────────────────────────────────────────────────
 

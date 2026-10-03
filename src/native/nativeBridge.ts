@@ -56,6 +56,12 @@ interface ThermalPrinterNative {
 interface PlatformUtilsNative {
   beep(kind: number): Promise<boolean>;
   getApiLevel(): Promise<number>;
+  /** Stable per-device id (ANDROID_ID) for license binding. */
+  getDeviceId(): Promise<string>;
+  /** Monotonic ms since boot — immune to clock changes. */
+  getUptimeMs(): Promise<number>;
+  /** Primary ABI ("arm64-v8a" / "armeabi-v7a"). */
+  getAbi(): Promise<string>;
   exportFile(
     fileName: string,
     mimeType: string,
@@ -66,6 +72,12 @@ interface PlatformUtilsNative {
   fileExists(path: string): Promise<boolean>;
   copyFile(sourcePath: string, destinationPath: string): Promise<string>;
   deleteFile(path: string): Promise<boolean>;
+}
+
+/** Hand-written CameraX view (capture/rebind by React view tag). */
+interface SelaCameraNativeModule {
+  capture(viewTag: number): Promise<string>;
+  rebind(viewTag: number): Promise<boolean>;
 }
 
 interface ImageDecoderNative {
@@ -103,6 +115,9 @@ export const SelaNotificationsNative: MaybeModule<SelaNotificationsNative> =
 
 export const SelaImagePickerNative: MaybeModule<SelaImagePickerNative> =
   NativeModules.SelaImagePicker as MaybeModule<SelaImagePickerNative>;
+
+export const SelaCameraNative: MaybeModule<SelaCameraNativeModule> =
+  NativeModules.SelaCamera as MaybeModule<SelaCameraNativeModule>;
 
 export function requireThermalPrinter(): ThermalPrinterNative {
   if (ThermalPrinterNative == null) {

@@ -50,7 +50,10 @@ import {useToastStore} from '../stores/toastStore';
 import {InvoiceService} from '../services/InvoiceService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
-import {requirePlatformUtils} from '../native/nativeBridge';
+import {
+  requirePlatformUtils,
+  PlatformUtilsNative,
+} from '../native/nativeBridge';
 import {BASE_UNIT_NAME, type ScannerMode} from '../core/config';
 import {
   fonts,
@@ -100,7 +103,28 @@ export function PosScreen() {
   const [search, setSearch] = useState('');
   const [discountText, setDiscountText] = useState('');
   const [cameraOpen, setCameraOpen] = useState(false);
+  // 32-bit devices run the TFLite inference 10-40x slower — the auto
+  // visual loop would saturate the JS thread there. Default to manual
+  // capture on them (merchant can still enable it manually).
   const [autoScan, setAutoScan] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    void PlatformUtilsNative?.getAbi()
+      .then(abi => {
+        if (
+          mounted &&
+          typeof abi === 'string' &&
+          abi.startsWith('armeabi-v7')
+        ) {
+          setAutoScan(false);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, []);
   const [busy, setBusy] = useState(false);
   const [lastRecognized, setLastRecognized] = useState<{
     name: string;

@@ -70,7 +70,12 @@ export type IconName =
   | 'scale'
   | 'shapes'
   | 'swap'
-  | 'qrFrame';
+  | 'qrFrame'
+  | 'key'
+  | 'phone'
+  | 'shield'
+  | 'lock'
+  | 'mail';
 
 interface IconProps {
   name: IconName;
@@ -101,6 +106,42 @@ const P: Record<IconName, React.ReactNode> = {
       <Path d="M2.8 9.5h18.4" />
       <Path d="M8.5 9.5 12 3.7l3.5 5.8" />
       <Path d="M8.6 13v4M12 13v4M15.4 13v4" />
+    </G>
+  ),
+  /** Activation key. */
+  key: (
+    <G>
+      <Circle cx={8} cy={8.5} r={4.2} />
+      <Path d="M11 11.5 20 20.5" />
+      <Path d="M16.5 17 14.5 19" />
+      <Path d="M19 14.5 17 16.5" />
+    </G>
+  ),
+  /** Phone handset. */
+  phone: (
+    <G>
+      <Path d="M5 4h3.5l1.5 4-2 1.5a12 12 0 0 0 6.5 6.5l1.5-2 4 1.5V19a1.6 1.6 0 0 1-1.8 1.6C10.8 19.7 4.3 13.2 3.4 5.8A1.6 1.6 0 0 1 5 4Z" />
+    </G>
+  ),
+  /** Anti-tamper shield. */
+  shield: (
+    <G>
+      <Path d="M12 3.2 4.8 6v5.4c0 4.5 3 8.2 7.2 9.4 4.2-1.2 7.2-4.9 7.2-9.4V6L12 3.2Z" />
+      <Path d="M9 12l2.1 2.1L15.4 10" />
+    </G>
+  ),
+  /** Closed padlock. */
+  lock: (
+    <G>
+      <Rect x={5} y={10.5} width={14} height={9.5} rx={2.2} />
+      <Path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
+    </G>
+  ),
+  /** Envelope. */
+  mail: (
+    <G>
+      <Rect x={3.5} y={5.5} width={17} height={13} rx={2} />
+      <Path d="M4 7l8 6 8-6" />
     </G>
   ),
   box: (

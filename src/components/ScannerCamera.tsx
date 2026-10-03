@@ -1,24 +1,26 @@
 /**
- * ScannerCamera — v3 on react-native-camera-kit.
+ * ScannerCamera — v4 on the hand-written native SelaCameraView.
  * ─────────────────────────────────────────────────────────────────
- * Replaces the react-native-vision-camera implementation whose
- * format selection + takePhoto pipeline blacked out and froze the
- * app on several devices. camera-kit (Tesla-maintained, CameraX
- * 1.1, battle-tested in production apps) provides:
+ * Camera history (why this file exists in this shape):
+ *  v1 react-native-vision-camera frame-processor → black screen
+ *     (worklets runtime missing).
+ *  v2 vision-camera photo pipeline → black screen + freezes (format
+ *     selection + takePhoto on several devices).
+ *  v3 react-native-camera-kit → STILL black screen + full-app
+ *     freeze: camera-kit created a NEW ML Kit client on EVERY frame
+ *     (memory/CPU flood) and its capture() promise hung forever when
+ *     the camera died, leaving the scanner dead until app restart.
+ *  v4 our own CameraX view (SelaCameraView.kt): one ML Kit client,
+ *     single 4:3 bind, analyzer paused during capture, native barcode
+ *     dedupe, 6s capture watchdog. JS side adds hard timeouts on
+ *     every native call + automatic camera rebind on fatal errors,
+ *     so nothing can freeze or hang the flow again.
  *
- *   - A rock-solid preview with NO format selection (the #1 cause
- *     of black previews was our custom photoResolution format).
- *   - Built-in continuous barcode scanning (bundled ML Kit — fully
- *     offline) for the باركود scanner mode.
- *   - capture() photos for the visual recognition pipeline.
- *
- * Permission is requested via PermissionsAndroid BEFORE the camera
- * mounts (camera-kit shows a black view when permission is missing).
- *
- * Modes (merchant picks in Settings):
- *   'barcode' — continuous barcode scan via onReadCode
- *   'visual'  — auto photo loop → TFLite embedding → cosine match
- *   'capture' — manual enrollment shots for ProductForm
+ * Public API (unchanged since v3 — PosScreen/ProductForm untouched):
+ *   <ScannerCamera mode="scan"|"capture" barcodeEnabled onBarcode
+ *                   onMatch onScore autoScan height />
+ *   ref.scanOnce()      → ScanResult | null
+ *   ref.captureAngle(a) → { embedding, thumbnailPath }
  */
 import React, {
   forwardRef,
@@ -37,17 +39,24 @@ import {
   TouchableOpacity,
   Vibration,
   View,
+  findNodeHandle,
+  requireNativeComponent,
+  type NativeMethods,
 } from 'react-native';
-import {Camera, CameraType} from 'react-native-camera-kit';
 import {Icon} from './Icon';
 import {useThemeColors} from '../core/theme';
-import {AUTO_SCAN_INTERVAL_MS, BARCODE_DEDUPE_MS} from '../core/config';
+import {
+  AUTO_SCAN_INTERVAL_MS,
+  BARCODE_DEDUPE_MS,
+  CAPTURE_TIMEOUT_MS,
+} from '../core/config';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
 import {requirePlatformUtils} from '../native/nativeBridge';
 import {logDiag} from '../core/diagnostics';
 import type {AngleLabel} from '../core/types';
+import {SelaCameraNative} from '../native/nativeBridge';
 
 export interface ScanResult {
   productId: number;
@@ -74,7 +83,7 @@ interface ScannerCameraProps {
   mode: ScannerCameraMode;
   /** Whether barcode scanning is active (from Settings → scannerMode). */
   barcodeEnabled?: boolean;
-  /** scan mode: fires for every barcode read (already deduped). */
+  /** scan mode: fires for every barcode read (already deduped natively). */
   onBarcode?: (code: string) => void;
   /** scan mode: fires for every confident visual match. */
   onMatch?: (result: ScanResult) => void;
@@ -86,9 +95,41 @@ interface ScannerCameraProps {
   height?: number;
 }
 
-/** Strips content:// or file:// to a plain filesystem path. */
-function toPath(uri: string): string {
-  return uri.replace(/^file:\/\//, '');
+interface NativeCameraProps {
+  barcodeEnabled: boolean;
+  torch: boolean;
+  permissionGranted: boolean;
+  onReadCode?: (event: {nativeEvent: {codeStringValue: string}}) => void;
+  onCameraError?: (event: {nativeEvent: {errorMessage: string}}) => void;
+  onCameraReady?: (event: unknown) => void;
+  style?: unknown;
+}
+
+const SelaCameraView =
+  requireNativeComponent<NativeCameraProps>('SelaCameraView');
+
+/** Rejects if a promise doesn't settle within ms — a hung native call
+ *  can never freeze the scan loop again (the v3 killer). */
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} — انتهت المهلة`));
+    }, ms);
+    promise.then(
+      value => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
 }
 
 export const ScannerCamera = forwardRef<
@@ -111,6 +152,10 @@ export const ScannerCamera = forwardRef<
   const [permission, setPermission] = useState<
     'unknown' | 'granted' | 'denied'
   >('unknown');
+  const [camState, setCamState] = useState<'starting' | 'ready' | 'error'>(
+    'starting',
+  );
+  const [remountKey, setRemountKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [statusText, setStatusText] = useState<string>(
     mode === 'capture'
@@ -122,17 +167,21 @@ export const ScannerCamera = forwardRef<
   const [flash, setFlash] = useState(false);
   const [torch, setTorch] = useState(false);
 
-  const cameraRef = useRef<React.ElementRef<typeof Camera>>(null);
+  const viewRef = useRef<
+    (React.Component<NativeCameraProps> & Readonly<NativeMethods>) | null
+  >(null);
   const busyRef = useRef(false);
   const disposedRef = useRef(false);
   const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMatchRef = useRef<{productId: number; at: number} | null>(null);
   const lastBarcodeRef = useRef<{code: string; at: number} | null>(null);
+  const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const threshold = useSettingsStore(state => state.settings.matchThreshold);
   const cooldownMs = useSettingsStore(
     state => state.settings.recognitionCooldownMs,
   );
+  const embeddingsCount = useCatalogStore(state => state.embeddingsCount);
 
   const onBarcodeRef = useRef(onBarcode);
   onBarcodeRef.current = onBarcode;
@@ -141,8 +190,7 @@ export const ScannerCamera = forwardRef<
   const onScoreRef = useRef(onScore);
   onScoreRef.current = onScore;
 
-  // ── Camera permission BEFORE mounting (camera-kit shows black
-  //    when permission is missing — request up front).
+  // ── Camera permission BEFORE mounting the native view. ──────
   useEffect(() => {
     let mounted = true;
     const ensurePermission = async () => {
@@ -197,31 +245,59 @@ export const ScannerCamera = forwardRef<
         clearTimeout(loopTimerRef.current);
         loopTimerRef.current = null;
       }
+      if (readyTimerRef.current != null) {
+        clearTimeout(readyTimerRef.current);
+        readyTimerRef.current = null;
+      }
     };
   }, []);
 
+  // ── Ready watchdog: if the native camera doesn't come up within
+  //    4.5s, show the retry overlay instead of a silent black box.
+  useEffect(() => {
+    if (permission !== 'granted') {
+      return;
+    }
+    setCamState('starting');
+    if (readyTimerRef.current != null) {
+      clearTimeout(readyTimerRef.current);
+    }
+    readyTimerRef.current = setTimeout(() => {
+      setCamState(current => (current === 'starting' ? 'error' : current));
+    }, 4500);
+    return () => {
+      if (readyTimerRef.current != null) {
+        clearTimeout(readyTimerRef.current);
+        readyTimerRef.current = null;
+      }
+    };
+  }, [remountKey, permission]);
+
   const capturePhoto = useCallback(async (): Promise<string | null> => {
-    const camera = cameraRef.current;
-    if (camera == null) {
+    const viewHandle = findNodeHandle(viewRef.current);
+    if (viewHandle == null || SelaCameraNative == null) {
       setStatusText('الكاميرا غير جاهزة بعد');
       return null;
     }
     try {
-      const photo = await camera.capture();
-      const path = photo?.path ?? toPath(photo?.uri ?? '');
+      const path = await withTimeout(
+        SelaCameraNative.capture(viewHandle),
+        CAPTURE_TIMEOUT_MS,
+        'التقاط الصورة',
+      );
       if (!path) {
         setStatusText('تعذر الالتقاط — حاول مجدداً');
         return null;
       }
       return path;
     } catch (error) {
-      logDiag(
-        'camera',
-        `فشل التقاط الصورة: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        'warn',
-      );
+      const message = error instanceof Error ? error.message : String(error);
+      logDiag('camera', `فشل التقاط الصورة: ${message}`, 'warn');
+      if (message.includes('المهلة') || message.includes('تجمد')) {
+        // Camera is dead — force a full rebind via remount.
+        setCamState('error');
+        setRemountKey(key => key + 1);
+      }
       setStatusText('فشل الالتقاط — أعد المحاولة');
       return null;
     }
@@ -248,9 +324,18 @@ export const ScannerCamera = forwardRef<
     if (busyRef.current) {
       return null;
     }
+    if (camState !== 'ready') {
+      setStatusText('انتظر جهوزية الكاميرا…');
+      return null;
+    }
     const modelInfo = VisionRecognitionService.getInfo();
     if (!modelInfo.loaded) {
       setStatusText('نموذج التعرف غير محمّل — استخدم اللمس أو الباركود');
+      return null;
+    }
+    if (embeddingsCount === 0) {
+      setStatusText('لا توجد بصمات محفوظة — سجّل منتجاتك أولاً');
+      onScoreRef.current?.(null);
       return null;
     }
     busyRef.current = true;
@@ -307,13 +392,24 @@ export const ScannerCamera = forwardRef<
       busyRef.current = false;
       setBusy(false);
     }
-  }, [beep, cooldownMs, deleteQuietly, capturePhoto, threshold]);
+  }, [
+    beep,
+    camState,
+    capturePhoto,
+    cooldownMs,
+    deleteQuietly,
+    embeddingsCount,
+    threshold,
+  ]);
 
   // ── Enrollment capture ───────────────────────────────────────
   const captureAngle = useCallback(
     async (angle: AngleLabel): Promise<CaptureResult> => {
       if (busyRef.current) {
         throw new Error('عملية التقاط أخرى قيد التنفيذ');
+      }
+      if (camState !== 'ready') {
+        throw new Error('الكاميرا غير جاهزة — انتظر أو أعد المحاولة');
       }
       busyRef.current = true;
       setBusy(true);
@@ -350,7 +446,7 @@ export const ScannerCamera = forwardRef<
         setBusy(false);
       }
     },
-    [beep, deleteQuietly, capturePhoto],
+    [beep, camState, deleteQuietly, capturePhoto],
   );
 
   useImperativeHandle(ref, () => ({
@@ -359,7 +455,7 @@ export const ScannerCamera = forwardRef<
     isBusy: () => busyRef.current,
   }));
 
-  // ── Barcode handler (camera-kit ML Kit, deduped) ─────────────
+  // ── Barcode handler (native dedupe + JS-side guard) ──────────
   const handleReadCode = useCallback(
     (event: {nativeEvent: {codeStringValue: string}}) => {
       const code = event.nativeEvent?.codeStringValue;
@@ -384,7 +480,9 @@ export const ScannerCamera = forwardRef<
     [beep],
   );
 
-  // ── Auto visual-scan loop (only when vision is the engine) ───
+  // ── Auto visual-scan loop ────────────────────────────────────
+  // Skips the pass entirely while the camera isn't ready or no
+  // product embeddings exist yet — no wasted inference, no freeze.
   useEffect(() => {
     if (mode !== 'scan' || !autoScan) {
       return;
@@ -400,7 +498,7 @@ export const ScannerCamera = forwardRef<
       }
       loopTimerRef.current = setTimeout(tick, AUTO_SCAN_INTERVAL_MS);
     };
-    loopTimerRef.current = setTimeout(tick, 350);
+    loopTimerRef.current = setTimeout(tick, 500);
     return () => {
       stopped = true;
       if (loopTimerRef.current != null) {
@@ -457,20 +555,48 @@ export const ScannerCamera = forwardRef<
 
   return (
     <View style={[styles.wrap, height != null ? {height} : null]}>
-      <Camera
-        ref={cameraRef}
+      <SelaCameraView
+        key={remountKey}
+        ref={viewRef}
         style={StyleSheet.absoluteFill}
-        cameraType={CameraType.Back}
-        scanBarcode={barcodeEnabled}
+        barcodeEnabled={barcodeEnabled}
+        torch={torch}
+        permissionGranted={permission === 'granted'}
         onReadCode={handleReadCode}
-        torchMode={torch ? 'on' : 'off'}
-        flashMode="off"
-        onError={(event: {nativeEvent: {errorMessage: string}}) => {
+        onCameraError={(event: {nativeEvent: {errorMessage: string}}) => {
           const message = event.nativeEvent?.errorMessage ?? 'خطأ غير معروف';
           logDiag('camera', `خطأ الكاميرا: ${message}`, 'error');
-          setStatusText('خطأ في الكاميرا — أغلقها وافتحها مجدداً');
+          setCamState('error');
+          setStatusText(message);
+        }}
+        onCameraReady={() => {
+          setCamState('ready');
+          if (mode === 'capture') {
+            setStatusText('وجّه الكاميرا نحو المنتج');
+          }
         }}
       />
+
+      {/* Camera error overlay + one-tap full rebind */}
+      {camState === 'error' ? (
+        <View style={styles.errorOverlay}>
+          <Icon name="camera" size={30} color={c.accent} />
+          <Text style={styles.errorTitle}>تعذر تشغيل الكاميرا</Text>
+          <Text style={styles.errorText}>
+            حدث خطأ في الكاميرا — إعادة المحاولة تعيد تشغيلها من الصفر.
+          </Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={() => {
+              setRemountKey(key => key + 1);
+              setStatusText('جارٍ إعادة تشغيل الكاميرا…');
+            }}
+            activeOpacity={0.85}>
+            <Icon name="refresh" size={16} color="#FFFFFF" />
+            <Text style={styles.retryText}>إعادة المحاولة</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       {/* ROI frame */}
       <View style={styles.roi} pointerEvents="none">
@@ -628,5 +754,41 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontFamily: 'Tajawal-Bold',
     fontSize: 15.5,
+  },
+  errorOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(11, 11, 16, 0.94)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    gap: 6,
+  },
+  errorTitle: {
+    fontFamily: 'Tajawal-Bold',
+    fontSize: 16,
+    color: '#F4F4F5',
+    marginTop: 6,
+  },
+  errorText: {
+    fontFamily: 'Tajawal-Regular',
+    fontSize: 13,
+    color: '#A1A1AA',
+    textAlign: 'center',
+    lineHeight: 21,
+    marginBottom: 10,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#F97316',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 28,
+  },
+  retryText: {
+    color: '#FFFFFF',
+    fontFamily: 'Tajawal-Bold',
+    fontSize: 14.5,
   },
 });

@@ -30,6 +30,7 @@ import {
 } from '../../components/ui';
 import {Icon, type IconName} from '../../components/Icon';
 import {useSettingsStore} from '../../stores/settingsStore';
+import {SubscriptionSection} from './SubscriptionSection';
 import {useThemeStore, useThemeColors, type ThemeMode} from '../../core/theme';
 import {ExportService} from '../../services/ExportService';
 import {wipeAllData} from '../../database/connection';
@@ -193,6 +194,9 @@ export function SettingsScreen() {
       <ScrollView
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}>
+        {/* ── Subscription ───────────────────────────────────── */}
+        <SubscriptionSection />
+
         {/* ── Appearance ─────────────────────────────────────── */}
         <Card style={styles.group}>
           <SectionTitle

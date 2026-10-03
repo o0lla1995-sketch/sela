@@ -20,6 +20,14 @@ export const KEYS = {
   stockAlertLedger: 'stock_alert_ledger_v1',
   schemaVersion: 'db_schema_version',
   themeMode: 'theme_mode_v1',
+  licensePayload: 'license_payload_b64_v1',
+  licenseSignature: 'license_signature_b64_v1',
+  licenseAnchor: 'license_anchor_v1',
+  licenseLastVerify: 'license_last_verify_v1',
+  licenseRollbackStrikes: 'license_rollback_strikes_v1',
+  licenseServerUrl: 'license_server_url_v1',
+  licenseDeviceId: 'license_device_id_v1',
+  licenseContact: 'license_contact_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {

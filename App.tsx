@@ -24,6 +24,7 @@ import {SafeAreaProvider} from 'react-native-safe-area-context';
 import {GestureHandlerRootView} from 'react-native-gesture-handler';
 
 import {RootNavigator} from './src/navigation/RootNavigator';
+import {LicenseGate} from './src/components/LicenseGate';
 import {Toaster as UIToaster} from './src/components/ui';
 import {ErrorBoundary as Boundary} from './src/components/ErrorBoundary';
 import {initDatabase} from './src/database/connection';
@@ -115,7 +116,9 @@ export default function App(): React.JSX.Element {
           ) : boot === 'error' ? (
             <BootError message={bootError ?? 'خطأ غير معروف'} />
           ) : (
-            <RootNavigator />
+            <LicenseGate>
+              <RootNavigator />
+            </LicenseGate>
           )}
           <UIToaster />
         </Boundary>
