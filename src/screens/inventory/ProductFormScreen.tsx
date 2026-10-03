@@ -665,11 +665,11 @@ export function ProductFormScreen() {
           <View style={styles.priceRow}>
             <View style={{flex: 1.2}}>
               <Field
-                label={`الكمية$(${
+                label={`الكمية ${
                   stockUnitId != null
-                    ? ` بـ${unitNameById.get(stockUnitId) ?? ''}`
-                    : ` (${BASE_UNIT_NAME})`
-                })`}
+                    ? `بـ${unitNameById.get(stockUnitId) ?? ''}`
+                    : `(${BASE_UNIT_NAME})`
+                }`}
                 value={stock}
                 onChangeText={setStock}
                 keyboardType="numeric"
