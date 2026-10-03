@@ -45,7 +45,11 @@ function load(): void {
 
 load();
 
-export function logDiag(tag: string, message: string, level: DiagLevel = 'info'): void {
+export function logDiag(
+  tag: string,
+  message: string,
+  level: DiagLevel = 'info',
+): void {
   const entry: DiagEntry = {at: localNow(), tag, message, level};
   entries = [entry, ...entries].slice(0, MAX_ENTRIES);
   if (level === 'error') {

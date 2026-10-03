@@ -61,6 +61,12 @@ export class ReceiptBuilder {
     return this;
   }
 
+  /** Raster image (store logo): GS v 0, centered, dithered natively. */
+  image(path: string, maxWidth: number): this {
+    this.ops.push({op: 'image', path, maxWidth, center: true});
+    return this;
+  }
+
   /** A dashed separator across the paper width. */
   separator(width: number, char = '-'): this {
     return this.textLine(char.repeat(Math.max(8, width)));
@@ -76,8 +82,12 @@ export class ReceiptBuilder {
    * e.g. "TOTAL ........ 45.00" (bidi-safe on any printer firmware).
    */
   twoColumns(label: string, amount: number | string, width: number): this {
-    const amountText = typeof amount === 'number' ? formatAmount(amount) : amount;
-    const labelPart = label.length <= width - 4 ? label : label.slice(0, Math.max(4, width - 4));
+    const amountText =
+      typeof amount === 'number' ? formatAmount(amount) : amount;
+    const labelPart =
+      label.length <= width - 4
+        ? label
+        : label.slice(0, Math.max(4, width - 4));
     const dots = Math.max(1, width - labelPart.length - amountText.length - 1);
     return this.textLine(`${labelPart} ${'.'.repeat(dots)} ${amountText}`);
   }

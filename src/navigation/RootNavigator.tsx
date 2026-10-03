@@ -1,13 +1,14 @@
 /**
  * Root navigation — react-navigation native-stack + bottom tabs.
  * ─────────────────────────────────────────────────────────────────
- * Replaces v1's hand-rolled zustand navigator which had no Android
- * hardware-back support, no transitions and no unified headers.
- * Structure (design.md §9):
+ * v3: theme-aware chrome (light/dark) + new management screens:
  *
  *   RootStack
  *   ├── MainTabs   (الرئيسية · نقطة البيع · المخزون · التقارير · الإعدادات)
  *   ├── ProductForm
+ *   ├── Stocktake          (الجرد + التقرير الكامل)
+ *   ├── ManageCategories   (تصنيفات المستخدم)
+ *   ├── ManageUnits        (وحدات المستخدم)
  *   ├── PrinterSettings
  *   ├── Diagnostics
  *   └── Notifications
@@ -18,20 +19,26 @@ import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import {createBottomTabNavigator} from '@react-navigation/bottom-tabs';
 import {I18nManager, View} from 'react-native';
 import {Icon, type IconName} from '../components/Icon';
-import {colors, fonts, typography} from '../core/theme';
+import {fonts, makeStyles, typography, useThemeColors} from '../core/theme';
 import {HomeScreen} from '../screens/HomeScreen';
 import {PosScreen} from '../screens/PosScreen';
 import {InventoryScreen} from '../screens/inventory/InventoryScreen';
 import {ReportsScreen} from '../screens/reports/ReportsScreen';
 import {SettingsScreen} from '../screens/settings/SettingsScreen';
 import {ProductFormScreen} from '../screens/inventory/ProductFormScreen';
+import {StocktakeScreen} from '../screens/inventory/StocktakeScreen';
+import {ManageCategoriesScreen} from '../screens/inventory/ManageCategoriesScreen';
+import {ManageUnitsScreen} from '../screens/inventory/ManageUnitsScreen';
 import {PrinterSettingsScreen} from '../screens/printer/PrinterSettingsScreen';
 import {DiagnosticsScreen} from '../screens/settings/DiagnosticsScreen';
 import {NotificationsScreen} from '../screens/NotificationsScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
-  ProductForm: {productId?: number} | undefined;
+  ProductForm: {productId?: number; barcode?: string} | undefined;
+  Stocktake: undefined;
+  ManageCategories: undefined;
+  ManageUnits: undefined;
   PrinterSettings: undefined;
   Diagnostics: undefined;
   Notifications: undefined;
@@ -56,26 +63,37 @@ const TAB_ITEMS: {
 }[] = [
   {name: 'Home', label: 'الرئيسية', icon: 'home', component: HomeScreen},
   {name: 'Pos', label: 'نقطة البيع', icon: 'cart', component: PosScreen},
-  {name: 'Inventory', label: 'المخزون', icon: 'box', component: InventoryScreen},
+  {
+    name: 'Inventory',
+    label: 'المخزون',
+    icon: 'box',
+    component: InventoryScreen,
+  },
   {name: 'Reports', label: 'التقارير', icon: 'chart', component: ReportsScreen},
-  {name: 'Settings', label: 'الإعدادات', icon: 'settings', component: SettingsScreen},
+  {
+    name: 'Settings',
+    label: 'الإعدادات',
+    icon: 'settings',
+    component: SettingsScreen,
+  },
 ];
 
 function MainTabs() {
+  const c = useThemeColors();
   return (
     <Tabs.Navigator
       screenOptions={{
         headerShown: false,
         tabBarStyle: {
-          backgroundColor: colors.surface,
+          backgroundColor: c.surface,
           borderTopWidth: 1,
-          borderTopColor: colors.borderSoft,
+          borderTopColor: c.borderSoft,
           height: 62,
           paddingBottom: 8,
           paddingTop: 6,
         },
-        tabBarActiveTintColor: colors.accent,
-        tabBarInactiveTintColor: colors.textDim,
+        tabBarActiveTintColor: c.accent,
+        tabBarInactiveTintColor: c.textDim,
         tabBarLabelStyle: {
           fontFamily: fonts.bold,
           fontSize: typography.micro + 1,
@@ -92,7 +110,9 @@ function MainTabs() {
             tabBarIcon: ({color, focused}) => (
               <View style={{alignItems: 'center', justifyContent: 'center'}}>
                 <Icon name={tab.icon} size={22} color={color} />
-                {focused ? <View style={styles.tabDot} /> : null}
+                {focused ? (
+                  <View style={{...tabDot, backgroundColor: c.accent}} />
+                ) : null}
               </View>
             ),
           }}
@@ -102,14 +122,23 @@ function MainTabs() {
   );
 }
 
+const tabDot = {
+  position: 'absolute' as const,
+  top: -6,
+  width: 4,
+  height: 4,
+  borderRadius: 2,
+};
+
 export function RootNavigator() {
+  const c = useThemeColors();
   return (
     <NavigationContainer>
       <Stack.Navigator
         screenOptions={{
           headerShown: false,
-          animation: I18N_RTL ? 'slide_from_left' : 'slide_from_right',
-          contentStyle: {backgroundColor: colors.bg},
+          animation: I18nManager.isRTL ? 'slide_from_left' : 'slide_from_right',
+          contentStyle: {backgroundColor: c.bg},
         }}>
         <Stack.Screen name="MainTabs" component={MainTabs} />
         <Stack.Screen
@@ -117,7 +146,20 @@ export function RootNavigator() {
           component={ProductFormScreen}
           options={{animation: 'slide_from_bottom'}}
         />
-        <Stack.Screen name="PrinterSettings" component={PrinterSettingsScreen} />
+        <Stack.Screen name="Stocktake" component={StocktakeScreen} />
+        <Stack.Screen
+          name="ManageCategories"
+          component={ManageCategoriesScreen}
+        />
+        <Stack.Screen
+          name="ManageUnits"
+          component={ManageUnitsScreen}
+          options={{animation: 'slide_from_bottom'}}
+        />
+        <Stack.Screen
+          name="PrinterSettings"
+          component={PrinterSettingsScreen}
+        />
         <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} />
         <Stack.Screen name="Notifications" component={NotificationsScreen} />
       </Stack.Navigator>
@@ -125,17 +167,5 @@ export function RootNavigator() {
   );
 }
 
-// RTL: forward navigation slides from the left edge (the "next"
-// direction in Arabic reading order).
-const I18N_RTL = I18nManager.isRTL;
-
-const styles = {
-  tabDot: {
-    position: 'absolute' as const,
-    top: -6,
-    width: 4,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: colors.accent,
-  },
-};
+// Keep makeStyles imported for future per-screen styles (tree-shaken).
+export const useNavStyles = makeStyles(() => ({noop: {}} as const));

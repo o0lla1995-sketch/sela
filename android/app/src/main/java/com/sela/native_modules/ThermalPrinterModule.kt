@@ -557,6 +557,67 @@ class ThermalPrinterModule(private val reactContext: ReactApplicationContext) :
                 buffer.write(Base64.decode(b64, Base64.NO_WRAP))
               }
             }
+            "image" -> {
+              // Raster image (store logo) — GS v 0 with Floyd-Steinberg
+              // dithering to 1-bit. Widths: 58mm = 384 dots, 80mm = 576.
+              val path = if (command.hasKey("path")) command.getString("path") ?: "" else ""
+              val maxWidth = if (command.hasKey("maxWidth")) command.getInt("maxWidth") else 384
+              val center = !command.hasKey("center") || command.getBoolean("center")
+              if (path.isNotEmpty()) {
+                val raster = buildRaster(path, maxWidth.coerceIn(64, 576))
+                if (raster != null) {
+                  if (center && raster.second < maxWidth) {
+                    // ESC $ relative print position (byte-aligned), then GS v 0.
+                    val byteOffset = ((maxWidth - raster.second) / 2 / 8) * 8
+                    buffer.write(byteArrayOf(0x1B, 0x24, (byteOffset and 0xFF).toByte(), ((byteOffset shr 8) and 0xFF).toByte()))
+                  }
+                  buffer.write(raster.first)
+                  // Reset relative position for the text that follows.
+                  buffer.write(byteArrayOf(0x1B, 0x24, 0x00, 0x00))
+                }
+              }
+            }
+            "image" -> {
+              // Raster image (store logo) — GS v 0 with Floyd-Steinberg
+              // dithering to 1-bit. Widths: 58mm → 384 dots, 80mm → 576.
+              val path = if (command.hasKey("path")) command.getString("path") ?: "" else ""
+              val maxWidth = if (command.hasKey("maxWidth")) command.getInt("maxWidth") else 384
+              val center = !command.hasKey("center") || command.getBoolean("center")
+              if (path.isNotEmpty()) {
+                val raster = buildRaster(path, maxWidth.coerceIn(64, 576))
+                if (raster != null) {
+                  if (center && raster.second < maxWidth) {
+                    // ESC $ relative print position (whole-byte aligned), then GS v 0.
+                    val byteOffset = ((maxWidth - raster.second) / 2 / 8) * 8
+                    buffer.write(byteArrayOf(0x1B, 0x24, (byteOffset and 0xFF).toByte(), ((byteOffset shr 8) and 0xFF).toByte()))
+                  }
+                  buffer.write(raster.first)
+                  // Reset relative position for the text that follows.
+                  buffer.write(byteArrayOf(0x1B, 0x24, 0x00, 0x00))
+                }
+              }
+            }
+            "image" -> {
+              // Raster image (store logo) — GS v 0 with Floyd-Steinberg
+              // dithering to 1-bit. Widths: 58mm → 384 dots, 80mm → 576.
+              val path = if (command.hasKey("path")) command.getString("path") ?: "" else ""
+              val maxWidth = if (command.hasKey("maxWidth")) command.getInt("maxWidth") else 384
+              val center = !command.hasKey("center") || command.getBoolean("center")
+              if (path.isNotEmpty()) {
+                val raster = buildRaster(path, maxWidth.coerceIn(64, 576))
+                if (raster != null) {
+                  if (center && raster.second < maxWidth) {
+                    // Feed + ESC $ set relative position, then GS v 0.
+                    val offsetDots = (maxWidth - raster.second) / 2
+                    val byteOffset = offsetDots / 8 * 8 // whole-byte alignment
+                    buffer.write(byteArrayOf(0x1B, 0x24, (byteOffset and 0xFF).toByte(), ((byteOffset shr 8) and 0xFF).toByte()))
+                  }
+                  buffer.write(raster.first)
+                  // Reset alignment for the text that follows.
+                  buffer.write(byteArrayOf(0x1B, 0x24, 0x00, 0x00))
+                }
+              }
+            }
             else -> {
               // Unknown op — skip defensively instead of crashing.
             }
@@ -586,6 +647,97 @@ class ThermalPrinterModule(private val reactContext: ReactApplicationContext) :
       } catch (t: Throwable) {
         promise.reject("PRINT_FAILED", "فشل أمر الطباعة: ${t.message}")
       }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // ESC/POS raster image (GS v 0) with Floyd-Steinberg dithering
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Decodes the image at [path], scales it so width <= [maxWidth] dots,
+   * dithers to 1-bit and returns (escposBytes, widthDots).
+   * Returns null on any decode failure — printing text continues.
+   */
+  private fun buildRaster(path: String, maxWidth: Int): Pair<ByteArray, Int>? {
+    var bitmap: android.graphics.Bitmap? = null
+    var scaled: android.graphics.Bitmap? = null
+    try {
+      val file = java.io.File(path)
+      if (!file.exists() || file.length() == 0L) return null
+      val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      android.graphics.BitmapFactory.decodeFile(path, bounds)
+      if (bounds.outWidth <= 0) return null
+      var sample = 1
+      while (bounds.outWidth / (sample * 2) >= maxWidth) sample *= 2
+      bitmap = android.graphics.BitmapFactory.decodeFile(
+        path,
+        android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+      ) ?: return null
+
+      val scale = minOf(1f, maxWidth.toFloat() / bitmap.width)
+      val w = max(1, (bitmap.width * scale).toInt())
+      val h = max(1, (bitmap.height * scale).toInt())
+      scaled = android.graphics.Bitmap.createScaledBitmap(bitmap, w, h, true)
+
+      // Luminance buffer with Floyd-Steinberg error diffusion.
+      val pixels = IntArray(w * h)
+      scaled.getPixels(pixels, 0, w, 0, 0, w, h)
+      val lum = FloatArray(w * h)
+      for (i in pixels.indices) {
+        val p = pixels[i]
+        val r = (p shr 16) and 0xFF
+        val g = (p shr 8) and 0xFF
+        val b = p and 0xFF
+        lum[i] = 0.299f * r + 0.587f * g + 0.114f * b
+      }
+      val bits = ByteArray(w * h)
+      val threshold = 160f
+      for (y in 0 until h) {
+        for (x in 0 until w) {
+          val i = y * w + x
+          val old = lum[i].coerceIn(0f, 255f)
+          val ink = old < threshold // dark pixel = print dot
+          bits[i] = if (ink) 1 else 0
+          val err = if (ink) old else old - 255f
+          val f = err / 16f
+          if (x + 1 < w) lum[i + 1] += f * 7
+          if (y + 1 < h) {
+            if (x > 0) lum[i + w - 1] += f * 3
+            lum[i + w] += f * 5
+            if (x + 1 < w) lum[i + w + 1] += f
+          }
+        }
+      }
+
+      // Pack into GS v 0 (m=0, normal density).
+      val bytesPerRow = (w + 7) / 8
+      val out = java.io.ByteArrayOutputStream(8 + bytesPerRow * h)
+      out.write(byteArrayOf(
+        0x1D, 0x76, 0x30, 0x00,
+        (bytesPerRow and 0xFF).toByte(),
+        ((bytesPerRow shr 8) and 0xFF).toByte(),
+        (h and 0xFF).toByte(),
+        ((h shr 8) and 0xFF).toByte()
+      ))
+      val row = ByteArray(bytesPerRow)
+      for (y in 0 until h) {
+        java.util.Arrays.fill(row, 0)
+        for (x in 0 until w) {
+          if (bits[y * w + x].toInt() == 1) {
+            row[x / 8] = (row[x / 8].toInt() or (0x80 shr (x % 8))).toByte()
+          }
+        }
+        out.write(row)
+      }
+      return Pair(out.toByteArray(), w)
+    } catch (oom: OutOfMemoryError) {
+      return null
+    } catch (t: Throwable) {
+      return null
+    } finally {
+      val distinct = listOfNotNull(bitmap, scaled).distinct()
+      distinct.forEach { if (!it.isRecycled) it.recycle() }
     }
   }
 

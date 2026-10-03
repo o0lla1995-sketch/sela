@@ -21,7 +21,10 @@ interface AlertLedger {
 
 function loadLedger(): AlertLedger {
   const today = localToday();
-  const stored = getJson<AlertLedger>(KEYS.stockAlertLedger, {keys: [], day: ''});
+  const stored = getJson<AlertLedger>(KEYS.stockAlertLedger, {
+    keys: [],
+    day: '',
+  });
   if (stored.day !== today) {
     return {keys: [], day: today};
   }

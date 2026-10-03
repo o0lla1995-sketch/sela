@@ -10,14 +10,20 @@ import {
   DEFAULT_RECOGNITION_COOLDOWN_MS,
   CODEPAGE_CP1256,
   DEFAULT_LOW_STOCK_THRESHOLD,
+  type ScannerMode,
 } from '../core/config';
 import type {PricingMode} from '../core/types';
 
 export interface AppSettings {
   storeName: string;
   storePhone: string;
+  storeAddress: string;
   footerMessage: string;
+  /** Store logo (local file path) shown in-app and on receipts. */
+  storeLogoPath: string | null;
   defaultPricingMode: PricingMode;
+  /** Scanner engine: barcode / visual / both (merchant's choice). */
+  scannerMode: ScannerMode;
   /** Vision */
   recognitionEnabled: boolean;
   matchThreshold: number;
@@ -37,10 +43,13 @@ export interface AppSettings {
 }
 
 const DEFAULTS: AppSettings = {
-  storeName: 'متجر سيلا',
+  storeName: 'متجر sela',
   storePhone: '',
+  storeAddress: '',
   footerMessage: 'شكراً لتعاملكم معنا — لا يوجد إرجاع أو استبدال بعد الفاتورة',
+  storeLogoPath: null,
   defaultPricingMode: 'RETAIL',
+  scannerMode: 'both',
   recognitionEnabled: true,
   matchThreshold: DEFAULT_MATCH_THRESHOLD,
   recognitionCooldownMs: DEFAULT_RECOGNITION_COOLDOWN_MS,

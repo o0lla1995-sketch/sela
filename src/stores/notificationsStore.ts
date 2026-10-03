@@ -57,7 +57,7 @@ async function postSystemNotification(
       return;
     }
     await SelaNotificationsNative.show(
-      Math.abs(hashCode(notification.id)) % 100000 + 1,
+      (Math.abs(hashCode(notification.id)) % 100000) + 1,
       notification.title,
       notification.body,
       notification.kind === 'out_of_stock' || notification.kind === 'low_stock'
@@ -67,7 +67,9 @@ async function postSystemNotification(
   } catch (error) {
     logDiag(
       'notifications',
-      `فشل إرسال إشعار النظام: ${error instanceof Error ? error.message : String(error)}`,
+      `فشل إرسال إشعار النظام: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
       'warn',
     );
   }
@@ -128,6 +130,10 @@ export const useNotificationsStore = create<NotificationsState>((set, get) => ({
 
 /** Imperative accessor for services. */
 export const notificationsStore = {
-  push: (kind: NotificationKind, title: string, body: string, options?: {productId?: number; system?: boolean}) =>
-    useNotificationsStore.getState().push(kind, title, body, options),
+  push: (
+    kind: NotificationKind,
+    title: string,
+    body: string,
+    options?: {productId?: number; system?: boolean},
+  ) => useNotificationsStore.getState().push(kind, title, body, options),
 };

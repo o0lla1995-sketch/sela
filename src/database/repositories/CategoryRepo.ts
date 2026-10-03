@@ -14,7 +14,9 @@ function rowToCategory(row: Record<string, unknown>): Category {
 
 export const CategoryRepo = {
   async list(): Promise<Category[]> {
-    const result = await getDb().execute('SELECT id, name FROM categories ORDER BY name ASC');
+    const result = await getDb().execute(
+      'SELECT id, name FROM categories ORDER BY name ASC',
+    );
     const rows = result.rows?._array ?? [];
     return rows.map(rowToCategory);
   },
@@ -32,7 +34,10 @@ export const CategoryRepo = {
     if ((existsRow?.cnt ?? 0) > 0) {
       throw new Error('توجد فئة بنفس الاسم مسبقاً');
     }
-    const result = await getDb().execute('INSERT INTO categories (name) VALUES (?)', [trimmed]);
+    const result = await getDb().execute(
+      'INSERT INTO categories (name) VALUES (?)',
+      [trimmed],
+    );
     return result.insertId ?? -1;
   },
 
@@ -41,18 +46,37 @@ export const CategoryRepo = {
     if (!trimmed) {
       throw new Error('اسم الفئة فارغ');
     }
-    await getDb().execute('UPDATE categories SET name = ? WHERE id = ?', [trimmed, id]);
+    await getDb().execute('UPDATE categories SET name = ? WHERE id = ?', [
+      trimmed,
+      id,
+    ]);
   },
 
+  /** Lists categories with the number of products in each. */
+  async listWithCounts(): Promise<Category[]> {
+    const result = await getDb().execute(
+      `SELECT c.id, c.name, COUNT(p.id) AS product_count
+       FROM categories c
+       LEFT JOIN products p ON p.category_id = c.id
+       GROUP BY c.id
+       ORDER BY c.name ASC`,
+    );
+    const rows = result.rows?._array ?? [];
+    return rows.map(row => ({
+      ...rowToCategory(row),
+      productCount: Number(row.product_count ?? 0),
+    }));
+  },
+
+  /**
+   * Deletes a category. Products keep existing but become uncategorized
+   * (same behaviour as global POS systems like Loyverse).
+   */
   async remove(id: number): Promise<void> {
-    const inUse = await getDb().execute(
-      'SELECT COUNT(*) AS cnt FROM products WHERE category_id = ?',
+    await getDb().execute(
+      'UPDATE products SET category_id = NULL WHERE category_id = ?',
       [id],
     );
-    const inUseRow = inUse.rows?._array?.[0] as {cnt?: number} | undefined;
-    if ((inUseRow?.cnt ?? 0) > 0) {
-      throw new Error('لا يمكن حذف الفئة — توجد منتجات مرتبطة بها');
-    }
     await getDb().execute('DELETE FROM categories WHERE id = ?', [id]);
   },
 

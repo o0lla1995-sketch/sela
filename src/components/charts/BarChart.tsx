@@ -12,7 +12,14 @@
 import React, {useMemo} from 'react';
 import {StyleSheet, Text, View} from 'react-native';
 import Svg, {G, Line, Rect, Text as SvgText} from 'react-native-svg';
-import {colors, fonts, radius, spacing, typography} from '../../core/theme';
+import {
+  fonts,
+  makeStyles,
+  radius,
+  spacing,
+  typography,
+  useThemeColors,
+} from '../../core/theme';
 import {Icon} from '../Icon';
 
 export interface BarDatum {
@@ -67,12 +74,16 @@ function niceCeiling(max: number): number {
 
 export function BarChart({
   data,
-  color = colors.accent,
+  color: colorProp,
   height = 170,
   width,
   formatTick,
   emptyText = 'لا توجد بيانات في هذه الفترة',
 }: BarChartProps): React.JSX.Element {
+  const c = useThemeColors();
+  const styles = useStyles();
+  const color = colorProp ?? c.accent;
+
   const layout = useMemo(() => {
     const values = data.map(d => (Number.isFinite(d.value) ? d.value : 0));
     const ceiling = niceCeiling(safeMax(values));
@@ -110,14 +121,14 @@ export function BarChart({
                   y1={y}
                   x2={width - paddingRight}
                   y2={y}
-                  stroke={colors.borderSoft}
+                  stroke={c.borderSoft}
                   strokeWidth={i === 0 ? 1.2 : 1}
                 />
                 <SvgText
                   x={paddingLeft - 6}
                   y={y + 3.5}
                   textAnchor="end"
-                  fill={colors.textFaint}
+                  fill={c.textFaint}
                   fontSize={typography.micro}
                   fontFamily={fonts.regular}>
                   {formatTick ? formatTick(line) : String(Math.round(line))}
@@ -128,9 +139,11 @@ export function BarChart({
           {/* Bars — RTL: first datum on the RIGHT */}
           {data.map((d, i) => {
             const raw = layout.values[i];
-            const h = Math.max(raw > 0 ? 3 : 0, (raw / layout.ceiling) * chartH);
-            const x =
-              width - paddingRight - (i + 1) * slot + (slot - barW) / 2;
+            const h = Math.max(
+              raw > 0 ? 3 : 0,
+              (raw / layout.ceiling) * chartH,
+            );
+            const x = width - paddingRight - (i + 1) * slot + (slot - barW) / 2;
             const y = chartH - h;
             return (
               <Rect
@@ -166,32 +179,36 @@ export function BarChart({
 }
 
 function ChartEmpty({text}: {text: string}): React.JSX.Element {
+  const c = useThemeColors();
+  const styles = useStyles();
   return (
     <View style={styles.empty}>
-      <Icon name="chart" size={30} color={colors.textFaint} />
+      <Icon name="chart" size={30} color={c.textFaint} />
       <Text style={styles.emptyText}>{text}</Text>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  axisLabel: {
-    color: colors.textFaint,
-    fontSize: typography.micro,
-    fontFamily: fonts.regular,
-    textAlign: 'center',
-  },
-  empty: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: spacing.xl,
-    gap: spacing.sm,
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.md,
-  },
-  emptyText: {
-    color: colors.textDim,
-    fontSize: typography.caption,
-    fontFamily: fonts.regular,
-  },
-});
+const useStyles = makeStyles(c =>
+  StyleSheet.create({
+    axisLabel: {
+      color: c.textFaint,
+      fontSize: typography.micro,
+      fontFamily: fonts.regular,
+      textAlign: 'center',
+    },
+    empty: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: spacing.xl,
+      gap: spacing.sm,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.md,
+    },
+    emptyText: {
+      color: c.textDim,
+      fontSize: typography.caption,
+      fontFamily: fonts.regular,
+    },
+  }),
+);

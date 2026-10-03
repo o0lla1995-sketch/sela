@@ -15,9 +15,16 @@ export interface EscPosOp {
     | 'text'
     | 'feed'
     | 'cut'
-    | 'rawBase64';
+    | 'rawBase64'
+    | 'image';
   /** Text payload for op:'text' / op:'rawBase64'. */
   value?: string;
+  /** Image file path for op:'image'. */
+  path?: string;
+  /** Max raster width in dots for op:'image' (58mm=384, 80mm=576). */
+  maxWidth?: number;
+  /** Center the raster for op:'image'. */
+  center?: boolean;
   /** Code page number for op:'codepage'. */
   page?: number;
   /** 0=left 1=center 2=right for op:'align'. */
@@ -34,7 +41,9 @@ export interface EscPosOp {
 interface ThermalPrinterNative {
   isBluetoothEnabled(): Promise<boolean>;
   requestEnableBluetooth(): Promise<boolean>;
-  getBondedDevices(): Promise<{name: string; address: string; bondState: number}[]>;
+  getBondedDevices(): Promise<
+    {name: string; address: string; bondState: number}[]
+  >;
   startDiscovery(): Promise<boolean>;
   stopDiscovery(): Promise<boolean>;
   connect(address: string): Promise<boolean>;
@@ -47,7 +56,11 @@ interface ThermalPrinterNative {
 interface PlatformUtilsNative {
   beep(kind: number): Promise<boolean>;
   getApiLevel(): Promise<number>;
-  exportFile(fileName: string, mimeType: string, content: string): Promise<string>;
+  exportFile(
+    fileName: string,
+    mimeType: string,
+    content: string,
+  ): Promise<string>;
   getFilesDir(): Promise<string>;
   makeDir(path: string): Promise<boolean>;
   fileExists(path: string): Promise<boolean>;
@@ -69,6 +82,11 @@ interface SelaNotificationsNative {
   cancelAll(): Promise<boolean>;
 }
 
+interface SelaImagePickerNative {
+  /** Opens the system image picker; resolves the saved local path. */
+  pickStoreLogo(maxDim: number): Promise<string>;
+}
+
 type MaybeModule<T> = T | undefined;
 
 export const ThermalPrinterNative: MaybeModule<ThermalPrinterNative> =
@@ -83,9 +101,14 @@ export const ImageDecoderNative: MaybeModule<ImageDecoderNative> =
 export const SelaNotificationsNative: MaybeModule<SelaNotificationsNative> =
   NativeModules.SelaNotifications as MaybeModule<SelaNotificationsNative>;
 
+export const SelaImagePickerNative: MaybeModule<SelaImagePickerNative> =
+  NativeModules.SelaImagePicker as MaybeModule<SelaImagePickerNative>;
+
 export function requireThermalPrinter(): ThermalPrinterNative {
   if (ThermalPrinterNative == null) {
-    throw new Error('وحدة الطباعة الناتيف غير متوفرة في هذا الإصدار من التطبيق');
+    throw new Error(
+      'وحدة الطباعة الناتيف غير متوفرة في هذا الإصدار من التطبيق',
+    );
   }
   return ThermalPrinterNative;
 }

@@ -60,7 +60,15 @@ export function localMonthStart(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
 }
 
-const WEEKDAYS_AR = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+const WEEKDAYS_AR = [
+  'الأحد',
+  'الاثنين',
+  'الثلاثاء',
+  'الأربعاء',
+  'الخميس',
+  'الجمعة',
+  'السبت',
+];
 
 /** '2026-01-02' → "الجمعة" (short Arabic weekday). */
 export function weekdayLabel(dateStr: string): string {

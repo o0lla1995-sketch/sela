@@ -5,7 +5,13 @@
  */
 import {getDb, toMessage} from '../connection';
 import {localNow} from '../../core/format';
-import type {CartLine, PricingMode, SaleItemRecord, SaleRecord, SaleWithItems} from '../../core/types';
+import type {
+  CartLine,
+  PricingMode,
+  SaleItemRecord,
+  SaleRecord,
+  SaleWithItems,
+} from '../../core/types';
 
 export interface CreateSaleInput {
   invoiceNumber: string;
@@ -23,7 +29,7 @@ function rowToSale(row: Record<string, unknown>): SaleRecord {
     total_cost: Number(row.total_cost ?? 0),
     total_profit: Number(row.total_profit ?? 0),
     discount: Number(row.discount ?? 0),
-    payment_type: (String(row.payment_type ?? 'RETAIL') as PricingMode),
+    payment_type: String(row.payment_type ?? 'RETAIL') as PricingMode,
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -37,6 +43,8 @@ function rowToItem(row: Record<string, unknown>): SaleItemRecord {
     unit_price: Number(row.unit_price ?? 0),
     cost_price: Number(row.cost_price ?? 0),
     total_line_price: Number(row.total_line_price ?? 0),
+    unit_name: row.unit_name == null ? null : String(row.unit_name),
+    base_quantity: row.base_quantity == null ? null : Number(row.base_quantity),
   };
 }
 
@@ -87,10 +95,11 @@ export const SaleRepo = {
       }
 
       for (const line of input.lines) {
+        const baseQty = line.quantity * (line.conversion ?? 1);
         await tx.execute(
           `INSERT INTO sale_items
-            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             saleId,
             line.productId,
@@ -98,22 +107,26 @@ export const SaleRepo = {
             line.unitPrice,
             line.costPrice,
             line.unitPrice * line.quantity,
+            line.unitName ?? null,
+            baseQty,
           ],
         );
-        // Oversell guard inside the same transaction.
+        // Oversell guard inside the same transaction (base units).
         const stockUpdate = await tx.execute(
           'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
-          [line.quantity, line.productId, line.quantity],
+          [baseQty, line.productId, baseQty],
         );
         if (stockUpdate.rowsAffected !== 1) {
           throw new Error(
-            `الكمية المتوفرة من "${line.name}" غير كافية (المتاح أقل من ${line.quantity})`,
+            `الكمية المتوفرة من "${line.name}" غير كافية (${baseQty} قطعة مطلوبة)`,
           );
         }
       }
     });
 
-    const saleResult = await db.execute('SELECT * FROM sales WHERE id = ?', [saleId]);
+    const saleResult = await db.execute('SELECT * FROM sales WHERE id = ?', [
+      saleId,
+    ]);
     const saleRow = saleResult.rows?._array?.[0];
     const itemsResult = await db.execute(
       'SELECT * FROM sale_items WHERE sale_id = ? ORDER BY id ASC',

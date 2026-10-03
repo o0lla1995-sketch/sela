@@ -15,7 +15,6 @@ import {
   AppButton,
   Badge,
   Card,
-  EmptyState,
   Screen,
   AppHeader,
   Segmented,
@@ -28,11 +27,23 @@ import {
 } from '../../services/printer/ThermalPrinterService';
 import {buildTestJob} from '../../services/printer/receipt';
 import {useToastStore} from '../../stores/toastStore';
-import {colors, radius, spacing, typography} from '../../core/theme';
-import {CODEPAGE_ASCII, CODEPAGE_CP1256, CODEPAGE_CP864} from '../../core/config';
+import {
+  makeStyles,
+  radius,
+  spacing,
+  typography,
+  useThemeColors,
+} from '../../core/theme';
+import {
+  CODEPAGE_ASCII,
+  CODEPAGE_CP1256,
+  CODEPAGE_CP864,
+} from '../../core/config';
 import type {PrinterDevice} from '../../core/types';
 
 export function PrinterSettingsScreen() {
+  const c = useThemeColors();
+  const styles = useStyles();
   const status = usePrinterStore(state => state.status);
   const deviceName = usePrinterStore(state => state.deviceName);
   const bonded = usePrinterStore(state => state.bonded);
@@ -113,6 +124,7 @@ export function PrinterSettingsScreen() {
         storeName: settings.storeName,
         storePhone: settings.storePhone,
         footerMessage: settings.footerMessage,
+        storeLogoPath: settings.storeLogoPath,
         paperWidth: settings.paperWidth,
         codepage: settings.codepage,
         showProfit: false,
@@ -128,8 +140,12 @@ export function PrinterSettingsScreen() {
 
   const connectedAddress = usePrinterStore(state => state.deviceAddress);
 
-  const renderDevice = (device: PrinterDevice, section: 'bonded' | 'discovered') => {
-    const isConnected = status === 'connected' && connectedAddress === device.address;
+  const renderDevice = (
+    device: PrinterDevice,
+    section: 'bonded' | 'discovered',
+  ) => {
+    const isConnected =
+      status === 'connected' && connectedAddress === device.address;
     const busy = connecting === device.address;
     return (
       <TouchableOpacity
@@ -145,7 +161,8 @@ export function PrinterSettingsScreen() {
         </View>
         {isConnected ? (
           <Badge label="متصل ✓" tone="success" />
-        ) : busy || (status === 'connecting' && connecting === device.address) ? (
+        ) : busy ||
+          (status === 'connecting' && connecting === device.address) ? (
           <Text style={styles.deviceConnecting}>جارٍ…</Text>
         ) : (
           <Text style={styles.deviceConnect}>اتصال</Text>
@@ -165,7 +182,7 @@ export function PrinterSettingsScreen() {
             onRefresh={() => {
               void refreshBonded();
             }}
-            tintColor={colors.accent}
+            tintColor={c.accent}
           />
         }>
         {/* ── Connection status ───────────────────────────────── */}
@@ -182,7 +199,13 @@ export function PrinterSettingsScreen() {
               </Text>
             </View>
             <Badge
-              label={status === 'connected' ? 'متصل' : status === 'connecting' ? '…' : 'منفصل'}
+              label={
+                status === 'connected'
+                  ? 'متصل'
+                  : status === 'connecting'
+                  ? '…'
+                  : 'منفصل'
+              }
               tone={status === 'connected' ? 'success' : 'neutral'}
             />
           </View>
@@ -219,7 +242,9 @@ export function PrinterSettingsScreen() {
         {/* ── Discovered devices ──────────────────────────────── */}
         {discovered.length > 0 ? (
           <Card>
-            <Text style={styles.sectionTitle}>أجهزة قريبة ({discovered.length})</Text>
+            <Text style={styles.sectionTitle}>
+              أجهزة قريبة ({discovered.length})
+            </Text>
             {discovered.map(device => renderDevice(device, 'discovered'))}
           </Card>
         ) : null}
@@ -253,9 +278,7 @@ export function PrinterSettingsScreen() {
           <Text style={styles.optionLabel}>ترميز اللغة العربية</Text>
           <Segmented
             value={String(settings.codepage)}
-            onChange={value =>
-              updateSettings({codepage: Number(value)})
-            }
+            onChange={value => updateSettings({codepage: Number(value)})}
             options={[
               {value: String(CODEPAGE_CP1256), label: 'عربي CP1256'},
               {value: String(CODEPAGE_CP864), label: 'عربي CP864'},
@@ -291,59 +314,77 @@ export function PrinterSettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  content: {padding: spacing.md, gap: spacing.md, paddingBottom: spacing.xxl},
-  statusRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.md,
-  },
-  statusLabel: {color: colors.textDim, fontSize: typography.small, marginBottom: 4},
-  statusValue: {color: colors.text, fontWeight: '900', fontSize: typography.body},
-  statusButtons: {flexDirection: 'row', gap: spacing.md},
-  errorText: {
-    color: colors.danger,
-    fontSize: typography.small,
-    marginTop: spacing.sm,
-    textAlign: 'center',
-  },
-  sectionTitle: {
-    color: colors.text,
-    fontWeight: '900',
-    fontSize: typography.body,
-    marginBottom: spacing.md,
-  },
-  deviceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-  },
-  deviceRowActive: {borderColor: colors.success, backgroundColor: colors.successSoft},
-  deviceInfo: {flex: 1},
-  deviceName: {color: colors.text, fontWeight: '800', fontSize: typography.caption},
-  deviceAddress: {color: colors.textDim, fontSize: typography.small, marginTop: 2},
-  deviceConnect: {color: colors.accent, fontWeight: '800', fontSize: typography.caption},
-  deviceConnecting: {color: colors.warning, fontWeight: '800', fontSize: typography.caption},
-  emptyList: {color: colors.textDim, fontSize: typography.small, lineHeight: 20},
-  optionLabel: {
-    color: colors.textDim,
-    fontSize: typography.caption,
-    fontWeight: '700',
-    marginTop: spacing.md,
-    marginBottom: 6,
-  },
-  hint: {
-    color: colors.textFaint,
-    fontSize: typography.small,
-    lineHeight: 17,
-    marginTop: spacing.sm,
-    marginBottom: spacing.md,
-  },
-  helpText: {color: colors.textDim, fontSize: typography.caption, lineHeight: 26},
-});
+const useStyles = makeStyles(c =>
+  StyleSheet.create({
+    content: {padding: spacing.md, gap: spacing.md, paddingBottom: spacing.xxl},
+    statusRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: spacing.md,
+    },
+    statusLabel: {
+      color: c.textDim,
+      fontSize: typography.small,
+      marginBottom: 4,
+    },
+    statusValue: {color: c.text, fontWeight: '900', fontSize: typography.body},
+    statusButtons: {flexDirection: 'row', gap: spacing.md},
+    errorText: {
+      color: c.danger,
+      fontSize: typography.small,
+      marginTop: spacing.sm,
+      textAlign: 'center',
+    },
+    sectionTitle: {
+      color: c.text,
+      fontWeight: '900',
+      fontSize: typography.body,
+      marginBottom: spacing.md,
+    },
+    deviceRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.md,
+      marginBottom: spacing.sm,
+    },
+    deviceRowActive: {borderColor: c.success, backgroundColor: c.successSoft},
+    deviceInfo: {flex: 1},
+    deviceName: {
+      color: c.text,
+      fontWeight: '800',
+      fontSize: typography.caption,
+    },
+    deviceAddress: {color: c.textDim, fontSize: typography.small, marginTop: 2},
+    deviceConnect: {
+      color: c.accent,
+      fontWeight: '800',
+      fontSize: typography.caption,
+    },
+    deviceConnecting: {
+      color: c.warning,
+      fontWeight: '800',
+      fontSize: typography.caption,
+    },
+    emptyList: {color: c.textDim, fontSize: typography.small, lineHeight: 20},
+    optionLabel: {
+      color: c.textDim,
+      fontSize: typography.caption,
+      fontWeight: '700',
+      marginTop: spacing.md,
+      marginBottom: 6,
+    },
+    hint: {
+      color: c.textFaint,
+      fontSize: typography.small,
+      lineHeight: 17,
+      marginTop: spacing.sm,
+      marginBottom: spacing.md,
+    },
+    helpText: {color: c.textDim, fontSize: typography.caption, lineHeight: 26},
+  }),
+);

@@ -7,6 +7,32 @@ export type PricingMode = 'RETAIL' | 'WHOLESALE';
 export interface Category {
   id: number;
   name: string;
+  /** Product count (only populated in management listings). */
+  productCount?: number;
+}
+
+/** A user-defined sellable unit (قطعة، كرتونة، كيلو…). */
+export interface Unit {
+  id: number;
+  name: string;
+  short_name: string;
+  sort_order: number;
+}
+
+/** A unit attached to a product with its conversion + price overrides. */
+export interface ProductUnit {
+  id: number;
+  product_id: number;
+  unit_id: number;
+  unitName: string;
+  unitShort: string;
+  /** Base-unit pieces per 1 of this unit (e.g. 1 كرتونة = 24 قطعة). */
+  conversion: number;
+  /** Optional per-unit barcode for scanning a whole carton. */
+  barcode: string | null;
+  /** Price overrides — null means derive from the product base price. */
+  retail_price: number | null;
+  wholesale_price: number | null;
 }
 
 export interface Product {
@@ -21,6 +47,10 @@ export interface Product {
   created_at: string;
   /** Per-product low-stock alert override (NULL → global default). */
   low_stock_threshold: number | null;
+  /** Product (base-unit) barcode, scanned at the POS. */
+  barcode: string | null;
+  /** Unit rows loaded on demand (ProductForm / POS unit picker). */
+  units?: ProductUnit[];
 }
 
 /** Stock state derived from quantity vs threshold. */
@@ -53,18 +83,27 @@ export interface EmbeddingsIndex {
 }
 
 export interface CartLine {
+  /** Stable key: productId + unitId ('' for base unit). */
+  key: string;
   productId: number;
   name: string;
-  /** Unit price used for this sale (depends on pricing mode). */
+  /** Unit price used for this sale (depends on pricing mode + unit). */
   unitPrice: number;
   /** Cost price snapshot at add-time (for profit accounting). */
   costPrice: number;
   /** Retail & wholesale prices snapshot so mode switching can re-price. */
   retailPrice: number;
   wholesalePrice: number;
+  /** Quantity in the chosen unit (not base pieces). */
   quantity: number;
   /** Stock snapshot shown in the stepper to block overselling. */
   availableStock: number;
+  /** Chosen unit id — null/0 = base unit (قطعة). */
+  unitId: number | null;
+  /** Display name of the chosen unit. */
+  unitName: string;
+  /** Base pieces per 1 unit (1 for the base unit). */
+  conversion: number;
 }
 
 export interface SaleRecord {
@@ -86,6 +125,10 @@ export interface SaleItemRecord {
   unit_price: number;
   cost_price: number;
   total_line_price: number;
+  /** Unit display name at sale time (e.g. كرتونة). */
+  unit_name: string | null;
+  /** Base pieces actually deducted from stock. */
+  base_quantity: number | null;
 }
 
 export interface SaleWithItems {
@@ -93,7 +136,45 @@ export interface SaleWithItems {
   items: SaleItemRecord[];
 }
 
-export type ReportRangeKey = 'today' | 'yesterday' | 'last7' | 'thisMonth' | 'custom';
+// ────────────────────────────────────────────────────────────────
+// Stocktake (الجرد)
+// ────────────────────────────────────────────────────────────────
+
+export interface Stocktake {
+  id: number;
+  started_at: string;
+  completed_at: string | null;
+  status: 'open' | 'completed';
+  note: string | null;
+}
+
+export interface StocktakeItem {
+  id: number;
+  stocktake_id: number;
+  product_id: number;
+  productName: string;
+  categoryId: number | null;
+  system_qty: number;
+  counted_qty: number | null;
+  unitHint: string | null;
+}
+
+export interface StocktakeSummary {
+  totalItems: number;
+  countedItems: number;
+  matchedItems: number;
+  shortageItems: number;
+  surplusItems: number;
+  totalSystem: number;
+  totalCounted: number;
+}
+
+export type ReportRangeKey =
+  | 'today'
+  | 'yesterday'
+  | 'last7'
+  | 'thisMonth'
+  | 'custom';
 
 export interface DateRange {
   /** Inclusive, 'YYYY-MM-DD'. */
@@ -160,7 +241,8 @@ export type NotificationKind =
   | 'low_stock'
   | 'info'
   | 'printer'
-  | 'sale';
+  | 'sale'
+  | 'stocktake';
 
 export interface AppNotification {
   /** Stable id (timestamp-based). */

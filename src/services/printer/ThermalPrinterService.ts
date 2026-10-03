@@ -7,10 +7,7 @@
  */
 import {Platform, PermissionsAndroid} from 'react-native';
 import {DeviceEventEmitter} from 'react-native';
-import {
-  requireThermalPrinter,
-  type EscPosOp,
-} from '../../native/nativeBridge';
+import {requireThermalPrinter, type EscPosOp} from '../../native/nativeBridge';
 import {logDiag} from '../../core/diagnostics';
 import {nativeErrorMessage} from '../../database/connection';
 import type {PrinterDevice} from '../../core/types';
@@ -36,16 +33,21 @@ export const PrinterEvents = {
   },
 
   onDiscoveryFinished(handler: () => void): () => void {
-    const sub = DeviceEventEmitter.addListener('onDiscoveryFinished', () => handler());
+    const sub = DeviceEventEmitter.addListener('onDiscoveryFinished', () =>
+      handler(),
+    );
     return () => sub.remove();
   },
 
   onConnectionChanged(
     handler: (connected: boolean, address?: string) => void,
   ): () => void {
-    const sub = DeviceEventEmitter.addListener('onConnectionChanged', payload => {
-      handler(Boolean(payload?.connected), payload?.address);
-    });
+    const sub = DeviceEventEmitter.addListener(
+      'onConnectionChanged',
+      payload => {
+        handler(Boolean(payload?.connected), payload?.address);
+      },
+    );
     return () => sub.remove();
   },
 
@@ -81,7 +83,8 @@ export async function ensureBluetoothPermissions(): Promise<boolean> {
       return (
         granted['android.permission.BLUETOOTH_CONNECT'] ===
           PermissionsAndroid.RESULTS.GRANTED &&
-        granted['android.permission.BLUETOOTH_SCAN'] === PermissionsAndroid.RESULTS.GRANTED
+        granted['android.permission.BLUETOOTH_SCAN'] ===
+          PermissionsAndroid.RESULTS.GRANTED
       );
     }
     // Android 5–11: location is required for discovery.
@@ -104,7 +107,11 @@ export const ThermalPrinterService = {
     try {
       return await requireThermalPrinter().isBluetoothEnabled();
     } catch (error) {
-      logDiag('printer', nativeErrorMessage(error, 'تعذر فحص البلوتوث'), 'warn');
+      logDiag(
+        'printer',
+        nativeErrorMessage(error, 'تعذر فحص البلوتوث'),
+        'warn',
+      );
       return false;
     }
   },
@@ -113,7 +120,11 @@ export const ThermalPrinterService = {
     try {
       return await requireThermalPrinter().requestEnableBluetooth();
     } catch (error) {
-      logDiag('printer', nativeErrorMessage(error, 'تعذر تفعيل البلوتوث'), 'warn');
+      logDiag(
+        'printer',
+        nativeErrorMessage(error, 'تعذر تفعيل البلوتوث'),
+        'warn',
+      );
       return false;
     }
   },

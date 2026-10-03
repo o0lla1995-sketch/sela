@@ -44,7 +44,10 @@ export function rangeFor(key: ReportRangeKey, custom?: DateRange): DateRange {
 }
 
 export const ReportService = {
-  async loadBundle(key: ReportRangeKey, custom?: DateRange): Promise<ReportBundle> {
+  async loadBundle(
+    key: ReportRangeKey,
+    custom?: DateRange,
+  ): Promise<ReportBundle> {
     const range = rangeFor(key, custom);
     const [summary, topByRevenue, daily, hourly] = await Promise.all([
       ReportRepo.summary(range),
@@ -53,7 +56,9 @@ export const ReportService = {
       ReportRepo.hourlySeries(range),
     ]);
 
-    const topByProfit = [...topByRevenue].sort((a, b) => b.profit - a.profit).slice(0, 10);
+    const topByProfit = [...topByRevenue]
+      .sort((a, b) => b.profit - a.profit)
+      .slice(0, 10);
 
     return {range, summary, topByRevenue, topByProfit, daily, hourly};
   },

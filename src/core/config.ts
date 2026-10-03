@@ -20,8 +20,31 @@ export const DEFAULT_MATCH_THRESHOLD = 0.82;
 /** Minimum time between two auto-adds of the SAME product (ms). */
 export const DEFAULT_RECOGNITION_COOLDOWN_MS = 1500;
 
+/** Scanner engine selected by the merchant from Settings. */
+export type ScannerMode = 'barcode' | 'visual' | 'both';
+
 /** Pause between auto-scan cycles in the POS camera sheet (ms). */
-export const AUTO_SCAN_INTERVAL_MS = 650;
+export const AUTO_SCAN_INTERVAL_MS = 900;
+
+/** Barcode re-scan guard: same code ignored for this long (ms). */
+export const BARCODE_DEDUPE_MS = 1600;
+
+/** Default base unit name used when a product has no unit rows. */
+export const BASE_UNIT_NAME = 'قطعة';
+
+/** Units seeded on first run (name, short name). */
+export const DEFAULT_UNITS: {name: string; short: string}[] = [
+  {name: 'قطعة', short: 'ق'},
+  {name: 'كرتونة', short: 'كرت'},
+  {name: 'علبة', short: 'علب'},
+  {name: 'كيس', short: 'كيس'},
+  {name: 'كيلوغرام', short: 'كغ'},
+  {name: 'غرام', short: 'غ'},
+  {name: 'لتر', short: 'ل'},
+  {name: 'دزينة', short: 'دز'},
+  {name: 'زجاجة', short: 'زج'},
+  {name: 'متر', short: 'م'},
+];
 
 /** Embedding JSON serialization precision (float decimals). */
 export const EMBEDDING_DECIMALS = 6;
@@ -54,11 +77,11 @@ export const CURRENCY = '₪';
 export const DB_NAME = 'sela.db';
 
 /** Schema version — bump + add a migration branch when changing DDL. */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
-/** App display name used on receipts & About page. */
-export const APP_NAME = 'سيلا';
-export const APP_NAME_EN = 'Sela';
+/** App display name (Latin, per merchant request) used everywhere. */
+export const APP_NAME = 'sela';
+export const APP_NAME_AR = 'سيلا';
 
 /** App version shown in Settings → About. */
-export const APP_VERSION = '2.0.0';
+export const APP_VERSION = '3.0.0';

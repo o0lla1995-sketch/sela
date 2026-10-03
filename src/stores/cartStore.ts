@@ -3,43 +3,91 @@
  * ─────────────────────────────────────────────────────────────────
  * Lines keep a price snapshot (retail + wholesale + cost) so the
  * مفرق/جملة switch re-prices instantly without a DB round-trip.
- * A draft is persisted to MMKV so an accidental app kill never loses
- * an in-progress sale.
+ * Each line also carries its sellable unit (قطعة / كرتونة / كيلو…)
+ * with the conversion factor — stock is always tracked in BASE
+ * units while the merchant sells in whatever unit they choose.
+ * A draft is persisted to MMKV so an accidental app kill never
+ * loses an in-progress sale.
  */
 import {create} from 'zustand';
 import {getJson, setJson, KEYS, storage} from '../storage/storage';
-import type {CartLine, PricingMode, Product} from '../core/types';
+import {BASE_UNIT_NAME} from '../core/config';
+import type {CartLine, PricingMode, Product, ProductUnit} from '../core/types';
+
+/** Price of one chosen unit under a pricing mode. */
+export function unitPriceFor(
+  product: Product,
+  unit: ProductUnit | null,
+  mode: PricingMode,
+): number {
+  if (unit == null) {
+    return mode === 'WHOLESALE'
+      ? product.wholesale_price
+      : product.retail_price;
+  }
+  const override =
+    mode === 'WHOLESALE' ? unit.wholesale_price : unit.retail_price;
+  if (override != null && override > 0) {
+    return override;
+  }
+  const base =
+    mode === 'WHOLESALE' ? product.wholesale_price : product.retail_price;
+  return base * unit.conversion;
+}
+
+function lineKey(productId: number, unitId: number | null): string {
+  return `${productId}:${unitId ?? 0}`;
+}
+
+function toLine(
+  product: Product,
+  mode: PricingMode,
+  unit: ProductUnit | null,
+): CartLine {
+  return {
+    key: lineKey(product.id, unit?.unit_id ?? null),
+    productId: product.id,
+    name: product.name,
+    unitPrice: unitPriceFor(product, unit, mode),
+    costPrice: unit ? product.cost_price * unit.conversion : product.cost_price,
+    retailPrice: unit
+      ? unit.retail_price ?? product.retail_price * unit.conversion
+      : product.retail_price,
+    wholesalePrice: unit
+      ? unit.wholesale_price ?? product.wholesale_price * unit.conversion
+      : product.wholesale_price,
+    quantity: 1,
+    availableStock: product.stock_quantity,
+    unitId: unit?.unit_id ?? null,
+    unitName: unit?.unitName ?? BASE_UNIT_NAME,
+    conversion: unit?.conversion ?? 1,
+  };
+}
 
 interface CartState {
   lines: CartLine[];
   pricingMode: PricingMode;
   discount: number;
-  addProduct: (product: Product, mode: PricingMode) => {added: boolean; reason?: string};
-  increment: (productId: number) => {ok: boolean; reason?: string};
-  decrement: (productId: number) => void;
-  removeLine: (productId: number) => void;
-  setQuantity: (productId: number, quantity: number) => {ok: boolean; reason?: string};
+  addProduct: (
+    product: Product,
+    mode: PricingMode,
+    unit?: ProductUnit | null,
+  ) => {added: boolean; reason?: string};
+  setLineUnit: (
+    product: Product,
+    unit: ProductUnit | null,
+  ) => {ok: boolean; reason?: string};
+  increment: (key: string) => {ok: boolean; reason?: string};
+  decrement: (key: string) => void;
+  removeLine: (key: string) => void;
+  setQuantity: (
+    key: string,
+    quantity: number,
+  ) => {ok: boolean; reason?: string};
   setDiscount: (discount: number) => void;
   setPricingMode: (mode: PricingMode) => void;
   clear: () => void;
   clearDiscount: () => void;
-}
-
-function priceFor(product: Product, mode: PricingMode): number {
-  return mode === 'WHOLESALE' ? product.wholesale_price : product.retail_price;
-}
-
-function toLine(product: Product, mode: PricingMode): CartLine {
-  return {
-    productId: product.id,
-    name: product.name,
-    unitPrice: priceFor(product, mode),
-    costPrice: product.cost_price,
-    retailPrice: product.retail_price,
-    wholesalePrice: product.wholesale_price,
-    quantity: 1,
-    availableStock: product.stock_quantity,
-  };
 }
 
 interface DraftSnapshot {
@@ -48,11 +96,22 @@ interface DraftSnapshot {
   discount: number;
 }
 
+/** Normalizes draft lines loaded from older versions. */
+function normalizeLine(line: CartLine): CartLine {
+  return {
+    ...line,
+    key: line.key ?? lineKey(line.productId, line.unitId ?? null),
+    unitId: line.unitId ?? null,
+    unitName: line.unitName ?? BASE_UNIT_NAME,
+    conversion: line.conversion ?? 1,
+  };
+}
+
 function loadDraft(): DraftSnapshot {
   const draft = getJson<DraftSnapshot | null>(KEYS.cartDraft, null);
   if (draft && Array.isArray(draft.lines)) {
     return {
-      lines: draft.lines,
+      lines: draft.lines.map(normalizeLine),
       pricingMode: draft.pricingMode === 'WHOLESALE' ? 'WHOLESALE' : 'RETAIL',
       discount: Number(draft.discount) || 0,
     };
@@ -60,22 +119,52 @@ function loadDraft(): DraftSnapshot {
   return {lines: [], pricingMode: 'RETAIL', discount: 0};
 }
 
-function saveDraft(lines: CartLine[], pricingMode: PricingMode, discount: number): void {
-  setJson(KEYS.cartDraft, {lines, pricingMode, discount} satisfies DraftSnapshot);
+function saveDraft(
+  lines: CartLine[],
+  pricingMode: PricingMode,
+  discount: number,
+): void {
+  setJson(KEYS.cartDraft, {
+    lines,
+    pricingMode,
+    discount,
+  } satisfies DraftSnapshot);
+}
+
+/** Base pieces already reserved by a line (excluding one line). */
+function baseUsed(lines: CartLine[], excludeKey?: string): Map<number, number> {
+  const used = new Map<number, number>();
+  for (const line of lines) {
+    if (line.key === excludeKey) continue;
+    used.set(
+      line.productId,
+      (used.get(line.productId) ?? 0) + line.quantity * line.conversion,
+    );
+  }
+  return used;
 }
 
 export const useCartStore = create<CartState>((set, get) => ({
   ...loadDraft(),
 
-  addProduct: (product, mode) => {
+  addProduct: (product, mode, unit = null) => {
     const state = get();
-    const existing = state.lines.find(line => line.productId === product.id);
+    const key = lineKey(product.id, unit?.unit_id ?? null);
+    const conversion = unit?.conversion ?? 1;
+    const existing = state.lines.find(line => line.key === key);
+    const used = baseUsed(state.lines);
+    const alreadyInCart = used.get(product.id) ?? 0;
+
+    if (alreadyInCart + conversion > product.stock_quantity) {
+      return {
+        added: false,
+        reason: `الكمية المتاحة من ${product.name} هي ${product.stock_quantity} قطعة فقط (في السلة: ${alreadyInCart})`,
+      };
+    }
+
     if (existing) {
-      if (existing.quantity >= product.stock_quantity) {
-        return {added: false, reason: `الكمية المتاحة من ${product.name} هي ${product.stock_quantity} فقط`};
-      }
       const lines = state.lines.map(line =>
-        line.productId === product.id
+        line.key === key
           ? {
               ...line,
               quantity: line.quantity + 1,
@@ -87,65 +176,105 @@ export const useCartStore = create<CartState>((set, get) => ({
       saveDraft(lines, state.pricingMode, state.discount);
       return {added: true};
     }
-    if (product.stock_quantity <= 0) {
-      return {added: false, reason: `${product.name} غير متوفر في المخزون`};
-    }
-    const lines = [...state.lines, toLine(product, mode)];
+    const lines = [...state.lines, toLine(product, mode, unit)];
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
     return {added: true};
   },
 
-  increment: productId => {
+  setLineUnit: (product, unit) => {
     const state = get();
-    const line = state.lines.find(entry => entry.productId === productId);
+    const key = lineKey(product.id, unit?.unit_id ?? null);
+    const existing = state.lines.find(line => line.key === key);
+    const conversion = unit?.conversion ?? 1;
+    const used = baseUsed(state.lines);
+    const alreadyInCart = used.get(product.id) ?? 0;
+
+    if (existing != null) {
+      // Merge: switching to a unit that already exists just keeps it.
+      return {ok: true};
+    }
+    // Replace every line of this product with the new unit line (qty 1).
+    const others = state.lines.filter(line => line.productId !== product.id);
+    if (
+      1 * conversion + alreadyInCart - alreadyInCart >
+      product.stock_quantity
+    ) {
+      return {
+        ok: false,
+        reason: `الكمية المتاحة هي ${product.stock_quantity} قطعة فقط`,
+      };
+    }
+    if (conversion > product.stock_quantity) {
+      return {
+        ok: false,
+        reason: `واحدة ${
+          unit?.unitName ?? ''
+        } تحتاج ${conversion} قطعة والمتوفر ${product.stock_quantity}`,
+      };
+    }
+    const lines = [...others, toLine(product, state.pricingMode, unit)];
+    set({lines});
+    saveDraft(lines, state.pricingMode, state.discount);
+    return {ok: true};
+  },
+
+  increment: key => {
+    const state = get();
+    const line = state.lines.find(entry => entry.key === key);
     if (!line) return {ok: false, reason: 'المنتج غير موجود في السلة'};
-    if (line.quantity >= line.availableStock) {
-      return {ok: false, reason: `الكمية المتاحة هي ${line.availableStock} فقط`};
+    const used = baseUsed(state.lines, key);
+    const alreadyInCart = used.get(line.productId) ?? 0;
+    if (alreadyInCart + line.conversion > line.availableStock) {
+      return {
+        ok: false,
+        reason: `الكمية المتاحة هي ${line.availableStock} قطعة فقط (في السلة: ${alreadyInCart})`,
+      };
     }
     const lines = state.lines.map(entry =>
-      entry.productId === productId
-        ? {...entry, quantity: entry.quantity + 1}
-        : entry,
+      entry.key === key ? {...entry, quantity: entry.quantity + 1} : entry,
     );
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
     return {ok: true};
   },
 
-  decrement: productId => {
+  decrement: key => {
     const state = get();
     const lines = state.lines
       .map(entry =>
-        entry.productId === productId
-          ? {...entry, quantity: entry.quantity - 1}
-          : entry,
+        entry.key === key ? {...entry, quantity: entry.quantity - 1} : entry,
       )
       .filter(entry => entry.quantity > 0);
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
   },
 
-  removeLine: productId => {
+  removeLine: key => {
     const state = get();
-    const lines = state.lines.filter(entry => entry.productId !== productId);
+    const lines = state.lines.filter(entry => entry.key !== key);
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
   },
 
-  setQuantity: (productId, quantity) => {
+  setQuantity: (key, quantity) => {
     const state = get();
     if (quantity <= 0) {
-      get().removeLine(productId);
+      get().removeLine(key);
       return {ok: true};
     }
-    const line = state.lines.find(entry => entry.productId === productId);
+    const line = state.lines.find(entry => entry.key === key);
     if (!line) return {ok: false, reason: 'المنتج غير موجود في السلة'};
-    if (quantity > line.availableStock) {
-      return {ok: false, reason: `الكمية المتاحة هي ${line.availableStock} فقط`};
+    const used = baseUsed(state.lines, key);
+    const alreadyInCart = used.get(line.productId) ?? 0;
+    if (alreadyInCart + quantity * line.conversion > line.availableStock) {
+      return {
+        ok: false,
+        reason: `الكمية المتاحة هي ${line.availableStock} قطعة فقط (في السلة: ${alreadyInCart})`,
+      };
     }
     const lines = state.lines.map(entry =>
-      entry.productId === productId ? {...entry, quantity} : entry,
+      entry.key === key ? {...entry, quantity} : entry,
     );
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
@@ -161,7 +290,7 @@ export const useCartStore = create<CartState>((set, get) => ({
 
   setPricingMode: mode => {
     const state = get();
-    // Re-price every line from its stored snapshots.
+    // Re-price every line from its stored unit snapshots.
     const lines = state.lines.map(line => ({
       ...line,
       unitPrice: mode === 'WHOLESALE' ? line.wholesalePrice : line.retailPrice,
@@ -189,8 +318,14 @@ export const useCartStore = create<CartState>((set, get) => ({
 
 /** Derived totals (pure functions so components stay cheap). */
 export function cartTotals(lines: CartLine[], discount: number) {
-  const subtotal = lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0);
-  const totalCost = lines.reduce((sum, line) => sum + line.costPrice * line.quantity, 0);
+  const subtotal = lines.reduce(
+    (sum, line) => sum + line.unitPrice * line.quantity,
+    0,
+  );
+  const totalCost = lines.reduce(
+    (sum, line) => sum + line.costPrice * line.quantity,
+    0,
+  );
   const safeDiscount = Math.min(Math.max(discount, 0), subtotal);
   const total = subtotal - safeDiscount;
   return {
@@ -200,5 +335,9 @@ export function cartTotals(lines: CartLine[], discount: number) {
     total,
     profit: total - totalCost,
     itemsCount: lines.reduce((sum, line) => sum + line.quantity, 0),
+    baseItemsCount: lines.reduce(
+      (sum, line) => sum + line.quantity * line.conversion,
+      0,
+    ),
   };
 }

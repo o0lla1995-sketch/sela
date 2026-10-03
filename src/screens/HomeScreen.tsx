@@ -3,45 +3,72 @@
  * Today's KPIs, stock alerts strip, quick actions and the latest
  * invoices — everything a shop owner glances at between customers.
  */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {ScrollView, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import React, {useCallback, useEffect, useState} from 'react';
+import {
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import {useNavigation} from '@react-navigation/native';
-import {AppButton, AppHeader, Badge, Card, EmptyState, SectionTitle, StatCard} from '../components/ui';
+import {
+  AppButton,
+  AppHeader,
+  Badge,
+  Card,
+  EmptyState,
+  SectionTitle,
+  StatCard,
+} from '../components/ui';
 import {Icon, IconChip, type IconName} from '../components/Icon';
 import {ReportService, type ReportBundle} from '../services/ReportService';
 import {StockAlertsService} from '../services/StockAlertsService';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
-import {colors, fonts, radius, spacing, typography} from '../core/theme';
+import {
+  fonts,
+  makeStyles,
+  radius,
+  spacing,
+  typography,
+  useThemeColors,
+} from '../core/theme';
 import {formatMoney, relativeTime} from '../core/format';
 import {APP_NAME, APP_VERSION} from '../core/config';
+import {Image} from 'react-native';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 
 const QUICK_ACTIONS: {
   key: string;
   label: string;
   icon: IconName;
-  target: 'Pos' | 'ProductForm' | 'PrinterSettings' | 'Reports';
+  target: 'Pos' | 'ProductForm' | 'PrinterSettings' | 'Reports' | 'Stocktake';
   accent?: boolean;
 }[] = [
   {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
   {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
-  {key: 'printer', label: 'الطابعة', icon: 'printer', target: 'PrinterSettings'},
+  {key: 'stocktake', label: 'الجرد', icon: 'clipboard', target: 'Stocktake'},
   {key: 'reports', label: 'التقارير', icon: 'chart', target: 'Reports'},
 ];
 
 export function HomeScreen() {
+  const c = useThemeColors();
+  const styles = useStyles();
   const navigation = useNavigation<any>();
   const settings = useSettingsStore(state => state.settings);
   const printerStatus = usePrinterStore(state => state.status);
-  const printerName = usePrinterStore(state => state.deviceName);
   const products = useCatalogStore(state => state.products);
-  const refreshCatalog = useCatalogStore(state => state.refresh);
 
   const [bundle, setBundle] = useState<ReportBundle | null>(null);
   const [recentSales, setRecentSales] = useState<
-    {id: number; invoice_number: string; total_amount: number; created_at: string}[]
+    {
+      id: number;
+      invoice_number: string;
+      total_amount: number;
+      created_at: string;
+    }[]
   >([]);
 
   const loadData = useCallback(async () => {
@@ -65,17 +92,32 @@ export function HomeScreen() {
     return unsubscribe;
   }, [navigation, loadData]);
 
-  const alerts = useMemo(() => StockAlertsService.activeAlerts(8), [products]);
+  const alerts = StockAlertsService.activeAlerts(8);
 
   return (
     <View style={styles.screen}>
       <AppHeader title={APP_NAME} subtitle="لوحة المتجر" showBack={false} />
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}>
         {/* ── Store welcome card ─────────────────────────────── */}
         <Card style={styles.welcome}>
           <View style={styles.welcomeRow}>
-            <IconChip name="store" chipSize={46} size={22} bg={colors.accentSoft} color={colors.accent} />
+            {settings.storeLogoPath ? (
+              <Image
+                source={{uri: `file://${settings.storeLogoPath}`}}
+                style={styles.storeLogo}
+              />
+            ) : (
+              <IconChip
+                name="store"
+                chipSize={46}
+                size={22}
+                bg={c.accentSoft}
+                color={c.accent}
+              />
+            )}
             <View style={{flex: 1}}>
               <Text style={styles.storeName} numberOfLines={1}>
                 {settings.storeName}
@@ -141,13 +183,16 @@ export function HomeScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{gap: spacing.sm, paddingBottom: spacing.xs}}>
+              contentContainerStyle={{
+                gap: spacing.sm,
+                paddingBottom: spacing.xs,
+              }}>
               {alerts.map(({product, state}) => (
                 <TouchableOpacity
                   key={product.id}
                   style={[
                     styles.alertCard,
-                    {borderColor: state === 'out' ? colors.danger : colors.warning},
+                    {borderColor: state === 'out' ? c.danger : c.warning},
                   ]}
                   onPress={() =>
                     navigation.navigate('ProductForm', {productId: product.id})
@@ -155,14 +200,16 @@ export function HomeScreen() {
                   <Icon
                     name={state === 'out' ? 'packageMinus' : 'alert'}
                     size={17}
-                    color={state === 'out' ? colors.danger : colors.warning}
+                    color={state === 'out' ? c.danger : c.warning}
                   />
                   <View style={{flex: 1, minWidth: 120}}>
                     <Text style={styles.alertName} numberOfLines={1}>
                       {product.name}
                     </Text>
                     <Text style={styles.alertQty}>
-                      {state === 'out' ? 'نفد المخزون' : `${product.stock_quantity} قطعة متبقية`}
+                      {state === 'out'
+                        ? 'نفد المخزون'
+                        : `${product.stock_quantity} قطعة متبقية`}
                     </Text>
                   </View>
                 </TouchableOpacity>
@@ -179,7 +226,9 @@ export function HomeScreen() {
               key={action.key}
               style={[
                 styles.quickCard,
-                action.accent ? {backgroundColor: colors.accent, borderColor: colors.accent} : null,
+                action.accent
+                  ? {backgroundColor: c.accent, borderColor: c.accent}
+                  : null,
               ]}
               onPress={() =>
                 navigation.navigate(
@@ -191,12 +240,12 @@ export function HomeScreen() {
               <Icon
                 name={action.icon}
                 size={26}
-                color={action.accent ? colors.onAccent : colors.accent}
+                color={action.accent ? c.onAccent : c.accent}
               />
               <Text
                 style={[
                   styles.quickLabel,
-                  action.accent ? {color: colors.onAccent} : null,
+                  action.accent ? {color: c.onAccent} : null,
                 ]}>
                 {action.label}
               </Text>
@@ -213,7 +262,12 @@ export function HomeScreen() {
               title="لا توجد فواتير بعد"
               subtitle="أول بيع سيظهر هنا — ابدأ من شاشة نقطة البيع"
               action={
-                <AppButton small title="ابدأ البيع" icon="cart" onPress={() => navigation.navigate('Pos' as never)} />
+                <AppButton
+                  small
+                  title="ابدأ البيع"
+                  icon="cart"
+                  onPress={() => navigation.navigate('Pos' as never)}
+                />
               }
             />
           </Card>
@@ -227,137 +281,153 @@ export function HomeScreen() {
                   index < recentSales.length - 1 ? styles.saleRowBorder : null,
                 ]}>
                 <View style={styles.saleInvoiceIcon}>
-                  <Icon name="inbox" size={16} color={colors.textDim} />
+                  <Icon name="inbox" size={16} color={c.textDim} />
                 </View>
                 <View style={{flex: 1}}>
                   <Text style={styles.saleInvoice}>{sale.invoice_number}</Text>
-                  <Text style={styles.saleTime}>{relativeTime(sale.created_at)}</Text>
+                  <Text style={styles.saleTime}>
+                    {relativeTime(sale.created_at)}
+                  </Text>
                 </View>
-                <Text style={styles.saleAmount}>{formatMoney(sale.total_amount)}</Text>
+                <Text style={styles.saleAmount}>
+                  {formatMoney(sale.total_amount)}
+                </Text>
               </View>
             ))}
           </Card>
         )}
 
-        <Text style={styles.version}>سيلا الإصدار {APP_VERSION} · يعمل دون إنترنت</Text>
+        <Text style={styles.version}>
+          sela · الإصدار {APP_VERSION} · يعمل دون إنترنت
+        </Text>
       </ScrollView>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  screen: {flex: 1, backgroundColor: colors.bg},
-  content: {
-    padding: spacing.lg,
-    gap: spacing.md,
-    paddingBottom: spacing.xxl,
-  },
-  welcome: {paddingVertical: spacing.md},
-  welcomeRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.md},
-  storeName: {
-    color: colors.text,
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  storeMeta: {
-    color: colors.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    marginTop: 2,
-  },
-  statsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  statCard: {minWidth: '48%'},
-  seeAll: {
-    color: colors.accent,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  alertCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.surface,
-    borderWidth: 1.5,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 10,
-    maxWidth: 250,
-  },
-  alertName: {
-    color: colors.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  alertQty: {
-    color: colors.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    marginTop: 1,
-  },
-  quickGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  quickCard: {
-    width: '48.3%',
-    minHeight: 92,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.borderSoft,
-    borderRadius: radius.lg,
-    alignItems: 'flex-start',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-  },
-  quickLabel: {
-    color: colors.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.caption,
-  },
-  saleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 12,
-  },
-  saleRowBorder: {borderBottomWidth: 1, borderBottomColor: colors.borderSoft},
-  saleInvoiceIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    backgroundColor: colors.surfaceAlt,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  saleInvoice: {
-    color: colors.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-    fontVariant: ['tabular-nums'],
-  },
-  saleTime: {
-    color: colors.textFaint,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-  },
-  saleAmount: {
-    color: colors.accent,
-    fontFamily: fonts.black,
-    fontSize: typography.caption,
-    fontVariant: ['tabular-nums'],
-  },
-  version: {
-    color: colors.textFaint,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    textAlign: 'center',
-    marginTop: spacing.md,
-  },
-});
+const useStyles = makeStyles(c =>
+  StyleSheet.create({
+    screen: {flex: 1, backgroundColor: c.bg},
+    storeLogo: {
+      width: 46,
+      height: 46,
+      borderRadius: 13,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    content: {
+      padding: spacing.lg,
+      gap: spacing.md,
+      paddingBottom: spacing.xxl,
+    },
+    welcome: {paddingVertical: spacing.md},
+    welcomeRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.md},
+    storeName: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    storeMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      marginTop: 2,
+    },
+    statsGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+    },
+    statCard: {minWidth: '48%'},
+    seeAll: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    alertCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderWidth: 1.5,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+      maxWidth: 250,
+    },
+    alertName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    alertQty: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+    },
+    quickGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+    },
+    quickCard: {
+      width: '48.3%',
+      minHeight: 92,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.lg,
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+      gap: spacing.sm,
+      paddingHorizontal: spacing.lg,
+    },
+    quickLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    saleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: 12,
+    },
+    saleRowBorder: {borderBottomWidth: 1, borderBottomColor: c.borderSoft},
+    saleInvoiceIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      backgroundColor: c.surfaceAlt,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    saleInvoice: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    saleTime: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+    },
+    saleAmount: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.caption,
+      fontVariant: ['tabular-nums'],
+    },
+    version: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+      marginTop: spacing.md,
+    },
+  }),
+);

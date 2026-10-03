@@ -22,7 +22,8 @@ class SelaPackage : ReactPackage {
     ThermalPrinterModule(reactContext),
     PlatformUtilsModule(reactContext),
     ImageDecoderModule(reactContext),
-    NotificationsModule(reactContext)
+    NotificationsModule(reactContext),
+    ImagePickerModule(reactContext)
   )
 
   override fun createViewManagers(

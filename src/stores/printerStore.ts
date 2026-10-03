@@ -3,7 +3,10 @@
  * lifecycle, with auto-reconnect to the last used printer.
  */
 import {create} from 'zustand';
-import {ThermalPrinterService, PrinterEvents} from '../services/printer/ThermalPrinterService';
+import {
+  ThermalPrinterService,
+  PrinterEvents,
+} from '../services/printer/ThermalPrinterService';
 import {useSettingsStore} from './settingsStore';
 import {logDiag} from '../core/diagnostics';
 import type {PrinterDevice} from '../core/types';
@@ -35,7 +38,9 @@ function ensureSubscriptions(): void {
 
   PrinterEvents.onDeviceFound(device => {
     usePrinterStore.setState(state => {
-      const known = state.discovered.some(entry => entry.address === device.address);
+      const known = state.discovered.some(
+        entry => entry.address === device.address,
+      );
       if (known) return state;
       return {discovered: [device, ...state.discovered]};
     });
@@ -47,7 +52,11 @@ function ensureSubscriptions(): void {
 
   PrinterEvents.onConnectionChanged(connected => {
     if (!connected) {
-      usePrinterStore.setState({status: 'disconnected', deviceName: null, deviceAddress: null});
+      usePrinterStore.setState({
+        status: 'disconnected',
+        deviceName: null,
+        deviceAddress: null,
+      });
     }
   });
 
@@ -82,7 +91,10 @@ export const usePrinterStore = create<PrinterState>((set, get) => ({
       set({discovered: [], scanning: true});
       const started = await ThermalPrinterService.startDiscovery();
       if (!started) {
-        set({scanning: false, lastError: 'تعذر بدء البحث — تأكد أن البلوتوث مفعّل'});
+        set({
+          scanning: false,
+          lastError: 'تعذر بدء البحث — تأكد أن البلوتوث مفعّل',
+        });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -104,7 +116,10 @@ export const usePrinterStore = create<PrinterState>((set, get) => ({
         printerAddress: device.address,
         printerName: device.name,
       });
-      logDiag('printer', `تم الاتصال بالطابعة ${device.name} (${device.address})`);
+      logDiag(
+        'printer',
+        `تم الاتصال بالطابعة ${device.name} (${device.address})`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({status: 'disconnected', lastError: message});

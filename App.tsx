@@ -12,7 +12,14 @@
  * shows a recovery screen instead of a black activity.
  */
 import React, {useEffect, useState} from 'react';
-import {ActivityIndicator, StatusBar, StyleSheet, Text, View} from 'react-native';
+import {
+  Appearance,
+  ActivityIndicator,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import {SafeAreaProvider} from 'react-native-safe-area-context';
 import {GestureHandlerRootView} from 'react-native-gesture-handler';
 
@@ -27,8 +34,14 @@ import {usePrinterStore} from './src/stores/printerStore';
 import {VisionRecognitionService} from './src/services/vision/VisionRecognitionService';
 import {StockAlertsService} from './src/services/StockAlertsService';
 import {logDiag} from './src/core/diagnostics';
-import {colors, fonts, spacing, typography} from './src/core/theme';
-import {APP_NAME, APP_VERSION} from './src/core/config';
+import {
+  colors,
+  fonts,
+  spacing,
+  typography,
+  useThemeStore,
+  useThemeColors,
+} from './src/core/theme';
 
 type BootState = 'booting' | 'ready' | 'error';
 
@@ -84,10 +97,18 @@ export default function App(): React.JSX.Element {
     };
   }, []);
 
+  // Keep the resolved theme in sync with the OS when mode = 'system'.
+  useEffect(() => {
+    const subscription = Appearance.addChangeListener(() => {
+      useThemeStore.getState().syncSystem();
+    });
+    return () => subscription.remove();
+  }, []);
+
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-        <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
+        <ThemedChrome />
         <Boundary label="التطبيق">
           {boot === 'booting' ? (
             <BootSplash />
@@ -103,28 +124,53 @@ export default function App(): React.JSX.Element {
   );
 }
 
-function BootSplash(): React.JSX.Element {
+/** StatusBar + root background follow the active theme. */
+function ThemedChrome(): null | React.JSX.Element {
+  const c = useThemeColors();
   return (
-    <View style={styles.center}>
-      <View style={styles.splashMark}>
-        <Text style={styles.splashGlyph}>س</Text>
+    <StatusBar
+      barStyle={
+        useThemeStore.getState().resolved === 'dark'
+          ? 'light-content'
+          : 'dark-content'
+      }
+      backgroundColor={c.bg}
+    />
+  );
+}
+
+function BootSplash(): React.JSX.Element {
+  const c = useThemeColors();
+  return (
+    <View style={[styles.center, {backgroundColor: c.bg}]}>
+      <View style={[styles.splashMark, {backgroundColor: c.accent}]}>
+        <Text style={styles.splashGlyph}>S</Text>
       </View>
-      <Text style={styles.splashTitle}>{APP_NAME}</Text>
-      <Text style={styles.splashSubtitle}>نقطة بيع ذكية — تعمل بلا إنترنت</Text>
-      <ActivityIndicator color={colors.accent} size="large" style={{marginTop: spacing.xl}} />
+      <Text style={[styles.splashTitle, {color: c.text}]}>sela</Text>
+      <Text style={[styles.splashSubtitle, {color: c.textDim}]}>
+        نقطة بيع ذكية — تعمل بلا إنترنت
+      </Text>
+      <ActivityIndicator
+        color={c.accent}
+        size="large"
+        style={{marginTop: spacing.xl}}
+      />
     </View>
   );
 }
 
 function BootError({message}: {message: string}): React.JSX.Element {
+  const c = useThemeColors();
   return (
-    <View style={styles.center}>
-      <View style={styles.splashMark}>
-        <Text style={styles.splashGlyph}>س</Text>
+    <View style={[styles.center, {backgroundColor: c.bg}]}>
+      <View style={[styles.splashMark, {backgroundColor: c.danger}]}>
+        <Text style={styles.splashGlyph}>S</Text>
       </View>
-      <Text style={styles.errorTitle}>تعذّر تشغيل التطبيق</Text>
-      <Text style={styles.errorText}>{message}</Text>
-      <Text style={styles.errorText}>
+      <Text style={[styles.errorTitle, {color: c.danger}]}>
+        تعذّر تشغيل التطبيق
+      </Text>
+      <Text style={[styles.errorText, {color: c.text}]}>{message}</Text>
+      <Text style={[styles.errorText, {color: c.textDim}]}>
         أعد تشغيل التطبيق — إذا استمرت المشكلة جرّب «مسح البيانات» من إعدادات
         أندرويد ثم أعد فتح التطبيق
       </Text>

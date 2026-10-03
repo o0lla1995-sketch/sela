@@ -8,6 +8,7 @@
 import {requirePlatformUtils} from '../native/nativeBridge';
 import {ReportService} from './ReportService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
+import {StocktakeRepo} from '../database/repositories/StocktakeRepo';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 import {localToday} from '../core/format';
 import type {ReportRangeKey, DateRange, Product} from '../core/types';
@@ -35,7 +36,10 @@ function xmlEscape(value: string | number): string {
     .replace(/"/g, '&quot;');
 }
 
-export function rowsToXls(rows: (string | number)[][], sheetName: string): string {
+export function rowsToXls(
+  rows: (string | number)[][],
+  sheetName: string,
+): string {
   const header = rows[0] ?? [];
   const bodyRows = rows.slice(1);
   const xmlRows = bodyRows
@@ -60,7 +64,12 @@ export function rowsToXls(rows: (string | number)[][], sheetName: string): strin
     `<Worksheet ss:Name="${xmlEscape(sheetName)}">` +
     '<Table>' +
     `<Row>${header
-      .map(cell => `<Cell><Data ss:Type="String">${xmlEscape(String(cell))}</Data></Cell>`)
+      .map(
+        cell =>
+          `<Cell><Data ss:Type="String">${xmlEscape(
+            String(cell),
+          )}</Data></Cell>`,
+      )
       .join('')}</Row>` +
     xmlRows +
     '</Table></Worksheet></Workbook>'
@@ -78,9 +87,9 @@ async function exportRows(
   const platform = requirePlatformUtils();
   const stamp = localToday().replace(/-/g, '');
   const fileName = `${baseName}_${stamp}.${format}`;
-  const mimeType =
-    format === 'csv' ? 'text/csv' : 'application/vnd.ms-excel';
-  const content = format === 'csv' ? rowsToCsv(rows) : rowsToXls(rows, baseName);
+  const mimeType = format === 'csv' ? 'text/csv' : 'application/vnd.ms-excel';
+  const content =
+    format === 'csv' ? rowsToCsv(rows) : rowsToXls(rows, baseName);
   return platform.exportFile(fileName, mimeType, content);
 }
 
@@ -130,6 +139,53 @@ export const ExportService = {
     return exportRows('sales_report', rows, format);
   },
 
+  /** Full stocktake report: system vs counted vs variance per product. */
+  async exportStocktakeReport(stocktakeId: number): Promise<string> {
+    const session = await StocktakeRepo.getById(stocktakeId);
+    if (session == null) {
+      throw new Error('جلسة الجرد غير موجودة');
+    }
+    const items = await StocktakeRepo.listItems(stocktakeId);
+    const rows: (string | number)[][] = [
+      ['المنتج', 'كمية النظام', 'الكمية المعدودة', 'الفرق', 'الحالة'],
+      ...items.map(item => {
+        const counted = item.counted_qty;
+        const variance = counted == null ? 0 : counted - item.system_qty;
+        const state =
+          counted == null
+            ? 'لم يُعد'
+            : variance === 0
+            ? 'مطابق'
+            : variance > 0
+            ? 'زيادة'
+            : 'نقص';
+        return [
+          item.productName,
+          item.system_qty,
+          counted ?? '',
+          variance ?? '',
+          state,
+        ];
+      }),
+      [
+        'الإجمالي',
+        items.reduce((sum, item) => sum + item.system_qty, 0),
+        items.reduce((sum, item) => sum + (item.counted_qty ?? 0), 0),
+        items.reduce(
+          (sum, item) =>
+            sum +
+            (item.counted_qty == null ? 0 : item.counted_qty - item.system_qty),
+          0,
+        ),
+        `جلسة #${session.id} — بدأت ${session.started_at}`,
+      ],
+    ];
+    const platform = requirePlatformUtils();
+    const stamp = localToday().replace(/-/g, '');
+    const fileName = `stocktake_${session.id}_${stamp}.csv`;
+    return platform.exportFile(fileName, 'text/csv', rowsToCsv(rows));
+  },
+
   /** Top products report (by revenue & profit). */
   async exportTopProducts(
     key: ReportRangeKey,
@@ -176,7 +232,10 @@ export const ExportService = {
         '',
         products.reduce((sum, product) => sum + product.stock_quantity, 0),
         products
-          .reduce((sum, product) => sum + product.cost_price * product.stock_quantity, 0)
+          .reduce(
+            (sum, product) => sum + product.cost_price * product.stock_quantity,
+            0,
+          )
           .toFixed(2),
       ],
     ];
@@ -202,7 +261,15 @@ export const ExportService = {
       ]),
       ['', ''],
       ['آخر المبيعات', ''],
-      ['رقم الفاتورة', 'الإجمالي', 'التكلفة', 'الربح', 'الخصم', 'النوع', 'التاريخ'],
+      [
+        'رقم الفاتورة',
+        'الإجمالي',
+        'التكلفة',
+        'الربح',
+        'الخصم',
+        'النوع',
+        'التاريخ',
+      ],
       ...sales.map(s => [
         s.invoice_number,
         s.total_amount.toFixed(2),

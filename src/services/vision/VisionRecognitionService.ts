@@ -13,8 +13,16 @@
  * No frame processors, no worklets — the crash that blacked out the
  * POS screen in v1 cannot happen again.
  */
-import {loadTensorflowModel, type TensorflowModel} from 'react-native-fast-tflite';
-import {MODEL_INPUT_SIZE, NORM_MEAN, NORM_STD, EMBEDDING_DECIMALS} from '../../core/config';
+import {
+  loadTensorflowModel,
+  type TensorflowModel,
+} from 'react-native-fast-tflite';
+import {
+  MODEL_INPUT_SIZE,
+  NORM_MEAN,
+  NORM_STD,
+  EMBEDDING_DECIMALS,
+} from '../../core/config';
 import {logDiag} from '../../core/diagnostics';
 import type {EmbeddingsIndex, VisionModelInfo} from '../../core/types';
 import {ImageDecoderNative} from '../../native/nativeBridge';
@@ -182,7 +190,9 @@ export const VisionRecognitionService = {
     } catch (error) {
       logDiag(
         'vision',
-        `فشل حفظ الصورة المصغرة: ${error instanceof Error ? error.message : String(error)}`,
+        `فشل حفظ الصورة المصغرة: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
         'warn',
       );
       return null;

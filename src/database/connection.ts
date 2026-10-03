@@ -5,7 +5,7 @@
  * first-run seed of default Arabic categories.
  */
 import {open, type DB} from '@op-engineering/op-sqlite';
-import {DB_NAME} from '../core/config';
+import {DB_NAME, DEFAULT_UNITS} from '../core/config';
 import {logDiag} from '../core/diagnostics';
 import {storage, getNumber, KEYS} from '../storage/storage';
 
@@ -23,6 +23,41 @@ const DDL_STATEMENTS: string[] = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS units (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    short_name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE IF NOT EXISTS product_units (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    unit_id INTEGER NOT NULL,
+    conversion REAL NOT NULL DEFAULT 1,
+    barcode TEXT,
+    retail_price REAL,
+    wholesale_price REAL,
+    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+    FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE,
+    UNIQUE(product_id, unit_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS stocktakes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME,
+    status TEXT NOT NULL DEFAULT 'open',
+    note TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS stocktake_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stocktake_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    system_qty REAL NOT NULL DEFAULT 0,
+    counted_qty REAL,
+    FOREIGN KEY(stocktake_id) REFERENCES stocktakes(id) ON DELETE CASCADE,
+    FOREIGN KEY(product_id) REFERENCES products(id),
+    UNIQUE(stocktake_id, product_id)
+  )`,
   `CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -33,6 +68,7 @@ const DDL_STATEMENTS: string[] = [
     category_id INTEGER,
     image_uri TEXT,
     low_stock_threshold INTEGER,
+    barcode TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(category_id) REFERENCES categories(id)
   )`,
@@ -66,6 +102,11 @@ const DDL_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)`,
   `CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)`,
+  `CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)`,
+  `CREATE INDEX IF NOT EXISTS idx_product_units_product ON product_units(product_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_product_units_barcode ON product_units(barcode)`,
+  `CREATE INDEX IF NOT EXISTS idx_stocktakes_status ON stocktakes(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_stocktake_items_session ON stocktake_items(stocktake_id)`,
   `CREATE INDEX IF NOT EXISTS idx_embeddings_product ON product_embeddings(product_id)`,
   `CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id)`,
@@ -84,6 +125,7 @@ const DEFAULT_CATEGORIES: string[] = [
 /**
  * Forward-only schema migrations, versioned in MMKV.
  * v2 (Sela 2.0): products.low_stock_threshold for per-product alerts.
+ * v3 (sela 3.0): units system + product barcodes + stocktake tables.
  */
 async function applyMigrations(database: DB): Promise<void> {
   const storedVersion = getNumber(KEYS.schemaVersion, 0);
@@ -101,6 +143,90 @@ async function applyMigrations(database: DB): Promise<void> {
       logDiag('db', 'ترحيل v2: أُضيف عمود حد المخزون المنخفض');
     }
     version = 2;
+  }
+
+  if (version < 3) {
+    const productsCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'barcode'",
+    );
+    const hasBarcode =
+      (productsCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasBarcode) {
+      await database.execute('ALTER TABLE products ADD COLUMN barcode TEXT');
+    }
+
+    const saleItemsCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sale_items') WHERE name = 'unit_name'",
+    );
+    const hasUnitName =
+      (saleItemsCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasUnitName) {
+      await database.execute(
+        'ALTER TABLE sale_items ADD COLUMN unit_name TEXT',
+      );
+      await database.execute(
+        'ALTER TABLE sale_items ADD COLUMN base_quantity REAL',
+      );
+    }
+
+    // New v3 tables (also in DDL for fresh installs — IF NOT EXISTS both ways).
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS units (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        short_name TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS product_units (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL,
+        unit_id INTEGER NOT NULL,
+        conversion REAL NOT NULL DEFAULT 1,
+        barcode TEXT,
+        retail_price REAL,
+        wholesale_price REAL,
+        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+        FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE,
+        UNIQUE(product_id, unit_id)
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS stocktakes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completed_at DATETIME,
+        status TEXT NOT NULL DEFAULT 'open',
+        note TEXT
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS stocktake_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stocktake_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        system_qty REAL NOT NULL DEFAULT 0,
+        counted_qty REAL,
+        FOREIGN KEY(stocktake_id) REFERENCES stocktakes(id) ON DELETE CASCADE,
+        FOREIGN KEY(product_id) REFERENCES products(id),
+        UNIQUE(stocktake_id, product_id)
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_product_units_product ON product_units(product_id)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stocktakes_status ON stocktakes(status)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stocktake_items_session ON stocktake_items(stocktake_id)',
+    );
+    logDiag('db', 'ترحيل v3: الوحدات والباركود والجرد');
+    version = 3;
   }
 
   if (version !== storedVersion) {
@@ -131,13 +257,32 @@ export async function initDatabase(): Promise<void> {
 
     const seeded = storage.getBoolean(KEYS.seededFlag);
     if (!seeded) {
-      const countResult = await db.execute('SELECT COUNT(*) AS cnt FROM categories');
-      const countRow = countResult.rows?._array?.[0] as {cnt?: number} | undefined;
+      const countResult = await db.execute(
+        'SELECT COUNT(*) AS cnt FROM categories',
+      );
+      const countRow = countResult.rows?._array?.[0] as
+        | {cnt?: number}
+        | undefined;
       if ((countRow?.cnt ?? 0) === 0) {
         for (const name of DEFAULT_CATEGORIES) {
           await db.execute('INSERT INTO categories (name) VALUES (?)', [name]);
         }
         logDiag('db', `تمت إضافة ${DEFAULT_CATEGORIES.length} فئات افتراضية`);
+      }
+      // Seed the default unit catalog (قطعة، كرتونة، كيلو…).
+      const unitsCount = await db.execute('SELECT COUNT(*) AS cnt FROM units');
+      const unitsRow = unitsCount.rows?._array?.[0] as
+        | {cnt?: number}
+        | undefined;
+      if ((unitsRow?.cnt ?? 0) === 0) {
+        let order = 0;
+        for (const unit of DEFAULT_UNITS) {
+          await db.execute(
+            'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
+            [unit.name, unit.short, order++],
+          );
+        }
+        logDiag('db', `تمت إضافة ${DEFAULT_UNITS.length} وحدات افتراضية`);
       }
       storage.set(KEYS.seededFlag, true);
     }
@@ -152,12 +297,18 @@ export async function initDatabase(): Promise<void> {
 /** DANGEROUS: wipes all business data (used by Settings → reset). */
 export async function wipeAllData(): Promise<void> {
   const database = getDb();
+  await database.execute('DELETE FROM stocktake_items');
+  await database.execute('DELETE FROM stocktakes');
   await database.execute('DELETE FROM sale_items');
   await database.execute('DELETE FROM sales');
   await database.execute('DELETE FROM product_embeddings');
+  await database.execute('DELETE FROM product_units');
   await database.execute('DELETE FROM products');
   await database.execute('DELETE FROM categories');
-  await database.execute("DELETE FROM sqlite_sequence WHERE name IN ('categories','products','product_embeddings','sales','sale_items')");
+  await database.execute('DELETE FROM units');
+  await database.execute(
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items')",
+  );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }
 

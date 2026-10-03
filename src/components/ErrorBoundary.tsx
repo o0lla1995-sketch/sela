@@ -7,8 +7,14 @@
  * with a retry button instead.
  */
 import React from 'react';
-import {StyleSheet, Text, TouchableOpacity, View, ViewStyle} from 'react-native';
-import {colors, fonts, radius, spacing, typography} from '../core/theme';
+import {
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  ViewStyle,
+} from 'react-native';
+import {fonts, radius, spacing, typography, getPalette} from '../core/theme';
 import {Icon} from './Icon';
 import {logDiag} from '../core/diagnostics';
 
@@ -56,16 +62,16 @@ export class ErrorBoundary extends React.Component<
     if (error == null) {
       return this.props.children;
     }
+    const c = getPalette();
+    const styles = themedStyles(c);
 
     const message = error.message || 'خطأ غير معروف';
 
     if (this.props.inline) {
       return (
         <View style={[styles.inline, this.props.style]}>
-          <Icon name="alert" size={20} color={colors.warning} />
-          <Text style={styles.inlineText}>
-            تعذر عرض هذا الجزء — {message}
-          </Text>
+          <Icon name="alert" size={20} color={c.warning} />
+          <Text style={styles.inlineText}>تعذر عرض هذا الجزء — {message}</Text>
           <TouchableOpacity onPress={this.retry} hitSlop={{top: 8, bottom: 8}}>
             <Text style={styles.inlineRetry}>إعادة المحاولة</Text>
           </TouchableOpacity>
@@ -76,18 +82,18 @@ export class ErrorBoundary extends React.Component<
     return (
       <View style={[styles.full, this.props.style]}>
         <View style={styles.iconWrap}>
-          <Icon name="alert" size={34} color={colors.warning} />
+          <Icon name="alert" size={34} color={c.warning} />
         </View>
         <Text style={styles.title}>حدث خطأ غير متوقع</Text>
         <Text style={styles.body}>
-          واجه هذا القسم مشكلة أثناء العرض. بياناتك محفوظة وسليمة — يمكنك
-          إعادة المحاولة أو العودة والاستمرار في العمل.
+          واجه هذا القسم مشكلة أثناء العرض. بياناتك محفوظة وسليمة — يمكنك إعادة
+          المحاولة أو العودة والاستمرار في العمل.
         </Text>
         <Text style={styles.detail} numberOfLines={3}>
           {message}
         </Text>
         <TouchableOpacity style={styles.retryButton} onPress={this.retry}>
-          <Icon name="refresh" size={18} color={colors.onAccent} />
+          <Icon name="refresh" size={18} color={c.onAccent} />
           <Text style={styles.retryText}>إعادة المحاولة</Text>
         </TouchableOpacity>
       </View>
@@ -95,10 +101,11 @@ export class ErrorBoundary extends React.Component<
   }
 }
 
-const styles = StyleSheet.create({
+function themedStyles(c: ReturnType<typeof getPalette>) {
+  return StyleSheet.create({
     full: {
       flex: 1,
-      backgroundColor: colors.bg,
+      backgroundColor: c.bg,
       alignItems: 'center',
       justifyContent: 'center',
       padding: spacing.xl,
@@ -108,18 +115,18 @@ const styles = StyleSheet.create({
       width: 76,
       height: 76,
       borderRadius: radius.pill,
-      backgroundColor: colors.warningSoft,
+      backgroundColor: c.warningSoft,
       alignItems: 'center',
       justifyContent: 'center',
       marginBottom: spacing.md,
     },
     title: {
-      color: colors.text,
+      color: c.text,
       fontFamily: fonts.black,
       fontSize: typography.heading,
     },
     body: {
-      color: colors.textDim,
+      color: c.textDim,
       fontFamily: fonts.regular,
       fontSize: typography.caption,
       textAlign: 'center',
@@ -127,7 +134,7 @@ const styles = StyleSheet.create({
       maxWidth: 300,
     },
     detail: {
-      color: colors.textFaint,
+      color: c.textFaint,
       fontFamily: fonts.regular,
       fontSize: typography.small,
       textAlign: 'center',
@@ -137,36 +144,37 @@ const styles = StyleSheet.create({
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
-      backgroundColor: colors.accent,
+      backgroundColor: c.accent,
       borderRadius: radius.md,
       paddingHorizontal: spacing.xl,
       paddingVertical: 13,
       marginTop: spacing.md,
     },
     retryText: {
-      color: colors.onAccent,
+      color: c.onAccent,
       fontFamily: fonts.bold,
       fontSize: typography.body,
     },
     inline: {
-      backgroundColor: colors.surface,
+      backgroundColor: c.surface,
       borderWidth: 1,
-      borderColor: colors.border,
+      borderColor: c.border,
       borderRadius: radius.md,
       padding: spacing.lg,
       alignItems: 'center',
       gap: spacing.xs,
     },
     inlineText: {
-      color: colors.textDim,
+      color: c.textDim,
       fontFamily: fonts.regular,
       fontSize: typography.small,
       textAlign: 'center',
     },
     inlineRetry: {
-      color: colors.accent,
+      color: c.accent,
       fontFamily: fonts.bold,
       fontSize: typography.caption,
       marginTop: spacing.xs,
     },
   });
+}

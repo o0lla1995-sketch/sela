@@ -33,7 +33,13 @@ export const ReportRepo = {
     );
     const salesRow =
       (salesResult.rows?._array?.[0] as
-        | {revenue?: number; cogs?: number; profit?: number; discount_total?: number; invoices?: number}
+        | {
+            revenue?: number;
+            cogs?: number;
+            profit?: number;
+            discount_total?: number;
+            invoices?: number;
+          }
         | undefined) ?? {};
 
     const itemsResult = await getDb().execute(
@@ -43,7 +49,9 @@ export const ReportRepo = {
        WHERE s.created_at >= ? AND s.created_at <= ?`,
       [start, end],
     );
-    const itemsRow = itemsResult.rows?._array?.[0] as {items?: number} | undefined;
+    const itemsRow = itemsResult.rows?._array?.[0] as
+      | {items?: number}
+      | undefined;
 
     const invoices = Number(salesRow.invoices ?? 0);
     const revenue = Number(salesRow.revenue ?? 0);
@@ -117,7 +125,12 @@ export const ReportRepo = {
     while (cursor.getTime() <= last.getTime() && guard < 120) {
       const day = toLocalDayString(cursor);
       points.push(
-        byDay.get(day) ?? {day, label: weekdayLabel(day), revenue: 0, profit: 0},
+        byDay.get(day) ?? {
+          day,
+          label: weekdayLabel(day),
+          revenue: 0,
+          profit: 0,
+        },
       );
       cursor.setDate(cursor.getDate() + 1);
       guard += 1;
@@ -195,7 +208,8 @@ export const ReportRepo = {
       cost: Number(row.cost ?? 0),
       profit: Number(row.profit ?? 0),
       discount: Number(row.discount ?? 0),
-      paymentType: String(row.payment_type ?? 'RETAIL') === 'WHOLESALE' ? 'جملة' : 'مفرق',
+      paymentType:
+        String(row.payment_type ?? 'RETAIL') === 'WHOLESALE' ? 'جملة' : 'مفرق',
     }));
   },
 

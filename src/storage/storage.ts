@@ -11,7 +11,7 @@ export const storage = new MMKV({id: 'vision-pos-store'});
 
 export const KEYS = {
   settings: 'settings_json_v1',
-  cartDraft: 'cart_draft_v1',
+  cartDraft: 'cart_draft_v2',
   invoiceCounter: 'invoice_counter_v1',
   invoiceDay: 'invoice_day_v1',
   savedPrinter: 'saved_printer_v1',
@@ -19,6 +19,7 @@ export const KEYS = {
   notifications: 'notifications_v1',
   stockAlertLedger: 'stock_alert_ledger_v1',
   schemaVersion: 'db_schema_version',
+  themeMode: 'theme_mode_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {

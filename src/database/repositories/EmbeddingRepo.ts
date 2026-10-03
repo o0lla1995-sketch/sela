@@ -6,15 +6,25 @@
  */
 import {getDb, toMessage} from '../connection';
 import {EMBEDDING_DECIMALS} from '../../core/config';
-import type {AngleLabel, DecodedEmbedding, EmbeddingsIndex} from '../../core/types';
+import type {
+  AngleLabel,
+  DecodedEmbedding,
+  EmbeddingsIndex,
+} from '../../core/types';
 
 export const EmbeddingRepo = {
   /** Saves one enrollment vector for a product angle (replaces existing). */
-  async save(productId: number, angle: AngleLabel, vector: Float32Array): Promise<void> {
+  async save(
+    productId: number,
+    angle: AngleLabel,
+    vector: Float32Array,
+  ): Promise<void> {
     if (vector.length === 0) {
       throw new Error('المتجه فارغ — لا يمكن حفظ البصمة');
     }
-    const json = Array.from(vector, value => Number(value.toFixed(EMBEDDING_DECIMALS)));
+    const json = Array.from(vector, value =>
+      Number(value.toFixed(EMBEDDING_DECIMALS)),
+    );
     const existing = await getDb().execute(
       'SELECT id FROM product_embeddings WHERE product_id = ? AND angle_label = ?',
       [productId, angle],
@@ -60,7 +70,10 @@ export const EmbeddingRepo = {
   },
 
   async deleteForProduct(productId: number): Promise<void> {
-    await getDb().execute('DELETE FROM product_embeddings WHERE product_id = ?', [productId]);
+    await getDb().execute(
+      'DELETE FROM product_embeddings WHERE product_id = ?',
+      [productId],
+    );
   },
 
   async deleteOne(productId: number, angle: AngleLabel): Promise<void> {
@@ -71,7 +84,9 @@ export const EmbeddingRepo = {
   },
 
   async countAll(): Promise<number> {
-    const result = await getDb().execute('SELECT COUNT(*) AS cnt FROM product_embeddings');
+    const result = await getDb().execute(
+      'SELECT COUNT(*) AS cnt FROM product_embeddings',
+    );
     const row = result.rows?._array?.[0] as {cnt?: number} | undefined;
     return Number(row?.cnt ?? 0);
   },

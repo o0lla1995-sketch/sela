@@ -6,9 +6,9 @@
  * thank-you footer → feed & cut.
  */
 import {ReceiptBuilder} from './escpos';
-import {formatAmount, formatDateTime} from '../../core/format';
+import {formatDateTime} from '../../core/format';
 import {APP_NAME, RECEIPT_WIDTH_58, RECEIPT_WIDTH_80} from '../../core/config';
-import type {SaleRecord, SaleItemRecord, Product} from '../../core/types';
+import type {SaleRecord, SaleItemRecord} from '../../core/types';
 
 export interface ReceiptSettings {
   storeName: string;
@@ -17,6 +17,8 @@ export interface ReceiptSettings {
   paperWidth: '58' | '80';
   codepage: number;
   showProfit: boolean;
+  /** Local logo path printed at the very top (null = skip). */
+  storeLogoPath?: string | null;
 }
 
 export interface ReceiptData {
@@ -41,8 +43,15 @@ const LABELS = {
 } as const;
 
 export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
-  const width = settings.paperWidth === '58' ? RECEIPT_WIDTH_58 : RECEIPT_WIDTH_80;
+  const width =
+    settings.paperWidth === '58' ? RECEIPT_WIDTH_58 : RECEIPT_WIDTH_80;
+  const rasterWidth = settings.paperWidth === '58' ? 384 : 576;
   const b = ReceiptBuilder.create();
+
+  // ── Optional store logo (raster, centered) ──
+  if (settings.storeLogoPath) {
+    b.image(settings.storeLogoPath, rasterWidth).feed(1);
+  }
 
   // ── Header ────────────────────────────────────────────────────
   b.codepage(settings.codepage)
@@ -55,7 +64,8 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
   if (settings.storePhone.trim()) {
     b.align(1).textLine(`Tel: ${settings.storePhone.trim()}`);
   }
-  b.align(1).textLine(APP_NAME)
+  b.align(1)
+    .textLine(APP_NAME)
     .align(2)
     .separator(width)
     .bold(true)
@@ -63,7 +73,11 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
     .bold(false)
     .textLine(`${LABELS.date}: ${formatDateTime(data.sale.created_at)}`)
     .textLine(
-      `${data.sale.payment_type === 'WHOLESALE' ? LABELS.paymentWholesale : LABELS.paymentRetail}`,
+      `${
+        data.sale.payment_type === 'WHOLESALE'
+          ? LABELS.paymentWholesale
+          : LABELS.paymentRetail
+      }`,
     )
     .separator(width);
 
@@ -73,13 +87,14 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
   for (const item of data.items) {
     const name =
       data.productNameById.get(item.product_id) ?? `#${item.product_id}`;
-    b.truncate(name, width);
+    const unitSuffix =
+      item.unit_name && item.unit_name !== 'قطعة' ? ` (${item.unit_name})` : '';
+    b.truncate(`${name}${unitSuffix}`, width);
     b.qtyPriceLine(item.quantity, item.unit_price, item.total_line_price);
   }
 
   // ── Totals ────────────────────────────────────────────────────
-  const subtotal =
-    data.sale.total_amount + data.sale.discount;
+  const subtotal = data.sale.total_amount + data.sale.discount;
   b.separator(width)
     .twoColumns(LABELS.subtotal, subtotal, width)
     .twoColumns(LABELS.discount, data.sale.discount, width)
@@ -112,8 +127,15 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
 
 /** Small self-test receipt used by "طباعة تجريبية". */
 export function buildTestJob(settings: ReceiptSettings) {
-  const width = settings.paperWidth === '58' ? RECEIPT_WIDTH_58 : RECEIPT_WIDTH_80;
+  const width =
+    settings.paperWidth === '58' ? RECEIPT_WIDTH_58 : RECEIPT_WIDTH_80;
+  const rasterWidth = settings.paperWidth === '58' ? 384 : 576;
   const b = ReceiptBuilder.create();
+
+  // ── Optional store logo (raster, centered) ──
+  if (settings.storeLogoPath) {
+    b.image(settings.storeLogoPath, rasterWidth).feed(1);
+  }
   b.codepage(settings.codepage)
     .align(1)
     .bold(true)

@@ -15,7 +15,10 @@ function rowToProduct(row: Record<string, unknown>): Product {
     stock_quantity: Number(row.stock_quantity ?? 0),
     category_id: row.category_id == null ? null : Number(row.category_id),
     image_uri: row.image_uri == null ? null : String(row.image_uri),
-    low_stock_threshold: row.low_stock_threshold == null ? null : Number(row.low_stock_threshold),
+    low_stock_threshold:
+      row.low_stock_threshold == null ? null : Number(row.low_stock_threshold),
+    barcode:
+      row.barcode == null || row.barcode === '' ? null : String(row.barcode),
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -29,10 +32,14 @@ export interface ProductInput {
   category_id: number | null;
   image_uri: string | null;
   low_stock_threshold?: number | null;
+  barcode?: string | null;
 }
 
 export const ProductRepo = {
-  async list(options?: {search?: string; categoryId?: number | 'all'}): Promise<Product[]> {
+  async list(options?: {
+    search?: string;
+    categoryId?: number | 'all';
+  }): Promise<Product[]> {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
 
@@ -46,7 +53,8 @@ export const ProductRepo = {
       params.push(options.categoryId);
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const sql = `SELECT p.* FROM products p ${where} ORDER BY p.name ASC LIMIT 500`;
     const result = await getDb().execute(sql, params);
     const rows = result.rows?._array ?? [];
@@ -54,13 +62,18 @@ export const ProductRepo = {
   },
 
   async getById(id: number): Promise<Product | null> {
-    const result = await getDb().execute('SELECT * FROM products WHERE id = ?', [id]);
+    const result = await getDb().execute(
+      'SELECT * FROM products WHERE id = ?',
+      [id],
+    );
     const row = result.rows?._array?.[0];
     return row ? rowToProduct(row) : null;
   },
 
   async countAll(): Promise<number> {
-    const result = await getDb().execute('SELECT COUNT(*) AS cnt FROM products');
+    const result = await getDb().execute(
+      'SELECT COUNT(*) AS cnt FROM products',
+    );
     const row = result.rows?._array?.[0] as {cnt?: number} | undefined;
     return Number(row?.cnt ?? 0);
   },
@@ -68,7 +81,11 @@ export const ProductRepo = {
   async create(input: ProductInput): Promise<number> {
     const name = input.name.trim();
     if (!name) throw new Error('اسم المنتج مطلوب');
-    if (input.retail_price < 0 || input.wholesale_price < 0 || input.cost_price < 0) {
+    if (
+      input.retail_price < 0 ||
+      input.wholesale_price < 0 ||
+      input.cost_price < 0
+    ) {
       throw new Error('الأسعار لا يمكن أن تكون سالبة');
     }
     if (input.stock_quantity < 0) {
@@ -76,17 +93,18 @@ export const ProductRepo = {
     }
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
         input.retail_price,
         input.wholesale_price,
-        Math.trunc(input.stock_quantity),
+        input.stock_quantity,
         input.category_id,
         input.image_uri,
         input.low_stock_threshold ?? null,
+        input.barcode?.trim() ? input.barcode.trim() : null,
         localNow(),
       ],
     );
@@ -96,7 +114,11 @@ export const ProductRepo = {
   async update(id: number, input: ProductInput): Promise<void> {
     const name = input.name.trim();
     if (!name) throw new Error('اسم المنتج مطلوب');
-    if (input.retail_price < 0 || input.wholesale_price < 0 || input.cost_price < 0) {
+    if (
+      input.retail_price < 0 ||
+      input.wholesale_price < 0 ||
+      input.cost_price < 0
+    ) {
       throw new Error('الأسعار لا يمكن أن تكون سالبة');
     }
     if (input.stock_quantity < 0) {
@@ -105,20 +127,34 @@ export const ProductRepo = {
     await getDb().execute(
       `UPDATE products SET
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
-        stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?
+        stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?,
+        barcode = ?
        WHERE id = ?`,
       [
         name,
         input.cost_price,
         input.retail_price,
         input.wholesale_price,
-        Math.trunc(input.stock_quantity),
+        input.stock_quantity,
         input.category_id,
         input.image_uri,
         input.low_stock_threshold ?? null,
+        input.barcode?.trim() ? input.barcode.trim() : null,
         id,
       ],
     );
+  },
+
+  /** Exact barcode lookup for POS scanning (base-unit barcode). */
+  async findByBarcode(code: string): Promise<Product | null> {
+    const clean = code.trim();
+    if (!clean) return null;
+    const result = await getDb().execute(
+      'SELECT * FROM products WHERE barcode = ? LIMIT 1',
+      [clean],
+    );
+    const row = result.rows?._array?.[0];
+    return row ? rowToProduct(row) : null;
   },
 
   async remove(id: number): Promise<void> {
@@ -132,8 +168,18 @@ export const ProductRepo = {
       [quantity, id, quantity],
     );
     if (result.rowsAffected !== 1) {
-      throw new Error(`الكمية المتوفرة من المنتج غير كافية (المطلوب: ${quantity})`);
+      throw new Error(
+        `الكمية المتوفرة من المنتج غير كافية (المطلوب: ${quantity})`,
+      );
     }
+  },
+
+  /** Sets an absolute stock value (used after stocktake reconciliation). */
+  async setStock(id: number, quantity: number): Promise<void> {
+    await getDb().execute(
+      'UPDATE products SET stock_quantity = ? WHERE id = ?',
+      [quantity, id],
+    );
   },
 
   safeMessage(error: unknown): string {

@@ -6,7 +6,13 @@
 import {SaleRepo} from '../database/repositories/SaleRepo';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {nextInvoiceNumber, localToday} from '../core/format';
-import {getNumber, setNumber, getString, setString, KEYS} from '../storage/storage';
+import {
+  getNumber,
+  setNumber,
+  getString,
+  setString,
+  KEYS,
+} from '../storage/storage';
 import {logDiag} from '../core/diagnostics';
 import {buildReceiptJob} from './printer/receipt';
 import {ThermalPrinterService} from './printer/ThermalPrinterService';
@@ -49,7 +55,9 @@ export const InvoiceService = {
 
     logDiag(
       'sale',
-      `تم إتمام البيع ${invoiceNumber} بمبلغ ${result.sale.total_amount.toFixed(2)} ₪`,
+      `تم إتمام البيع ${invoiceNumber} بمبلغ ${result.sale.total_amount.toFixed(
+        2,
+      )} ₪`,
     );
 
     if (options.print) {
@@ -76,7 +84,10 @@ export const InvoiceService = {
   },
 
   /** Rebuilds a printable job for an already-saved invoice. */
-  async reprintInvoice(saleId: number, receiptSettings: ReceiptSettings): Promise<void> {
+  async reprintInvoice(
+    saleId: number,
+    receiptSettings: ReceiptSettings,
+  ): Promise<void> {
     const sale = await SaleRepo.listRecent(200);
     const record = sale.find(entry => entry.id === saleId);
     if (!record) {

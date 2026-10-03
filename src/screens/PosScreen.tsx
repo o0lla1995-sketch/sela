@@ -1,15 +1,23 @@
 /**
- * PosScreen — نقطة البيع (design.md §9.2).
- * Loyverse-style product grid + expandable camera scanning sheet +
+ * PosScreen — نقطة البيع (v3).
+ * ─────────────────────────────────────────────────────────────────
+ * Loyverse-style product grid + camera sheet driven by the merchant's
+ * chosen scanner engine (باركود / بصري / كلاهما from Settings) +
  * Square-style persistent cart with a dominant charge button.
- * Manual selling never depends on the camera being available.
+ *
+ * Cart lines support sellable units: products with unit rows (كرتونة
+ * × 24 …) show a unit chip — tap it to switch the line's unit; stock
+ * is always reserved in base pieces. Manual selling never depends on
+ * the camera being available.
  */
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  Alert,
   Dimensions,
   Image,
   Keyboard,
   LayoutAnimation,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -18,7 +26,7 @@ import {
   Vibration,
   View,
 } from 'react-native';
-import {useFocusEffect} from '@react-navigation/native';
+import {useFocusEffect, useNavigation} from '@react-navigation/native';
 import {
   AppButton,
   AppHeader,
@@ -34,29 +42,46 @@ import {
   ScannerCamera,
   type ScannerCameraHandle,
 } from '../components/ScannerCamera';
-import {useCartStore, cartTotals} from '../stores/cartStore';
+import {useCartStore, cartTotals, unitPriceFor} from '../stores/cartStore';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
 import {useToastStore} from '../stores/toastStore';
 import {InvoiceService} from '../services/InvoiceService';
+import {ProductRepo} from '../database/repositories/ProductRepo';
+import {UnitRepo} from '../database/repositories/UnitRepo';
 import {requirePlatformUtils} from '../native/nativeBridge';
-import {colors, fonts, radius, spacing, typography} from '../core/theme';
+import {BASE_UNIT_NAME, type ScannerMode} from '../core/config';
+import {
+  fonts,
+  makeStyles,
+  radius,
+  spacing,
+  typography,
+  useThemeColors,
+} from '../core/theme';
 import {formatMoney, parseNumber} from '../core/format';
 import {stockStateOf} from '../core/types';
-import type {Product} from '../core/types';
+import type {CartLine, Product, ProductUnit} from '../core/types';
 
 const GRID_COLUMNS = 3;
 const SCREEN_WIDTH = Dimensions.get('window').width;
-const GRID_TILE = Math.floor((SCREEN_WIDTH - spacing.lg * 2 - spacing.sm * (GRID_COLUMNS - 1)) / GRID_COLUMNS);
+const GRID_TILE = Math.floor(
+  (SCREEN_WIDTH - spacing.lg * 2 - spacing.sm * (GRID_COLUMNS - 1)) /
+    GRID_COLUMNS,
+);
 
 export function PosScreen() {
+  const c = useThemeColors();
+  const styles = useStyles();
+  const navigation = useNavigation<any>();
   const cameraRef = useRef<ScannerCameraHandle>(null);
 
   const lines = useCartStore(state => state.lines);
   const pricingMode = useCartStore(state => state.pricingMode);
   const discount = useCartStore(state => state.discount);
   const addProduct = useCartStore(state => state.addProduct);
+  const setLineUnit = useCartStore(state => state.setLineUnit);
   const increment = useCartStore(state => state.increment);
   const decrement = useCartStore(state => state.decrement);
   const removeLine = useCartStore(state => state.removeLine);
@@ -77,7 +102,19 @@ export function PosScreen() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [autoScan, setAutoScan] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [lastRecognized, setLastRecognized] = useState<{name: string; score: number} | null>(null);
+  const [lastRecognized, setLastRecognized] = useState<{
+    name: string;
+    score: number;
+  } | null>(null);
+  const [lastBarcode, setLastBarcode] = useState<string | null>(null);
+  const [unitPickerLine, setUnitPickerLine] = useState<CartLine | null>(null);
+  const [unitPickerRows, setUnitPickerRows] = useState<ProductUnit[] | null>(
+    null,
+  );
+
+  const scannerMode: ScannerMode = settings.scannerMode;
+  const barcodeActive = scannerMode === 'barcode' || scannerMode === 'both';
+  const visualActive = scannerMode === 'visual' || scannerMode === 'both';
 
   const totals = useMemo(() => cartTotals(lines, discount), [lines, discount]);
 
@@ -108,13 +145,10 @@ export function PosScreen() {
   }, [settings.soundEnabled]);
 
   const tryAdd = useCallback(
-    (product: Product, source: 'vision' | 'manual') => {
-      const result = addProduct(product, pricingMode);
+    (product: Product, unit?: ProductUnit | null) => {
+      const result = addProduct(product, pricingMode, unit ?? null);
       if (result.added) {
         beep();
-        if (source === 'vision') {
-          Vibration.vibrate(40);
-        }
       } else if (result.reason) {
         toast(result.reason, 'error');
       }
@@ -131,7 +165,11 @@ export function PosScreen() {
         return;
       }
       setLastRecognized({name: product.name, score: match.score});
-      const result = addProduct(product, useCartStore.getState().pricingMode);
+      const result = addProduct(
+        product,
+        useCartStore.getState().pricingMode,
+        null,
+      );
       if (result.added) {
         Vibration.vibrate(40);
         beep();
@@ -142,18 +180,120 @@ export function PosScreen() {
     [addProduct, beep, toast],
   );
 
+  /** Barcode read → exact product lookup → cart or create prompt. */
+  const handleBarcode = useCallback(
+    async (code: string) => {
+      setLastBarcode(code);
+      try {
+        // 1. Base product barcode.
+        const product = await ProductRepo.findByBarcode(code);
+        if (product != null) {
+          const result = addProduct(
+            product,
+            useCartStore.getState().pricingMode,
+            null,
+          );
+          if (result.added) {
+            beep();
+          } else if (result.reason) {
+            toast(result.reason, 'error');
+          }
+          return;
+        }
+        // 2. Unit-level barcode (a whole كرتونة).
+        const unitHit = await UnitRepo.findByBarcode(code);
+        if (unitHit != null) {
+          const unitProduct = await ProductRepo.getById(unitHit.productId);
+          if (unitProduct != null) {
+            const result = addProduct(
+              unitProduct,
+              useCartStore.getState().pricingMode,
+              unitHit.productUnit,
+            );
+            if (result.added) {
+              beep();
+              toast(
+                `أُضيفت وحدة ${unitHit.productUnit.unitName} من ${unitProduct.name}`,
+                'success',
+              );
+            } else if (result.reason) {
+              toast(result.reason, 'error');
+            }
+            return;
+          }
+        }
+        // 3. Unknown → offer creating the product with this barcode.
+        Alert.alert(
+          'باركود غير معروف',
+          `لا يوجد منتج مسجل بالباركود ${code}. هل تريد إضافة منتج جديد بهذا الباركود؟`,
+          [
+            {text: 'إلغاء', style: 'cancel'},
+            {
+              text: 'إضافة منتج',
+              onPress: () =>
+                navigation.navigate('ProductForm', {barcode: code}),
+            },
+          ],
+        );
+      } catch (error) {
+        toast(
+          error instanceof Error ? error.message : 'فشل البحث عن الباركود',
+          'error',
+        );
+      }
+    },
+    [addProduct, beep, toast, navigation],
+  );
+
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) {
       return products;
     }
-    return products.filter(product => product.name.toLowerCase().includes(query));
+    return products.filter(
+      product =>
+        product.name.toLowerCase().includes(query) ||
+        (product.barcode ?? '').includes(query),
+    );
   }, [search, products]);
 
   const priceOf = useCallback(
     (product: Product) =>
-      pricingMode === 'WHOLESALE' ? product.wholesale_price : product.retail_price,
+      pricingMode === 'WHOLESALE'
+        ? product.wholesale_price
+        : product.retail_price,
     [pricingMode],
+  );
+
+  /** Opens the unit picker sheet for a cart line. */
+  const openUnitPicker = useCallback(async (line: CartLine) => {
+    setUnitPickerLine(line);
+    setUnitPickerRows(null);
+    try {
+      const rows = await UnitRepo.listForProduct(line.productId);
+      setUnitPickerRows(rows);
+    } catch {
+      setUnitPickerRows([]);
+    }
+  }, []);
+
+  const pickUnit = useCallback(
+    (unit: ProductUnit | null) => {
+      if (unitPickerLine == null) return;
+      const product = products.find(
+        entry => entry.id === unitPickerLine.productId,
+      );
+      if (product == null) return;
+      const result = setLineUnit(product, unit);
+      if (!result.ok && result.reason) {
+        toast(result.reason, 'error');
+      } else if (unit != null) {
+        beep();
+      }
+      setUnitPickerLine(null);
+      setUnitPickerRows(null);
+    },
+    [unitPickerLine, products, setLineUnit, beep, toast],
   );
 
   const completeSale = useCallback(
@@ -163,7 +303,10 @@ export function PosScreen() {
         return;
       }
       if (withPrint && printerStatus !== 'connected') {
-        toast('لا توجد طابعة متصلة — أكمل البيع بدون طباعة أو أوصل الطابعة أولاً', 'error');
+        toast(
+          'لا توجد طابعة متصلة — أكمل البيع بدون طباعة أو أوصل الطابعة أولاً',
+          'error',
+        );
         return;
       }
       setBusy(true);
@@ -178,6 +321,7 @@ export function PosScreen() {
             storeName: settings.storeName,
             storePhone: settings.storePhone,
             footerMessage: settings.footerMessage,
+            storeLogoPath: settings.storeLogoPath,
             paperWidth: settings.paperWidth,
             codepage: settings.codepage,
             showProfit: settings.showProfitOnReceipt,
@@ -189,8 +333,12 @@ export function PosScreen() {
         clear();
         setDiscountText('');
         setLastRecognized(null);
+        setLastBarcode(null);
         void refreshCatalog();
-        toast(`تم إتمام البيع بنجاح ${withPrint ? 'وإرساله للطابعة' : ''}`, 'success');
+        toast(
+          `تم إتمام البيع بنجاح ${withPrint ? 'وإرساله للطابعة' : ''}`,
+          'success',
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         toast(message, 'error');
@@ -214,6 +362,13 @@ export function PosScreen() {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setCameraOpen(value => !value);
   }, []);
+
+  const scannerLabel =
+    scannerMode === 'barcode'
+      ? 'باركود'
+      : scannerMode === 'visual'
+      ? 'بصري'
+      : 'مسح';
 
   return (
     <View style={styles.screen}>
@@ -250,16 +405,22 @@ export function PosScreen() {
               onPress={toggleCamera}
               activeOpacity={0.8}>
               <Icon
-                name={cameraOpen ? 'x' : 'scan'}
+                name={
+                  cameraOpen
+                    ? 'x'
+                    : scannerMode === 'barcode'
+                    ? 'barcode'
+                    : 'scan'
+                }
                 size={19}
-                color={cameraOpen ? colors.danger : colors.onAccent}
+                color={cameraOpen ? c.danger : c.onAccent}
               />
               <Text
                 style={[
                   styles.scanButtonText,
-                  cameraOpen ? {color: colors.danger} : null,
+                  cameraOpen ? {color: c.danger} : null,
                 ]}>
-                {cameraOpen ? 'إغلاق' : 'مسح'}
+                {cameraOpen ? 'إغلاق' : scannerLabel}
               </Text>
             </TouchableOpacity>
           </View>
@@ -272,43 +433,57 @@ export function PosScreen() {
               <ScannerCamera
                 ref={cameraRef}
                 mode="scan"
-                autoScan={autoScan && tabFocused}
+                barcodeEnabled={barcodeActive}
+                onBarcode={code => {
+                  void handleBarcode(code);
+                }}
+                autoScan={visualActive && autoScan && tabFocused}
                 onMatch={handleMatch}
+                height={300}
               />
-              <View style={styles.cameraToolbar} pointerEvents="box-none">
-                <TouchableOpacity
-                  style={styles.autoScanChip}
-                  onPress={() => setAutoScan(value => !value)}
-                  activeOpacity={0.8}>
-                  <Icon
-                    name={autoScan ? 'flash' : 'clock'}
-                    size={14}
-                    color={autoScan ? colors.accent : colors.textDim}
-                  />
-                  <Text
-                    style={[
-                      styles.autoScanText,
-                      autoScan ? {color: colors.accent} : null,
-                    ]}>
-                    {autoScan ? 'مسح تلقائي' : 'يدوي'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.snapNowButton}
-                  onPress={() => void cameraRef.current?.scanOnce()}
-                  activeOpacity={0.8}>
-                  <Icon name="camera" size={16} color={colors.onAccent} />
-                  <Text style={styles.snapNowText}>التقط الآن</Text>
-                </TouchableOpacity>
-              </View>
+              {visualActive ? (
+                <View style={styles.cameraToolbar} pointerEvents="box-none">
+                  <TouchableOpacity
+                    style={styles.autoScanChip}
+                    onPress={() => setAutoScan(value => !value)}
+                    activeOpacity={0.8}>
+                    <Icon
+                      name={autoScan ? 'flash' : 'clock'}
+                      size={14}
+                      color={autoScan ? c.accent : c.textDim}
+                    />
+                    <Text
+                      style={[
+                        styles.autoScanText,
+                        autoScan ? {color: c.accent} : null,
+                      ]}>
+                      {autoScan ? 'مسح بصري تلقائي' : 'بصري يدوي'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.snapNowButton}
+                    onPress={() => void cameraRef.current?.scanOnce()}
+                    activeOpacity={0.8}>
+                    <Icon name="camera" size={16} color={c.onAccent} />
+                    <Text style={styles.snapNowText}>التقط الآن</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
               {lastRecognized ? (
                 <View style={styles.recognizedBanner}>
-                  <Icon name="checkCircle" size={16} color={colors.success} />
+                  <Icon name="checkCircle" size={16} color={c.success} />
                   <Text style={styles.recognizedText} numberOfLines={1}>
                     {lastRecognized.name}
                   </Text>
                   <Text style={styles.recognizedScore}>
                     {(lastRecognized.score * 100).toFixed(0)}%
+                  </Text>
+                </View>
+              ) : lastBarcode != null ? (
+                <View style={styles.recognizedBanner}>
+                  <Icon name="barcode" size={16} color={c.success} />
+                  <Text style={styles.recognizedText} numberOfLines={1}>
+                    {lastBarcode}
                   </Text>
                 </View>
               ) : null}
@@ -321,7 +496,7 @@ export function PosScreen() {
           <EmptyState
             icon="box"
             title="لا توجد منتجات بعد"
-            subtitle="أضف أول منتج مع بصمته البصرية من شاشة المخزون لكي تتمكن من البيع"
+            subtitle="أضف أول منتج مع بصمته البصرية أو باركوده من شاشة المخزون"
           />
         ) : (
           <ScrollView
@@ -339,38 +514,55 @@ export function PosScreen() {
               </View>
             ) : (
               filteredProducts.map(product => {
-                const stockState = stockStateOf(product, settings.lowStockDefaultThreshold);
+                const stockState = stockStateOf(
+                  product,
+                  settings.lowStockDefaultThreshold,
+                );
                 return (
                   <TouchableOpacity
                     key={product.id}
                     style={styles.tile}
-                    onPress={() => tryAdd(product, 'manual')}
+                    onPress={() => tryAdd(product)}
                     activeOpacity={0.75}>
                     {product.image_uri ? (
-                      <Image source={{uri: `file://${product.image_uri}`}} style={styles.tileImage} />
+                      <Image
+                        source={{uri: `file://${product.image_uri}`}}
+                        style={styles.tileImage}
+                      />
                     ) : (
-                      <View style={[styles.tileImage, styles.tileImageFallback]}>
-                        <Icon name="box" size={20} color={colors.accent} />
+                      <View
+                        style={[styles.tileImage, styles.tileImageFallback]}>
+                        <Icon name="box" size={20} color={c.accent} />
                       </View>
                     )}
                     <Text style={styles.tileName} numberOfLines={1}>
                       {product.name}
                     </Text>
-                    <Text style={styles.tilePrice}>{formatMoney(priceOf(product))}</Text>
+                    <Text style={styles.tilePrice}>
+                      {formatMoney(priceOf(product))}
+                    </Text>
                     <View style={styles.tileStockRow}>
                       <View
                         style={[
                           styles.stockDot,
-                          stockState === 'out'
-                            ? {backgroundColor: colors.danger}
-                            : stockState === 'low'
-                            ? {backgroundColor: colors.warning}
-                            : {backgroundColor: colors.success},
+                          {
+                            backgroundColor:
+                              stockState === 'out'
+                                ? c.danger
+                                : stockState === 'low'
+                                ? c.warning
+                                : c.success,
+                          },
                         ]}
                       />
                       <Text style={styles.tileStock}>
-                        {stockState === 'out' ? 'نفد' : `${product.stock_quantity} قطعة`}
+                        {stockState === 'out'
+                          ? 'نفد'
+                          : `${product.stock_quantity} ${BASE_UNIT_NAME}`}
                       </Text>
+                      {product.barcode ? (
+                        <Icon name="barcode" size={11} color={c.textFaint} />
+                      ) : null}
                     </View>
                   </TouchableOpacity>
                 );
@@ -383,10 +575,13 @@ export function PosScreen() {
         <View style={styles.cartPanel}>
           {lines.length === 0 ? (
             <View style={styles.cartEmptyRow}>
-              <Icon name="cart" size={18} color={colors.textFaint} />
+              <Icon name="cart" size={18} color={c.textFaint} />
               <Text style={styles.cartEmptyText}>
-                السلة فارغة — المس منتجاً من الشبكة أو امسحه بالكاميرا
-                {embeddingsCount === 0 && products.length > 0
+                السلة فارغة — المس منتجاً من الشبكة أو امسحه
+                {barcodeActive ? ' بالباركود' : ''}
+                {barcodeActive && visualActive ? ' أو ' : ''}
+                {visualActive ? 'بالكاميرا' : ''}
+                {embeddingsCount === 0 && products.length > 0 && !barcodeActive
                   ? ' (لا توجد بصمات بصرية محفوظة بعد — البيع باللمس متاح)'
                   : ''}
               </Text>
@@ -396,34 +591,50 @@ export function PosScreen() {
               <View style={styles.cartLinesWrap}>
                 <ScrollView showsVerticalScrollIndicator={false}>
                   {lines.map(line => (
-                    <View key={line.productId} style={styles.cartLine}>
+                    <View key={line.key} style={styles.cartLine}>
                       <View style={styles.cartLineInfo}>
                         <Text style={styles.cartLineName} numberOfLines={1}>
                           {line.name}
                         </Text>
-                        <Text style={styles.cartLineMeta}>
-                          {formatMoney(line.unitPrice)} × {line.quantity} ={' '}
-                          {formatMoney(line.unitPrice * line.quantity)}
-                        </Text>
+                        <View style={styles.cartLineMetaRow}>
+                          <Text style={styles.cartLineMeta}>
+                            {formatMoney(line.unitPrice)} × {line.quantity} ={' '}
+                            {formatMoney(line.unitPrice * line.quantity)}
+                          </Text>
+                        </View>
+                        {/* Unit chip — opens the unit picker */}
+                        <TouchableOpacity
+                          style={styles.unitChip}
+                          onPress={() => openUnitPicker(line)}
+                          activeOpacity={0.8}>
+                          <Icon name="scale" size={12} color={c.accent} />
+                          <Text style={styles.unitChipText}>
+                            {line.unitName}
+                            {line.conversion > 1
+                              ? ` (${line.conversion} ${BASE_UNIT_NAME})`
+                              : ''}
+                          </Text>
+                          <Icon name="chevronDown" size={12} color={c.accent} />
+                        </TouchableOpacity>
                       </View>
                       <Stepper
                         value={line.quantity}
                         onIncrement={() => {
-                          const result = increment(line.productId);
+                          const result = increment(line.key);
                           if (!result.ok && result.reason) {
                             toast(result.reason, 'error');
                           }
                         }}
                         onDecrement={() => {
-                          decrement(line.productId);
+                          decrement(line.key);
                         }}
                         decrementDanger
                       />
                       <TouchableOpacity
-                        onPress={() => removeLine(line.productId)}
+                        onPress={() => removeLine(line.key)}
                         style={styles.removeBtn}
                         hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
-                        <Icon name="trash" size={16} color={colors.danger} />
+                        <Icon name="trash" size={16} color={c.danger} />
                       </TouchableOpacity>
                     </View>
                   ))}
@@ -443,7 +654,7 @@ export function PosScreen() {
                   }}
                   keyboardType="numeric"
                   placeholder="0"
-                  placeholderTextColor={colors.textFaint}
+                  placeholderTextColor={c.textFaint}
                 />
                 <TouchableOpacity
                   style={styles.quickChip}
@@ -469,49 +680,164 @@ export function PosScreen() {
                     setDiscount(0);
                     setDiscountText('');
                   }}>
-                  <Text style={[styles.quickChipText, {color: colors.textDim}]}>إلغاء</Text>
+                  <Text style={[styles.quickChipText, {color: c.textDim}]}>
+                    إلغاء
+                  </Text>
                 </TouchableOpacity>
+              </View>
+
+              {/* Totals + checkout */}
+              <View style={styles.totalsRow}>
+                <View>
+                  <Text style={styles.totalLabel}>
+                    الإجمالي · {totals.itemsCount} وحدة ({totals.baseItemsCount}{' '}
+                    {BASE_UNIT_NAME})
+                  </Text>
+                  {totals.safeDiscount > 0 ? (
+                    <Text style={styles.discountValue}>
+                      خصم {formatMoney(totals.safeDiscount)}
+                    </Text>
+                  ) : null}
+                </View>
+                <MoneyText value={totals.total} big />
+              </View>
+
+              <View style={styles.checkoutRow}>
+                <AppButton
+                  title={
+                    printerStatus === 'connected'
+                      ? 'بيع وطباعة'
+                      : 'بيع وطباعة (بدون طابعة)'
+                  }
+                  icon="printer"
+                  onPress={() => completeSale(true)}
+                  loading={busy}
+                  style={{flex: 1.4}}
+                />
+                <AppButton
+                  title="بيع فقط"
+                  variant="secondary"
+                  icon="check"
+                  onPress={() => completeSale(false)}
+                  loading={busy}
+                  style={{flex: 1}}
+                />
               </View>
             </>
           )}
-
-          {/* Totals + checkout */}
-          <View style={styles.totalsRow}>
-            <View>
-              <Text style={styles.totalLabel}>
-                الإجمالي · {totals.itemsCount} قطعة
-              </Text>
-              {totals.safeDiscount > 0 ? (
-                <Text style={styles.discountValue}>
-                  خصم {formatMoney(totals.safeDiscount)}
-                </Text>
-              ) : null}
-            </View>
-            <MoneyText value={totals.total} big />
-          </View>
-
-          {lines.length > 0 ? (
-            <View style={styles.checkoutRow}>
-              <AppButton
-                title={printerStatus === 'connected' ? 'بيع وطباعة' : 'بيع وطباعة (بدون طابعة)'}
-                icon="printer"
-                onPress={() => completeSale(true)}
-                loading={busy}
-                style={{flex: 1.4}}
-              />
-              <AppButton
-                title="بيع فقط"
-                variant="secondary"
-                icon="check"
-                onPress={() => completeSale(false)}
-                loading={busy}
-                style={{flex: 1}}
-              />
-            </View>
-          ) : null}
         </View>
       </View>
+
+      {/* ── Unit picker sheet ──────────────────────────────── */}
+      <Modal
+        visible={unitPickerLine != null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          setUnitPickerLine(null);
+          setUnitPickerRows(null);
+        }}>
+        <View style={styles.unitModalOverlay}>
+          <TouchableOpacity
+            style={{flex: 1}}
+            activeOpacity={1}
+            onPress={() => {
+              setUnitPickerLine(null);
+              setUnitPickerRows(null);
+            }}
+          />
+          <View style={styles.unitModalSheet}>
+            <View style={styles.unitModalHandle} />
+            <Text style={styles.unitModalTitle}>
+              وحدة البيع — {unitPickerLine?.name}
+            </Text>
+            {unitPickerRows == null ? (
+              <Text style={styles.unitModalMuted}>جارٍ تحميل الوحدات…</Text>
+            ) : (
+              <>
+                <UnitOption
+                  label={`${BASE_UNIT_NAME} (الأساس)`}
+                  meta={`سعر الوحدة: ${
+                    unitPickerLine
+                      ? formatMoney(
+                          pricingMode === 'WHOLESALE'
+                            ? products.find(
+                                p => p.id === unitPickerLine.productId,
+                              )?.wholesale_price ?? 0
+                            : products.find(
+                                p => p.id === unitPickerLine.productId,
+                              )?.retail_price ?? 0,
+                        )
+                      : ''
+                  }`}
+                  active={unitPickerLine?.unitId == null}
+                  onPress={() => pickUnit(null)}
+                />
+                {unitPickerRows.map(row => {
+                  const product = products.find(
+                    p => p.id === unitPickerLine?.productId,
+                  );
+                  const price = product
+                    ? unitPriceFor(product, row, pricingMode)
+                    : 0;
+                  return (
+                    <UnitOption
+                      key={row.id}
+                      label={row.unitName}
+                      meta={`1 ${row.unitName} = ${
+                        row.conversion
+                      } ${BASE_UNIT_NAME} · ${formatMoney(price)}`}
+                      active={unitPickerLine?.unitId === row.unit_id}
+                      onPress={() => pickUnit(row)}
+                    />
+                  );
+                })}
+                <Text style={styles.unitModalHint}>
+                  الكميات تُخصم من المخزون بالقطعة تلقائياً — بيع كرتونة واحدة
+                  يخصم عدد قطعها.
+                </Text>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────
+// Sub-components
+// ────────────────────────────────────────────────────────────────
+
+function UnitOption({
+  label,
+  meta,
+  active,
+  onPress,
+}: {
+  label: string;
+  meta: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  return (
+    <TouchableOpacity
+      style={[
+        styles.unitOption,
+        active
+          ? {borderColor: c.accent, backgroundColor: c.accentSofter}
+          : null,
+      ]}
+      onPress={onPress}
+      activeOpacity={0.8}>
+      <View style={{flex: 1}}>
+        <Text style={styles.unitOptionLabel}>{label}</Text>
+        <Text style={styles.unitOptionMeta}>{meta}</Text>
+      </View>
+      {active ? <Icon name="checkCircle" size={20} color={c.accent} /> : null}
+    </TouchableOpacity>
   );
 }
 
@@ -522,306 +848,400 @@ function SearchInput({
   value: string;
   onChange: (text: string) => void;
 }) {
+  const c = useThemeColors();
+  const styles = useStyles();
   return (
     <View style={styles.searchWrap}>
-      <Icon name="search" size={17} color={colors.textFaint} />
+      <Icon name="search" size={17} color={c.textFaint} />
       <TextInput
         style={styles.searchInput}
         value={value}
         onChangeText={onChange}
-        placeholder="ابحث عن منتج…"
-        placeholderTextColor={colors.textFaint}
+        placeholder="ابحث عن منتج أو باركود…"
+        placeholderTextColor={c.textFaint}
         textAlign="right"
         returnKeyType="search"
       />
       {value.length > 0 ? (
-        <TouchableOpacity onPress={() => onChange('')} hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-          <Icon name="x" size={15} color={colors.textDim} />
+        <TouchableOpacity
+          onPress={() => onChange('')}
+          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+          <Icon name="x" size={15} color={c.textDim} />
         </TouchableOpacity>
       ) : null}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  screen: {flex: 1, backgroundColor: colors.bg},
-  body: {flex: 1, padding: spacing.lg, gap: spacing.md},
+const useStyles = makeStyles(c =>
+  StyleSheet.create({
+    screen: {flex: 1, backgroundColor: c.bg},
+    body: {flex: 1, padding: spacing.lg, gap: spacing.md},
 
-  // Controls
-  controlsRow: {gap: spacing.sm},
-  searchRow: {flexDirection: 'row', gap: spacing.sm, alignItems: 'center'},
-  searchWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    height: 46,
-  },
-  searchInput: {
-    flex: 1,
-    color: colors.text,
-    fontFamily: fonts.medium,
-    fontSize: typography.caption,
-    paddingVertical: 0,
-  },
-  scanButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: colors.accent,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.lg,
-    height: 46,
-  },
-  scanButtonActive: {
-    backgroundColor: colors.dangerSoft,
-    borderWidth: 1,
-    borderColor: colors.danger,
-  },
-  scanButtonText: {
-    color: colors.onAccent,
-    fontFamily: fonts.bold,
-    fontSize: typography.caption,
-  },
+    // Controls
+    controlsRow: {gap: spacing.sm},
+    searchRow: {flexDirection: 'row', gap: spacing.sm, alignItems: 'center'},
+    searchWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      height: 46,
+    },
+    searchInput: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.medium,
+      fontSize: typography.caption,
+      paddingVertical: 0,
+    },
+    scanButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.accent,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.lg,
+      height: 46,
+    },
+    scanButtonActive: {
+      backgroundColor: c.dangerSoft,
+      borderWidth: 1,
+      borderColor: c.danger,
+    },
+    scanButtonText: {
+      color: c.onAccent,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
 
-  // Camera sheet
-  cameraSheet: {
-    height: 300,
-    borderRadius: radius.lg,
-    overflow: 'hidden',
-    backgroundColor: '#050508',
-  },
-  cameraToolbar: {
-    position: 'absolute',
-    top: spacing.sm,
-    left: spacing.sm,
-    right: spacing.sm,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  autoScanChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: colors.scrim,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 7,
-  },
-  autoScanText: {
-    color: colors.textDim,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  snapNowButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: colors.accent,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 8,
-  },
-  snapNowText: {
-    color: colors.onAccent,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  recognizedBanner: {
-    position: 'absolute',
-    bottom: spacing.sm,
-    left: spacing.sm,
-    right: spacing.sm,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.scrim,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.success,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 9,
-  },
-  recognizedText: {
-    flex: 1,
-    color: colors.success,
-    fontFamily: fonts.bold,
-    fontSize: typography.caption,
-  },
-  recognizedScore: {
-    color: colors.success,
-    fontFamily: fonts.black,
-    fontSize: typography.caption,
-    fontVariant: ['tabular-nums'],
-  },
+    // Camera sheet
+    cameraSheet: {
+      height: 300,
+      borderRadius: radius.lg,
+      overflow: 'hidden',
+      backgroundColor: '#0B0B10',
+    },
+    cameraToolbar: {
+      position: 'absolute',
+      top: spacing.sm,
+      left: spacing.sm,
+      right: spacing.xl + 42,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    autoScanChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.scrim,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 7,
+    },
+    autoScanText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    snapNowButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.accent,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: 8,
+    },
+    snapNowText: {
+      color: c.onAccent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    recognizedBanner: {
+      position: 'absolute',
+      bottom: spacing.sm,
+      left: spacing.sm,
+      right: spacing.sm,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.scrim,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.success,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 9,
+    },
+    recognizedText: {
+      flex: 1,
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    recognizedScore: {
+      color: c.success,
+      fontFamily: fonts.black,
+      fontSize: typography.caption,
+      fontVariant: ['tabular-nums'],
+    },
 
-  // Grid
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    paddingBottom: spacing.sm,
-  },
-  tile: {
-    width: GRID_TILE,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.borderSoft,
-    borderRadius: radius.md,
-    padding: spacing.sm,
-    gap: 4,
-  },
-  tileImage: {
-    width: GRID_TILE - spacing.sm * 2,
-    height: GRID_TILE - spacing.sm * 2 - 44,
-    borderRadius: radius.sm,
-    backgroundColor: colors.surfaceAlt,
-  },
-  tileImageFallback: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tileName: {
-    color: colors.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-    minHeight: 17,
-  },
-  tilePrice: {
-    color: colors.accent,
-    fontFamily: fonts.black,
-    fontSize: typography.small + 1,
-    fontVariant: ['tabular-nums'],
-  },
-  tileStockRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  stockDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  tileStock: {
-    color: colors.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-  },
+    // Grid
+    grid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+      paddingBottom: spacing.sm,
+    },
+    tile: {
+      width: GRID_TILE,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.sm,
+      gap: 4,
+    },
+    tileImage: {
+      width: GRID_TILE - spacing.sm * 2,
+      height: GRID_TILE - spacing.sm * 2 - 62,
+      borderRadius: radius.sm,
+      backgroundColor: c.surfaceAlt,
+    },
+    tileImageFallback: {
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    tileName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      minHeight: 17,
+    },
+    tilePrice: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.small + 1,
+      fontVariant: ['tabular-nums'],
+    },
+    tileStockRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+    },
+    stockDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+    },
+    tileStock: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      flex: 1,
+    },
 
-  // Cart panel
-  cartPanel: {
-    backgroundColor: colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.borderSoft,
-    padding: spacing.md,
-    gap: spacing.sm,
-    maxHeight: '52%',
-  },
-  cartEmptyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.xs,
-  },
-  cartEmptyText: {
-    flex: 1,
-    color: colors.textFaint,
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    lineHeight: 18,
-  },
-  cartLinesWrap: {
-    maxHeight: 132,
-  },
-  cartLine: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: 7,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderSoft,
-  },
-  cartLineInfo: {flex: 1},
-  cartLineName: {
-    color: colors.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.caption,
-  },
-  cartLineMeta: {
-    color: colors.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    marginTop: 1,
-    fontVariant: ['tabular-nums'],
-  },
-  removeBtn: {
-    width: 34,
-    height: 34,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  discountRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  discountLabel: {
-    color: colors.textDim,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  discountInput: {
-    width: 74,
-    backgroundColor: colors.surfaceAlt,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.sm,
-    color: colors.text,
-    textAlign: 'center',
-    paddingVertical: 6,
-    fontSize: typography.caption,
-    fontFamily: fonts.bold,
-  },
-  quickChip: {
-    backgroundColor: colors.accentSoft,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 7,
-  },
-  quickChipGhost: {backgroundColor: colors.surfaceAlt},
-  quickChipText: {
-    color: colors.accent,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  totalsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingTop: spacing.xs,
-  },
-  totalLabel: {
-    color: colors.textDim,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  discountValue: {
-    color: colors.danger,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-    marginTop: 2,
-  },
-  checkoutRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-});
+    // Cart panel
+    cartPanel: {
+      backgroundColor: c.surface,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.md,
+      gap: spacing.sm,
+      maxHeight: '54%',
+    },
+    cartEmptyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingVertical: spacing.xs,
+    },
+    cartEmptyText: {
+      flex: 1,
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 18,
+    },
+    cartLinesWrap: {
+      maxHeight: 158,
+    },
+    cartLine: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingVertical: 7,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    cartLineInfo: {flex: 1},
+    cartLineName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    cartLineMetaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    cartLineMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+      fontVariant: ['tabular-nums'],
+    },
+    unitChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      backgroundColor: c.accentSofter,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 3,
+      alignSelf: 'flex-start',
+      marginTop: 4,
+    },
+    unitChipText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+    },
+    removeBtn: {
+      width: 34,
+      height: 34,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    discountRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    discountLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    discountInput: {
+      width: 74,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      color: c.text,
+      textAlign: 'center',
+      paddingVertical: 6,
+      fontSize: typography.caption,
+      fontFamily: fonts.bold,
+    },
+    quickChip: {
+      backgroundColor: c.accentSoft,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 7,
+    },
+    quickChipGhost: {backgroundColor: c.surfaceAlt},
+    quickChipText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    totalsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingTop: spacing.xs,
+    },
+    totalLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      flexShrink: 1,
+    },
+    discountValue: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      marginTop: 2,
+    },
+    checkoutRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+
+    // Unit picker modal
+    unitModalOverlay: {
+      flex: 1,
+      backgroundColor: c.overlay,
+      justifyContent: 'flex-end',
+    },
+    unitModalSheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      gap: spacing.sm,
+      paddingBottom: spacing.xxl,
+    },
+    unitModalHandle: {
+      alignSelf: 'center',
+      width: 44,
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: c.border,
+      marginBottom: spacing.xs,
+    },
+    unitModalTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+      textAlign: 'center',
+      marginBottom: spacing.sm,
+    },
+    unitModalMuted: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.caption,
+      textAlign: 'center',
+    },
+    unitModalHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'center',
+      lineHeight: 18,
+      marginTop: spacing.sm,
+    },
+    unitOption: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    unitOptionLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    unitOptionMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      marginTop: 1,
+    },
+  }),
+);

@@ -1,6 +1,9 @@
 /**
- * InventoryScreen — المخزون (design.md §9.3).
- * Search + category chips + product rows with live stock badges.
+ * InventoryScreen — المخزون (v3).
+ * ─────────────────────────────────────────────────────────────────
+ * Redesigned breathing room: taller category chips with product
+ * counts, roomier rows with stock + unit badges, quick access to
+ * stocktake (الجرد) and category management.
  */
 import React, {useCallback, useMemo, useState} from 'react';
 import {
@@ -16,7 +19,15 @@ import {AppButton, AppHeader, EmptyState, SearchBar} from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useSettingsStore} from '../../stores/settingsStore';
-import {colors, fonts, radius, spacing, typography} from '../../core/theme';
+import {BASE_UNIT_NAME} from '../../core/config';
+import {
+  fonts,
+  makeStyles,
+  radius,
+  spacing,
+  typography,
+  useThemeColors,
+} from '../../core/theme';
 import {formatMoney} from '../../core/format';
 import {stockStateOf, type Product} from '../../core/types';
 
@@ -44,25 +55,33 @@ export function InventoryScreen() {
       if (filter !== 'all' && product.category_id !== filter) {
         return false;
       }
-      if (query && !product.name.toLowerCase().includes(query)) {
+      if (
+        query &&
+        !product.name.toLowerCase().includes(query) &&
+        !(product.barcode ?? '').includes(query)
+      ) {
         return false;
       }
       return true;
     });
   }, [products, search, filter]);
 
-  const stockBadge = useCallback(
-    (product: Product) => {
-      const state = stockStateOf(product, settings.lowStockDefaultThreshold);
-      if (state === 'out') {
-        return {label: 'نفد', tone: 'danger' as const};
-      }
-      if (state === 'low') {
-        return {label: `${product.stock_quantity} منخفض`, tone: 'warning' as const};
-      }
-      return {label: `${product.stock_quantity}`, tone: 'success' as const};
-    },
-    [settings.lowStockDefaultThreshold],
+  /** Products per category for the chip counts. */
+  const countFor = useCallback(
+    (categoryId: number | 'all') =>
+      categoryId === 'all'
+        ? products.length
+        : products.filter(product => product.category_id === categoryId).length,
+    [products],
+  );
+
+  const lowCount = useMemo(
+    () =>
+      products.filter(
+        product =>
+          stockStateOf(product, settings.lowStockDefaultThreshold) !== 'ok',
+      ).length,
+    [products, settings.lowStockDefaultThreshold],
   );
 
   return (
@@ -75,24 +94,27 @@ export function InventoryScreen() {
       setSearch={setSearch}
       filter={filter}
       setFilter={setFilter}
-      badge={stockBadge}
+      countFor={countFor}
+      lowCount={lowCount}
+      defaultThreshold={settings.lowStockDefaultThreshold}
       onRefresh={refresh}
     />
   );
 }
 
-
 function InventoryLayout({
   products,
   allProducts,
   categories,
-  loading,
+  loading: _loading,
   search,
   setSearch,
   filter,
   setFilter,
-  badge,
-  onRefresh,
+  countFor,
+  lowCount,
+  defaultThreshold,
+  onRefresh: _onRefresh,
 }: {
   products: Product[];
   allProducts: Product[];
@@ -102,24 +124,27 @@ function InventoryLayout({
   setSearch: (value: string) => void;
   filter: CategoryFilter;
   setFilter: (value: CategoryFilter) => void;
-  badge: (product: Product) => {label: string; tone: 'danger' | 'warning' | 'success'};
+  countFor: (categoryId: number | 'all') => number;
+  lowCount: number;
+  defaultThreshold: number;
   onRefresh: () => Promise<void>;
 }) {
+  const c = useThemeColors();
+  const styles = useStyles();
   const navigation = useNavigation<any>();
-  const lowCount = allProducts.filter(
-    product => stockStateOf(product, 5) !== 'ok',
-  ).length;
 
   return (
     <View style={styles.screen}>
       <AppHeader
         title="المخزون"
-        subtitle={`${allProducts.length} منتج`}
+        subtitle={`${allProducts.length} منتج${
+          lowCount > 0 ? ` · ${lowCount} يحتاج انتباهاً` : ''
+        }`}
         showBack={false}
         right={
           <AppButton
             small
-            title="منتج جديد"
+            title="منتج"
             icon="plus"
             onPress={() => navigation.navigate('ProductForm', {})}
           />
@@ -127,18 +152,42 @@ function InventoryLayout({
       />
 
       <View style={styles.body}>
+        {/* ── Quick actions ─────────────────────────────────── */}
+        <View style={styles.quickRow}>
+          <QuickAction
+            icon="clipboard"
+            label="الجرد"
+            hint="جلسة جرد كاملة"
+            onPress={() => navigation.navigate('Stocktake' as never)}
+          />
+          <QuickAction
+            icon="shapes"
+            label="التصنيفات"
+            hint="إدارة التصنيفات"
+            onPress={() => navigation.navigate('ManageCategories' as never)}
+          />
+          <QuickAction
+            icon="scale"
+            label="الوحدات"
+            hint="كرتونة، كيلو…"
+            onPress={() => navigation.navigate('ManageUnits' as never)}
+          />
+        </View>
+
         <SearchBar
           value={search}
           onChangeText={setSearch}
-          placeholder="ابحث بالاسم…"
+          placeholder="ابحث بالاسم أو الباركود…"
         />
 
+        {/* ── Category chips (with counts, roomier) ─────────── */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{gap: spacing.sm, paddingVertical: 2}}>
+          contentContainerStyle={{gap: spacing.sm, paddingVertical: 4}}>
           <FilterChip
             label="الكل"
+            count={countFor('all')}
             active={filter === 'all'}
             onPress={() => setFilter('all')}
           />
@@ -146,6 +195,7 @@ function InventoryLayout({
             <FilterChip
               key={category.id}
               label={category.name}
+              count={countFor(category.id)}
               active={filter === category.id}
               onPress={() => setFilter(category.id)}
             />
@@ -158,7 +208,7 @@ function InventoryLayout({
             title={allProducts.length === 0 ? 'المخزون فارغ' : 'لا نتائج'}
             subtitle={
               allProducts.length === 0
-                ? 'أضف أول منتج مع التقاط بصمته البصرية من ثلاث زوايا'
+                ? 'أضف أول منتج مع بصمته البصرية أو باركوده'
                 : 'جرّب كلمة بحث مختلفة أو تصنيفاً آخر'
             }
             action={
@@ -174,10 +224,13 @@ function InventoryLayout({
           />
         ) : (
           <ScrollView
-            contentContainerStyle={{gap: spacing.sm, paddingBottom: spacing.xxl}}
+            contentContainerStyle={{
+              gap: spacing.sm,
+              paddingBottom: spacing.xxl,
+            }}
             showsVerticalScrollIndicator={false}>
             {products.map(product => {
-              const stock = badge(product);
+              const state = stockStateOf(product, defaultThreshold);
               return (
                 <TouchableOpacity
                   key={product.id}
@@ -193,7 +246,7 @@ function InventoryLayout({
                     />
                   ) : (
                     <View style={[styles.thumb, styles.thumbFallback]}>
-                      <Icon name="box" size={20} color={colors.accent} />
+                      <Icon name="box" size={20} color={c.accent} />
                     </View>
                   )}
                   <View style={{flex: 1}}>
@@ -204,30 +257,50 @@ function InventoryLayout({
                       مفرق {formatMoney(product.retail_price)} · جملة{' '}
                       {formatMoney(product.wholesale_price)}
                     </Text>
+                    <View style={styles.tagRow}>
+                      {product.barcode ? (
+                        <View style={styles.miniTag}>
+                          <Icon name="barcode" size={10} color={c.textFaint} />
+                        </View>
+                      ) : null}
+                      {state === 'low' ? (
+                        <View style={styles.miniTag}>
+                          <Text style={styles.miniTagText}>حد منخفض</Text>
+                        </View>
+                      ) : null}
+                    </View>
                   </View>
                   <View style={styles.rowEnd}>
                     <View
                       style={[
                         styles.stockBadge,
-                        stock.tone === 'danger'
-                          ? {backgroundColor: colors.dangerSoft}
-                          : stock.tone === 'warning'
-                          ? {backgroundColor: colors.warningSoft}
-                          : {backgroundColor: colors.successSoft},
+                        {
+                          backgroundColor:
+                            state === 'out'
+                              ? c.dangerSoft
+                              : state === 'low'
+                              ? c.warningSoft
+                              : c.successSoft,
+                        },
                       ]}>
                       <Text
                         style={[
                           styles.stockText,
-                          stock.tone === 'danger'
-                            ? {color: colors.danger}
-                            : stock.tone === 'warning'
-                            ? {color: colors.warning}
-                            : {color: colors.success},
+                          {
+                            color:
+                              state === 'out'
+                                ? c.danger
+                                : state === 'low'
+                                ? c.warning
+                                : c.success,
+                          },
                         ]}>
-                        {stock.label}
+                        {state === 'out'
+                          ? 'نفد'
+                          : `${product.stock_quantity} ${BASE_UNIT_NAME}`}
                       </Text>
                     </View>
-                    <Icon name="chevronLeft" size={16} color={colors.textFaint} />
+                    <Icon name="chevronLeft" size={16} color={c.textFaint} />
                   </View>
                 </TouchableOpacity>
               );
@@ -239,97 +312,209 @@ function InventoryLayout({
   );
 }
 
-function FilterChip({
+function QuickAction({
+  icon,
   label,
-  active,
+  hint,
   onPress,
 }: {
+  icon: 'clipboard' | 'shapes' | 'scale';
   label: string;
-  active: boolean;
+  hint: string;
   onPress: () => void;
 }) {
+  const c = useThemeColors();
+  const styles = useStyles();
   return (
     <TouchableOpacity
-      style={[styles.chip, active && styles.chipActive]}
+      style={styles.quickAction}
       onPress={onPress}
-      activeOpacity={0.8}>
-      <Text style={[styles.chipText, active && styles.chipTextActive]}>
-        {label}
-      </Text>
+      activeOpacity={0.75}>
+      <View style={[styles.quickIcon, {backgroundColor: c.accentSoft}]}>
+        <Icon name={icon} size={19} color={c.accent} />
+      </View>
+      <View style={{flex: 1}}>
+        <Text style={styles.quickLabel}>{label}</Text>
+        <Text style={styles.quickHint} numberOfLines={1}>
+          {hint}
+        </Text>
+      </View>
     </TouchableOpacity>
   );
 }
 
-const styles = StyleSheet.create({
-  screen: {flex: 1, backgroundColor: colors.bg},
-  body: {
-    flex: 1,
-    padding: spacing.lg,
-    gap: spacing.md,
-  },
-  chip: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 8,
-  },
-  chipActive: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent,
-  },
-  chipText: {
-    color: colors.textDim,
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  chipTextActive: {color: colors.onAccent},
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.borderSoft,
-    borderRadius: radius.md,
-    padding: spacing.md,
-  },
-  thumb: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    backgroundColor: colors.surfaceAlt,
-  },
-  thumbFallback: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  name: {
-    color: colors.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.caption,
-  },
-  meta: {
-    color: colors.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    marginTop: 2,
-    fontVariant: ['tabular-nums'],
-  },
-  rowEnd: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  stockBadge: {
-    borderRadius: radius.pill,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-  },
-  stockText: {
-    fontFamily: fonts.bold,
-    fontSize: typography.micro,
-    fontVariant: ['tabular-nums'],
-  },
-});
+function FilterChip({
+  label,
+  count,
+  active,
+  onPress,
+}: {
+  label: string;
+  count: number;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  return (
+    <TouchableOpacity
+      style={[
+        styles.chip,
+        active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+      ]}
+      onPress={onPress}
+      activeOpacity={0.8}>
+      <Text style={[styles.chipText, {color: active ? c.onAccent : c.textDim}]}>
+        {label}
+      </Text>
+      <View
+        style={[
+          styles.chipCount,
+          {backgroundColor: active ? 'rgba(255,255,255,0.22)' : c.surfaceHi},
+        ]}>
+        <Text
+          style={[
+            styles.chipCountText,
+            {color: active ? c.onAccent : c.textFaint},
+          ]}>
+          {count}
+        </Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+const useStyles = makeStyles(c =>
+  StyleSheet.create({
+    screen: {flex: 1, backgroundColor: c.bg},
+    body: {
+      flex: 1,
+      padding: spacing.lg,
+      gap: spacing.md,
+    },
+    quickRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    quickAction: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    quickIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 11,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    quickLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    quickHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      marginTop: 1,
+    },
+    chip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+    },
+    chipText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    chipCount: {
+      minWidth: 22,
+      borderRadius: 8,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 5,
+      paddingVertical: 1,
+    },
+    chipCountText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+      fontVariant: ['tabular-nums'],
+    },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    thumb: {
+      width: 52,
+      height: 52,
+      borderRadius: 13,
+      backgroundColor: c.surfaceAlt,
+    },
+    thumbFallback: {
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    name: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    meta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 3,
+      fontVariant: ['tabular-nums'],
+    },
+    tagRow: {
+      flexDirection: 'row',
+      gap: spacing.xs,
+      marginTop: 4,
+    },
+    miniTag: {
+      backgroundColor: c.surfaceHi,
+      borderRadius: 6,
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+    },
+    miniTagText: {
+      color: c.textFaint,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro - 0.5,
+    },
+    rowEnd: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    stockBadge: {
+      borderRadius: radius.pill,
+      paddingHorizontal: 12,
+      paddingVertical: 5,
+    },
+    stockText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 0.5,
+      fontVariant: ['tabular-nums'],
+    },
+  }),
+);
