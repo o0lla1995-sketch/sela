@@ -1,6 +1,8 @@
 package com.sela
 
 import android.app.Application
+import android.content.Context
+import android.content.res.Configuration
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
@@ -11,8 +13,27 @@ import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
 import com.facebook.soloader.SoLoader
 import com.sela.native_modules.SelaPackage
+import java.util.Locale
 
 class MainApplication : Application(), ReactApplication {
+
+  /**
+   * سيلا Arabic-first, process-wide. Forcing the ar locale + RTL layout
+   * direction on the APPLICATION context means every derived context —
+   * every Activity, the React context, and the system notifications we
+   * build from it — carries an Arabic RTL configuration regardless of
+   * the device's own locale (Hebrew/English devices included). This is
+   * what makes stock-alert notifications render right-to-left with no
+   * left-edge cutoff, and keeps I18nManager.isRTL true from launch.
+   */
+  override fun attachBaseContext(base: Context) {
+    val locale = Locale("ar")
+    Locale.setDefault(locale)
+    val config = Configuration(base.resources.configuration)
+    config.setLocale(locale)
+    config.setLayoutDirection(locale)
+    super.attachBaseContext(base.createConfigurationContext(config))
+  }
 
   override val reactNativeHost: ReactNativeHost =
       object : DefaultReactNativeHost(this) {

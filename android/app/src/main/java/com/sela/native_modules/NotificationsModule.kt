@@ -12,7 +12,6 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
-import java.util.Locale
 
 /**
  * NotificationsModule
@@ -109,14 +108,14 @@ class NotificationsModule(reactContext: ReactApplicationContext) :
         "sale" -> CHANNEL_SALES_ID
         else -> CHANNEL_ID
       }
-      // Arabic-first notification: framework Notification.Builder is
-      // used (instead of NotificationCompat) because setLocale(Locale)
-      // exists there since API 24 = our minSdk. It forces the shade
-      // to lay this notification out RIGHT-to-left (title/body aligned
-      // right, icon on the right) even when the device locale is
-      // Hebrew/English — fixes "alerts read left-to-right and get cut
-      // off at the left edge". (NotificationCompat lacks setLocale.)
-      val locale = Locale("ar")
+      // Arabic-first notification. The app context itself is already
+      // Arabic/RTL (MainApplication.attachBaseContext forces it), so the
+      // builder inherits the RTL configuration. As a text-level guarantee
+      // on any OEM shade, each string is prefixed with RLM (U+200F) so the
+      // bidi paragraph base direction is right-to-left — fixes "alerts
+      // read left-to-right and get cut off at the left edge" on devices
+      // whose system locale isn't Arabic.
+      val rlm = "\u200F"
       val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         Notification.Builder(ctx, channel)
       } else {
@@ -126,10 +125,9 @@ class NotificationsModule(reactContext: ReactApplicationContext) :
         setSmallIcon(
           ctx.resources.getIdentifier("ic_stat_sela", "drawable", ctx.packageName)
         )
-        setContentTitle(title)
-        setContentText(body)
-        setStyle(Notification.BigTextStyle().bigText(body))
-        setLocale(locale)
+        setContentTitle(rlm + title)
+        setContentText(rlm + body)
+        setStyle(Notification.BigTextStyle().bigText(rlm + body))
         setAutoCancel(true)
         setPriority(
           if (kind == "out_of_stock") Notification.PRIORITY_HIGH
