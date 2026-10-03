@@ -3,10 +3,17 @@
  */
 
 import 'react-native-gesture-handler';
-import {AppRegistry, I18nManager} from 'react-native';
+import {AppRegistry, I18nManager, UIManager} from 'react-native';
 
 import App from './App';
 import {name as appName} from './app.json';
+
+// Enable LayoutAnimation presets on Android (camera sheet slide).
+try {
+  UIManager.setLayoutAnimationEnabledExperimental?.(true);
+} catch {
+  // Older Android versions simply skip animated layout changes.
+}
 
 // The app UI is fully Arabic — force RTL layout from the very first launch.
 // Setting this before registerComponent applies on first run; on later runs
