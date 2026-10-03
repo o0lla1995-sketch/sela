@@ -155,6 +155,8 @@ export const ScannerCamera = forwardRef<
   const [camState, setCamState] = useState<'starting' | 'ready' | 'error'>(
     'starting',
   );
+  /** Real native failure reason ("" when the JS watchdog fired instead). */
+  const [nativeError, setNativeError] = useState<string>('');
   const [remountKey, setRemountKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [statusText, setStatusText] = useState<string>(
@@ -253,18 +255,21 @@ export const ScannerCamera = forwardRef<
   }, []);
 
   // ── Ready watchdog: if the native camera doesn't come up within
-  //    4.5s, show the retry overlay instead of a silent black box.
+  //    8s (cold CameraX init + the v5.2 retry/fallback ladder can
+  //    legitimately take a few seconds on budget hardware), show
+  //    the retry overlay instead of a silent black box.
   useEffect(() => {
     if (permission !== 'granted') {
       return;
     }
     setCamState('starting');
+    setNativeError('');
     if (readyTimerRef.current != null) {
       clearTimeout(readyTimerRef.current);
     }
     readyTimerRef.current = setTimeout(() => {
       setCamState(current => (current === 'starting' ? 'error' : current));
-    }, 4500);
+    }, 8000);
     return () => {
       if (readyTimerRef.current != null) {
         clearTimeout(readyTimerRef.current);
@@ -578,6 +583,7 @@ export const ScannerCamera = forwardRef<
         onCameraError={(event: {nativeEvent: {errorMessage: string}}) => {
           const message = event.nativeEvent?.errorMessage ?? 'خطأ غير معروف';
           logDiag('camera', `خطأ الكاميرا: ${message}`, 'error');
+          setNativeError(message);
           setCamState('error');
           setStatusText(message);
         }}
@@ -595,7 +601,11 @@ export const ScannerCamera = forwardRef<
           <Icon name="camera" size={30} color={c.accent} />
           <Text style={styles.errorTitle}>تعذر تشغيل الكاميرا</Text>
           <Text style={styles.errorText}>
-            حدث خطأ في الكاميرا — إعادة المحاولة تعيد تشغيلها من الصفر.
+            {nativeError
+              ? `السبب من الجهاز: ${nativeError}`
+              : 'لم تجهز الكاميرا خلال المهلة.'}
+            {'\n'}إعادة المحاولة تعيد تشغيلها من الصفر — إن تكرر الخطأ أغلق
+            التطبيقات الأخرى التي تستخدم الكاميرا.
           </Text>
           <TouchableOpacity
             style={styles.retryButton}

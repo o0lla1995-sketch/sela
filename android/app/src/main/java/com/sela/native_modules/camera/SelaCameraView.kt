@@ -252,6 +252,14 @@ class SelaCameraView(
      *  - barcode mode  → Preview + ImageAnalysis (ML Kit reads frames)
      *  - visual/camera → Preview + ImageCapture  (still photos)
      * Idempotent: safe to call from attach, layout and prop changes.
+     *
+     * v5.2 resilience: a failed bind retries ONCE after 600ms (some
+     * budget camera HALs need a beat after a previous release), then
+     * falls back to a PREVIEW-ONLY bind (a single stream — the weakest
+     * combination every HAL supports) before giving up. Only our OWN
+     * previous use cases are unbound — the global unbindAll() could
+     * kill another live SelaCameraView's session (two views exist
+     * while switching between the POS sheet and the product form).
      */
     private fun ensureBound() {
         if (binding.get() || bound.get() || deadCamera.get()) return
@@ -271,73 +279,156 @@ class SelaCameraView(
             try {
                 val provider = future.get()
                 cameraProvider = provider
+                bindInternal(provider)
+            } catch (error: Exception) {
+                handleBindFailure(error)
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
 
+    /** Single bind attempt; throws on failure. */
+    private fun bindInternal(provider: ProcessCameraProvider) {
+        // Release ONLY this view's previous use cases (never the
+        // global unbindAll — another SelaCameraView may be live).
+        val previous = listOfNotNull(preview, imageCapture, imageAnalysis)
+        if (previous.isNotEmpty()) {
+            try {
+                provider.unbind(*previous.toTypedArray())
+            } catch (_: Exception) {
+                // Already unbound — fine.
+            }
+        }
+
+        val owner = CameraHost()
+        owner.resume()
+        host = owner
+
+        val rotation = try {
+            previewView.display?.rotation ?: Surface.ROTATION_0
+        } catch (_: Exception) {
+            Surface.ROTATION_0
+        }
+
+        val newPreview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(rotation)
+            .build()
+
+        val useCases = mutableListOf<UseCase>(newPreview)
+
+        if (propBarcodeEnabled) {
+            val newAnalysis = ImageAnalysis.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetRotation(rotation)
+                .build()
+            imageAnalysis = newAnalysis
+            imageCapture = null
+            useCases.add(newAnalysis)
+        } else {
+            val newCapture = ImageCapture.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .setTargetRotation(rotation)
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setJpegQuality(88)
+                .build()
+            imageCapture = newCapture
+            imageAnalysis = null
+            useCases.add(newCapture)
+        }
+
+        preview = newPreview
+
+        camera = provider.bindToLifecycle(
+            owner,
+            CameraSelector.DEFAULT_BACK_CAMERA,
+            *useCases.toTypedArray()
+        )
+
+        newPreview.setSurfaceProvider(previewView.surfaceProvider)
+
+        // Restore torch state across (re)binds.
+        if (propTorch) {
+            camera?.cameraControl?.enableTorch(true)
+        }
+
+        bound.set(true)
+        binding.set(false)
+        if (propBarcodeEnabled) applyAnalyzer()
+        dispatchReady()
+    }
+
+    /**
+     * v5.2 failure ladder: retry once → preview-only fallback → real
+     * error (with the exception class, so Diagnostics finally shows
+     * WHY the camera failed on a given device).
+     */
+    private fun handleBindFailure(error: Exception) {
+        val reason = "${error.javaClass.simpleName}: ${error.message ?: "خطأ غير معروف"}"
+        if (!attached.get()) {
+            binding.set(false)
+            return
+        }
+        mainHandler.postDelayed({
+            if (!attached.get() || deadCamera.get()) {
+                binding.set(false)
+                return@postDelayed
+            }
+            val provider = cameraProvider
+            if (provider == null) {
+                binding.set(false)
+                dispatchError("فشل تشغيل الكاميرا: $reason")
+                return@postDelayed
+            }
+            // Retry #1 — same use-case set.
+            try {
+                bindInternal(provider)
+                return@postDelayed
+            } catch (_: Exception) {
+                // fall through to the preview-only fallback
+            }
+            if (!attached.get() || deadCamera.get()) {
+                binding.set(false)
+                return@postDelayed
+            }
+            // Fallback — preview alone (weakest combination any HAL
+            // supports). Captures will report not-ready but the
+            // merchant at least gets a live viewfinder + retry.
+            try {
+                imageCapture = null
+                imageAnalysis = null
                 val owner = CameraHost()
                 owner.resume()
                 host = owner
-
                 val rotation = try {
                     previewView.display?.rotation ?: Surface.ROTATION_0
                 } catch (_: Exception) {
                     Surface.ROTATION_0
                 }
-
                 val newPreview = Preview.Builder()
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                     .setTargetRotation(rotation)
                     .build()
-
-                val useCases = mutableListOf<UseCase>(newPreview)
-
-                if (propBarcodeEnabled) {
-                    val newAnalysis = ImageAnalysis.Builder()
-                        .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setTargetRotation(rotation)
-                        .build()
-                    imageAnalysis = newAnalysis
-                    imageCapture = null
-                    useCases.add(newAnalysis)
-                } else {
-                    val newCapture = ImageCapture.Builder()
-                        .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                        .setTargetRotation(rotation)
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .setJpegQuality(88)
-                        .build()
-                    imageCapture = newCapture
-                    imageAnalysis = null
-                    useCases.add(newCapture)
-                }
-
                 preview = newPreview
-
-                provider.unbindAll()
                 camera = provider.bindToLifecycle(
                     owner,
                     CameraSelector.DEFAULT_BACK_CAMERA,
-                    *useCases.toTypedArray()
+                    newPreview
                 )
-
                 newPreview.setSurfaceProvider(previewView.surfaceProvider)
-
-                // Restore torch state across (re)binds.
-                if (propTorch) {
-                    camera?.cameraControl?.enableTorch(true)
-                }
-
                 bound.set(true)
                 binding.set(false)
-                if (propBarcodeEnabled) applyAnalyzer()
                 dispatchReady()
-            } catch (error: Exception) {
+            } catch (fatal: Exception) {
                 binding.set(false)
                 bound.set(false)
                 host?.destroy()
                 host = null
-                dispatchError("فشل تشغيل الكاميرا: ${error.message ?: "خطأ غير معروف"}")
+                val fatalReason =
+                    "${fatal.javaClass.simpleName}: ${fatal.message ?: "خطأ غير معروف"}"
+                dispatchError("فشل تشغيل الكاميرا: $fatalReason (بعد محاولتين)")
             }
-        }, ContextCompat.getMainExecutor(context))
+        }, 600)
     }
 
     /** Starts the ML Kit analyzer on the bound ImageAnalysis. */
@@ -628,8 +719,13 @@ class SelaCameraView(
         // Never leave a pending frame-grab promise hanging on teardown.
         finishSnapshot(null, "أُغلق ماسح الكاميرا")
         try {
-            imageAnalysis?.clearAnalyzer()
-            cameraProvider?.unbindAll()
+            // Unbind ONLY this view's own use cases — a global
+            // unbindAll() would kill another live SelaCameraView's
+            // session (e.g. POS sheet camera + product form camera).
+            val own = listOfNotNull(preview, imageCapture, imageAnalysis)
+            if (own.isNotEmpty()) {
+                cameraProvider?.unbind(*own.toTypedArray())
+            }
         } catch (_: Exception) {
             // Unbind during teardown is best-effort.
         }

@@ -1,16 +1,21 @@
 package com.sela.native_modules
 
+import android.app.Activity
 import android.content.ContentValues
+import android.content.Intent
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
+import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableArray
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -28,14 +33,97 @@ import java.io.FileOutputStream
  *    private storage (copy / delete / exists / makeDir).
  */
 class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
-  ReactContextBaseJavaModule(reactContext) {
+  ReactContextBaseJavaModule(reactContext), ActivityEventListener {
 
   companion object {
     const val NAME = "PlatformUtils"
     private const val EXPORT_DIR_NAME = "SmartVisionPOS"
+    private const val PICK_FILE_REQUEST = 47123
   }
 
   override fun getName(): String = NAME
+
+  init {
+    reactContext.addActivityEventListener(this)
+  }
+
+  // ────────────────────────────────────────────────────────
+  // SAF file picker (backup restore)
+  // ────────────────────────────────────────────────────────
+
+  private var pendingPickPromise: Promise? = null
+
+  /**
+   * Opens the system "Open file" picker (ACTION_OPEN_DOCUMENT), lets
+   * the user choose a file matching [mimeTypes] and resolves with the
+   * file's full UTF-8 content. Rejects when the user cancels.
+   */
+  @ReactMethod
+  fun pickAndReadFile(mimeTypes: ReadableArray, promise: Promise) {
+    val activity = currentActivity
+    if (activity == null) {
+      promise.reject("NO_ACTIVITY", "التطبيق غير نشط — حاول مرة أخرى")
+      return
+    }
+    pendingPickPromise?.reject("PICK_BUSY", "هناك عملية اختيار ملف أخرى قيد التنفيذ")
+    pendingPickPromise = promise
+    try {
+      val wanted = ArrayList<String>()
+      for (i in 0 until mimeTypes.size()) {
+        wanted.add(mimeTypes.getString(i) ?: "*/*")
+      }
+      if (wanted.isEmpty()) {
+        wanted.add("*/*")
+      }
+      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "*/*"
+        putExtra(Intent.EXTRA_MIME_TYPES, wanted.toTypedArray())
+        putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+      }
+      activity.startActivityForResult(intent, PICK_FILE_REQUEST)
+    } catch (t: Throwable) {
+      pendingPickPromise = null
+      promise.reject("PICK_FAILED", "تعذّر فتح منتقي الملفات: ${t.message}")
+    }
+  }
+
+  override fun onActivityResult(
+    requestCode: Int,
+    resultCode: Int,
+    data: Intent?
+  ) {
+    if (requestCode != PICK_FILE_REQUEST) {
+      return
+    }
+    val promise = pendingPickPromise ?: return
+    pendingPickPromise = null
+    if (resultCode != Activity.RESULT_OK || data == null) {
+      promise.reject("CANCELLED", "تم إلغاء اختيار الملف")
+      return
+    }
+    val uri: Uri? = data.data
+    if (uri == null) {
+      promise.reject("NO_FILE", "لم يتم اختيار أي ملف")
+      return
+    }
+    try {
+      val content = reactContext.contentResolver.openInputStream(uri)
+        ?.use { stream -> stream.readBytes().toString(Charsets.UTF_8) }
+        ?: throw IllegalStateException("تعذّر قراءة الملف")
+      if (content.isEmpty()) {
+        promise.reject("EMPTY_FILE", "الملف المختار فارغ")
+        return
+      }
+      promise.resolve(content)
+    } catch (t: Throwable) {
+      promise.reject("READ_FAILED", "فشل قراءة الملف: ${t.message}")
+    }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    // Not used — required by ActivityEventListener.
+  }
 
   // ────────────────────────────────────────────────────────────────
   // Device identity, anti-tamper timing & ABI

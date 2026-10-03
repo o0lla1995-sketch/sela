@@ -36,7 +36,7 @@ import {
   useThemeColors,
 } from '../core/theme';
 import {formatMoney, relativeTime} from '../core/format';
-import {APP_NAME, APP_VERSION} from '../core/config';
+import {APP_NAME, APP_VERSION_LABEL} from '../core/config';
 import {Image} from 'react-native';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 
@@ -130,7 +130,7 @@ export function HomeScreen() {
               <View style={styles.versionBadge}>
                 <View style={styles.versionDot} />
                 <Text style={styles.versionBadgeText}>
-                  الإصدار {APP_VERSION}
+                  الإصدار {APP_VERSION_LABEL}
                 </Text>
               </View>
             </View>
@@ -150,28 +150,32 @@ export function HomeScreen() {
         {/* ── Today KPIs ─────────────────────────────────────── */}
         <SectionTitle title="ملخص اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
         <View style={styles.statsGrid}>
-          <StatCard
-            label="مبيعات اليوم"
-            value={formatMoney(bundle?.summary.revenue ?? 0)}
-            tone="accent"
-            icon="wallet"
-          />
-          <StatCard
-            label="صافي الربح"
-            value={formatMoney(bundle?.summary.netProfit ?? 0)}
-            tone={(bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'}
-            icon="chart"
-          />
-          <StatCard
-            label="عدد الفواتير"
-            value={String(bundle?.summary.invoicesCount ?? 0)}
-            icon="inbox"
-          />
-          <StatCard
-            label="القطع المبيعة"
-            value={String(bundle?.summary.itemsCount ?? 0)}
-            icon="box"
-          />
+          <View style={styles.statsRow}>
+            <StatCard
+              label="مبيعات اليوم"
+              value={formatMoney(bundle?.summary.revenue ?? 0)}
+              tone="accent"
+              icon="wallet"
+            />
+            <StatCard
+              label="صافي الربح"
+              value={formatMoney(bundle?.summary.netProfit ?? 0)}
+              tone={(bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'}
+              icon="chart"
+            />
+          </View>
+          <View style={styles.statsRow}>
+            <StatCard
+              label="عدد الفواتير"
+              value={String(bundle?.summary.invoicesCount ?? 0)}
+              icon="inbox"
+            />
+            <StatCard
+              label="القطع المبيعة"
+              value={String(bundle?.summary.itemsCount ?? 0)}
+              icon="box"
+            />
+          </View>
         </View>
 
         {/* ── Stock alerts ───────────────────────────────────── */}
@@ -179,7 +183,7 @@ export function HomeScreen() {
           <>
             <SectionTitle
               title="تنبيهات المخزون"
-              hint="منتجات تحتاج إعادة تزويد"
+              hint={`${alerts.length} منتج يحتاج إعادة تزويد`}
               action={
                 <TouchableOpacity
                   onPress={() => navigation.navigate('Notifications' as never)}>
@@ -187,29 +191,29 @@ export function HomeScreen() {
                 </TouchableOpacity>
               }
             />
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{
-                gap: spacing.sm,
-                paddingBottom: spacing.xs,
-              }}>
-              {alerts.map(({product, state}) => (
+            <View style={styles.alertsCol}>
+              {alerts.slice(0, 3).map(({product, state}) => (
                 <TouchableOpacity
                   key={product.id}
                   style={[
                     styles.alertCard,
-                    {borderColor: state === 'out' ? c.danger : c.warning},
+                    {
+                      borderRightWidth: 4,
+                      borderColor: state === 'out' ? c.danger : c.warning,
+                    },
                   ]}
                   onPress={() =>
                     navigation.navigate('ProductForm', {productId: product.id})
-                  }>
-                  <Icon
-                    name={state === 'out' ? 'packageMinus' : 'alert'}
-                    size={17}
-                    color={state === 'out' ? c.danger : c.warning}
-                  />
-                  <View style={{flex: 1, minWidth: 120}}>
+                  }
+                  activeOpacity={0.8}>
+                  <View style={styles.alertIconWrap}>
+                    <Icon
+                      name={state === 'out' ? 'packageMinus' : 'alert'}
+                      size={18}
+                      color={state === 'out' ? c.danger : c.warning}
+                    />
+                  </View>
+                  <View style={styles.alertTexts}>
                     <Text style={styles.alertName} numberOfLines={1}>
                       {product.name}
                     </Text>
@@ -219,9 +223,14 @@ export function HomeScreen() {
                         : `${product.stock_quantity} قطعة متبقية`}
                     </Text>
                   </View>
+                  <Icon
+                    name="chevronLeft"
+                    size={16}
+                    color={c.textFaint}
+                  />
                 </TouchableOpacity>
               ))}
-            </ScrollView>
+            </View>
           </>
         ) : null}
 
@@ -305,7 +314,7 @@ export function HomeScreen() {
         )}
 
         <Text style={styles.version}>
-          sela · الإصدار {APP_VERSION} · يعمل دون إنترنت
+          {APP_NAME} · الإصدار {APP_VERSION_LABEL} · يعمل دون إنترنت
         </Text>
       </ScrollView>
     </View>
@@ -365,26 +374,42 @@ const useStyles = makeStyles(c =>
       fontVariant: ['tabular-nums'],
     },
     statsGrid: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: spacing.sm,
+      gap: spacing.md,
     },
-    statCard: {minWidth: '48%'},
+    statsRow: {
+      flexDirection: 'row',
+      gap: spacing.md,
+    },
     seeAll: {
       color: c.accent,
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
+    alertsCol: {
+      gap: spacing.sm,
+    },
     alertCard: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
+      gap: spacing.md,
       backgroundColor: c.surface,
-      borderWidth: 1.5,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
       borderRadius: radius.md,
       paddingHorizontal: spacing.md,
-      paddingVertical: 10,
-      maxWidth: 250,
+      paddingVertical: 11,
+    },
+    alertIconWrap: {
+      width: 38,
+      height: 38,
+      borderRadius: 11,
+      backgroundColor: c.surfaceAlt,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    alertTexts: {
+      flex: 1,
+      minWidth: 0,
     },
     alertName: {
       color: c.text,

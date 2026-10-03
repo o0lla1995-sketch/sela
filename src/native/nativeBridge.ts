@@ -67,6 +67,8 @@ interface PlatformUtilsNative {
     mimeType: string,
     content: string,
   ): Promise<string>;
+  /** Opens the system file picker and returns the picked file's text. */
+  pickAndReadFile(mimeTypes: string[]): Promise<string>;
   getFilesDir(): Promise<string>;
   makeDir(path: string): Promise<boolean>;
   fileExists(path: string): Promise<boolean>;

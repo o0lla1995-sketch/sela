@@ -49,11 +49,26 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease --stacktrace --no-daemon
 
+      - name: Derive versioned APK name
+        id: version
+        run: |
+          # Name the APK after the version so every release is
+          # instantly distinguishable in the downloads list.
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            APK_NAME="Sela-${GITHUB_REF_NAME}"
+          else
+            SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+            APK_NAME="Sela-dev-${SHORT_SHA}"
+          fi
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+          cp android/app/build/outputs/apk/release/app-release.apk "/tmp/${APK_NAME}.apk"
+          ls -la /tmp/*.apk
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Sela-APK
-          path: android/app/build/outputs/apk/release/app-release.apk
+          name: ${{ steps.version.outputs.apk_name }}
+          path: /tmp/${{ steps.version.outputs.apk_name }}.apk
           retention-days: 90
 
       - name: Create GitHub Release with APK
@@ -62,6 +77,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            android/app/build/outputs/apk/release/app-release.apk \
-            --title "سيلا Sela $GITHUB_REF_NAME" \
+            "/tmp/${{ steps.version.outputs.apk_name }}.apk#تطبيق sela $GITHUB_REF_NAME (APK)" \
+            --title "sela سيلا $GITHUB_REF_NAME" \
             --generate-notes

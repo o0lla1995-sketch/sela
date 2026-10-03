@@ -23,8 +23,14 @@ export const DEFAULT_RECOGNITION_COOLDOWN_MS = 1500;
 /** Scanner engine selected by the merchant from Settings. */
 export type ScannerMode = 'barcode' | 'visual' | 'both';
 
-/** Pause between auto-scan cycles in the POS camera sheet (ms). */
-export const AUTO_SCAN_INTERVAL_MS = 900;
+/**
+ * Pause between auto-scan cycles in the POS camera sheet (ms).
+ * v6: 900 → 2000 ms — on budget hardware a capture + decode +
+ * inference cycle takes ~1s, so 900ms meant near back-to-back
+ * captures that stress cheap camera HALs. The loop already skips
+ * while busy; this keeps the cadence genuinely calm.
+ */
+export const AUTO_SCAN_INTERVAL_MS = 2000;
 
 /** Hard timeout around every native camera call — a hung camera can
  *  never freeze the scan flow again (v3's fatal freeze). */
@@ -87,8 +93,16 @@ export const DB_SCHEMA_VERSION = 3;
 export const APP_NAME = 'sela';
 export const APP_NAME_AR = 'سيلا';
 
-/** App version shown in Settings → About. */
-export const APP_VERSION = '5.0.0';
+/**
+ * App version — shown on the Home dashboard badge, Settings → About
+ * and in the release APK file name. Keep in sync with
+ * android/app/build.gradle versionName/versionCode.
+ */
+export const APP_VERSION = '6.0.0';
+/** Android versionCode (build number) — bump on EVERY release. */
+export const APP_BUILD_CODE = 7;
+/** Human-readable version with build number, e.g. "6.0.0 (7)". */
+export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 
 // ─────────────────────────────────────────────────────────────
 // Subscription / licensing

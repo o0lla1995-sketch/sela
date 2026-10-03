@@ -36,7 +36,14 @@ class CameraErrorEvent(
         }
 
     companion object {
-        const val EVENT_NAME = "topError"
+        /**
+         * ⚠️ MUST NOT be "topError" — that name is ALREADY claimed by
+         * React Native's built-in Image manager (registrationName
+         * "onError"). With the collision, every real camera error was
+         * silently dropped and the merchant only saw the generic JS
+         * timeout overlay — the real cause never reached JS. v5.2 fix.
+         */
+        const val EVENT_NAME = "topCameraError"
     }
 }
 

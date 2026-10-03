@@ -33,6 +33,7 @@ import {useSettingsStore} from '../../stores/settingsStore';
 import {SubscriptionSection} from './SubscriptionSection';
 import {useThemeStore, useThemeColors, type ThemeMode} from '../../core/theme';
 import {ExportService} from '../../services/ExportService';
+import {BackupService} from '../../services/BackupService';
 import {wipeAllData} from '../../database/connection';
 import {useToastStore} from '../../stores/toastStore';
 import {useCatalogStore} from '../../stores/catalogStore';
@@ -44,7 +45,7 @@ import {
 import {fonts, makeStyles, radius, spacing, typography} from '../../core/theme';
 import {
   APP_NAME,
-  APP_VERSION,
+  APP_VERSION_LABEL,
   DEFAULT_LOW_STOCK_THRESHOLD,
 } from '../../core/config';
 import type {ScannerMode} from '../../core/config';
@@ -143,14 +144,76 @@ export function SettingsScreen() {
     toast('تمت إزالة الشعار', 'info');
   }, [toast, update]);
 
+  const [busyExport, setBusyExport] = useState(false);
+  const [busyRestore, setBusyRestore] = useState(false);
+
   const backupData = useCallback(async () => {
+    setBusyExport(true);
     try {
-      const path = await ExportService.exportBackup();
-      toast(`تم حفظ النسخة الاحتياطية: ${path}`, 'success', 5000);
+      const {path, summary} = await BackupService.exportBackup();
+      toast(
+        `تم حفظ النسخة في ${path} — ${summary.products} منتج و${summary.embeddings} بصمة و${summary.sales} فاتورة`,
+        'success',
+        6000,
+      );
     } catch (error) {
-      toast(error instanceof Error ? error.message : 'فشل التصدير', 'error');
+      toast(
+        error instanceof Error ? error.message : 'فشل إنشاء النسخة الاحتياطية',
+        'error',
+        5000,
+      );
+    } finally {
+      setBusyExport(false);
     }
   }, [toast]);
+
+  const restoreData = useCallback(async () => {
+    setBusyRestore(true);
+    try {
+      const doc = await BackupService.pickAndParseBackup();
+      const summary = BackupService.summarize(doc);
+      setBusyRestore(false);
+      Alert.alert(
+        'استرجاع النسخة الاحتياطية',
+        `هذا الملف يحتوي:\n${summary.products} منتج · ${summary.categories} تصنيف · ${summary.units} وحدة\n${summary.embeddings} بصمة بصرية · ${summary.sales} فاتورة\n\nسيتم استبدال كل البيانات الحالية بمحتويات النسخة. هل تريد المتابعة؟`,
+        [
+          {text: 'إلغاء', style: 'cancel'},
+          {
+            text: 'استرجاع الآن',
+            style: 'destructive',
+            onPress: async () => {
+              setBusyRestore(true);
+              try {
+                const result = await BackupService.restoreBackup(doc);
+                await refreshCatalog();
+                toast(
+                  `تم الاسترجاع بنجاح — ${result.products} منتج و${result.embeddings} بصمة و${result.sales} فاتورة`,
+                  'success',
+                  6000,
+                );
+              } catch (error) {
+                toast(
+                  error instanceof Error
+                    ? error.message
+                    : 'فشل الاسترجاع — لم تتغير بياناتك',
+                  'error',
+                  6000,
+                );
+              } finally {
+                setBusyRestore(false);
+              }
+            },
+          },
+        ],
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes('إلغاء')) {
+        toast(message, 'error', 5000);
+      }
+      setBusyRestore(false);
+    }
+  }, [refreshCatalog, toast]);
 
   const wipe = useCallback(() => {
     Alert.alert(
@@ -461,13 +524,50 @@ export function SettingsScreen() {
 
         {/* ── Data tools ─────────────────────────────────────── */}
         <Card style={styles.group}>
-          <SectionTitle title="أدوات البيانات" />
+          <SectionTitle
+            title="النسخ الاحتياطي والاستعادة"
+            hint="ملف واحد يحمل كل شيء: المنتجات والوحدات والبصمات والفواتير والإعدادات"
+          />
           <AppButton
-            title="نسخة احتياطية (CSV)"
+            title="تنزيل نسخة احتياطية (ملف JSON)"
             variant="secondary"
             icon="save"
             small
+            loading={busyExport}
             onPress={backupData}
+          />
+          <AppButton
+            title="استرجاع من نسخة احتياطية"
+            variant="secondary"
+            icon="inbox"
+            small
+            loading={busyRestore}
+            onPress={restoreData}
+          />
+          <Text style={styles.backupHint}>
+            الملف يُحفظ في مجلد التنزيلات (Downloads/SmartVisionPOS) — انقله
+            لجهاز جديد أو استرجع بعد أي إعادة تثبيت بنفس الزر الثاني.
+          </Text>
+        </Card>
+
+        <Card style={styles.group}>
+          <SectionTitle title="أدوات متقدمة" />
+          <AppButton
+            title="تصدير المخزون (CSV)"
+            variant="ghost"
+            icon="chart"
+            small
+            onPress={async () => {
+              try {
+                const path = await ExportService.exportInventory('csv');
+                toast(`تم تصدير المخزون: ${path}`, 'success', 5000);
+              } catch (error) {
+                toast(
+                  error instanceof Error ? error.message : 'فشل التصدير',
+                  'error',
+                );
+              }
+            }}
           />
           <AppButton
             title="حذف جميع البيانات"
@@ -479,7 +579,7 @@ export function SettingsScreen() {
         </Card>
 
         <Text style={styles.about}>
-          {APP_NAME} · الإصدار {APP_VERSION} · يعمل دون إنترنت 100%
+          {APP_NAME} · الإصدار {APP_VERSION_LABEL} · يعمل دون إنترنت 100%
         </Text>
       </ScrollView>
     </View>
@@ -594,6 +694,13 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
       textAlign: 'center',
       marginTop: spacing.md,
+    },
+    backupHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 17,
+      textAlign: 'left',
     },
   }),
 );

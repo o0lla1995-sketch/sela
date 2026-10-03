@@ -16,9 +16,9 @@ import {
   Dimensions,
   Image,
   Keyboard,
-  LayoutAnimation,
   Modal,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TextInput,
@@ -27,6 +27,7 @@ import {
   View,
 } from 'react-native';
 import {useFocusEffect, useNavigation} from '@react-navigation/native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {
   AppButton,
   AppHeader,
@@ -79,6 +80,7 @@ export function PosScreen() {
   const styles = useStyles();
   const navigation = useNavigation<any>();
   const cameraRef = useRef<ScannerCameraHandle>(null);
+  const insets = useSafeAreaInsets();
 
   const lines = useCartStore(state => state.lines);
   const pricingMode = useCartStore(state => state.pricingMode);
@@ -382,9 +384,11 @@ export function PosScreen() {
     ],
   );
 
-  const toggleCamera = useCallback(() => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setCameraOpen(value => !value);
+  const openScanner = useCallback(() => {
+    setCameraOpen(true);
+  }, []);
+  const closeScanner = useCallback(() => {
+    setCameraOpen(false);
   }, []);
 
   const scannerLabel =
@@ -425,95 +429,20 @@ export function PosScreen() {
               <SearchInput value={search} onChange={setSearch} />
             </View>
             <TouchableOpacity
-              style={[styles.scanButton, cameraOpen && styles.scanButtonActive]}
-              onPress={toggleCamera}
+              style={styles.scanButton}
+              onPress={openScanner}
               activeOpacity={0.8}>
               <Icon
                 name={
-                  cameraOpen
-                    ? 'x'
-                    : scannerMode === 'barcode'
-                    ? 'barcode'
-                    : 'scan'
+                  scannerMode === 'barcode' ? 'barcode' : 'scan'
                 }
                 size={19}
-                color={cameraOpen ? c.danger : c.onAccent}
+                color={c.onAccent}
               />
-              <Text
-                style={[
-                  styles.scanButtonText,
-                  cameraOpen ? {color: c.danger} : null,
-                ]}>
-                {cameraOpen ? 'إغلاق' : scannerLabel}
-              </Text>
+              <Text style={styles.scanButtonText}>{scannerLabel}</Text>
             </TouchableOpacity>
           </View>
         </View>
-
-        {/* ── Camera sheet ─────────────────────────────────── */}
-        {cameraOpen ? (
-          <ErrorBoundary inline label="الكاميرا">
-            <View style={styles.cameraSheet}>
-              <ScannerCamera
-                ref={cameraRef}
-                mode="scan"
-                barcodeEnabled={barcodeActive}
-                onBarcode={code => {
-                  void handleBarcode(code);
-                }}
-                autoScan={visualActive && autoScan && tabFocused}
-                onMatch={handleMatch}
-                height={300}
-              />
-              {visualActive ? (
-                <View style={styles.cameraToolbar} pointerEvents="box-none">
-                  <TouchableOpacity
-                    style={styles.autoScanChip}
-                    onPress={() => setAutoScan(value => !value)}
-                    activeOpacity={0.8}>
-                    <Icon
-                      name={autoScan ? 'flash' : 'clock'}
-                      size={14}
-                      color={autoScan ? c.accent : c.textDim}
-                    />
-                    <Text
-                      style={[
-                        styles.autoScanText,
-                        autoScan ? {color: c.accent} : null,
-                      ]}>
-                      {autoScan ? 'مسح بصري تلقائي' : 'بصري يدوي'}
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.snapNowButton}
-                    onPress={() => void cameraRef.current?.scanOnce()}
-                    activeOpacity={0.8}>
-                    <Icon name="camera" size={16} color={c.onAccent} />
-                    <Text style={styles.snapNowText}>التقط الآن</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : null}
-              {lastRecognized ? (
-                <View style={styles.recognizedBanner}>
-                  <Icon name="checkCircle" size={16} color={c.success} />
-                  <Text style={styles.recognizedText} numberOfLines={1}>
-                    {lastRecognized.name}
-                  </Text>
-                  <Text style={styles.recognizedScore}>
-                    {(lastRecognized.score * 100).toFixed(0)}%
-                  </Text>
-                </View>
-              ) : lastBarcode != null ? (
-                <View style={styles.recognizedBanner}>
-                  <Icon name="barcode" size={16} color={c.success} />
-                  <Text style={styles.recognizedText} numberOfLines={1}>
-                    {lastBarcode}
-                  </Text>
-                </View>
-              ) : null}
-            </View>
-          </ErrorBoundary>
-        ) : null}
 
         {/* ── Products grid ────────────────────────────────── */}
         {products.length === 0 ? (
@@ -752,6 +681,149 @@ export function PosScreen() {
         </View>
       </View>
 
+      {/* ── Full-screen scanner overlay ────────────────────────
+          v6: the camera lives in its own full-screen modal — opening
+          it NEVER squeezes the product grid or pushes the cart and
+          checkout buttons off small screens (the v5 inline-sheet
+          complaint). The selling layout below never moves. */}
+      <Modal
+        visible={cameraOpen}
+        animationType="slide"
+        statusBarTranslucent
+        onRequestClose={closeScanner}>
+        <StatusBar barStyle="light-content" backgroundColor="#0B0B10" />
+        <View style={styles.scannerOverlay}>
+          <ErrorBoundary inline label="الكاميرا">
+            <View style={{flex: 1}}>
+              <ScannerCamera
+                ref={cameraRef}
+                mode="scan"
+                barcodeEnabled={barcodeActive}
+                onBarcode={code => {
+                  void handleBarcode(code);
+                }}
+                autoScan={visualActive && autoScan && tabFocused}
+                onMatch={handleMatch}
+              />
+            </View>
+
+            {/* Top chrome: close + engine hint */}
+            <View
+              style={[styles.scannerTopBar, {top: Math.max(insets.top, spacing.md)}]}>
+              <TouchableOpacity
+                style={styles.scannerCloseChip}
+                onPress={closeScanner}
+                activeOpacity={0.8}>
+                <Icon name="x" size={18} color="#F4F4F5" />
+                <Text style={styles.scannerCloseText}>إغلاق</Text>
+              </TouchableOpacity>
+              <View style={styles.scannerEngineChip}>
+                <Icon
+                  name={
+                    scannerMode === 'barcode'
+                      ? 'barcode'
+                      : scannerMode === 'visual'
+                      ? 'scan'
+                      : 'flash'
+                  }
+                  size={14}
+                  color={c.accent}
+                />
+                <Text style={styles.scannerEngineText}>{scannerLabel}</Text>
+              </View>
+            </View>
+
+            {/* Bottom chrome: recognition feedback + cart + actions */}
+            <View
+              style={[
+                styles.scannerBottom,
+                {paddingBottom: Math.max(insets.bottom, spacing.md)},
+              ]}>
+              {lastRecognized ? (
+                <View style={styles.scannerBanner}>
+                  <Icon name="checkCircle" size={16} color={c.success} />
+                  <Text style={styles.scannerBannerText} numberOfLines={1}>
+                    {lastRecognized.name}
+                  </Text>
+                  <Text style={styles.scannerBannerScore}>
+                    {(lastRecognized.score * 100).toFixed(0)}%
+                  </Text>
+                </View>
+              ) : lastBarcode != null ? (
+                <View style={styles.scannerBanner}>
+                  <Icon name="barcode" size={16} color={c.success} />
+                  <Text style={styles.scannerBannerText} numberOfLines={1}>
+                    {lastBarcode}
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.scannerBannerHint}>
+                  <Text style={styles.scannerBannerHintText}>
+                    {scannerMode === 'barcode'
+                      ? 'وجّه الكاميرا نحو ملصق الباركود'
+                      : scannerMode === 'visual'
+                      ? 'وجّه الكاميرا نحو المنتج — يُضاف تلقائياً عند التعرّف'
+                      : 'باركود أو بصري — كلاهما يعمل معاً'}
+                  </Text>
+                </View>
+              )}
+
+              {/* Live cart summary — the merchant sees the sale grow
+                  without leaving the scanner. */}
+              <View style={styles.scannerCartRow}>
+                <View style={styles.scannerCartInfo}>
+                  <Icon name="cart" size={15} color={c.accent} />
+                  <Text style={styles.scannerCartText}>
+                    {totals.itemsCount} قطعة · {formatMoney(totals.total)}
+                  </Text>
+                </View>
+                <AppButton
+                  small
+                  title="السلة والدفع"
+                  icon="cart"
+                  onPress={closeScanner}
+                />
+              </View>
+
+              <View style={styles.scannerActionsRow}>
+                {visualActive ? (
+                  <TouchableOpacity
+                    style={[styles.autoScanChip, autoScan && styles.autoScanChipOn]}
+                    onPress={() => setAutoScan(value => !value)}
+                    activeOpacity={0.8}>
+                    <Icon
+                      name={autoScan ? 'flash' : 'clock'}
+                      size={14}
+                      color={autoScan ? c.accent : c.textDim}
+                    />
+                    <Text
+                      style={[
+                        styles.autoScanText,
+                        autoScan ? {color: c.accent} : null,
+                      ]}>
+                      {autoScan ? 'مسح تلقائي' : 'يدوي'}
+                    </Text>
+                  </TouchableOpacity>
+                ) : (
+                  <View />
+                )}
+                {visualActive ? (
+                  <TouchableOpacity
+                    style={styles.snapNowButton}
+                    onPress={() => void cameraRef.current?.scanOnce()}
+                    activeOpacity={0.8}>
+                    <Icon name="camera" size={16} color={c.onAccent} />
+                    <Text style={styles.snapNowText}>التقط الآن</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <View />
+                )}
+              </View>
+            </View>
+          </ErrorBoundary>
+        </View>
+      </Modal>
+
       {/* ── Unit picker sheet ──────────────────────────────── */}
       <Modal
         visible={unitPickerLine != null}
@@ -943,30 +1015,138 @@ const useStyles = makeStyles(c =>
       fontSize: typography.caption,
     },
 
-    // Camera sheet
-    cameraSheet: {
-      height: 300,
-      borderRadius: radius.lg,
-      overflow: 'hidden',
+    // Full-screen scanner overlay (v6)
+    scannerOverlay: {
+      flex: 1,
       backgroundColor: '#0B0B10',
     },
-    cameraToolbar: {
+    scannerTopBar: {
       position: 'absolute',
-      top: spacing.sm,
-      left: spacing.sm,
-      right: spacing.xl + 42,
+      left: spacing.md,
+      right: spacing.md,
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
+    },
+    scannerCloseChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: 'rgba(14, 14, 18, 0.84)',
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: 9,
+    },
+    scannerCloseText: {
+      color: '#F4F4F5',
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    scannerEngineChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: 'rgba(14, 14, 18, 0.84)',
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 7,
+    },
+    scannerEngineText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    scannerBottom: {
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      paddingHorizontal: spacing.lg,
+      paddingTop: spacing.xs,
+      gap: spacing.sm,
+    },
+    scannerBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: 'rgba(14, 14, 18, 0.84)',
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.success,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+    },
+    scannerBannerText: {
+      flex: 1,
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    scannerBannerScore: {
+      color: c.success,
+      fontFamily: fonts.black,
+      fontSize: typography.caption,
+      fontVariant: ['tabular-nums'],
+    },
+    scannerBannerHint: {
+      backgroundColor: 'rgba(14, 14, 18, 0.84)',
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+      alignItems: 'center',
+    },
+    scannerBannerHintText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      textAlign: 'center',
+    },
+    scannerCartRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      backgroundColor: 'rgba(14, 14, 18, 0.84)',
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 8,
+    },
+    scannerCartInfo: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    scannerCartText: {
+      color: '#F4F4F5',
+      fontFamily: fonts.black,
+      fontSize: typography.caption,
+      fontVariant: ['tabular-nums'],
+    },
+    scannerActionsRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      minHeight: 44,
     },
     autoScanChip: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
-      backgroundColor: c.scrim,
+      backgroundColor: 'rgba(14, 14, 18, 0.84)',
       borderRadius: radius.pill,
+      borderWidth: 1,
+      borderColor: c.border,
       paddingHorizontal: spacing.md,
-      paddingVertical: 7,
+      paddingVertical: 9,
+    },
+    autoScanChipOn: {
+      borderColor: c.accent,
+      backgroundColor: 'rgba(249, 115, 22, 0.18)',
     },
     autoScanText: {
       color: c.textDim,
@@ -980,39 +1160,12 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.accent,
       borderRadius: radius.pill,
       paddingHorizontal: spacing.lg,
-      paddingVertical: 8,
+      paddingVertical: 10,
     },
     snapNowText: {
       color: c.onAccent,
       fontFamily: fonts.bold,
       fontSize: typography.small,
-    },
-    recognizedBanner: {
-      position: 'absolute',
-      bottom: spacing.sm,
-      left: spacing.sm,
-      right: spacing.sm,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-      backgroundColor: c.scrim,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.success,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 9,
-    },
-    recognizedText: {
-      flex: 1,
-      color: c.success,
-      fontFamily: fonts.bold,
-      fontSize: typography.caption,
-    },
-    recognizedScore: {
-      color: c.success,
-      fontFamily: fonts.black,
-      fontSize: typography.caption,
-      fontVariant: ['tabular-nums'],
     },
 
     // Grid

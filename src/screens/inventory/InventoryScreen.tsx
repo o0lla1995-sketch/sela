@@ -366,7 +366,8 @@ function FilterChip({
         active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
       ]}
       onPress={onPress}
-      activeOpacity={0.8}>
+      activeOpacity={0.8}
+      hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
       <Text style={[styles.chipText, {color: active ? c.onAccent : c.textDim}]}>
         {label}
       </Text>
@@ -431,25 +432,26 @@ const useStyles = makeStyles(c =>
     chip: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
+      gap: 5,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.pill,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 6,
+      borderRadius: 6,
+      paddingHorizontal: 9,
+      paddingVertical: 3,
+      minHeight: 28,
     },
     chipText: {
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: typography.micro + 1,
     },
     chipCount: {
-      minWidth: 18,
-      minHeight: 16,
-      borderRadius: 6,
+      minWidth: 16,
+      minHeight: 15,
+      borderRadius: 4,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingHorizontal: 4,
+      paddingHorizontal: 3,
       paddingVertical: 1,
     },
     chipCountText: {
