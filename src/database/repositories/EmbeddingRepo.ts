@@ -112,6 +112,13 @@ export const EmbeddingRepo = {
     );
   },
 
+  /** v10 (round-16 #4): wipes EVERY fingerprint — the one-time
+   *  migration when the bundled embedding model changes generation
+   *  (old vectors live in a different feature space). */
+  async deleteAll(): Promise<void> {
+    await getDb().execute('DELETE FROM product_embeddings');
+  },
+
   async deleteOne(productId: number, angle: StoredAngle): Promise<void> {
     await getDb().execute(
       'DELETE FROM product_embeddings WHERE product_id = ? AND angle_label = ?',

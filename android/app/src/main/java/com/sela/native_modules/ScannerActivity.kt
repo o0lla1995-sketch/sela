@@ -273,15 +273,20 @@ class ScannerActivity : Activity() {
         resultBanner?.visibility = View.GONE
     }
     /** v9.2 (round-15 #5): engine chrome + the in-camera switcher.
-     *  Both chromes exist in the combined window; visibility follows
-     *  the active engine. (shutter is a FrameLayout — addView needs
-     *  the ViewGroup type, not plain View.) */
+     *  v10 (round-16 #2): the bottom chrome lives in ONE deterministic
+     *  stack (switcher → hint → shutter) added LAST so it always sits
+     *  ABOVE every other view — the capture button can never hide
+     *  behind the engines again. (shutter is a FrameLayout — addView
+     *  needs the ViewGroup type, not plain View.) */
     private var scanLine: View? = null
-    private var barcodeHint: TextView? = null
+    private var engineHint: TextView? = null
     private var shutter: FrameLayout? = null
-    private var photoHint: TextView? = null
     private var switchBarcodeSeg: TextView? = null
     private var switchPhotoSeg: TextView? = null
+    /** v10: true while the combined window runs the BARCODE engine —
+     *  the dimmed shutter then SWITCHES to the photo engine instead
+     *  of capturing (there is no image use case bound to tap). */
+    private var shutterSwitchesEngine = false
 
     // ═══════════════════════════════════════════════════════════
     // Lifecycle
@@ -573,10 +578,14 @@ class ScannerActivity : Activity() {
         }
         root.addView(resultBanner)
 
-        // 4) Mode-specific chrome. In the COMBINED window (v9.2)
-        //    BOTH chromes exist and visibility follows the active
-        //    engine; in single-engine windows only that engine's
-        //    chrome is built (byte-for-byte the proven v9.1 path).
+        // 4) Mode-specific chrome. In every window the RED LASER is
+        //    the barcode engine's centerpiece; the SHUTTER is the
+        //    photo engine's. In the combined window both exist and
+        //    the shutter NEVER hides — dimmed while the barcode
+        //    engine runs (tap = switch to visual), armed while the
+        //    photo engine runs (tap = capture). v10 (round-16 #2):
+        //    both move into ONE bottom stack added LAST to root, so
+        //    no later sibling view can ever cover them.
         if (modeValue != MODE_PHOTO) {
             // Red laser line with a subtle animated sweep.
             scanLine = View(this).apply {
@@ -587,28 +596,13 @@ class ScannerActivity : Activity() {
             }
             root.addView(scanLine)
             animateScanLine(scanLine!!)
-
-            barcodeHint = hintView(
-                if (isContinuous) {
-                    if (isBothMode) {
-                        "امسح ملصق الباركود — كل قراءة تُضاف للسلة · بدّل للبصري بالمفتاح بالأسفل"
-                    } else {
-                        "امسح عدة منتجات — كل قراءة تُضاف للسلة فوراً · إغلاق للإنهاء"
-                    }
-                } else {
-                    "وجّه الكاميرا نحو ملصق الباركود — يُقفل تلقائياً عند القراءة"
-                }
-            )
-            root.addView(barcodeHint)
         }
         if (modeValue != MODE_BARCODE) {
-            // Shutter: big white ring + inner disc, bottom-center.
+            // Shutter: big white ring + inner disc.
             // v9: single deliberate shot per window (the v8.1 flow the
             // merchant's device ran crash-free).
             shutter = FrameLayout(this).apply {
-                layoutParams = FrameLayout.LayoutParams(
-                    dp(74), dp(74), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                )
+                layoutParams = LinearLayout.LayoutParams(dp(74), dp(74))
             }
             shutter!!.addView(View(this).apply {
                 background = GradientDrawable().apply {
@@ -630,28 +624,48 @@ class ScannerActivity : Activity() {
                     dp(56), dp(56), Gravity.CENTER
                 )
             })
-            shutter!!.setOnClickListener { capturePhoto() }
-            root.addView(shutter)
-
-            photoHint = hintView(
-                if (isMultiPhoto) {
-                    if (isBothMode) {
-                        "صوّر المنتج واحداً تلو الآخر — كل تعرّف يُضاف للسلة · بدّل للباركود بالمفتاح بالأسفل"
-                    } else {
-                        "صوّر المنتجات واحداً تلو الآخر — كل صورة تُميّز وتُضاف للسلة · إغلاق للإنهاء"
-                    }
+            shutter!!.setOnClickListener {
+                if (shutterSwitchesEngine) {
+                    // Dimmed shutter in the combined window's barcode
+                    // mode: one tap glides to the VISUAL engine.
+                    switchEngine(toBarcode = false)
                 } else {
-                    "عبّئ الإطار بالمنتج ثم اضغط زر التصوير"
+                    capturePhoto()
                 }
-            )
-            root.addView(photoHint)
+            }
         }
 
-        // 5) v9.2 (round-15 #5): the in-camera ENGINE SWITCHER — a
-        //    big two-segment pill (باركود | بصري) that flips the
-        //    active engine with one tap, camera never closing. The
-        //    merchant's exact ask: easy switching while both engines
-        //    are selected and the camera is running.
+        // 5) v10 (round-16 #2): THE BOTTOM STACK — one deterministic
+        //    container for ALL bottom chrome (switcher, engine hint,
+        //    shutter), laid out top→bottom by a plain vertical
+        //    LinearLayout and added LAST so nothing can draw over it.
+        //    The old per-view gravity + inset margins let the switcher
+        //    and hints pile onto the shutter when inset dispatch was
+        //    late — exactly the "زر التقاط الصورة يختفي خلفهما" bug.
+        engineHint = hintView("")
+        val bottomStack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(10), dp(8), dp(10), dp(18))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            )
+        }
+        // Pad above the gesture/navigation bar — one listener for the
+        // whole stack (shielded: a ROM insets quirk must never crash).
+        bottomStack.setOnApplyWindowInsetsListener { v, insets ->
+            runCatching {
+                val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
+                    .getInsets(WindowInsetsCompat.Type.systemBars())
+                v.setPadding(
+                    v.paddingLeft, v.paddingTop, v.paddingRight,
+                    bars.bottom + dp(18)
+                )
+            }
+            insets
+        }
         if (isBothMode) {
             val switcher = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -662,11 +676,10 @@ class ScannerActivity : Activity() {
                     setStroke(dp(1), Color.parseColor("#33FFFFFF"))
                 }
                 setPadding(dp(6), dp(6), dp(6), dp(6))
-                layoutParams = FrameLayout.LayoutParams(
+                layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                )
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { gravity = Gravity.CENTER_HORIZONTAL }
             }
             switchBarcodeSeg = engineSegment("باركود").apply {
                 setOnClickListener { switchEngine(toBarcode = true) }
@@ -676,18 +689,38 @@ class ScannerActivity : Activity() {
             }
             switcher.addView(switchBarcodeSeg)
             switcher.addView(switchPhotoSeg)
-            switcher.setOnApplyWindowInsetsListener { v, insets ->
-                runCatching {
-                    val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
-                        .getInsets(WindowInsetsCompat.Type.systemBars())
-                    (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
-                        bars.bottom + dp(170)
-                    v.requestLayout()
+            bottomStack.addView(
+                switcher,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    bottomMargin = dp(14)
                 }
-                insets
+            )
+        }
+        bottomStack.addView(
+            engineHint,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = dp(14)
             }
-            root.addView(switcher)
-            updateEngineChrome()
+        )
+        if (shutter != null) {
+            bottomStack.addView(
+                shutter,
+                LinearLayout.LayoutParams(dp(74), dp(74)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                }
+            )
+        }
+        root.addView(bottomStack)
+        updateEngineChrome()
+        if (isBothMode) {
             updateSwitcherUi()
         }
     }
@@ -716,13 +749,28 @@ class ScannerActivity : Activity() {
         statusChip.text = statusChipText()
     }
 
-    /** v9.2: flip the chrome visibility to the active engine. */
+    /** v9.2: flip the chrome to the active engine.
+     *  v10 (round-16 #2): ONE hint view re-texted per engine + the
+     *  shutter stays mounted in the combined window (dimmed while
+     *  the barcode engine runs — tapping it glides to the visual
+     *  engine; full and armed under the photo engine). */
     private fun updateEngineChrome() {
         val barcodeActive = engineIsBarcode
         scanLine?.visibility = if (barcodeActive) View.VISIBLE else View.GONE
-        barcodeHint?.visibility = if (barcodeActive) View.VISIBLE else View.GONE
-        shutter?.visibility = if (barcodeActive) View.GONE else View.VISIBLE
-        photoHint?.visibility = if (barcodeActive) View.GONE else View.VISIBLE
+        engineHint?.text = when {
+            isBothMode && barcodeActive ->
+                "امسح ملصق الباركود — كل قراءة تُضاف للسلة · زر التصوير بالأسفل يبدّل للمسح البصري"
+            isBothMode ->
+                "صوّر المنتجات — كل تعرّف يُضاف للسلة · يمكن التقاط عدة منتجات في صورة واحدة"
+            isContinuous -> "امسح عدة منتجات — كل قراءة تُضاف للسلة فوراً · إغلاق للإنهاء"
+            isMultiPhoto -> "صوّر المنتجات واحداً تلو الآخر — كل صورة تُميّز وتُضاف للسلة · إغلاق للإنهاء"
+            engineIsBarcode -> "وجّه الكاميرا نحو ملصق الباركود — يُقفل تلقائياً عند القراءة"
+            else -> "عبّئ الإطار بالمنتج ثم اضغط زر التصوير"
+        }
+        if (isBothMode && shutter != null) {
+            shutterSwitchesEngine = barcodeActive
+            shutter!!.alpha = if (barcodeActive) 0.45f else 1f
+        }
     }
 
     /** v9.2: highlight the active switcher segment (app accent). */
@@ -797,23 +845,6 @@ class ScannerActivity : Activity() {
             background = GradientDrawable().apply {
                 cornerRadius = dp(14).toFloat()
                 setColor(Color.parseColor("#B31C1C22"))
-            }
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            )
-        }.also { hint ->
-            hint.setOnApplyWindowInsetsListener { v, insets ->
-                // v8.3: shielded.
-                runCatching {
-                    val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
-                        .getInsets(WindowInsetsCompat.Type.systemBars())
-                    (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
-                        bars.bottom + dp(86)
-                    v.requestLayout()
-                }
-                insets
             }
         }
 
@@ -1130,7 +1161,10 @@ class ScannerActivity : Activity() {
         )
         banner.visibility = View.VISIBLE
         banner.removeCallbacks(bannerHide)
-        banner.postDelayed(bannerHide, 1900)
+        // v10 (round-16 #3): stock-out / failure notices linger
+        // longer — the merchant must actually READ them before the
+        // banner fades.
+        banner.postDelayed(bannerHide, if (ok) 1900L else 3000L)
     }
 
     // ── Torch ─────────────────────────────────────────────────

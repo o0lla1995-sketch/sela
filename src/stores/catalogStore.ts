@@ -8,6 +8,10 @@ import {CategoryRepo} from '../database/repositories/CategoryRepo';
 import {EmbeddingRepo} from '../database/repositories/EmbeddingRepo';
 import {PlatformUtilsNative} from '../native/nativeBridge';
 import {logDiag} from '../core/diagnostics';
+import {EMBEDDING_MODEL_VERSION} from '../core/config';
+import {getNumber, setNumber, KEYS} from '../storage/storage';
+import {useToastStore} from './toastStore';
+import {notificationsStore} from './notificationsStore';
 import type {Category, EmbeddingsIndex, Product} from '../core/types';
 
 interface CatalogState {
@@ -96,6 +100,50 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
   refresh: async () => {
     set({loading: true, error: null});
     try {
+      // v10 (round-16 #4): one-time migration — when the bundled
+      // embedding model changes generation, every stored fingerprint
+      // belongs to the OLD feature space and would match garbage.
+      // Wipe them once; the merchant re-photographs products from
+      // the product form (a notice lands in the diagnostics log).
+      if (
+        getNumber(KEYS.embeddingModelVersion, 1) !== EMBEDDING_MODEL_VERSION
+      ) {
+        try {
+          await EmbeddingRepo.deleteAll();
+          setNumber(KEYS.embeddingModelVersion, EMBEDDING_MODEL_VERSION);
+          logDiag(
+            'catalog',
+            'تم تحديث نموذج التعرف البصري — أُلغيت البصمات القديمة، أعد تصوير المنتجات من شاشة المنتج',
+            'warn',
+          );
+          // v10: the merchant MUST know why visual scanning went
+          // quiet after the update — durable notification + toast.
+          try {
+            notificationsStore.push(
+              'info',
+              'تحديث نموذج التعرف البصري',
+              'تمت ترقية محرك التعرف على المنتجات (أسرع وأدق). أعد تصوير المنتجات من شاشة المنتج ليعمل المسح البصري من جديد.',
+            );
+            useToastStore
+              .getState()
+              .show(
+                'تم تحديث نموذج التعرف — أعد تصوير المنتجات من شاشة المنتج',
+                'info',
+                6000,
+              );
+          } catch {
+            // Notification centers are best-effort.
+          }
+        } catch (error) {
+          logDiag(
+            'catalog',
+            `فشل تنظيف البصمات القديمة: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            'warn',
+          );
+        }
+      }
       const [products, categories, embeddings] = await Promise.all([
         ProductRepo.list(),
         CategoryRepo.list(),

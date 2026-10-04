@@ -172,6 +172,18 @@ interface ImageDecoderNative {
     fit: boolean,
     flip: boolean,
   ): Promise<string>;
+  /** v10 (round-16 #4): multi-product WINDOW probe — a square window
+   *  of side min(w,h)*w centered at fractional (cx,cy), cropped from
+   *  a cached decode of the same path (cheap for 10+ windows). */
+  decodeRgbWindow(
+    path: string,
+    size: number,
+    cx: number,
+    cy: number,
+    w: number,
+  ): Promise<string>;
+  /** v10: frees the cached window-probe bitmap after the pass. */
+  releaseDecodeCache(): Promise<void>;
   /** Downscaled JPEG copy for thumbnails → new absolute path. */
   saveScaled(path: string, maxDim: number, quality: number): Promise<string>;
 }

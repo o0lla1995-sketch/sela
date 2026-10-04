@@ -5,7 +5,8 @@
  */
 import {SaleRepo} from '../database/repositories/SaleRepo';
 import {ProductRepo} from '../database/repositories/ProductRepo';
-import {nextInvoiceNumber, localToday} from '../core/format';
+import {getDb} from '../database/connection';
+import {localToday} from '../core/format';
 import {
   getNumber,
   setNumber,
@@ -19,14 +20,68 @@ import {ThermalPrinterService} from './printer/ThermalPrinterService';
 import type {CartLine, PricingMode, SaleWithItems} from '../core/types';
 import type {ReceiptSettings} from './printer/receipt';
 
-function reserveInvoiceNumber(): string {
+/** INV-YYYYMMDD-NNNN for a day + sequence. */
+function formatInvoiceNumber(day: string, seq: number): string {
+  return `INV-${day.replace(/-/g, '')}-${String(seq).padStart(4, '0')}`;
+}
+
+/** Parses the numeric suffix of an invoice number (0 when malformed). */
+function invoiceSequence(number: string): number {
+  const match = /^(?:INV-\d{8}-)?(\d+)$/.exec(String(number ?? '').trim());
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+/** The highest invoice sequence already stored for a day prefix. */
+async function maxSequenceInDb(prefix: string): Promise<number> {
+  let max = 0;
+  try {
+    const result = await getDb().execute(
+      'SELECT invoice_number FROM sales WHERE invoice_number LIKE ?',
+      [`${prefix}%`],
+    );
+    for (const row of result.rows?._array ?? []) {
+      const seq = invoiceSequence(String(row.invoice_number ?? ''));
+      if (seq > max) {
+        max = seq;
+      }
+    }
+  } catch (error) {
+    // The reservation still works from the MMKV counter alone.
+    logDiag(
+      'sale',
+      `تعذر قراء تسلسل الفواتير: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      'warn',
+    );
+  }
+  return max;
+}
+
+/**
+ * v10 (round-16 #1): DB-AWARE invoice reservation.
+ * ─────────────────────────────────────────────────────────────────
+ * The old reservation trusted the MMKV counter alone. After
+ * restoring an old backup the database can hold HIGHER invoice
+ * numbers for today than the counter — the next sale then generated
+ * a number that already existed, hit the UNIQUE constraint and the
+ * whole sale failed ("رقم الفاتورة موجود مسبقاً"). The counter now
+ * reconciles with the DATABASE on every reservation: the next number
+ * is always max(MMKV next, highest stored sequence for today) + 1,
+ * so selling continues right after the last registered invoice no
+ * matter where the data came from.
+ */
+async function reserveInvoiceNumber(): Promise<string> {
   const today = localToday();
+  const prefix = `INV-${today.replace(/-/g, '')}-`;
+  const dbMax = await maxSequenceInDb(prefix);
   const lastDay = getString(KEYS.invoiceDay, '');
   const counter = getNumber(KEYS.invoiceCounter, 0);
-  const next = nextInvoiceNumber(counter, lastDay, today);
-  setNumber(KEYS.invoiceCounter, next.counter);
-  setString(KEYS.invoiceDay, next.day);
-  return next.invoiceNumber;
+  const mmkvNext = lastDay === today ? counter + 1 : 1;
+  const next = Math.max(mmkvNext, dbMax + 1);
+  setNumber(KEYS.invoiceCounter, next);
+  setString(KEYS.invoiceDay, today);
+  return formatInvoiceNumber(today, next);
 }
 
 export interface CompleteSaleOptions {
@@ -43,19 +98,43 @@ export interface CompleteSaleOptions {
 
 export const InvoiceService = {
   async completeSale(options: CompleteSaleOptions): Promise<SaleWithItems> {
-    const invoiceNumber = reserveInvoiceNumber();
-
-    // One atomic transaction: sale + items + stock decrements.
-    const result = await SaleRepo.createSale({
-      invoiceNumber,
-      lines: options.lines,
-      discount: options.discount,
-      paymentType: options.paymentType,
-    });
+    // v10 (round-16 #1): a UNIQUE collision (a number this device
+    // didn't know about — e.g. mid-sale restore races) re-reserves
+    // from the DB and retries instead of failing the sale.
+    let result: SaleWithItems | null = null;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 4 && result == null; attempt += 1) {
+      const invoiceNumber = await reserveInvoiceNumber();
+      try {
+        // One atomic transaction: sale + items + stock decrements.
+        result = await SaleRepo.createSale({
+          invoiceNumber,
+          lines: options.lines,
+          discount: options.discount,
+          paymentType: options.paymentType,
+        });
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/UNIQUE/i.test(message)) {
+          throw error;
+        }
+        logDiag(
+          'sale',
+          `تضارب رقم الفاتورة ${invoiceNumber} — إعادة الحجز من قاعدة البيانات`,
+          'warn',
+        );
+      }
+    }
+    if (result == null) {
+      throw lastError instanceof Error
+        ? lastError
+        : new Error('تعذر حجز رقم فاتورة — حاول مرة أخرى');
+    }
 
     logDiag(
       'sale',
-      `تم إتمام البيع ${invoiceNumber} بمبلغ ${result.sale.total_amount.toFixed(
+      `تم إتمام البيع ${result.sale.invoice_number} بمبلغ ${result.sale.total_amount.toFixed(
         2,
       )} ₪`,
     );
@@ -106,5 +185,57 @@ export const InvoiceService = {
       receiptSettings,
     );
     await ThermalPrinterService.printJob(job);
+  },
+
+  /**
+   * v10 (round-16 #1): re-syncs the MMKV invoice counter with the
+   * DATABASE after a backup restore — walks every stored invoice,
+   * finds the latest day + its highest sequence and stores them, so
+   * the very first post-restore sale continues after the last
+   * restored invoice instead of colliding with it.
+   */
+  async syncInvoiceCounterFromDb(): Promise<void> {
+    try {
+      const result = await getDb().execute(
+        'SELECT invoice_number FROM sales',
+      );
+      let bestDay = '';
+      let bestSeq = 0;
+      const byDay = new Map<string, number>();
+      for (const row of result.rows?._array ?? []) {
+        const value = String(row.invoice_number ?? '');
+        const match = /^INV-(\d{8})-(\d+)$/.exec(value.trim());
+        if (match == null) {
+          continue;
+        }
+        const day = `${match[1].slice(0, 4)}-${match[1].slice(4, 6)}-${match[1].slice(6, 8)}`;
+        const seq = parseInt(match[2], 10);
+        byDay.set(day, Math.max(byDay.get(day) ?? 0, seq));
+        if (day > bestDay) {
+          bestDay = day;
+        }
+      }
+      if (bestDay !== '') {
+        bestSeq = byDay.get(bestDay) ?? 0;
+        setString(KEYS.invoiceDay, bestDay);
+        setNumber(KEYS.invoiceCounter, bestSeq);
+        logDiag(
+          'sale',
+          `تمت مزامنة عداد الفواتير مع قاعدة البيانات: آخر فاتورة ${formatInvoiceNumber(
+            bestDay,
+            bestSeq,
+          )}`,
+        );
+      }
+    } catch (error) {
+      // The DB-aware reservation still recovers on the next sale.
+      logDiag(
+        'sale',
+        `تعذر مزامنة عداد الفواتير: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        'warn',
+      );
+    }
   },
 };

@@ -28,6 +28,9 @@ export const KEYS = {
   licenseServerUrl: 'license_server_url_v1',
   licenseDeviceId: 'license_device_id_v1',
   licenseContact: 'license_contact_v1',
+  /** v10 (round-16 #4): generation of the embeddings currently in
+   *  the database — wiped once when the bundled model changes. */
+  embeddingModelVersion: 'embedding_model_version_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {

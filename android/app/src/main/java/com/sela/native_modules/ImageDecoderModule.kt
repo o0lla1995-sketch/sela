@@ -29,6 +29,15 @@ import kotlin.math.min
  *                            scale the WHOLE frame to the square
  *                            (packaging context); flip = horizontal
  *                            mirror (enrollment augmentation).
+ *  decodeRgbWindow(path, size, cx, cy, w) -> v10 (round-16 #4)
+ *                            multi-product window probe: a square
+ *                            window of side min(w,h)*w centered at
+ *                            (cx,cy) in FRACTIONS of the frame,
+ *                            cropped from a CACHED decode of the
+ *                            same path — the 10-window pass decodes
+ *                            the JPEG once and crops cheaply.
+ *  releaseDecodeCache()  -> frees the cached bitmap (call when the
+ *                            window pass for a photo is done).
  *  saveScaled(path, maxDim, quality) -> writes a downscaled JPEG copy
  *                            (used for catalogue thumbnails) and
  *                            returns its absolute path.
@@ -42,6 +51,148 @@ class ImageDecoderModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
   override fun getName(): String = "ImageDecoder"
+
+  // ── v10 window-probe cache ─────────────────────────────────────
+  // The multi-product pass fires ~10 window decodes for the SAME
+  // photo. Decoding the JPEG once (long edge capped at 1280 — plenty
+  // for a 0.55 window at 224px input) and cropping the cached bitmap
+  // makes the extra windows nearly free.
+  private val decodeLock = Any()
+  private var cachedPath: String? = null
+  private var cachedBitmap: Bitmap? = null
+
+  /** Decodes (or reuses) the cached photo for window crops. */
+  private fun windowSource(path: String): Bitmap? {
+    synchronized(decodeLock) {
+      if (cachedPath == path && cachedBitmap != null) {
+        return cachedBitmap
+      }
+      val file = File(path)
+      if (!file.exists() || file.length() == 0L) {
+        return null
+      }
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeFile(path, bounds)
+      if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        return null
+      }
+      val cap = 1280
+      var sample = 1
+      val longest = max(bounds.outWidth, bounds.outHeight)
+      while (longest / (sample * 2) >= cap) {
+        sample *= 2
+      }
+      val decoded = BitmapFactory.decodeFile(
+        path, BitmapFactory.Options().apply { inSampleSize = sample }
+      ) ?: return null
+      val scale = min(1f, cap.toFloat() / max(decoded.width, decoded.height))
+      val scaled = if (scale < 1f) {
+        Bitmap.createScaledBitmap(
+          decoded,
+          max(1, (decoded.width * scale).toInt()),
+          max(1, (decoded.height * scale).toInt()),
+          true
+        ).also { if (it !== decoded) decoded.recycle() }
+      } else {
+        decoded
+      }
+      runCatching { cachedBitmap?.recycle() }
+      cachedBitmap = scaled
+      cachedPath = path
+      return scaled
+    }
+  }
+
+  /** Extracts size×size RGB from a square window (fraction coords). */
+  private fun windowRgb(
+    src: Bitmap,
+    size: Int,
+    cx: Float,
+    cy: Float,
+    w: Float,
+  ): ByteArray? {
+    val bw = src.width
+    val bh = src.height
+    val side = (min(bw, bh) * w).toInt().coerceIn(8, min(bw, bh))
+    var left = (cx * bw - side / 2f).toInt()
+    var top = (cy * bh - side / 2f).toInt()
+    left = left.coerceIn(0, bw - side)
+    top = top.coerceIn(0, bh - side)
+    val crop = Bitmap.createBitmap(src, left, top, side, side)
+    val scaled = if (crop.width == size && crop.height == size) {
+      crop
+    } else {
+      Bitmap.createScaledBitmap(crop, size, size, true).also {
+        if (it !== crop) crop.recycle()
+      }
+    }
+    return try {
+      val n = size * size
+      val pixels = IntArray(n)
+      scaled.getPixels(pixels, 0, size, 0, 0, size, size)
+      val bytes = ByteArray(n * 3)
+      var i = 0
+      for (p in pixels) {
+        bytes[i++] = ((p shr 16) and 0xFF).toByte()
+        bytes[i++] = ((p shr 8) and 0xFF).toByte()
+        bytes[i++] = (p and 0xFF).toByte()
+      }
+      bytes
+    } finally {
+      scaled.recycle()
+    }
+  }
+
+  /** v10 (round-16 #4): one multi-product window probe. */
+  @ReactMethod
+  fun decodeRgbWindow(
+    path: String,
+    size: Int,
+    cx: Double,
+    cy: Double,
+    w: Double,
+    promise: Promise
+  ) {
+    if (size <= 0 || size > 512) {
+      promise.reject("E_ARGS", "حجم فك الترميز غير صالح", null)
+      return
+    }
+    try {
+      val src = synchronized(decodeLock) { windowSource(path) }
+      if (src == null) {
+        promise.reject("E_NOFILE", "ملف الصورة غير موجود", null)
+        return
+      }
+      val bytes = synchronized(decodeLock) {
+        windowRgb(src, size, cx.toFloat(), cy.toFloat(), w.toFloat())
+      }
+      if (bytes == null) {
+        promise.reject("E_DECODE", "تعذر قص نافذة الصورة", null)
+        return
+      }
+      promise.resolve(Base64.encodeToString(bytes, Base64.NO_WRAP))
+    } catch (oom: OutOfMemoryError) {
+      runCatching { releaseCacheLocked() }
+      promise.reject("E_OOM", "نفدت الذاكرة أثناء معالجة الصورة — أعد المحاولة", null)
+    } catch (e: Exception) {
+      promise.reject("E_DECODE", "فشل فك ترميز الصورة: ${e.message}", e)
+    }
+  }
+
+  /** Frees the cached window-probe bitmap. */
+  @ReactMethod
+  fun releaseDecodeCache(promise: Promise) {
+    synchronized(decodeLock) {
+      runCatching { releaseCacheLocked() }
+    }
+    promise.resolve(null)
+  }
+
+  private fun releaseCacheLocked() {
+    runCatching { cachedBitmap?.recycle() }
+    cachedBitmap = null
+    cachedPath = null
+  }
 
   // -- decodeRgb (public API) ------------------------------------
   @ReactMethod

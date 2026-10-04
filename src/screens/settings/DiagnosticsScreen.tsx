@@ -164,7 +164,7 @@ export function DiagnosticsScreen() {
           <DiagRow label="طبقة الإخراج" value={modelInfo.outputName || '-'} />
           <DiagRow
             label="النموذج"
-            value="MobileNetV3-Small float32 (محلي 100%)"
+            value="EfficientNet-B0 float32 (محلي 100%)"
           />
         </Card>
 

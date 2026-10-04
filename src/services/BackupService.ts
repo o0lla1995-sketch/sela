@@ -29,7 +29,8 @@
 import {getDb, toMessage} from '../database/connection';
 import {requirePlatformUtils} from '../native/nativeBridge';
 import {getSettings, useSettingsStore} from '../stores/settingsStore';
-import {APP_VERSION, APP_BUILD_CODE} from '../core/config';
+import {APP_VERSION, APP_BUILD_CODE, EMBEDDING_MODEL_VERSION} from '../core/config';
+import {InvoiceService} from './InvoiceService';
 import {logDiag} from '../core/diagnostics';
 import type {AppSettings} from '../stores/settingsStore';
 
@@ -51,6 +52,11 @@ interface BackupFile {
   backupVersion: number;
   createdAt: string;
   appVersion: string;
+  /** v10 (round-16 #4): the embedding-model generation the
+   *  fingerprints were built with — a mismatched generation is
+   *  SKIPPED on restore (vectors from another model live in a
+   *  different space and would poison matching). */
+  embeddingModelVersion?: number;
   categories: {id: number; name: string}[];
   units: {
     id: number;
@@ -292,6 +298,7 @@ export const BackupService = {
       })),
       images,
       settings: getSettings(),
+      embeddingModelVersion: EMBEDDING_MODEL_VERSION,
     };
 
     return {
@@ -526,22 +533,37 @@ export const BackupService = {
         productUnits += 1;
       }
 
-      // Vision fingerprints.
+      // Vision fingerprints. v10 (round-16 #4): fingerprints from a
+      // DIFFERENT embedding-model generation are skipped — their
+      // vectors live in another feature space and matching them
+      // against the current model would be garbage. Backups with NO
+      // generation marker (pre-v10) were built with the v1 model and
+      // are skipped for the same reason.
       let embeddings = 0;
-      for (const embedding of doc.embeddings ?? []) {
-        const newProductId = productMap.get(Number(embedding.product_id));
-        if (newProductId == null || !embedding.embedding_data) {
-          continue;
+      const fingerprintsCompatible =
+        doc.embeddingModelVersion === EMBEDDING_MODEL_VERSION;
+      if (fingerprintsCompatible) {
+        for (const embedding of doc.embeddings ?? []) {
+          const newProductId = productMap.get(Number(embedding.product_id));
+          if (newProductId == null || !embedding.embedding_data) {
+            continue;
+          }
+          await tx.execute(
+            'INSERT INTO product_embeddings (product_id, embedding_data, angle_label) VALUES (?, ?, ?)',
+            [
+              newProductId,
+              embedding.embedding_data,
+              embedding.angle_label || 'front',
+            ],
+          );
+          embeddings += 1;
         }
-        await tx.execute(
-          'INSERT INTO product_embeddings (product_id, embedding_data, angle_label) VALUES (?, ?, ?)',
-          [
-            newProductId,
-            embedding.embedding_data,
-            embedding.angle_label || 'front',
-          ],
+      } else {
+        logDiag(
+          'backup',
+          `تم تخطي ${doc.embeddings?.length ?? 0} بصمة — نموذج تعرّف مختلف (أعد تسجيل صور المنتجات)`,
+          'warn',
         );
-        embeddings += 1;
       }
 
       // Sales history.
@@ -635,6 +657,15 @@ export const BackupService = {
     // Settings land outside the DB transaction (MMKV).
     if (doc.settings != null) {
       useSettingsStore.getState().update(doc.settings);
+    }
+
+    // v10 (round-16 #1): the restored sales may carry HIGHER invoice
+    // numbers than this device's counter — reconcile immediately so
+    // the next sale continues after the last restored invoice.
+    try {
+      await InvoiceService.syncInvoiceCounterFromDb();
+    } catch {
+      // The DB-aware reservation recovers on the next sale anyway.
     }
 
     logDiag(

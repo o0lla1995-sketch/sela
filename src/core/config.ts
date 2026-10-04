@@ -3,17 +3,49 @@
  */
 import type {UnitKind} from './types';
 
-/** Required input resolution of the bundled MobileNetV3-Small embedder. */
+/** Required input resolution of the bundled EfficientNet-B0
+ *  embedder (v10 — round-16 #4). */
 export const MODEL_INPUT_SIZE = 224;
 
 /**
- * Pixel normalization used for BOTH enrollment and recognition, so any
- * fixed monotone transform stays consistent and matching accuracy is
- * unaffected. MediaPipe float32 models expect [-1, 1]:
- * value = (pixel - 127.5) / 127.5
+ * Pixel normalization for the v10 model. The Keras EfficientNet-B0
+ * feature extractor INCLUDES its own rescaling layer, so it expects
+ * RAW [0, 255] pixel values — the JS pipeline passes them through
+ * unchanged: value = (pixel - 0) / 1
  */
-export const NORM_MEAN = 127.5;
-export const NORM_STD = 127.5;
+export const NORM_MEAN = 0;
+export const NORM_STD = 1;
+
+/**
+ * v10 (round-16 #4): the embedding-model GENERATION. Every stored /
+ * backed-up fingerprint belongs to exactly one generation; when the
+ * bundled model changes (v1 = MobileNetV3-Small, v2 = EfficientNet-B0)
+ * old vectors live in a different feature space and are wiped once on
+ * first load (and skipped on restore).
+ */
+export const EMBEDDING_MODEL_VERSION = 2;
+
+/**
+ * v10 multi-product window set (round-16 #4): one photo is probed
+ * through a cascade — a full-frame FIT probe first (fast single-
+ * product path), then a center window + a 3×3 grid of local windows
+ * that find and read SEVERAL products in the same photo.
+ */
+export const VISION_WINDOW_CENTER = 0.85;
+export const VISION_WINDOW_GRID = 0.55;
+export const VISION_GRID_POSITIONS = [0.24, 0.5, 0.76] as const;
+/** Two windows of the SAME product count as separate units only
+ *  when they barely overlap (IoU below this) AND both are clearly
+ *  confident — guards against one big item spanning the frame. */
+export const VISION_UNIT_IOU = 0.25;
+/** Extra confidence required before a same-product duplicate unit
+ *  is counted (base threshold + this). */
+export const VISION_UNIT_EXTRA_MARGIN = 0.04;
+/** Max units of one product a single photo may add. */
+export const VISION_MAX_UNITS_PER_PRODUCT = 4;
+/** The FIT probe short-circuits (single fast add, no grid pass) only
+ *  this far ABOVE the merchant's match threshold. */
+export const VISION_FAST_PATH_EXTRA = 0.05;
 
 /**
  * Default cosine similarity threshold.
@@ -183,9 +215,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '9.2.0';
+export const APP_VERSION = '10.0.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 15;
+export const APP_BUILD_CODE = 16;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

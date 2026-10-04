@@ -250,3 +250,210 @@ export function deserializeEmbedding(json: string): Float32Array {
   }
   return vec;
 }
+
+// ═════════════════════════════════════════════════════════════════
+// v10 (round-16 #4) — multi-product window recognition
+// ═════════════════════════════════════════════════════════════════
+
+/** A square probe window in fractional frame coordinates. */
+export interface WindowSpec {
+  /** Window center, 0..1 of frame width/height. */
+  cx: number;
+  cy: number;
+  /** Window side as a fraction of the frame's short side. */
+  w: number;
+}
+
+/** One window's match outcome against the fingerprint index. */
+export interface WindowHit {
+  window: WindowSpec;
+  productId: number;
+  score: number;
+  runnerUpId: number | null;
+  runnerUpScore: number;
+}
+
+export interface SelectedDetection {
+  productId: number;
+  units: number;
+  score: number;
+}
+
+export interface WindowSelection {
+  detections: SelectedDetection[];
+  ambiguous: {productId: number; score: number}[];
+}
+
+/**
+ * v10: per-window best + runner-up across the whole fingerprint
+ * index. Every window votes for ONE product; the runner-up score is
+ * kept so lookalike protection (ambiguity margin) works per window.
+ */
+export function matchWindowProbes(
+  probes: {spec: WindowSpec; vector: Float32Array}[],
+  flat: Float32Array,
+  ids: number[],
+  dim: number,
+): WindowHit[] {
+  if (
+    flat == null ||
+    ids == null ||
+    ids.length === 0 ||
+    dim <= 0 ||
+    probes.length === 0
+  ) {
+    return [];
+  }
+  const hits: WindowHit[] = [];
+  for (const probe of probes) {
+    if (probe.vector.length !== dim) {
+      continue;
+    }
+    // Best = the strongest row of the winning PRODUCT; the runner-up
+    // is always a DIFFERENT product (a product's own mirror/angle
+    // rows must never trigger the lookalike guard).
+    let bestId = -1;
+    let bestScore = -2;
+    let runnerUpId: number | null = null;
+    let runnerUpScore = -2;
+    const rows = ids.length;
+    for (let r = 0; r < rows; r++) {
+      const id = ids[r];
+      if (id === bestId) {
+        // Another fingerprint of the current winner — only upgrades
+        // its own score, never becomes the runner-up.
+        let dot = 0;
+        const base = r * dim;
+        for (let d = 0; d < dim; d++) {
+          dot += probe.vector[d] * flat[base + d];
+        }
+        if (dot > bestScore) {
+          bestScore = dot;
+        }
+        continue;
+      }
+      let dot = 0;
+      const base = r * dim;
+      for (let d = 0; d < dim; d++) {
+        dot += probe.vector[d] * flat[base + d];
+      }
+      if (dot > bestScore) {
+        runnerUpId = bestId >= 0 ? bestId : runnerUpId;
+        runnerUpScore = bestScore > -2 ? bestScore : runnerUpScore;
+        bestScore = dot;
+        bestId = id;
+      } else if (dot > runnerUpScore) {
+        runnerUpScore = dot;
+        runnerUpId = id;
+      }
+    }
+    if (bestId >= 0) {
+      hits.push({
+        window: probe.spec,
+        productId: bestId,
+        score: Math.max(-1, Math.min(1, bestScore)),
+        runnerUpId: runnerUpId != null && runnerUpId >= 0 ? runnerUpId : null,
+        runnerUpScore:
+          runnerUpScore > -2 ? Math.max(-1, Math.min(1, runnerUpScore)) : 0,
+      });
+    }
+  }
+  return hits;
+}
+
+/** Intersection-over-union of two square windows (fraction space). */
+export function windowIoU(a: WindowSpec, b: WindowSpec): number {
+  const ax1 = a.cx - a.w / 2;
+  const ax2 = a.cx + a.w / 2;
+  const ay1 = a.cy - a.w / 2;
+  const ay2 = a.cy + a.w / 2;
+  const bx1 = b.cx - b.w / 2;
+  const bx2 = b.cx + b.w / 2;
+  const by1 = b.cy - b.w / 2;
+  const by2 = b.cy + b.w / 2;
+  const interW = Math.min(ax2, bx2) - Math.max(ax1, bx1);
+  const interH = Math.min(ay2, by2) - Math.max(ay1, by1);
+  if (interW <= 0 || interH <= 0) {
+    return 0;
+  }
+  const inter = interW * interH;
+  const union = a.w * a.w + b.w * b.w - inter;
+  return union <= 0 ? 0 : inter / union;
+}
+
+/**
+ * v10: greedy detection selection over the window hits.
+ * ─────────────────────────────────────────────────────────────────
+ *  • a window accepts its best product when the score clears the
+ *    merchant threshold AND the runner-up is far enough behind (the
+ *    same lookalike margin the single-probe engine used);
+ *  • a SECOND unit of an already-accepted product only counts when
+ *    the window barely overlaps the product's first window (IoU) and
+ *    scores even higher than the base threshold — two bottles of the
+ *    same soda side by side read as ×2, one big box spanning the
+ *    frame does not;
+ *  • near-miss hits (threshold-0.05..threshold) become the candidate
+ *    strip exactly like before.
+ */
+export function selectDetections(
+  hits: WindowHit[],
+  options: {
+    threshold: number;
+    margin: number;
+    unitIou: number;
+    unitExtra: number;
+    maxUnits: number;
+  },
+): WindowSelection {
+  const sorted = [...hits].sort((a, b) => b.score - a.score);
+  const accepted = new Map<
+    number,
+    {score: number; windows: WindowSpec[]; units: number}
+  >();
+  const ambiguous: {productId: number; score: number}[] = [];
+  const nearMiss = options.threshold - 0.05;
+
+  for (const hit of sorted) {
+    const existing = accepted.get(hit.productId);
+    if (existing != null) {
+      // Potential extra UNIT of the same product.
+      if (
+        existing.units < options.maxUnits &&
+        hit.score >= options.threshold + options.unitExtra &&
+        existing.windows.every(
+          spec => windowIoU(spec, hit.window) < options.unitIou,
+        )
+      ) {
+        existing.windows.push(hit.window);
+        existing.units += 1;
+      }
+      continue;
+    }
+    const looksLikeRunnerUp =
+      hit.runnerUpId != null &&
+      hit.score - hit.runnerUpScore < options.margin;
+    if (hit.score >= options.threshold && !looksLikeRunnerUp) {
+      accepted.set(hit.productId, {
+        score: hit.score,
+        windows: [hit.window],
+        units: 1,
+      });
+    } else if (hit.score >= nearMiss) {
+      if (
+        !ambiguous.some(entry => entry.productId === hit.productId)
+      ) {
+        ambiguous.push({productId: hit.productId, score: hit.score});
+      }
+    }
+  }
+
+  const detections: SelectedDetection[] = Array.from(accepted.entries())
+    .map(([productId, value]) => ({
+      productId,
+      units: value.units,
+      score: value.score,
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  return {detections, ambiguous};
+}

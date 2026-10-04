@@ -60,9 +60,17 @@ import {
   BASE_UNIT_NAME,
   QUICK_WEIGHTS,
   VISION_AMBIGUITY_MARGIN,
+  VISION_FAST_PATH_EXTRA,
+  VISION_MAX_UNITS_PER_PRODUCT,
+  VISION_UNIT_EXTRA_MARGIN,
+  VISION_UNIT_IOU,
   WEIGHT_UNIT_NAME,
   type ScannerMode,
 } from '../core/config';
+import {
+  matchWindowProbes,
+  selectDetections,
+} from '../services/vision/embedding';
 import {
   fonts,
   makeStyles,
@@ -112,12 +120,15 @@ function addedMessage(
 }
 
 /** v9.2 (round-15 #2): the outcome of one barcode read — 'unknown'
- *  is fully SILENT (no banner, no counter, no prompt). */
+ *  is fully SILENT (no banner, no counter, no prompt).
+ *  v10 (round-16 #3): 'error' carries the REASON (نفدت الكمية …)
+ *  so the LIVE scanner window can show it — a plain RN toast is
+ *  invisible under the native window. */
 type BarcodeOutcome =
   | {status: 'added'; name: string; product: Product; unitPrice: number}
   | {status: 'queued'; name: string}
   | {status: 'unknown'}
-  | {status: 'error'; name?: string};
+  | {status: 'error'; name?: string; reason?: string};
 
 export function PosScreen() {
   const c = useThemeColors();
@@ -338,119 +349,250 @@ export function PosScreen() {
   }, []);
 
   /**
-   * v9.2 (round-15 #4): ONE photo-recognition pipeline shared by the
-   * visual and combined sessions. v9.1 quality engine (round-14
-   * #2a): each photo runs a FOUR-CROP ENSEMBLE (classic center +
-   * 0.78 zoom + 0.56 zoom + whole-frame fit) scored per DISTINCT
-   * product across ALL its registered fingerprints (3 angles ×
-   * mirrors). The best product auto-adds only when it ALSO beats the
-   * runner-up by VISION_AMBIGUITY_MARGIN — two lookalikes scoring
-   * 0.84 vs 0.83 is a coin flip the merchant settles with one tap,
-   * not a silent wrong add.
-   * v9.2 (round-15 #4): every outcome is confirmed LIVE inside the
-   * camera window with an actionable message — what was added (name
-   * + ×N + price), what to do with a weight product, and HOW to fix
-   * a miss (get closer / fill the frame / retake).
+   * v10 (round-16 #3 + #4): the CASCADE photo-recognition pipeline
+   * shared by the visual and combined sessions.
+   * ─────────────────────────────────────────────────────────────────
+   * STEP 1 — fast path: ONE whole-frame probe against the new
+   * EfficientNet-B0 model. A single product roughly filling the
+   * frame (the everyday case) resolves after ONE inference — faster
+   * than the old four-crop ensemble while running a far stronger
+   * model (lookalike products separate cleanly).
+   *
+   * STEP 2 — multi-product: a center window + a 3×3 grid of local
+   * windows each read ONE item; greedy selection with per-window
+   * lookalike margins, same-product unit counting (two bottles of
+   * the same soda side by side = ×2) and near-miss candidates for
+   * the strip. EVERY product found is added to the cart in one shot.
+   *
+   * STOCK (round-16 #3): exhausted products never silently queue or
+   * add — a clear نفدت الكمية banner names the product inside the
+   * scan window, for piece AND weight products alike.
    */
   const processVisionPhoto = useCallback(
     async (photoPath: string, session: ScanSession) => {
       try {
         await VisionRecognitionService.loadModel();
-        const probes = await VisionRecognitionService.embedPhotoEnsemble(
-          photoPath,
-        );
-        const live = useCatalogStore.getState().embeddingsIndex;
-        if (live == null || live.ids.length === 0) {
+        const index = useCatalogStore.getState().embeddingsIndex;
+        if (index == null || index.ids.length === 0) {
           await notifyScanResult(
             false,
             'لا توجد بصمات بصرية بعد — سجّل صور المنتجات من شاشة المنتج',
           );
           return;
         }
-        const top = VisionRecognitionService.matchMulti(probes, live, 4);
-        const allProducts = useCatalogStore.getState().products;
-        const matches = top
-          .map(match => ({
-            product: allProducts.find(entry => entry.id === match.productId),
-            score: match.score,
-          }))
-          .filter(
-            (match): match is {product: Product; score: number} =>
-              match.product != null,
-          );
-        if (matches.length === 0) {
-          await notifyScanResult(
-            false,
-            'لم يتم التعرف — اقترب أكثر واملأ الإطار بالمنتج ثم أعد التصوير',
-          );
-          return;
-        }
         const threshold = useSettingsStore.getState().settings.matchThreshold;
-        const best = matches[0];
-        const runnerUp = matches[1];
-        const ambiguousPick =
-          runnerUp != null &&
-          best.score - runnerUp.score < VISION_AMBIGUITY_MARGIN;
-        if (best.score >= threshold && !ambiguousPick) {
-          // Confident + unambiguous → straight into the cart.
-          if (isWeightProduct(best.product)) {
-            session.confirmed++;
-            session.counts.set(
-              best.product.id,
-              (session.counts.get(best.product.id) ?? 0) + 1,
+        const allProducts = useCatalogStore.getState().products;
+
+        /** Base units of a product already reserved by the cart. */
+        const inCartBase = (productId: number): number =>
+          useCartStore
+            .getState()
+            .lines.filter(line => line.productId === productId)
+            .reduce(
+              (sum, line) => sum + line.quantity * line.conversion,
+              0,
             );
-            beep();
-            await notifyScanResult(
-              true,
-              `منتج وزن — أدخل وزنه عند الإغلاق: ${best.product.name}`,
+
+        /**
+         * Adds one CONFIRMED detection (or queues its weight pad),
+         * respecting stock. Returns the confirmation message part or
+         * the failure part for the summary banner.
+         */
+        const deliver = (
+          product: Product,
+          units: number,
+        ): {part: string; ok: boolean; added: number} => {
+          const mode = useCartStore.getState().pricingMode;
+          if (isWeightProduct(product)) {
+            const remaining = product.stock_quantity - inCartBase(product.id);
+            if (remaining <= 0) {
+              return {
+                part: `نفدت كمية ${product.name}`,
+                ok: false,
+                added: 0,
+              };
+            }
+            session.confirmed += 1;
+            session.counts.set(
+              product.id,
+              (session.counts.get(product.id) ?? 0) + 1,
             );
             if (
-              !session.weightQueue.some(entry => entry.id === best.product.id)
+              !session.weightQueue.some(entry => entry.id === product.id)
             ) {
-              session.weightQueue.push(best.product);
+              session.weightQueue.push(product);
+            }
+            return {
+              part: `${product.name} — وزنه عند الإغلاق`,
+              ok: true,
+              added: 1,
+            };
+          }
+          let added = 0;
+          let blockedReason: string | null = null;
+          for (let i = 0; i < units; i += 1) {
+            const result = addProduct(product, mode, null);
+            if (result.added) {
+              added += 1;
+            } else {
+              blockedReason = result.reason ?? `نفدت كمية ${product.name}`;
+              break;
+            }
+          }
+          if (added > 0) {
+            session.confirmed += added;
+            session.counts.set(
+              product.id,
+              (session.counts.get(product.id) ?? 0) + added,
+            );
+          }
+          const price =
+            mode === 'WHOLESALE'
+              ? product.wholesale_price
+              : product.retail_price;
+          const part =
+            added > 0
+              ? `${product.name}${added > 1 ? ` ×${added}` : ''}${
+                  price > 0 && added > 0
+                    ? ` · ${formatMoney(price * added)}`
+                    : ''
+                }${added < units ? ` — ${blockedReason}` : ''}`
+              : (blockedReason ?? `نفدت كمية ${product.name}`);
+          return {part, ok: added > 0, added};
+        };
+
+        // ── STEP 1: whole-frame fit probe (the fast single path). ──
+        const fitVector = await VisionRecognitionService.embedFitProbe(
+          photoPath,
+        );
+        const fitHits = matchWindowProbes(
+          [{spec: {cx: 0.5, cy: 0.5, w: 1}, vector: fitVector}],
+          index.flat,
+          index.ids,
+          index.dim,
+        );
+        const fit = fitHits[0] ?? null;
+        const fitAmbiguous =
+          fit != null &&
+          fit.runnerUpId != null &&
+          fit.score - fit.runnerUpScore < VISION_AMBIGUITY_MARGIN;
+        if (
+          fit != null &&
+          fit.score >= threshold + VISION_FAST_PATH_EXTRA &&
+          !fitAmbiguous
+        ) {
+          const product = allProducts.find(p => p.id === fit.productId);
+          if (product != null) {
+            const outcome = deliver(product, 1);
+            if (outcome.ok) {
+              beep();
+              await notifyScanResult(true, `أُضيف: ${outcome.part}`);
+            } else {
+              await notifyScanResult(false, outcome.part);
             }
             return;
           }
-          const mode = useCartStore.getState().pricingMode;
-          const result = addProduct(best.product, mode, null);
-          if (result.added) {
-            session.confirmed++;
-            session.counts.set(
-              best.product.id,
-              (session.counts.get(best.product.id) ?? 0) + 1,
-            );
-            beep();
-            await notifyScanResult(
-              true,
-              addedMessage(
-                session,
-                best.product,
-                mode === 'WHOLESALE'
-                  ? best.product.wholesale_price
-                  : best.product.retail_price,
-              ),
-            );
-          } else if (result.reason) {
-            await notifyScanResult(false, result.reason);
-          }
-        } else {
-          // Low score or a lookalike tie → candidates for later.
-          await notifyScanResult(
-            ambiguousPick,
-            ambiguousPick
-              ? 'منتجان متشابهان — سيظهران عند الإغلاق لتختار الصحيح'
-              : 'التعرف غير مؤكد — اقترب وتصوّر مرة أخرى، أو اختر المرشحين عند الإغلاق',
-          );
-          for (const match of matches.slice(0, 3)) {
-            if (
-              !session.ambiguous.some(
-                entry => entry.product.id === match.product.id,
-              )
-            ) {
-              session.ambiguous.push(match);
+        }
+
+        // ── STEP 2: the multi-product window pass. ──
+        const probes = await VisionRecognitionService.embedWindowProbes(
+          photoPath,
+        );
+        const hits = matchWindowProbes(
+          probes,
+          index.flat,
+          index.ids,
+          index.dim,
+        );
+        const selection = selectDetections(hits, {
+          threshold,
+          margin: VISION_AMBIGUITY_MARGIN,
+          unitIou: VISION_UNIT_IOU,
+          unitExtra: VISION_UNIT_EXTRA_MARGIN,
+          maxUnits: VISION_MAX_UNITS_PER_PRODUCT,
+        });
+
+        // Fallback: the windows missed but the whole frame was a
+        // clean single match → classic single add.
+        if (
+          selection.detections.length === 0 &&
+          fit != null &&
+          fit.score >= threshold &&
+          !fitAmbiguous
+        ) {
+          const product = allProducts.find(p => p.id === fit.productId);
+          if (product != null) {
+            const outcome = deliver(product, 1);
+            if (outcome.ok) {
+              beep();
+              await notifyScanResult(true, `أُضيف: ${outcome.part}`);
+            } else {
+              await notifyScanResult(false, outcome.part);
             }
+            return;
           }
         }
+
+        if (selection.detections.length === 0) {
+          // Nothing confident — keep the near-miss candidates for
+          // the strip that appears when the window closes.
+          await notifyScanResult(
+            fitAmbiguous,
+            fitAmbiguous
+              ? 'منتجان متشابهان — سيظهران عند الإغلاق لتختار الصحيح'
+              : 'لم يتم التعرف — اقترب أكثر واملأ الإطار بالمنتج ثم أعد التصوير',
+          );
+          for (const candidate of selection.ambiguous.slice(0, 3)) {
+            const product = allProducts.find(
+              p => p.id === candidate.productId,
+            );
+            if (
+              product != null &&
+              !session.ambiguous.some(
+                entry => entry.product.id === product.id,
+              )
+            ) {
+              session.ambiguous.push({product, score: candidate.score});
+            }
+          }
+          if (fit != null && fit.score < threshold - 0.05) {
+            const product = allProducts.find(p => p.id === fit.productId);
+            if (
+              product != null &&
+              !session.ambiguous.some(
+                entry => entry.product.id === product.id,
+              )
+            ) {
+              session.ambiguous.push({product, score: fit.score});
+            }
+          }
+          return;
+        }
+
+        // ── Deliver EVERY detected product in one summary banner. ──
+        const okParts: string[] = [];
+        const failParts: string[] = [];
+        for (const detection of selection.detections) {
+          const product = allProducts.find(p => p.id === detection.productId);
+          if (product == null) {
+            continue;
+          }
+          const outcome = deliver(product, detection.units);
+          if (outcome.ok) {
+            okParts.push(outcome.part);
+          } else {
+            failParts.push(outcome.part);
+          }
+        }
+        if (okParts.length > 0) {
+          beep();
+        }
+        const summary =
+          (okParts.length > 1
+            ? `أُضيف ${okParts.length} منتجات: ${okParts.join(' + ')}`
+            : `أُضيف: ${okParts.join('')}`) +
+          (failParts.length > 0 ? ` · ${failParts.join(' · ')}` : '');
+        await notifyScanResult(okParts.length > 0, summary || 'لم يتم التعرف');
       } catch (error) {
         await notifyScanResult(
           false,
@@ -459,8 +601,10 @@ export function PosScreen() {
             : 'فشل تحليل الصورة — أعد التصوير',
         );
       } finally {
-        // The full-res scan file has served its purpose — free the
-        // space (thumbnails/fingerprints are already stored).
+        // The window pass cached a decode of this photo — free it,
+        // then delete the scan file itself (thumbnails/fingerprints
+        // are already stored).
+        void VisionRecognitionService.releaseDecodeCache();
         if (PlatformUtilsNative != null) {
           void PlatformUtilsNative.deleteFile(photoPath).catch(() => {});
         }
@@ -621,6 +765,22 @@ export function PosScreen() {
         const product = await ProductRepo.findByBarcode(code);
         if (product != null) {
           if (isWeightProduct(product)) {
+            // v10 (round-16 #3): an exhausted WEIGHT product must not
+            // queue its pad silently — say نفدت الكمية in the window.
+            const inCart = useCartStore
+              .getState()
+              .lines.filter(line => line.productId === product.id)
+              .reduce(
+                (sum, line) => sum + line.quantity * line.conversion,
+                0,
+              );
+            if (product.stock_quantity - inCart <= 0) {
+              return {
+                status: 'error',
+                name: product.name,
+                reason: `نفدت الكمية — ${product.name}`,
+              };
+            }
             setPendingWeight(prev =>
               prev.some(entry => entry.id === product.id)
                 ? prev
@@ -643,10 +803,14 @@ export function PosScreen() {
                   : product.retail_price,
             };
           }
-          if (result.reason) {
-            toast(result.reason, 'error');
-          }
-          return {status: 'error', name: product.name};
+          // v10 (round-16 #3): the reason (نفدت الكمية …) travels to
+          // the in-window banner — the RN toast is hidden behind the
+          // native scanner window.
+          return {
+            status: 'error',
+            name: product.name,
+            reason: result.reason,
+          };
         }
         // 2. Unit-level barcode (a whole كرتونة).
         const unitHit = await UnitRepo.findByBarcode(code);
@@ -668,23 +832,26 @@ export function PosScreen() {
                 ),
               };
             }
-            if (result.reason) {
-              toast(result.reason, 'error');
-            }
-            return {status: 'error', name: unitProduct.name};
+            return {
+              status: 'error',
+              name: unitProduct.name,
+              reason: result.reason,
+            };
           }
         }
         // 3. Unknown → SILENT (round-15 #2): no message, no counter.
         return {status: 'unknown'};
       } catch (error) {
-        toast(
-          error instanceof Error ? error.message : 'فشل البحث عن الباركود',
-          'error',
-        );
-        return {status: 'error'};
+        return {
+          status: 'error',
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'فشل البحث عن الباركود',
+        };
       }
     },
-    [addProduct, beep, toast],
+    [addProduct, beep],
   );
 
   /**
@@ -745,6 +912,10 @@ export function PosScreen() {
               true,
               `منتج وزن — أدخل وزنه عند الإغلاق: ${outcome.name}`,
             );
+          } else if (outcome.status === 'error' && outcome.reason != null) {
+            // v10 (round-16 #3): stock-out / lookup failures show IN
+            // the scanner window (the RN toast is behind it).
+            await notifyScanResult(false, outcome.reason);
           }
           // v9.2 (round-15 #2): 'unknown' stays SILENT — the read is
           // simply not confirmed. No banner, no counter, no prompts.
@@ -849,6 +1020,10 @@ export function PosScreen() {
               true,
               `منتج وزن — أدخل وزنه عند الإغلاق: ${outcome.name}`,
             );
+          } else if (outcome.status === 'error' && outcome.reason != null) {
+            // v10 (round-16 #3): stock-out / lookup failures show IN
+            // the scanner window (the RN toast is behind it).
+            await notifyScanResult(false, outcome.reason);
           }
           // Unknown → SILENT (round-15 #2).
         }

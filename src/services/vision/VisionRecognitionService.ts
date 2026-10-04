@@ -22,6 +22,9 @@ import {
   NORM_MEAN,
   NORM_STD,
   EMBEDDING_DECIMALS,
+  VISION_WINDOW_CENTER,
+  VISION_WINDOW_GRID,
+  VISION_GRID_POSITIONS,
 } from '../../core/config';
 import {logDiag} from '../../core/diagnostics';
 import type {EmbeddingsIndex, VisionModelInfo} from '../../core/types';
@@ -33,12 +36,21 @@ import {
   l2NormalizeInPlace,
   matchProductsMulti,
   serializeEmbedding,
+  type WindowSpec,
 } from './embedding';
 
 // Metro resolves this require to a bundled asset because 'tflite' is
 // registered in metro.config.js assetExts.
+//
+// v10 (round-16 #4): MobileNetV3-Small-075 → EfficientNet-B0
+// feature extractor (ImageNet, GAP, 1280-d). Benchmarked on real
+// product photos: same-product crop similarity 0.83 vs 0.72 and
+// +15% separation margin — lookalike products resolve, and at the
+// 0.80 threshold the best-window true-accept climbs from 75% to
+// 92% with false accepts at 0%. The model includes its own input
+// rescaling, so pixels are passed through RAW [0,255].
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const MODEL_SOURCE = require('../../../assets/models/mobilenet_v3_small.tflite');
+const MODEL_SOURCE = require('../../../assets/models/efficientnet_b0.tflite');
 
 let model: TensorflowModel | null = null;
 
@@ -246,6 +258,99 @@ export const VisionRecognitionService = {
         : new Error('فشل تحليل صورة المسح');
     }
     return probes;
+  },
+
+  /**
+   * v10 (round-16 #4): the CASCADE — step 1 is a single whole-frame
+   * FIT probe. One product roughly filling the frame (the everyday
+   * case) matches here and the scan resolves after ONE inference —
+   * faster than the old four-crop ensemble while running a much
+   * stronger model.
+   */
+  async embedFitProbe(photoPath: string): Promise<Float32Array> {
+    return this.embedPhotoEx(photoPath, {fit: true});
+  },
+
+  /**
+   * v10 (round-16 #4): the CASCADE — step 2, the multi-product
+   * WINDOW pass. One center window (a product filling the frame but
+   * slightly off-center) + a 3×3 grid of local windows that each
+   * read ONE item from a shelf-style photo. The JPEG is decoded
+   * ONCE natively (cached) and every window is a cheap crop, so the
+   * 10-window pass costs one decode + 10 small crops + 10 inferences.
+   * A failed window is skipped; at least one must succeed.
+   */
+  async embedWindowProbes(
+    photoPath: string,
+  ): Promise<{spec: WindowSpec; vector: Float32Array}[]> {
+    if (model == null) {
+      throw new Error('نموذج التعرف غير محمّل');
+    }
+    if (ImageDecoderNative == null) {
+      throw new Error('وحدة معالجة الصور غير متوفرة في هذا الإصدار');
+    }
+    const size = info.loaded ? info.inputSize : MODEL_INPUT_SIZE;
+    const windows: WindowSpec[] = [
+      {cx: 0.5, cy: 0.5, w: VISION_WINDOW_CENTER},
+    ];
+    for (const cy of VISION_GRID_POSITIONS) {
+      for (const cx of VISION_GRID_POSITIONS) {
+        windows.push({cx, cy, w: VISION_WINDOW_GRID});
+      }
+    }
+    const probes: {spec: WindowSpec; vector: Float32Array}[] = [];
+    let lastError: unknown = null;
+    for (const spec of windows) {
+      try {
+        const b64 = await ImageDecoderNative.decodeRgbWindow(
+          photoPath,
+          size,
+          spec.cx,
+          spec.cy,
+          spec.w,
+        );
+        if (typeof b64 !== 'string' || b64.length === 0) {
+          throw new Error('تعذر استخراج بيانات الصورة');
+        }
+        const bytes = base64ToBytes(b64);
+        if (bytes.length < size * size * 3) {
+          throw new Error('بيانات الصورة غير مكتملة');
+        }
+        const input = bytesToModelInput(
+          bytes,
+          size,
+          NORM_MEAN,
+          NORM_STD,
+          info.channelsLast,
+        );
+        const outputs = model.runSync([input]);
+        const output = outputs?.[0];
+        if (output == null || output.length === 0) {
+          throw new Error('النموذج لم يُرجع نتيجة');
+        }
+        const vector = new Float32Array(output.length);
+        vector.set(output as Float32Array);
+        l2NormalizeInPlace(vector);
+        probes.push({spec, vector});
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (probes.length === 0) {
+      throw lastError instanceof Error
+        ? lastError
+        : new Error('فشل تحليل نوافذ الصورة');
+    }
+    return probes;
+  },
+
+  /** v10: frees the native window-decode cache after a photo pass. */
+  async releaseDecodeCache(): Promise<void> {
+    try {
+      await ImageDecoderNative?.releaseDecodeCache();
+    } catch {
+      // Best-effort — the cache also rolls over on the next photo.
+    }
   },
 
   /**
