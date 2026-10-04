@@ -19,6 +19,7 @@ function rowToProduct(row: Record<string, unknown>): Product {
       row.low_stock_threshold == null ? null : Number(row.low_stock_threshold),
     barcode:
       row.barcode == null || row.barcode === '' ? null : String(row.barcode),
+    sold_by_weight: Number(row.sold_by_weight ?? 0) === 1 ? 1 : 0,
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -33,6 +34,8 @@ export interface ProductInput {
   image_uri: string | null;
   low_stock_threshold?: number | null;
   barcode?: string | null;
+  /** v8.3: 1 = sold by weight (kilo base). */
+  sold_by_weight?: number;
 }
 
 export const ProductRepo = {
@@ -93,8 +96,8 @@ export const ProductRepo = {
     }
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
@@ -105,6 +108,7 @@ export const ProductRepo = {
         input.image_uri,
         input.low_stock_threshold ?? null,
         input.barcode?.trim() ? input.barcode.trim() : null,
+        input.sold_by_weight === 1 ? 1 : 0,
         localNow(),
       ],
     );
@@ -128,7 +132,7 @@ export const ProductRepo = {
       `UPDATE products SET
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
         stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?,
-        barcode = ?
+        barcode = ?, sold_by_weight = ?
        WHERE id = ?`,
       [
         name,
@@ -140,6 +144,7 @@ export const ProductRepo = {
         input.image_uri,
         input.low_stock_threshold ?? null,
         input.barcode?.trim() ? input.barcode.trim() : null,
+        input.sold_by_weight === 1 ? 1 : 0,
         id,
       ],
     );
@@ -179,6 +184,15 @@ export const ProductRepo = {
     await getDb().execute(
       'UPDATE products SET stock_quantity = ? WHERE id = ?',
       [quantity, id],
+    );
+  },
+
+  /** v8.3: nulls a product's image (its file is gone — restore /
+   *  reinstall left a dead path; the fallback icon must come back). */
+  async clearImage(id: number): Promise<void> {
+    await getDb().execute(
+      'UPDATE products SET image_uri = NULL WHERE id = ?',
+      [id],
     );
   },
 

@@ -38,7 +38,7 @@ import {ExportService} from '../../services/ExportService';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useNotificationsStore} from '../../stores/notificationsStore';
 import {useToastStore} from '../../stores/toastStore';
-import {parseNumber, formatDateTime} from '../../core/format';
+import {parseNumber, formatDateTime, formatQty} from '../../core/format';
 import {
   fonts,
   makeStyles,
@@ -652,7 +652,7 @@ function CountRow({
   const tone =
     variance == null
       ? 'neutral'
-      : variance === 0
+      : Math.abs(variance) < 0.0005
       ? 'success'
       : variance > 0
       ? 'info'
@@ -660,11 +660,9 @@ function CountRow({
   const toneLabel =
     variance == null
       ? 'لم يُعد'
-      : variance === 0
+      : Math.abs(variance) < 0.0005
       ? 'مطابق'
-      : variance > 0
-      ? `+${variance}`
-      : `${variance}`;
+      : `${variance > 0 ? '+' : ''}${formatQty(variance)}`;
 
   return (
     <View style={styles.row}>
@@ -673,7 +671,10 @@ function CountRow({
           {item.productName}
         </Text>
         <View style={styles.rowMetaRow}>
-          <Text style={styles.rowMeta}>النظام: {item.system_qty}</Text>
+          <Text style={styles.rowMeta}>
+            النظام: {formatQty(item.system_qty)}
+            {item.soldByWeight === 1 ? ' كغ' : ''}
+          </Text>
           {item.unitHint ? (
             <Text style={styles.rowHint} numberOfLines={1}>
               ({item.unitHint})
@@ -690,14 +691,18 @@ function CountRow({
           <Icon name="check" size={16} color={c.success} />
           <Text style={styles.matchText}>مطابق</Text>
         </TouchableOpacity>
+        {/* v8.3 (round-12 #4): weight products count in fractional
+            kilograms — decimal-pad shows the point key. */}
         <TextInput
           ref={inputRef}
           style={styles.countInput}
           value={text}
           onChangeText={setText}
           onEndEditing={() => onSetCounted(item, text)}
-          keyboardType="numeric"
-          placeholder="0"
+          keyboardType={
+            item.soldByWeight === 1 ? 'decimal-pad' : 'numeric'
+          }
+          placeholder={item.soldByWeight === 1 ? '0.0' : '0'}
           placeholderTextColor={c.textFaint}
           returnKeyType={returnKeyType ?? 'next'}
           onSubmitEditing={() => {
@@ -734,8 +739,9 @@ function ReportTable({items}: {items: StocktakeItem[]}) {
           عددّ {countedRows.length} من أصل {items.length} منتج
         </Text>
         <Text style={styles.reportSummaryMeta}>
-          إجمالي النظام: {totalSystem} · إجمالي العدّ: {totalCounted} · فرق:{' '}
-          {totalCounted - totalSystem}
+          إجمالي النظام: {formatQty(totalSystem)} · إجمالي العدّ:{' '}
+          {formatQty(totalCounted)} · فرق:{' '}
+          {formatQty(totalCounted - totalSystem)}
         </Text>
       </View>
 

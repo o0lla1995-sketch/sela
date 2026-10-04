@@ -69,6 +69,11 @@ const DDL_STATEMENTS: string[] = [
     image_uri TEXT,
     low_stock_threshold INTEGER,
     barcode TEXT,
+    -- v8.3 (round-12 #4): 1 = sold BY WEIGHT — prices are per kilo,
+    -- stock is fractional kilograms and the POS opens a weight pad
+    -- instead of counting pieces (the professional grocery pattern:
+    -- Loyverse / Square scale-weighed products).
+    sold_by_weight INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(category_id) REFERENCES categories(id)
   )`,
@@ -126,6 +131,9 @@ const DEFAULT_CATEGORIES: string[] = [
  * Forward-only schema migrations, versioned in MMKV.
  * v2 (Sela 2.0): products.low_stock_threshold for per-product alerts.
  * v3 (sela 3.0): units system + product barcodes + stocktake tables.
+ * v4 (sela 8.3): products.sold_by_weight (weight-sold products —
+ *                prices per kilo, fractional kg stock) + the وقية
+ *                (250 g) regional unit joins the seed catalog.
  */
 async function applyMigrations(database: DB): Promise<void> {
   const storedVersion = getNumber(KEYS.schemaVersion, 0);
@@ -227,6 +235,40 @@ async function applyMigrations(database: DB): Promise<void> {
     );
     logDiag('db', 'ترحيل v3: الوحدات والباركود والجرد');
     version = 3;
+  }
+
+  if (version < 4) {
+    // v8.3 (round-12 #4): the weight-sold flag.
+    const cols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'sold_by_weight'",
+    );
+    const hasWeight =
+      (cols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasWeight) {
+      await database.execute(
+        'ALTER TABLE products ADD COLUMN sold_by_weight INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    // The regional 250 g unit (وقية) joins every existing install so
+    // weight products can price a quarter-kilo out of the box.
+    const wakfCount = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM units WHERE name = 'وقية'",
+    );
+    const wakfRow =
+      (wakfCount.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (wakfRow === 0) {
+      const maxOrder = await database.execute(
+        'SELECT MAX(sort_order) AS mx FROM units',
+      );
+      const mx =
+        (maxOrder.rows?._array?.[0] as {mx?: number | null})?.mx ?? 0;
+      await database.execute(
+        'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
+        ['وقية', 'وقية', Number(mx) + 1],
+      );
+    }
+    logDiag('db', 'ترحيل v4: منتجات الوزن + وحدة الوقية');
+    version = 4;
   }
 
   if (version !== storedVersion) {

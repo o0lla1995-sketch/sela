@@ -380,6 +380,72 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     }
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // v8.3 (round-12 #3): base64 file payload for the BACKUP pipeline.
+  // Product images live as JPEG files in filesDir/thumbs — the v1
+  // backup exported only their PATHS, so a restore on a new device
+  // (or after a reinstall) brought back products with dead image
+  // references ("products lost their pictures"). The backup now
+  // embeds every image as base64 and the restore writes fresh files.
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Reads an app-internal file and resolves its content as base64.
+   * Guarded: only files inside this app's own filesDir can be read
+   * (the paths come from the products table — never trust them as
+   * arbitrary read tickets).
+   */
+  @ReactMethod
+  fun readFileBase64(path: String, promise: Promise) {
+    try {
+      val file = File(path)
+      val root = reactContext.filesDir.canonicalFile
+      val canonical = file.canonicalFile
+      if (!canonical.path.startsWith(root.path)) {
+        promise.reject("OUT_OF_SCOPE", "الملف خارج مساحة التطبيق")
+        return
+      }
+      if (!file.exists() || file.length() == 0L) {
+        promise.reject("NOT_FOUND", "الملف غير موجود: $path")
+        return
+      }
+      FileInputStream(file).use { input ->
+        val bytes = input.readBytes()
+        promise.resolve(android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+      }
+    } catch (t: Throwable) {
+      promise.reject("READ_FAILED", "تعذّر قراءة الملف: ${t.message}")
+    }
+  }
+
+  /**
+   * Writes base64 content into filesDir/<subDir>/<name> and resolves
+   * the NEW absolute path (the caller stores it in the restored
+   * product's image_uri). Name is sanitized; subDir fixed to the
+   * known image folders so a restored backup can never write into an
+   * arbitrary location.
+   */
+  @ReactMethod
+  fun writeFileBase64(subDir: String, name: String, base64: String, promise: Promise) {
+    try {
+      val allowed = setOf("thumbs", "scans", "restore")
+      val folder = if (allowed.contains(subDir)) subDir else "restore"
+      val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .take(80)
+        .ifEmpty { "file_${System.currentTimeMillis()}" }
+      val dir = File(reactContext.filesDir, folder).apply { mkdirs() }
+      val target = File(dir, "r_${System.currentTimeMillis()}_$safeName")
+      val bytes = android.util.Base64.decode(base64, android.util.Base64.NO_WRAP)
+      FileOutputStream(target).use { output ->
+        output.write(bytes)
+        output.flush()
+      }
+      promise.resolve(target.absolutePath)
+    } catch (t: Throwable) {
+      promise.reject("WRITE_FAILED", "تعذّر حفظ الملف: ${t.message}")
+    }
+  }
+
   override fun invalidate() {
     super.invalidate()
     // Nothing to clean up — no threads or receivers held.

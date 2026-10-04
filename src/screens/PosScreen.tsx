@@ -16,6 +16,7 @@ import {
   Dimensions,
   Image,
   Keyboard,
+  KeyboardAvoidingView,
   LayoutAnimation,
   Modal,
   ScrollView,
@@ -50,6 +51,7 @@ import {findTopMatches} from '../services/vision/embedding';
 import {
   cameraPermissionMessage,
   ensureCameraPermission,
+  openAppSettings,
   scanBarcodeContinuous,
   scanVisualContinuous,
 } from '../services/vision/scanFlow';
@@ -57,6 +59,8 @@ import {requirePlatformUtils, SelaScannerNative} from '../native/nativeBridge';
 import {
   BASE_UNIT_NAME,
   DEFAULT_RECOGNITION_COOLDOWN_MS,
+  QUICK_WEIGHTS,
+  WEIGHT_UNIT_NAME,
   type ScannerMode,
 } from '../core/config';
 import {
@@ -67,8 +71,8 @@ import {
   typography,
   useThemeColors,
 } from '../core/theme';
-import {formatMoney, parseNumber} from '../core/format';
-import {stockStateOf} from '../core/types';
+import {formatMoney, formatQty, parseNumber} from '../core/format';
+import {baseUnitLabelOf, isWeightProduct, stockStateOf} from '../core/types';
 import type {CartLine, Product, ProductUnit} from '../core/types';
 
 const GRID_COLUMNS = 3;
@@ -88,6 +92,7 @@ export function PosScreen() {
   const pricingMode = useCartStore(state => state.pricingMode);
   const discount = useCartStore(state => state.discount);
   const addProduct = useCartStore(state => state.addProduct);
+  const addWeighted = useCartStore(state => state.addWeighted);
   const setLineUnit = useCartStore(state => state.setLineUnit);
   const increment = useCartStore(state => state.increment);
   const decrement = useCartStore(state => state.decrement);
@@ -120,6 +125,17 @@ export function PosScreen() {
   const [unitPickerRows, setUnitPickerRows] = useState<ProductUnit[] | null>(
     null,
   );
+  // v8.3 (round-12 #4): the WEIGHT pad — a weight-sold product can
+  // never be added as "one piece": tapping it (or scanning it) opens
+  // this sheet so the merchant types/weighs the kg amount.
+  const [weightProduct, setWeightProduct] = useState<Product | null>(null);
+  const [weightUnitRows, setWeightUnitRows] = useState<ProductUnit[] | null>(
+    null,
+  );
+  /** Weight products recognized DURING a scan session — they wait
+   *  here and their weight pads open one by one when the scanner
+   *  closes (the Loyverse scale-item pattern). */
+  const [pendingWeight, setPendingWeight] = useState<Product[]>([]);
 
   const scannerMode: ScannerMode = settings.scannerMode;
   const barcodeActive = scannerMode === 'barcode' || scannerMode === 'both';
@@ -152,8 +168,25 @@ export function PosScreen() {
     }
   }, [settings.soundEnabled]);
 
+  /** v8.3: opens the weight pad for a product (loads its sellable
+   *  sub-units — وقية و غيرها — for the quick-add rows). */
+  const openWeightPad = useCallback((product: Product) => {
+    setWeightProduct(product);
+    setWeightUnitRows(null);
+    UnitRepo.listForProduct(product.id)
+      .then(rows => setWeightUnitRows(rows))
+      .catch(() => setWeightUnitRows([]));
+  }, []);
+
   const tryAdd = useCallback(
     (product: Product, unit?: ProductUnit | null) => {
+      // v8.3 (round-12 #4): weight-sold products NEVER add as whole
+      // pieces — the weight pad opens instead (type kg or tap وقية /
+      // نصف كغ quick chips; price = kg × kilo price).
+      if (isWeightProduct(product)) {
+        openWeightPad(product);
+        return;
+      }
       const result = addProduct(product, pricingMode, unit ?? null);
       if (result.added) {
         beep();
@@ -161,7 +194,37 @@ export function PosScreen() {
         toast(result.reason, 'error');
       }
     },
-    [addProduct, pricingMode, beep, toast],
+    [addProduct, pricingMode, beep, toast, openWeightPad],
+  );
+
+  // v8.3: queued weight pads — one scanner session can recognize
+  // several weight products; each gets its pad in turn when the
+  // native window closes.
+  useEffect(() => {
+    if (weightProduct == null && pendingWeight.length > 0) {
+      const [next, ...rest] = pendingWeight;
+      setPendingWeight(rest);
+      openWeightPad(next);
+    }
+  }, [weightProduct, pendingWeight, openWeightPad]);
+
+  /** v8.3: confirm the weight pad → fractional kg line in the cart. */
+  const confirmWeight = useCallback(
+    (product: Product, kg: number, unit: ProductUnit | null) => {
+      const result = addWeighted(
+        product,
+        useCartStore.getState().pricingMode,
+        kg,
+        unit,
+      );
+      if (result.added) {
+        beep();
+        setWeightProduct(null);
+      } else if (result.reason) {
+        toast(result.reason, 'error');
+      }
+    },
+    [addWeighted, beep, toast],
   );
 
   /** v8.2 CONTINUOUS visual session: the native engine AUTO-captures
@@ -180,7 +243,22 @@ export function PosScreen() {
     }
     const permission = await ensureCameraPermission();
     if (permission !== 'granted') {
-      toast(cameraPermissionMessage(permission), 'error');
+      // v8.3 (round-12 #1): a one-tap escape into the system
+      // settings when the permission is permanently denied — the
+      // system no longer shows the ask dialog in that state.
+      Alert.alert(
+        'إذن الكاميرا مطلوب',
+        cameraPermissionMessage(permission),
+        [
+          {text: 'إغلاق', style: 'cancel'},
+          {
+            text: 'فتح الإعدادات',
+            onPress: () => {
+              void openAppSettings();
+            },
+          },
+        ],
+      );
       return;
     }
     const index = useCatalogStore.getState().embeddingsIndex;
@@ -251,6 +329,25 @@ export function PosScreen() {
               );
               return;
             }
+            // v8.3 (round-12 #4): weight products can't auto-add a
+            // whole kilo — queue the weight pad; it opens the moment
+            // the scanner window closes.
+            if (isWeightProduct(product)) {
+              setPendingWeight(prev =>
+                prev.some(entry => entry.id === product.id)
+                  ? prev
+                  : [...prev, product],
+              );
+              added++;
+              lastAddAt.set(product.id, now);
+              beep();
+              SelaScannerNative?.reportVisualResult(
+                'added',
+                `${product.name} — حدّد الوزن بعد الإغلاق`,
+                best.score,
+              );
+              return;
+            }
             const result = addProduct(
               product,
               useCartStore.getState().pricingMode,
@@ -287,9 +384,9 @@ export function PosScreen() {
       setScanBusy(false);
       if (added > 0) {
         toast(
-          `انتهت الجلسة — أُضيف ${added} ${
+          `انتهت الجلسة — ${added} ${
             added === 1 ? 'منتج' : 'منتجات'
-          } إلى السلة`,
+          } جاهزة في السلة`,
           'success',
         );
       }
@@ -315,6 +412,22 @@ export function PosScreen() {
         // 1. Base product barcode.
         const product = await ProductRepo.findByBarcode(code);
         if (product != null) {
+          // v8.3 (round-12 #4): weight products open the weight pad
+          // (during a continuous session they queue for it instead —
+          // no invented whole-kilo adds).
+          if (isWeightProduct(product)) {
+            if (interactive) {
+              openWeightPad(product);
+            } else {
+              setPendingWeight(prev =>
+                prev.some(entry => entry.id === product.id)
+                  ? prev
+                  : [...prev, product],
+              );
+            }
+            beep();
+            return;
+          }
           const result = addProduct(
             product,
             useCartStore.getState().pricingMode,
@@ -373,7 +486,7 @@ export function PosScreen() {
         );
       }
     },
-    [addProduct, beep, toast, navigation],
+    [addProduct, beep, toast, navigation, openWeightPad],
   );
 
   /**
@@ -670,6 +783,7 @@ export function PosScreen() {
                     product,
                     settings.lowStockDefaultThreshold,
                   );
+                  const weighted = isWeightProduct(product);
                   return (
                     <TouchableOpacity
                       key={product.id}
@@ -687,11 +801,21 @@ export function PosScreen() {
                           <Icon name="box" size={20} color={c.accent} />
                         </View>
                       )}
+                      {weighted ? (
+                        <View style={styles.weightBadge}>
+                          <Icon
+                            name="scale"
+                            size={9}
+                            color={c.onAccent}
+                          />
+                        </View>
+                      ) : null}
                       <Text style={styles.tileName} numberOfLines={1}>
                         {product.name}
                       </Text>
                       <Text style={styles.tilePrice}>
                         {formatMoney(priceOf(product))}
+                        {weighted ? '/كغ' : ''}
                       </Text>
                       <View style={styles.tileStockRow}>
                         <View
@@ -710,7 +834,10 @@ export function PosScreen() {
                         <Text style={styles.tileStock}>
                           {stockState === 'out'
                             ? 'نفد'
-                            : `${product.stock_quantity} ${BASE_UNIT_NAME}`}
+                            : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(
+                                product,
+                                BASE_UNIT_NAME,
+                              )}`}
                         </Text>
                         {product.barcode ? (
                           <Icon name="barcode" size={11} color={c.textFaint} />
@@ -795,7 +922,8 @@ export function PosScreen() {
                             rows tall max and nothing overflows. */}
                         <View style={styles.cartLineMetaRow}>
                           <Text style={styles.cartLineMeta} numberOfLines={1}>
-                            {formatMoney(line.unitPrice)} × {line.quantity} ={' '}
+                            {formatMoney(line.unitPrice)} ×{' '}
+                            {formatQty(line.quantity)} ={' '}
                             {formatMoney(line.unitPrice * line.quantity)}
                           </Text>
                           <TouchableOpacity
@@ -805,8 +933,8 @@ export function PosScreen() {
                             <Icon name="scale" size={10} color={c.accent} />
                             <Text style={styles.unitChipText} numberOfLines={1}>
                               {line.unitName}
-                              {line.conversion > 1
-                                ? ` (${line.conversion})`
+                              {line.conversion !== 1
+                                ? ` (${formatQty(line.conversion)})`
                                 : ''}
                             </Text>
                             <Icon
@@ -891,8 +1019,14 @@ export function PosScreen() {
               <View style={styles.totalsRow}>
                 <View>
                   <Text style={styles.totalLabel}>
-                    الإجمالي · {totals.itemsCount} وحدة ({totals.baseItemsCount}{' '}
-                    {BASE_UNIT_NAME})
+                    الإجمالي · {formatQty(totals.itemsCount, 2)} وحدة (
+                    {formatQty(totals.baseItemsCount, 2)}{' '}
+                    {lines.some(line => line.byWeight)
+                      ? lines.some(line => !line.byWeight)
+                        ? 'وحدة أساس'
+                        : WEIGHT_UNIT_NAME
+                      : BASE_UNIT_NAME}
+                    )
                   </Text>
                   {totals.safeDiscount > 0 ? (
                     <Text style={styles.discountValue}>
@@ -1058,7 +1192,190 @@ export function PosScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* ── v8.3 (round-12 #4): WEIGHT pad — how weight products are
+          sold. Prices are per kilo; the merchant types the weight
+          (decimal) or taps a quick chip (وقية 250غ / نصف كغ / كيلو…)
+          and the live total = kg × kilo price. Sub-units from the
+          product's unit rows (وقية = 0.25 كغ…) add by their unit. */}
+      <WeightSheet
+        product={weightProduct}
+        unitRows={weightUnitRows}
+        pricingMode={pricingMode}
+        onClose={() => {
+          setWeightProduct(null);
+          setWeightUnitRows(null);
+        }}
+        onConfirm={confirmWeight}
+      />
     </View>
+  );
+}
+
+/**
+ * v8.3: the weight pad itself — a bottom sheet with a big decimal
+ * input, the regional quick-weight chips, the product's sellable
+ * sub-units (وقية…) and a live price preview.
+ */
+function WeightSheet({
+  product,
+  unitRows,
+  pricingMode,
+  onClose,
+  onConfirm,
+}: {
+  product: Product | null;
+  unitRows: ProductUnit[] | null;
+  pricingMode: 'RETAIL' | 'WHOLESALE';
+  onClose: () => void;
+  onConfirm: (
+    product: Product,
+    kg: number,
+    unit: ProductUnit | null,
+  ) => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  const [weightText, setWeightText] = useState('');
+
+  useEffect(() => {
+    setWeightText('');
+  }, [product?.id]);
+
+  if (product == null) {
+    return null;
+  }
+  const kiloPrice =
+    pricingMode === 'WHOLESALE'
+      ? product.wholesale_price
+      : product.retail_price;
+  const weight = parseNumber(weightText);
+  const validWeight =
+    !Number.isNaN(weight) && weight > 0 ? Math.round(weight * 1000) / 1000 : 0;
+  const total = validWeight > 0 ? validWeight * kiloPrice : 0;
+
+  const confirm = () => {
+    if (validWeight <= 0) {
+      return;
+    }
+    onConfirm(product, validWeight, null);
+    setWeightText('');
+  };
+
+  return (
+    <Modal
+      visible
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}>
+      <View style={styles.unitModalOverlay}>
+        <TouchableOpacity style={{flex: 1}} activeOpacity={1} onPress={onClose} />
+        <KeyboardAvoidingView behavior="padding" style={{width: '100%'}}>
+          <View style={styles.unitModalSheet}>
+            <View style={styles.unitModalHandle} />
+            <View style={styles.weightHeaderRow}>
+              <View style={{flex: 1}}>
+                <Text style={styles.unitModalTitle} numberOfLines={1}>
+                  {product.name}
+                </Text>
+                <Text style={styles.weightKiloPrice}>
+                  سعر الكيلو ({pricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}):{' '}
+                  {formatMoney(kiloPrice)}
+                </Text>
+              </View>
+              <View style={styles.weightStockChip}>
+                <Text style={styles.weightStockText}>
+                  {formatQty(product.stock_quantity)} {WEIGHT_UNIT_NAME} متوفر
+                </Text>
+              </View>
+            </View>
+
+            {/* The weight input — big, decimal, auto-focused. */}
+            <View style={styles.weightInputRow}>
+              <TextInput
+                style={styles.weightInput}
+                value={weightText}
+                onChangeText={setWeightText}
+                keyboardType="decimal-pad"
+                placeholder="0.000"
+                placeholderTextColor={c.textFaint}
+                autoFocus
+                selectTextOnFocus
+              />
+              <Text style={styles.weightInputUnit}>{WEIGHT_UNIT_NAME}</Text>
+            </View>
+            {total > 0 ? (
+              <Text style={styles.weightLiveTotal}>
+                {formatQty(validWeight)} {WEIGHT_UNIT_NAME} ×{' '}
+                {formatMoney(kiloPrice)} = {formatMoney(total)}
+              </Text>
+            ) : null}
+
+            {/* Regional quick weights — وقية / نصف كغ / كيلو… */}
+            <Text style={styles.weightQuickLabel}>أوزان سريعة:</Text>
+            <View style={styles.weightQuickRow}>
+              {QUICK_WEIGHTS.map(entry => (
+                <TouchableOpacity
+                  key={entry.kg}
+                  style={styles.weightQuickChip}
+                  onPress={() => {
+                    onConfirm(product, entry.kg, null);
+                    setWeightText('');
+                  }}
+                  activeOpacity={0.75}>
+                  <Text style={styles.weightQuickValue}>
+                    {formatQty(entry.kg)}
+                  </Text>
+                  <Text style={styles.weightQuickName}>{entry.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* The product's own sellable sub-units (وقية = 0.25 كغ). */}
+            {unitRows != null && unitRows.length > 0 ? (
+              <>
+                <Text style={styles.weightQuickLabel}>وحدات المنتج:</Text>
+                {unitRows.map(row => {
+                  const price = unitPriceFor(product, row, pricingMode);
+                  return (
+                    <TouchableOpacity
+                      key={row.id}
+                      style={styles.weightUnitRow}
+                      onPress={() => {
+                        onConfirm(product, 1, row);
+                        setWeightText('');
+                      }}
+                      activeOpacity={0.75}>
+                      <Text style={styles.weightUnitName}>{row.unitName}</Text>
+                      <Text style={styles.weightUnitMeta}>
+                        {formatQty(row.conversion)} {WEIGHT_UNIT_NAME} ·{' '}
+                        {formatMoney(price)}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </>
+            ) : null}
+
+            <View style={styles.weightActionRow}>
+              <AppButton
+                title="إلغاء"
+                variant="secondary"
+                onPress={onClose}
+                style={{flex: 1}}
+              />
+              <AppButton
+                title={`أضف للسلة${total > 0 ? ` · ${formatMoney(total)}` : ''}`}
+                icon="check"
+                onPress={confirm}
+                disabled={validWeight <= 0}
+                style={{flex: 1.6}}
+              />
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </View>
+    </Modal>
   );
 }
 
@@ -1540,6 +1857,134 @@ const useStyles = makeStyles(c =>
       textAlign: 'center',
       lineHeight: 18,
       marginTop: spacing.sm,
+    },
+
+    // ── v8.3 (round-12 #4): weight pad ──────────────────────────
+    weightBadge: {
+      position: 'absolute',
+      top: spacing.xs + 2,
+      left: spacing.xs + 2,
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    weightHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    weightKiloPrice: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+      textAlign: 'center',
+    },
+    weightStockChip: {
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 4,
+    },
+    weightStockText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 0.5,
+      fontVariant: ['tabular-nums'],
+    },
+    weightInputRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1.5,
+      borderColor: c.accent,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs + 2,
+    },
+    weightInput: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: 30,
+      textAlign: 'center',
+      paddingVertical: spacing.sm,
+      fontVariant: ['tabular-nums'],
+    },
+    weightInputUnit: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    weightLiveTotal: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+      textAlign: 'center',
+      fontVariant: ['tabular-nums'],
+    },
+    weightQuickLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+      marginTop: spacing.xs,
+    },
+    weightQuickRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+    },
+    weightQuickChip: {
+      alignItems: 'center',
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs + 2,
+      minWidth: 76,
+    },
+    weightQuickValue: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.caption,
+      fontVariant: ['tabular-nums'],
+    },
+    weightQuickName: {
+      color: c.textFaint,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+      marginTop: 1,
+    },
+    weightUnitRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.sm + 2,
+    },
+    weightUnitName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    weightUnitMeta: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    weightActionRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      marginTop: spacing.xs,
     },
     unitOption: {
       flexDirection: 'row',

@@ -74,6 +74,15 @@ interface PlatformUtilsNative {
   fileExists(path: string): Promise<boolean>;
   copyFile(sourcePath: string, destinationPath: string): Promise<string>;
   deleteFile(path: string): Promise<boolean>;
+  /** v8.3: app-internal file → base64 (backup image embedding).
+   *  Rejects when the path is outside filesDir or the file is gone. */
+  readFileBase64(path: string): Promise<string>;
+  /** v8.3: base64 → fresh file inside filesDir/<subDir> → new path. */
+  writeFileBase64(
+    subDir: string,
+    name: string,
+    base64: string,
+  ): Promise<string>;
 }
 
 /**

@@ -17,7 +17,14 @@
  * (SAF), reads the same format and restores in ONE SQLite
  * transaction — either the whole backup lands or nothing changes.
  *
- * Format: { "app": "sela", "backupVersion": 1, ... }
+ * Format: { "app": "sela", "backupVersion": 2, ... }
+ *
+ * v8.3 (round-12 #3): the backup now EMBEDS the product images as
+ * base64 ("images") — v1 carried only file PATHS, so a restore on a
+ * new device or after a reinstall brought products back with dead
+ * image references and no picture. Restore writes fresh image files
+ * and repoints every product's image_uri at them. Also carries
+ * sold_by_weight (weight-sold products).
  */
 import {getDb, toMessage} from '../database/connection';
 import {requirePlatformUtils} from '../native/nativeBridge';
@@ -26,7 +33,7 @@ import {APP_VERSION, APP_BUILD_CODE} from '../core/config';
 import {logDiag} from '../core/diagnostics';
 import type {AppSettings} from '../stores/settingsStore';
 
-const BACKUP_VERSION = 1;
+const BACKUP_VERSION = 2;
 const JSON_MIME = 'application/json';
 
 export interface BackupSummary {
@@ -57,6 +64,7 @@ interface BackupFile {
     image_uri: string | null;
     low_stock_threshold: number | null;
     barcode: string | null;
+    sold_by_weight?: number;
     created_at: string;
   }[];
   product_units: {
@@ -103,6 +111,9 @@ interface BackupFile {
     system_qty: number;
     counted_qty: number | null;
   }[];
+  /** v8.3: embedded product image files (base64 JPEG) — keyed by
+   *  `name`, referenced by the products' original image paths. */
+  images?: {name: string; data: string}[];
   settings: Partial<AppSettings>;
 }
 
@@ -135,7 +146,7 @@ export const BackupService = {
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order FROM units'),
       db.execute(
-        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, created_at FROM products',
+        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, created_at FROM products',
       ),
       db.execute(
         'SELECT product_id, unit_id, conversion, barcode, retail_price, wholesale_price FROM product_units',
@@ -156,6 +167,38 @@ export const BackupService = {
         'SELECT stocktake_id, product_id, system_qty, counted_qty FROM stocktake_items',
       ),
     ]);
+
+    // v8.3 (round-12 #3): embed every product image as base64 so a
+    // restore on ANY device brings the pictures back. Files are read
+    // through the guarded native helper; a missing/dead file is
+    // silently skipped (its path is simply not in the map, and the
+    // restore then clears that product's image).
+    const images: {name: string; data: string}[] = [];
+    try {
+      const platform = requirePlatformUtils();
+      const seen = new Set<string>();
+      for (const row of rowsOf(products)) {
+        const uri = row.image_uri == null ? null : String(row.image_uri);
+        if (uri == null || uri.length === 0 || seen.has(uri)) {
+          continue;
+        }
+        seen.add(uri);
+        try {
+          const base64 = await platform.readFileBase64(uri);
+          if (base64.length > 0) {
+            const name = `img_${images.length}_${uri
+              .split('/')
+              .pop()
+              ?.replace(/[^A-Za-z0-9._-]/g, '_')}`;
+            images.push({name, data: base64});
+          }
+        } catch {
+          // Dead path — nothing to embed.
+        }
+      }
+    } catch {
+      // Native helper unavailable (old bridge?) — export paths only.
+    }
 
     const doc: BackupFile = {
       app: 'sela',
@@ -187,6 +230,7 @@ export const BackupService = {
             ? null
             : Number(row.low_stock_threshold),
         barcode: row.barcode == null ? null : String(row.barcode),
+        sold_by_weight: Number(row.sold_by_weight ?? 0) === 1 ? 1 : 0,
         created_at: String(row.created_at ?? ''),
       })),
       product_units: rowsOf(productUnits).map(row => ({
@@ -238,6 +282,7 @@ export const BackupService = {
         counted_qty:
           row.counted_qty == null ? null : Number(row.counted_qty),
       })),
+      images,
       settings: getSettings(),
     };
 
@@ -306,6 +351,54 @@ export const BackupService = {
   async restoreBackup(doc: BackupFile): Promise<BackupSummary> {
     const db = getDb();
 
+    // v8.3 (round-12 #3): write every EMBEDDED image into fresh files
+    // BEFORE the transaction, then map old path → new path so the
+    // restored products point at files that actually exist on THIS
+    // device. v1 backups (no images block) keep the original paths —
+    // same-device restores still work, and the dead-path cleanup pass
+    // (catalogStore) clears the rest.
+    const imageNewPath = new Map<string, string>();
+    if (Array.isArray(doc.images) && doc.images.length > 0) {
+      const nameToNewPath = new Map<string, string>();
+      try {
+        const platform = requirePlatformUtils();
+        for (const image of doc.images) {
+          if (!image?.name || !image?.data) {
+            continue;
+          }
+          const newPath = await platform.writeFileBase64(
+            'thumbs',
+            image.name.endsWith('.jpg') ? image.name : `${image.name}.jpg`,
+            image.data,
+          );
+          nameToNewPath.set(image.name, newPath);
+        }
+      } catch {
+        // Native writer unavailable — fall back to original paths.
+      }
+      for (const product of doc.products ?? []) {
+        const uri = product.image_uri;
+        if (uri == null || uri.length === 0) {
+          continue;
+        }
+        // The export stored images keyed by name; find the embedded
+        // copy that belonged to this product by matching the original
+        // file name inside the embedded name.
+        const originalName = uri.split('/').pop() ?? '';
+        const match = doc.images.find(
+          entry =>
+            entry?.name != null &&
+            entry.name.includes(originalName.replace(/[^A-Za-z0-9._-]/g, '_')),
+        );
+        if (match != null) {
+          const newPath = nameToNewPath.get(match.name);
+          if (newPath != null) {
+            imageNewPath.set(uri, newPath);
+          }
+        }
+      }
+    }
+
     // op-sqlite transactions resolve with void — counts are captured
     // through this mutable summary object instead.
     const summary: BackupSummary = {
@@ -367,10 +460,14 @@ export const BackupService = {
         if (!product.name) {
           continue;
         }
+        const restoredImage =
+          product.image_uri != null
+            ? imageNewPath.get(product.image_uri) ?? product.image_uri
+            : null;
         const inserted = await tx.execute(
           `INSERT INTO products
-            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             product.name,
             Number(product.cost_price ?? 0),
@@ -380,9 +477,10 @@ export const BackupService = {
             product.category_id != null
               ? categoryMap.get(Number(product.category_id)) ?? null
               : null,
-            product.image_uri ?? null,
+            restoredImage,
             product.low_stock_threshold ?? null,
             product.barcode ?? null,
+            product.sold_by_weight === 1 ? 1 : 0,
             product.created_at || nowLocal(),
           ],
         );

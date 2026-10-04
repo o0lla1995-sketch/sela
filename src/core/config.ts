@@ -53,6 +53,28 @@ export const BARCODE_DEDUPE_MS = 1600;
 /** Default base unit name used when a product has no unit rows. */
 export const BASE_UNIT_NAME = 'قطعة';
 
+/** v8.3 (round-12 #4): base unit for WEIGHT-sold products — the kilo.
+ *  Prices are per kilo, stock is tracked in fractional kilograms. */
+export const WEIGHT_UNIT_NAME = 'كغ';
+
+/** v8.3: quick weights in the POS weight pad (kg) with Arabic labels —
+ *  the regional counter staples: وقية (250 g) and نصف كيلو (500 g)
+ *  get one tap, no typing. */
+export const QUICK_WEIGHTS: {kg: number; label: string}[] = [
+  {kg: 0.25, label: 'وقية'},
+  {kg: 0.5, label: 'نصف كغ'},
+  {kg: 0.75, label: '٣ أرباع'},
+  {kg: 1, label: 'كيلو'},
+  {kg: 1.5, label: 'كغ ونص'},
+  {kg: 2, label: '٢ كغ'},
+];
+
+/** v8.3: rounding precision for weight quantities (3 decimals = 1 g). */
+export const WEIGHT_QTY_DECIMALS = 3;
+
+/** v8.3: floating-point slack when comparing fractional stock (1 g). */
+export const QTY_EPSILON = 0.001;
+
 /** Units seeded on first run (name, short name). */
 export const DEFAULT_UNITS: {name: string; short: string}[] = [
   {name: 'قطعة', short: 'ق'},
@@ -61,6 +83,7 @@ export const DEFAULT_UNITS: {name: string; short: string}[] = [
   {name: 'كيس', short: 'كيس'},
   {name: 'كيلوغرام', short: 'كغ'},
   {name: 'غرام', short: 'غ'},
+  {name: 'وقية', short: 'وقية'},
   {name: 'لتر', short: 'ل'},
   {name: 'دزينة', short: 'دز'},
   {name: 'زجاجة', short: 'زج'},
@@ -98,7 +121,7 @@ export const CURRENCY = '₪';
 export const DB_NAME = 'sela.db';
 
 /** Schema version — bump + add a migration branch when changing DDL. */
-export const DB_SCHEMA_VERSION = 3;
+export const DB_SCHEMA_VERSION = 4;
 
 /** App display name (Latin, per merchant request) used everywhere. */
 export const APP_NAME = 'sela';
@@ -109,9 +132,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '8.2.0';
+export const APP_VERSION = '8.3.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 11;
+export const APP_BUILD_CODE = 12;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

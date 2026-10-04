@@ -96,6 +96,28 @@ import kotlin.math.roundToInt
  *     flash (round-11 #2: the merchant waves product after product
  *     and each one jumps into the cart by itself).
  *
+ *  v8.3 (round-12 #1 — the crash shield):
+ *   The merchant's device hard-crashed ("sela closed because this
+ *   app has a bug") the moment a scan was opened. A plain
+ *   `catch (Exception)` cannot stop `Error` subtypes
+ *   (NoSuchMethodError / NoClassDefFoundError / ClassCastException
+ *   inside OEM camera stacks) and an exception escaping ANY of this
+ *   window's callbacks means PROCESS DEATH. v8.3 therefore:
+ *     • builds the UI and calls setContentView BEFORE anything else
+ *       (a permission dialog over a view-less Activity window is a
+ *       documented OEM crash class — that window state is now
+ *       impossible),
+ *     • catches Throwable (not just Exception) across EVERY entry
+ *       point — onCreate, camera bind + its retry ladder, the ML Kit
+ *       frame callbacks (an exception inside a Play Services task
+ *       listener kills the app), insets listeners, the banner, the
+ *       torch — and converts every failure into a READABLE Arabic
+ *       error returned to JS (with the exception class name), never
+ *       a crash,
+ *     • reports liveness to the module (liveInstances) so a stale
+ *       pendingPromise from a killed session can never jam the
+ *       scanner with "الماسح مفتوح بالفعل".
+ *
  *  JS contract (SelaScannerModule):
  *   • opens with  intent extra "mode" = "barcode" | "photo",
  *     optional extra "continuous" = true (both engines).
@@ -128,6 +150,16 @@ class ScannerActivity : Activity() {
          *  window itself can celebrate / hint in real time.
          *  kind: "added" | "dup" | "miss". */
         @JvmStatic var visualFeedback: ((kind: String, name: String, score: Double) -> Unit)? = null
+
+        /** v8.3: how many scanner windows are ALIVE right now. The
+         *  module uses this to detect a stale pendingPromise left by
+         *  a session the system killed (process death on permission
+         *  grant) — without this check the scanner jams forever
+         *  with E_BUSY until an app restart. */
+        @JvmStatic val liveInstances = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /** True when at least one scanner window is alive. */
+        @JvmStatic fun isLive(): Boolean = liveInstances.get() > 0
 
         /** v8.2: auto-capture cadence for the continuous visual
          *  session — shot → settle → next. ~2s + capture latency
@@ -164,10 +196,12 @@ class ScannerActivity : Activity() {
         private val registry = LifecycleRegistry(this)
         override val lifecycle: Lifecycle get() = registry
         fun resume() {
-            registry.currentState = Lifecycle.State.RESUMED
+            // v8.3: shielded — a ROM-specific LifecycleRegistry complaint
+            // must never kill the window.
+            runCatching { registry.currentState = Lifecycle.State.RESUMED }
         }
         fun pause() {
-            registry.currentState = Lifecycle.State.CREATED
+            runCatching { registry.currentState = Lifecycle.State.CREATED }
         }
         fun destroy() {
             runCatching { registry.currentState = Lifecycle.State.DESTROYED }
@@ -227,13 +261,41 @@ class ScannerActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        liveInstances.incrementAndGet()
+
+        // v8.3 CRASH SHIELD (round-12 #1):
+        //  1. The UI is built and attached BEFORE anything else can
+        //     happen — the window is NEVER view-less, not even while
+        //     the permission dialog shows on top of it (a permission
+        //     dialog over an empty Activity window is a documented
+        //     OEM crash class — that state is now impossible).
+        //  2. Everything is wrapped in catch-Throwable: an OEM camera
+        //     stack throwing an Error (not an Exception) used to kill
+        //     the whole app; now every failure becomes a readable
+        //     error handed back to JS with the exception class name.
+        try {
+            buildUi()
+            setContentView(root)
+        } catch (error: Throwable) {
+            finishWithError(
+                "فشل تهيئة نافذة الماسح: " +
+                    error.javaClass.simpleName +
+                    (error.message?.let { " — $it" } ?: "")
+            )
+            return
+        }
 
         // v8.2 (round-11 #1): ASK for the camera the first time — the
         // app used to die instantly with "فعّله من إعدادات النظام"
         // because nothing ever requested the permission at runtime.
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
+        // v8.3: the request now happens over a REAL content view, and
+        // JS (scanFlow.ensureCameraPermission) almost always grants
+        // it before this window even starts — this is the safety net.
+        val hasPermission = runCatching {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(false)
+        if (!hasPermission) {
             ActivityCompat.requestPermissions(
                 this, arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA
             )
@@ -244,9 +306,21 @@ class ScannerActivity : Activity() {
 
     /** Everything that happens once the camera permission is in hand. */
     private fun onReady() {
-        buildUi()
-        setContentView(root)
-        bindCamera()
+        if (isFinishing || isDestroyed) {
+            return
+        }
+        try {
+            bindCamera()
+        } catch (error: Throwable) {
+            // v8.3: bindCamera itself only schedules work, but a ROM
+            // could still throw synchronously — never crash for it.
+            finishWithError(
+                "تعذر بدء الكاميرا: " +
+                    error.javaClass.simpleName +
+                    (error.message?.let { " — $it" } ?: "")
+            )
+            return
+        }
         if (isContinuous && !isBarcodeMode) {
             // JS streams recognition outcomes back — show them live.
             ScannerActivity.visualFeedback = { kind, name, score ->
@@ -313,24 +387,32 @@ class ScannerActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        cameraHost.resume()
-        // v8.2: resume the visual auto-capture loop after the window
-        // comes back to the front (e.g. after the permission dialog).
-        if (isContinuous && !isBarcodeMode && cameraProvider != null) {
-            scheduleNextAutoCapture(800)
+        // v8.3: shielded — a lifecycle hiccup must never kill the app.
+        runCatching {
+            cameraHost.resume()
+            // v8.2: resume the visual auto-capture loop after the
+            // window comes back to the front (e.g. after the
+            // permission dialog).
+            if (isContinuous && !isBarcodeMode && cameraProvider != null) {
+                scheduleNextAutoCapture(800)
+            }
         }
     }
 
     override fun onStop() {
         super.onStop()
-        cameraHost.pause()
-        // The camera is unbound while stopped — pause the auto loop.
-        mainHandler.removeCallbacks(autoShotRunnable)
+        // v8.3: shielded.
+        runCatching {
+            cameraHost.pause()
+            // The camera is unbound while stopped — pause the auto loop.
+            mainHandler.removeCallbacks(autoShotRunnable)
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        mainHandler.removeCallbacks(autoShotRunnable)
+        liveInstances.decrementAndGet()
+        runCatching { mainHandler.removeCallbacks(autoShotRunnable) }
         if (settled.compareAndSet(false, true)) {
             // Guarantee the JS promise never hangs if the system kills us.
             finishWithError("أُغلق الماسح قبل إكمال العملية")
@@ -348,7 +430,7 @@ class ScannerActivity : Activity() {
                 runCatching { sessionPhotoB?.delete() }
             }
         }
-        cameraHost.destroy()
+        runCatching { cameraHost.destroy() }
         runCatching { scannerClient.close() }
         runCatching { analysisExecutor.shutdown() }
     }
@@ -407,10 +489,13 @@ class ScannerActivity : Activity() {
             )
         }
         // Pad below the status bar on edge-to-edge Android 15+.
+        // v8.3: shielded — insets quirks on OEM ROMs must never crash.
         topBar.setOnApplyWindowInsetsListener { v, insets ->
-            val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
-                .getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(v.paddingLeft, bars.top + dp(8), v.paddingRight, v.paddingBottom)
+            runCatching {
+                val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
+                    .getInsets(WindowInsetsCompat.Type.systemBars())
+                v.setPadding(v.paddingLeft, bars.top + dp(8), v.paddingRight, v.paddingBottom)
+            }
             insets
         }
 
@@ -516,11 +601,14 @@ class ScannerActivity : Activity() {
                 )
             }.also { banner ->
                 banner.setOnApplyWindowInsetsListener { v, insets ->
-                    val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
-                        .getInsets(WindowInsetsCompat.Type.systemBars())
-                    (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
-                        bars.bottom + dp(168)
-                    v.requestLayout()
+                    // v8.3: shielded.
+                    runCatching {
+                        val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
+                            .getInsets(WindowInsetsCompat.Type.systemBars())
+                        (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
+                            bars.bottom + dp(168)
+                        v.requestLayout()
+                    }
                     insets
                 }
             }
@@ -569,11 +657,14 @@ class ScannerActivity : Activity() {
             )
         }.also { hint ->
             hint.setOnApplyWindowInsetsListener { v, insets ->
-                val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
-                    .getInsets(WindowInsetsCompat.Type.systemBars())
-                (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
-                    bars.bottom + dp(86)
-                v.requestLayout()
+                // v8.3: shielded.
+                runCatching {
+                    val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
+                        .getInsets(WindowInsetsCompat.Type.systemBars())
+                    (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
+                        bars.bottom + dp(86)
+                    v.requestLayout()
+                }
                 insets
             }
         }
@@ -582,27 +673,31 @@ class ScannerActivity : Activity() {
 
     private fun animateScanLine(line: View) {
         line.post {
-            val parent = line.parent as? View ?: return@post
-            val span = parent.height * 0.62f
-            val from = (parent.height / 2f - span / 2f).toInt()
-            val to = (parent.height / 2f + span / 2f).toInt()
-            line.animate()
-                .translationY(from.toFloat())
-                .setDuration(0)
-                .withEndAction {
-                    line.animate()
-                        .translationY(to.toFloat())
-                        .setDuration(1400)
-                        .withEndAction {
-                            line.animate()
-                                .translationY(from.toFloat())
-                                .setDuration(1400)
-                                .withEndAction { if (!isFinishing) animateScanLine(line) }
-                                .start()
-                        }
-                        .start()
-                }
-                .start()
+            runCatching {
+                val parent = line.parent as? View ?: return@post
+                val span = parent.height * 0.62f
+                val from = (parent.height / 2f - span / 2f).toInt()
+                val to = (parent.height / 2f + span / 2f).toInt()
+                line.animate()
+                    .translationY(from.toFloat())
+                    .setDuration(0)
+                    .withEndAction {
+                        line.animate()
+                            .translationY(to.toFloat())
+                            .setDuration(1400)
+                            .withEndAction {
+                                line.animate()
+                                    .translationY(from.toFloat())
+                                    .setDuration(1400)
+                                    .withEndAction {
+                                        if (!isFinishing) animateScanLine(line)
+                                    }
+                                    .start()
+                            }
+                            .start()
+                    }
+                    .start()
+            }
         }
     }
 
@@ -611,13 +706,21 @@ class ScannerActivity : Activity() {
     // ═══════════════════════════════════════════════════════════
 
     private fun bindCamera() {
-        val future = ProcessCameraProvider.getInstance(this)
+        val future = runCatching { ProcessCameraProvider.getInstance(this) }
+            .getOrNull()
+        if (future == null) {
+            finishWithError("تعذر تهيئة مزود الكاميرا على هذا الجهاز")
+            return
+        }
         future.addListener(
             {
+                // v8.3: catch Throwable — an OEM camera stack can throw
+                // Error subtypes that `catch (Exception)` let through,
+                // killing the whole app (round-12 #1).
                 try {
                     cameraProvider = future.get()
                     startCamera()
-                } catch (error: Exception) {
+                } catch (error: Throwable) {
                     finishWithError(
                         "تعذر تهيئة الكاميرا: ${error.javaClass.simpleName}" +
                             (error.message?.let { " — $it" } ?: "")
@@ -656,7 +759,9 @@ class ScannerActivity : Activity() {
             if (isContinuous && !isBarcodeMode) {
                 scheduleNextAutoCapture(1400)
             }
-        } catch (firstError: Exception) {
+        } catch (firstError: Throwable) {
+            // v8.3: catch Throwable (was Exception) — OEM camera stacks
+            // can throw Error subtypes; those killed the whole app.
             // Bind ladder: retry once after 600ms, then surface the
             // real error class (never a silent black screen again).
             android.os.Handler(mainLooper).postDelayed(
@@ -681,7 +786,7 @@ class ScannerActivity : Activity() {
                         if (isContinuous && !isBarcodeMode) {
                             scheduleNextAutoCapture(1400)
                         }
-                    } catch (secondError: Exception) {
+                    } catch (secondError: Throwable) {
                         finishWithError(
                             "فشل تشغيل الكاميرا: " +
                                 secondError.javaClass.simpleName +
@@ -711,20 +816,28 @@ class ScannerActivity : Activity() {
             )
             scannerClient.process(input)
                 .addOnSuccessListener { barcodes ->
-                    val value = barcodes
-                        .firstOrNull()?.rawValue
-                        ?.takeIf { it.isNotBlank() }
-                    if (value != null) {
-                        if (isContinuous) {
-                            onBarcodeContinuous(value)
-                        } else if (settled.compareAndSet(false, true)) {
-                            runOnUiThread { onBarcodeRead(value) }
+                    // v8.3: shielded — an exception inside a Play
+                    // Services task listener is PROCESS DEATH.
+                    runCatching {
+                        val value = barcodes
+                            .firstOrNull()?.rawValue
+                            ?.takeIf { it.isNotBlank() }
+                        if (value != null) {
+                            if (isContinuous) {
+                                onBarcodeContinuous(value)
+                            } else if (settled.compareAndSet(false, true)) {
+                                runOnUiThread { onBarcodeRead(value) }
+                            }
                         }
                     }
                 }
-                .addOnCompleteListener { proxy.close() }
-        } catch (_: Exception) {
-            proxy.close()
+                .addOnCompleteListener {
+                    runCatching { proxy.close() }
+                }
+        } catch (_: Throwable) {
+            // v8.3: Throwable — some HALs throw OOM-adjacent errors on
+            // frame wrap; close and move on.
+            runCatching { proxy.close() }
         }
     }
 
@@ -870,39 +983,45 @@ class ScannerActivity : Activity() {
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    if (isContinuous) {
-                        captureInFlight = false
-                        if (settled.get()) {
-                            return
+                    // v8.3: shielded — a capture callback exception on
+                    // an OEM HAL is process death otherwise.
+                    runCatching {
+                        if (isContinuous) {
+                            captureInFlight = false
+                            if (settled.get()) {
+                                return
+                            }
+                            flash(Color.parseColor("#26FFFFFF"), 110)
+                            // Stream to JS (the emitter is thread-safe) and
+                            // keep the session RUNNING — the merchant waves
+                            // product after product without leaving the camera.
+                            runCatching {
+                                ScannerActivity.visualSink?.invoke(file.absolutePath, auto)
+                            }
+                            scheduleNextAutoCapture(VISUAL_AUTO_INTERVAL_MS)
+                        } else if (settled.compareAndSet(false, true)) {
+                            flash(Color.parseColor("#66FFFFFF"), 140)
+                            setResultAndFinish(path = file.absolutePath)
                         }
-                        flash(Color.parseColor("#26FFFFFF"), 110)
-                        // Stream to JS (the emitter is thread-safe) and
-                        // keep the session RUNNING — the merchant waves
-                        // product after product without leaving the camera.
-                        runCatching {
-                            ScannerActivity.visualSink?.invoke(file.absolutePath, auto)
-                        }
-                        scheduleNextAutoCapture(VISUAL_AUTO_INTERVAL_MS)
-                    } else if (settled.compareAndSet(false, true)) {
-                        flash(Color.parseColor("#66FFFFFF"), 140)
-                        setResultAndFinish(path = file.absolutePath)
                     }
                 }
 
                 override fun onError(error: ImageCaptureException) {
-                    if (isContinuous) {
-                        captureInFlight = false
-                        if (settled.get()) {
-                            return
+                    runCatching {
+                        if (isContinuous) {
+                            captureInFlight = false
+                            if (settled.get()) {
+                                return
+                            }
+                            // Back off briefly and try again — one failed
+                            // shot must never end the session.
+                            scheduleNextAutoCapture(1500)
+                        } else if (settled.compareAndSet(false, true)) {
+                            finishWithError(
+                                "فشل التقاط الصورة: ${error.javaClass.simpleName}" +
+                                    (error.message?.let { " — $it" } ?: "")
+                            )
                         }
-                        // Back off briefly and try again — one failed
-                        // shot must never end the session.
-                        scheduleNextAutoCapture(1500)
-                    } else if (settled.compareAndSet(false, true)) {
-                        finishWithError(
-                            "فشل التقاط الصورة: ${error.javaClass.simpleName}" +
-                                (error.message?.let { " — $it" } ?: "")
-                        )
                     }
                 }
             }
@@ -916,44 +1035,48 @@ class ScannerActivity : Activity() {
      * continuous visual session feel alive at the counter.
      */
     private fun showRecognizerBanner(kind: String, name: String, score: Double) {
-        val banner = recognizerBanner ?: return
-        val background = banner.background as? GradientDrawable
-        when (kind) {
-            "added" -> {
-                val pct = (score * 100).roundToInt()
-                banner.text = if (name.isNotBlank()) {
-                    "أُضيف للسلة: $name · $pct%"
-                } else {
-                    "أُضيف للسلة"
+        // v8.3: fully shielded — the banner is pure celebration and
+        // must never be able to take the window down.
+        runCatching {
+            val banner = recognizerBanner ?: return
+            val background = banner.background as? GradientDrawable
+            when (kind) {
+                "added" -> {
+                    val pct = (score * 100).roundToInt()
+                    banner.text = if (name.isNotBlank()) {
+                        "أُضيف للسلة: $name · $pct%"
+                    } else {
+                        "أُضيف للسلة"
+                    }
+                    background?.setColor(Color.parseColor("#E622C55E"))
+                    banner.setTextColor(Color.WHITE)
+                    visualAdds.incrementAndGet()
+                    statusChip.text = "مسح بصري متواصل · ${visualAdds.get()}"
+                    vibrate(40)
+                    flash(Color.parseColor("#3322C55E"), 220)
                 }
-                background?.setColor(Color.parseColor("#E622C55E"))
-                banner.setTextColor(Color.WHITE)
-                visualAdds.incrementAndGet()
-                statusChip.text = "مسح بصري متواصل · ${visualAdds.get()}"
-                vibrate(40)
-                flash(Color.parseColor("#3322C55E"), 220)
+                "dup" -> {
+                    banner.text = "$name — مضاف بالفعل في السلة"
+                    background?.setColor(Color.parseColor("#D91C1C22"))
+                    banner.setTextColor(Color.parseColor("#E7E7EA"))
+                    vibrate(15)
+                }
+                else -> {
+                    banner.text = "لم يتم التعرف — قرّب الكاميرا أو حسّن الإضاءة"
+                    background?.setColor(Color.parseColor("#E68A5A00"))
+                    banner.setTextColor(Color.WHITE)
+                }
             }
-            "dup" -> {
-                banner.text = "$name — مضاف بالفعل في السلة"
-                background?.setColor(Color.parseColor("#D91C1C22"))
-                banner.setTextColor(Color.parseColor("#E7E7EA"))
-                vibrate(15)
-            }
-            else -> {
-                banner.text = "لم يتم التعرف — قرّب الكاميرا أو حسّن الإضاءة"
-                background?.setColor(Color.parseColor("#E68A5A00"))
-                banner.setTextColor(Color.WHITE)
-            }
+            banner.animate().cancel()
+            banner.visibility = View.VISIBLE
+            banner.alpha = 1f
+            banner.animate()
+                .alpha(0f)
+                .setStartDelay(1500)
+                .setDuration(400)
+                .withEndAction { banner.visibility = View.GONE }
+                .start()
         }
-        banner.animate().cancel()
-        banner.visibility = View.VISIBLE
-        banner.alpha = 1f
-        banner.animate()
-            .alpha(0f)
-            .setStartDelay(1500)
-            .setDuration(400)
-            .withEndAction { banner.visibility = View.GONE }
-            .start()
     }
 
     // ── Torch ─────────────────────────────────────────────────
@@ -964,27 +1087,34 @@ class ScannerActivity : Activity() {
     }
 
     private fun applyTorch() {
-        val unit = camera ?: return
-        val available = unit.cameraInfo.hasFlashUnit()
-        runCatching { unit.cameraControl.enableTorch(torchOn && available) }
-        torchButton.setTextColor(
-            if (torchOn && available) {
-                torchButton.background = GradientDrawable().apply {
-                    cornerRadius = dp(18).toFloat()
+        // v8.3: rewritten clean + fully shielded — the old version
+        // mutated the button background INSIDE the setTextColor
+        // argument (worked, but fragile) and any flash-unit probe
+        // failure escaped as a crash on some ROMs.
+        runCatching {
+            val unit = camera ?: return
+            val available = unit.cameraInfo.hasFlashUnit()
+            runCatching { unit.cameraControl.enableTorch(torchOn && available) }
+            val active = torchOn && available
+            torchButton.background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                if (active) {
                     setColor(Color.parseColor("#F97316"))
-                }
-                Color.WHITE
-            } else {
-                torchButton.background = GradientDrawable().apply {
-                    cornerRadius = dp(18).toFloat()
+                } else {
                     setColor(Color.parseColor("#CC1C1C22"))
                     setStroke(dp(1), Color.parseColor("#33FFFFFF"))
                 }
-                Color.parseColor("#E7E7EA")
             }
-        )
-        if (!available) {
-            torchButton.text = "لا فلاش"
+            torchButton.setTextColor(
+                if (active) {
+                    Color.WHITE
+                } else {
+                    Color.parseColor("#E7E7EA")
+                }
+            )
+            if (!available) {
+                torchButton.text = "لا فلاش"
+            }
         }
     }
 
@@ -1012,14 +1142,17 @@ class ScannerActivity : Activity() {
     }
 
     private fun flash(color: Int, durationMs: Long) {
-        flashOverlay.setBackgroundColor(color)
-        flashOverlay.visibility = View.VISIBLE
-        flashOverlay.alpha = 1f
-        flashOverlay.animate()
-            .alpha(0f)
-            .setDuration(durationMs)
-            .withEndAction { flashOverlay.visibility = View.GONE }
-            .start()
+        // v8.3: shielded.
+        runCatching {
+            flashOverlay.setBackgroundColor(color)
+            flashOverlay.visibility = View.VISIBLE
+            flashOverlay.alpha = 1f
+            flashOverlay.animate()
+                .alpha(0f)
+                .setDuration(durationMs)
+                .withEndAction { flashOverlay.visibility = View.GONE }
+                .start()
+        }
     }
 
     // ── Result delivery ───────────────────────────────────────

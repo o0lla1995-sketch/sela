@@ -123,8 +123,25 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
             return
         }
         if (pendingPromise != null) {
-            promise.reject("E_BUSY", "الماسح مفتوح بالفعل", null)
-            return
+            // v8.3 (round-12 #1): a pendingPromise with NO live scanner
+            // window is a fossil — the system killed the previous
+            // session (process death on permission grant / low memory)
+            // before its activity result ever arrived. Recovering it
+            // here is what un-jams the scanner after that kill; without
+            // this the merchant was stuck on "الماسح مفتوح بالفعل"
+            // until a full app restart.
+            if (ScannerActivity.isLive()) {
+                promise.reject("E_BUSY", "الماسح مفتوح بالفعل", null)
+                return
+            }
+            runCatching {
+                pendingPromise?.resolve(
+                    com.facebook.react.bridge.Arguments.createMap().apply {
+                        putBoolean("cancelled", true)
+                    }
+                )
+            }
+            pendingPromise = null
         }
 
         pendingPromise = promise

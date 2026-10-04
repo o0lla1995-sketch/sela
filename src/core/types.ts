@@ -49,8 +49,28 @@ export interface Product {
   low_stock_threshold: number | null;
   /** Product (base-unit) barcode, scanned at the POS. */
   barcode: string | null;
+  /** v8.3 (round-12 #4): 1 = sold BY WEIGHT — the base unit is the
+   *  kilogram: prices are per-kilo, stock is fractional kg and the
+   *  POS opens a weight pad instead of adding whole pieces. */
+  sold_by_weight: number;
   /** Unit rows loaded on demand (ProductForm / POS unit picker). */
   units?: ProductUnit[];
+}
+
+/** v8.3: is this product sold by weight (kilo-based)? */
+export function isWeightProduct(
+  product: Pick<Product, 'sold_by_weight'>,
+): boolean {
+  return product.sold_by_weight === 1;
+}
+
+/** v8.3: the base-unit label for a product ('كغ' for weight products,
+ *  the global BASE_UNIT_NAME otherwise). */
+export function baseUnitLabelOf(
+  product: Pick<Product, 'sold_by_weight'>,
+  baseName: string,
+): string {
+  return isWeightProduct(product) ? 'كغ' : baseName;
 }
 
 /** Stock state derived from quantity vs threshold. */
@@ -104,6 +124,8 @@ export interface CartLine {
   unitName: string;
   /** Base pieces per 1 unit (1 for the base unit). */
   conversion: number;
+  /** v8.3: true for weight-sold products — quantity is fractional kg. */
+  byWeight?: boolean;
 }
 
 export interface SaleRecord {
@@ -157,6 +179,8 @@ export interface StocktakeItem {
   system_qty: number;
   counted_qty: number | null;
   unitHint: string | null;
+  /** v8.3: 1 = weight product — the count input allows decimals (kg). */
+  soldByWeight: number;
 }
 
 export interface StocktakeSummary {

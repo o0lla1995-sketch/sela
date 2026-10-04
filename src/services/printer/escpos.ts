@@ -94,8 +94,11 @@ export class ReceiptBuilder {
 
   /** Product line: "2 x 4.50 = 9.00" (pure ASCII, right-aligned). */
   qtyPriceLine(quantity: number, unitPrice: number, total: number): this {
+    // v8.3: weight lines carry fractional kg — 1.25 x 12.00 = 15.00
+    // (trim trailing zeros, keep up to 3 decimals).
+    const qty = Number(quantity.toFixed(3));
     return this.textLine(
-      `${quantity} x ${formatAmount(unitPrice)} = ${formatAmount(total)}`,
+      `${qty} x ${formatAmount(unitPrice)} = ${formatAmount(total)}`,
     );
   }
 

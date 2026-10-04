@@ -29,6 +29,17 @@ export function formatAmount(value: number): string {
   return safe.toFixed(2);
 }
 
+/**
+ * v8.3 (round-12 #4): quantity formatter for WEIGHT-sold lines and
+ * stock badges — 1.25 stays "1.25", 2 stays "2", 0.25 stays "0.25"
+ * (trailing zeros trimmed, up to 3 decimals = gram precision).
+ */
+export function formatQty(value: number, maxDecimals = 3): string {
+  const safe = Number.isFinite(value) ? value : 0;
+  const rounded = Number(safe.toFixed(maxDecimals));
+  return String(rounded);
+}
+
 function pad(n: number, width = 2): string {
   return String(n).padStart(width, '0');
 }

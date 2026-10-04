@@ -11,7 +11,12 @@
  */
 import {create} from 'zustand';
 import {getJson, setJson, KEYS, storage} from '../storage/storage';
-import {BASE_UNIT_NAME} from '../core/config';
+import {
+  BASE_UNIT_NAME,
+  QTY_EPSILON,
+  WEIGHT_QTY_DECIMALS,
+  WEIGHT_UNIT_NAME,
+} from '../core/config';
 import type {CartLine, PricingMode, Product, ProductUnit} from '../core/types';
 
 /** Price of one chosen unit under a pricing mode. */
@@ -44,6 +49,7 @@ function toLine(
   mode: PricingMode,
   unit: ProductUnit | null,
 ): CartLine {
+  const weighted = product.sold_by_weight === 1;
   return {
     key: lineKey(product.id, unit?.unit_id ?? null),
     productId: product.id,
@@ -59,8 +65,26 @@ function toLine(
     quantity: 1,
     availableStock: product.stock_quantity,
     unitId: unit?.unit_id ?? null,
-    unitName: unit?.unitName ?? BASE_UNIT_NAME,
+    unitName: unit?.unitName ?? (weighted ? WEIGHT_UNIT_NAME : BASE_UNIT_NAME),
     conversion: unit?.conversion ?? 1,
+    /** v8.3: weight-sold lines accept fractional quantities (kg). */
+    byWeight: weighted,
+  };
+}
+
+/** v8.3: a fresh weight line with an arbitrary (fractional) kg qty. */
+function toWeightLine(
+  product: Product,
+  mode: PricingMode,
+  unit: ProductUnit | null,
+  quantity: number,
+): CartLine {
+  const line = toLine(product, mode, unit);
+  return {
+    ...line,
+    quantity:
+      Math.round(quantity * 10 ** WEIGHT_QTY_DECIMALS) /
+      10 ** WEIGHT_QTY_DECIMALS,
   };
 }
 
@@ -71,6 +95,14 @@ interface CartState {
   addProduct: (
     product: Product,
     mode: PricingMode,
+    unit?: ProductUnit | null,
+  ) => {added: boolean; reason?: string};
+  /** v8.3 (round-12 #4): add a WEIGHT-sold product with a fractional
+   *  quantity (kg or a sub-unit like وقية via `unit`). */
+  addWeighted: (
+    product: Product,
+    mode: PricingMode,
+    quantity: number,
     unit?: ProductUnit | null,
   ) => {added: boolean; reason?: string};
   setLineUnit: (
@@ -104,6 +136,7 @@ function normalizeLine(line: CartLine): CartLine {
     unitId: line.unitId ?? null,
     unitName: line.unitName ?? BASE_UNIT_NAME,
     conversion: line.conversion ?? 1,
+    byWeight: line.byWeight ?? false,
   };
 }
 
@@ -177,6 +210,56 @@ export const useCartStore = create<CartState>((set, get) => ({
       return {added: true};
     }
     const lines = [...state.lines, toLine(product, mode, unit)];
+    set({lines});
+    saveDraft(lines, state.pricingMode, state.discount);
+    return {added: true};
+  },
+
+  addWeighted: (product, mode, quantity, unit = null) => {
+    const state = get();
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return {added: false, reason: 'أدخل وزناً صالحاً أكبر من صفر'};
+    }
+    const key = lineKey(product.id, unit?.unit_id ?? null);
+    const conversion = unit?.conversion ?? 1;
+    const existing = state.lines.find(line => line.key === key);
+    const used = baseUsed(state.lines);
+    const alreadyInCart = used.get(product.id) ?? 0;
+    const baseNeeded = quantity * conversion;
+
+    // Floating-point slack: 0.1+0.2 style noise must never block a
+    // legitimate sale when the scale shows exactly the remaining kg.
+    if (alreadyInCart + baseNeeded > product.stock_quantity + QTY_EPSILON) {
+      const available = Math.max(
+        0,
+        product.stock_quantity - alreadyInCart,
+      );
+      return {
+        added: false,
+        reason: `المتاح من ${product.name} هو ${
+          Math.round(available * 1000) / 1000
+        } كغ فقط (في السلة: ${Math.round(alreadyInCart * 1000) / 1000} كغ)`,
+      };
+    }
+
+    if (existing) {
+      const lines = state.lines.map(line =>
+        line.key === key
+          ? {
+              ...line,
+              quantity: line.quantity + quantity,
+              availableStock: product.stock_quantity,
+            }
+          : line,
+      );
+      set({lines});
+      saveDraft(lines, state.pricingMode, state.discount);
+      return {added: true};
+    }
+    const lines = [
+      ...state.lines,
+      toWeightLine(product, mode, unit, quantity),
+    ];
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
     return {added: true};

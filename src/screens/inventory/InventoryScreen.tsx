@@ -5,9 +5,10 @@
  * counts, roomier rows with stock + unit badges, quick access to
  * stocktake (الجرد) and category management.
  */
-import React, {useCallback, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Image,
+  Keyboard,
   ScrollView,
   StyleSheet,
   Text,
@@ -29,8 +30,13 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {formatMoney} from '../../core/format';
-import {stockStateOf, type Product} from '../../core/types';
+import {formatMoney, formatQty} from '../../core/format';
+import {
+  baseUnitLabelOf,
+  isWeightProduct,
+  stockStateOf,
+  type Product,
+} from '../../core/types';
 
 type CategoryFilter = number | 'all';
 
@@ -146,6 +152,24 @@ function InventoryLayout({
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
 
+  // v8.3 (round-12 #2): while the search keyboard is open the
+  // category chips fold away — the search field stays fully visible
+  // and the results list gets the whole remaining screen instead of
+  // the keyboard + chips squeezing it over the search bar.
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () =>
+      setKeyboardOpen(true),
+    );
+    const hide = Keyboard.addListener('keyboardDidHide', () =>
+      setKeyboardOpen(false),
+    );
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
   return (
     <View style={styles.screen}>
       <AppHeader
@@ -221,30 +245,36 @@ function InventoryLayout({
           placeholder="ابحث بالاسم أو الباركود…"
         />
 
-        {/* ── Category chips — compact, horizontally scrollable ── */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{
-            gap: 6,
-            paddingVertical: 2,
-          }}>
-          <FilterChip
-            label="الكل"
-            count={countFor('all')}
-            active={filter === 'all'}
-            onPress={() => setFilter('all')}
-          />
-          {categories.map(category => (
+        {/* ── Category chips — compact, horizontally scrollable.
+            v8.3 (round-12 #2): hidden while the search keyboard is
+            open (more room for results + the search field), and the
+            list starts DIRECTLY under them (no dead gap). ── */}
+        {!keyboardOpen ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{
+              gap: 6,
+              paddingVertical: 2,
+            }}
+            style={styles.chipsRow}>
             <FilterChip
-              key={category.id}
-              label={category.name}
-              count={countFor(category.id)}
-              active={filter === category.id}
-              onPress={() => setFilter(category.id)}
+              label="الكل"
+              count={countFor('all')}
+              active={filter === 'all'}
+              onPress={() => setFilter('all')}
             />
-          ))}
-        </ScrollView>
+            {categories.map(category => (
+              <FilterChip
+                key={category.id}
+                label={category.name}
+                count={countFor(category.id)}
+                active={filter === category.id}
+                onPress={() => setFilter(category.id)}
+              />
+            ))}
+          </ScrollView>
+        ) : null}
 
         {products.length === 0 ? (
           <EmptyState
@@ -268,13 +298,17 @@ function InventoryLayout({
           />
         ) : (
           <ScrollView
+            style={{flex: 1}}
             contentContainerStyle={{
               gap: spacing.sm,
               paddingBottom: spacing.xxl,
             }}
-            showsVerticalScrollIndicator={false}>
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag">
             {products.map(product => {
               const state = stockStateOf(product, defaultThreshold);
+              const weighted = isWeightProduct(product);
               return (
                 <TouchableOpacity
                   key={product.id}
@@ -298,10 +332,16 @@ function InventoryLayout({
                       {product.name}
                     </Text>
                     <Text style={styles.meta} numberOfLines={1}>
-                      مفرق {formatMoney(product.retail_price)} · جملة{' '}
+                      {weighted ? 'كيلو' : 'مفرق'}{' '}
+                      {formatMoney(product.retail_price)} · جملة{' '}
                       {formatMoney(product.wholesale_price)}
                     </Text>
                     <View style={styles.tagRow}>
+                      {weighted ? (
+                        <View style={styles.miniTag}>
+                          <Icon name="scale" size={10} color={c.textFaint} />
+                        </View>
+                      ) : null}
                       {product.barcode ? (
                         <View style={styles.miniTag}>
                           <Icon name="barcode" size={10} color={c.textFaint} />
@@ -341,7 +381,10 @@ function InventoryLayout({
                         ]}>
                         {state === 'out'
                           ? 'نفد'
-                          : `${product.stock_quantity} ${BASE_UNIT_NAME}`}
+                          : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(
+                              product,
+                              BASE_UNIT_NAME,
+                            )}`}
                       </Text>
                     </View>
                     <Icon name="chevronLeft" size={16} color={c.textFaint} />
@@ -439,7 +482,15 @@ const useStyles = makeStyles(c =>
     body: {
       flex: 1,
       padding: spacing.lg,
-      gap: spacing.md,
+      // v8.3 (round-12 #2): sm (8) — the product list starts right
+      // under the filter chips (md left a visible dead gap after the
+      // quick-action buttons were removed in v8.2).
+      gap: spacing.sm,
+    },
+    // v8.3: the chips strip takes exactly its content height — it
+    // can never stretch between the search bar and the product list.
+    chipsRow: {
+      flexGrow: 0,
     },
     // v8.2 (round-11 #4): header overflow menu — replaces the three
     // tall quick-action cards that used to push the list down.

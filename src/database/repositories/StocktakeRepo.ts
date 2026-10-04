@@ -34,14 +34,25 @@ function rowToItem(row: Record<string, unknown>): StocktakeItem {
     system_qty: Number(row.system_qty ?? 0),
     counted_qty: row.counted_qty == null ? null : Number(row.counted_qty),
     unitHint: row.unit_hint == null ? null : String(row.unit_hint),
+    soldByWeight: Number(row.sold_by_weight ?? 0) === 1 ? 1 : 0,
   };
 }
 
-/** Carton-style hint: "كرتونة × 24" for the biggest conversion unit. */
+/**
+ * Carton-style hint for PIECE products: "كرتونة × 24".
+ * v8.3: WEIGHT products show their biggest sub-kilo unit instead —
+ * "1 وقية = 0.25 كغ" (conversion < 1, printf keeps the fraction that
+ * CAST AS INTEGER used to truncate to 0).
+ */
 const UNIT_HINT_SQL = `(
-  SELECT '1 ' || u.name || ' = ' || CAST(pu.conversion AS INTEGER) || ' قطعة'
+  SELECT '1 ' || u.name || ' = ' || printf('%.3g', pu.conversion) ||
+    (CASE WHEN p.sold_by_weight = 1 THEN ' كغ' ELSE ' قطعة' END)
   FROM product_units pu JOIN units u ON u.id = pu.unit_id
-  WHERE pu.product_id = p.id AND pu.conversion > 1
+  WHERE pu.product_id = p.id
+    AND (
+      (p.sold_by_weight = 1 AND pu.conversion > 0 AND pu.conversion < 1)
+      OR (COALESCE(p.sold_by_weight, 0) = 0 AND pu.conversion > 1)
+    )
   ORDER BY pu.conversion DESC LIMIT 1
 ) AS unit_hint`;
 
@@ -120,7 +131,7 @@ export const StocktakeRepo = {
       conditions.push('si.counted_qty IS NULL');
     }
     const result = await getDb().execute(
-      `SELECT si.*, p.name AS product_name, p.category_id, ${UNIT_HINT_SQL}
+      `SELECT si.*, p.name AS product_name, p.category_id, p.sold_by_weight, ${UNIT_HINT_SQL}
        FROM stocktake_items si
        JOIN products p ON p.id = si.product_id
        WHERE ${conditions.join(' AND ')}

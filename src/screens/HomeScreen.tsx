@@ -35,8 +35,9 @@ import {
   typography,
   useThemeColors,
 } from '../core/theme';
-import {formatMoney, relativeTime} from '../core/format';
-import {APP_NAME, APP_VERSION_LABEL} from '../core/config';
+import {formatMoney, formatQty, relativeTime} from '../core/format';
+import {APP_NAME, APP_VERSION_LABEL, BASE_UNIT_NAME} from '../core/config';
+import {baseUnitLabelOf} from '../core/types';
 import {Image} from 'react-native';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 
@@ -220,7 +221,10 @@ export function HomeScreen() {
                     <Text style={styles.alertQty}>
                       {state === 'out'
                         ? 'نفد المخزون'
-                        : `${product.stock_quantity} قطعة متبقية`}
+                        : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(
+                            product,
+                            BASE_UNIT_NAME,
+                          )} متبقية`}
                     </Text>
                   </View>
                   <Icon

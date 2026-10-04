@@ -24,6 +24,7 @@
 import {
   DeviceEventEmitter,
   EmitterSubscription,
+  Linking,
   PermissionsAndroid,
 } from 'react-native';
 import {SelaScannerNative} from '../../native/nativeBridge';
@@ -71,6 +72,21 @@ export function cameraPermissionMessage(
   return result === 'never_ask_again'
     ? 'إذن الكاميرا مرفوض نهائياً — فعّله من: الإعدادات ← التطبيقات ← سيلا ← الأذونات'
     : 'لا يمكن فتح الماسح بدون إذن الكاميرا — امنح الإذن وحاول مجدداً';
+}
+
+/**
+ * v8.3: opens the app's system settings page — when the camera
+ * permission is permanently denied the system no longer shows the
+ * ask-dialog, so the merchant's only way forward is the settings
+ * toggle. Exposed for the permission Alert button in PosScreen.
+ */
+export async function openAppSettings(): Promise<void> {
+  try {
+    await Linking.openSettings();
+  } catch {
+    // Some ROMs without a settings activity — the manual path in the
+    // message still works.
+  }
 }
 
 /** Throws a readable Arabic error when the camera is not permitted. */

@@ -36,6 +36,7 @@ import {useCatalogStore} from '../../stores/catalogStore';
 import {useToastStore} from '../../stores/toastStore';
 import {VisionRecognitionService} from '../../services/vision/VisionRecognitionService';
 import {scanBarcode, capturePhoto} from '../../services/vision/scanFlow';
+import {PlatformUtilsNative} from '../../native/nativeBridge';
 import {
   fonts,
   makeStyles,
@@ -50,6 +51,7 @@ import {
   ANGLE_LABELS_AR,
   BASE_UNIT_NAME,
   DEFAULT_LOW_STOCK_THRESHOLD,
+  WEIGHT_UNIT_NAME,
 } from '../../core/config';
 import type {AngleLabel, Category, ProductUnit, Unit} from '../../core/types';
 
@@ -117,6 +119,9 @@ export function ProductFormScreen() {
   const [stockUnitId, setStockUnitId] = useState<number | null>(null);
   const [categoryId, setCategoryId] = useState<number | 'none'>('none');
   const [imageUri, setImageUri] = useState<string | null>(null);
+  /** v8.3 (round-12 #4): قطعة (counted) or وزن (weighed — prices per
+   *  kilo, fractional kg stock, weight pad at the POS). */
+  const [saleMode, setSaleMode] = useState<'piece' | 'weight'>('piece');
   const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
   const [angles, setAngles] = useState<Record<AngleLabel, AngleState>>({
     front: {embedding: null, thumbnailPath: null},
@@ -157,6 +162,7 @@ export function ProductFormScreen() {
             );
             setCategoryId(product.category_id ?? 'none');
             setImageUri(product.image_uri);
+            setSaleMode(product.sold_by_weight === 1 ? 'weight' : 'piece');
             setUnitRows(productUnits.map(unitRowToDraft));
           }
         }
@@ -188,7 +194,10 @@ export function ProductFormScreen() {
   /** v8: native PHOTO engine → embed → this angle's fingerprint.
    *  The camera runs in its own native window (ScannerActivity):
    *  fill-frame preview, real torch, correct dimensions — every
-   *  time, on every device. */
+   *  time, on every device.
+   *  v8.3 (round-12 #3): a fresh thumbnail now REPLACES a dead
+   *  image path too — restored backups used to leave a stale
+   *  image_uri that blocked new photos from ever showing. */
   const captureAngle = useCallback(
     async (angle: AngleLabel) => {
       try {
@@ -205,8 +214,22 @@ export function ProductFormScreen() {
           ...prev,
           [angle]: {embedding, thumbnailPath},
         }));
-        if (thumbnailPath != null && imageUri == null) {
-          setImageUri(thumbnailPath);
+        // v8.3: adopt the new photo when there is no image OR the
+        // current one points at a file that no longer exists (a
+        // restored backup left dead paths — they used to block new
+        // images from appearing).
+        if (thumbnailPath != null) {
+          let currentIsDead = imageUri == null;
+          if (imageUri != null && PlatformUtilsNative != null) {
+            try {
+              currentIsDead = !(await PlatformUtilsNative.fileExists(imageUri));
+            } catch {
+              currentIsDead = false;
+            }
+          }
+          if (currentIsDead) {
+            setImageUri(thumbnailPath);
+          }
         }
         toast(`تم حفظ البصمة ${ANGLE_LABELS_AR[angle]}`, 'success');
       } catch (error) {
@@ -356,8 +379,16 @@ export function ProductFormScreen() {
     const wholesale = wholesalePrice.trim()
       ? parseNumber(wholesalePrice)
       : retail;
-    const stockConversion = validConversion(stockUnitId) ?? 1;
-    const stockValue = stock.trim() ? parseNumber(stock) * stockConversion : 0;
+    const weighted = saleMode === 'weight';
+    // v8.3: weight products keep fractional kg stock (12.5 كغ) —
+    // only PIECE products round the entered stock to whole units.
+    const stockConversion = weighted ? 1 : (validConversion(stockUnitId) ?? 1);
+    const stockRaw = stock.trim() ? parseNumber(stock) * stockConversion : 0;
+    const stockValue = weighted
+      ? Math.round((Number.isNaN(stockRaw) ? 0 : stockRaw) * 1000) / 1000
+      : Number.isNaN(stockRaw)
+      ? 0
+      : Math.round(stockRaw);
     const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
 
     if (!trimmedName) {
@@ -365,11 +396,17 @@ export function ProductFormScreen() {
       return;
     }
     if (Number.isNaN(cost) || cost < 0) {
-      toast('أدخل سعر تكلفة صالحاً', 'error');
+      toast(
+        weighted ? 'أدخل سعر تكلفة صالحاً للكيلو' : 'أدخل سعر تكلفة صالحاً',
+        'error',
+      );
       return;
     }
     if (Number.isNaN(retail) || retail <= 0) {
-      toast('أدخل سعر مبيع صالحاً', 'error');
+      toast(
+        weighted ? 'أدخل سعر مبيع صالحاً للكيلو' : 'أدخل سعر مبيع صالحاً',
+        'error',
+      );
       return;
     }
     if (Number.isNaN(wholesale) || wholesale < 0) {
@@ -422,14 +459,17 @@ export function ProductFormScreen() {
         cost_price: cost,
         retail_price: retail,
         wholesale_price: wholesale,
-        stock_quantity: Number.isNaN(stockValue) ? 0 : stockValue,
+        stock_quantity: stockValue,
         category_id: categoryId === 'none' ? null : categoryId,
         image_uri: imageUri,
         low_stock_threshold:
           thresholdValue != null && !Number.isNaN(thresholdValue)
-            ? Math.trunc(thresholdValue)
+            ? weighted
+              ? Math.round(thresholdValue * 1000) / 1000
+              : Math.trunc(thresholdValue)
             : null,
         barcode: barcode.trim() || null,
+        sold_by_weight: weighted ? 1 : 0,
       };
 
       let targetId = productId;
@@ -474,6 +514,7 @@ export function ProductFormScreen() {
     threshold,
     categoryId,
     imageUri,
+    saleMode,
     unitRows,
     stockUnitId,
     validConversion,
@@ -603,6 +644,66 @@ export function ProductFormScreen() {
             }}
           />
 
+          {/* ── v8.3 (round-12 #4): HOW is this product sold? ──
+              قطعة = counted pieces (default). وزن = weighed — the
+              prices below become PER KILO, stock is fractional kg,
+              and the POS opens a weight pad (with وقية/نصف كغ
+              quick chips) instead of adding whole pieces. */}
+          <SectionTitle
+            title="طريقة البيع"
+            hint={
+              saleMode === 'weight'
+                ? 'الأسعار أدناه لكل كيلوغرام — المخزون بالكيلو ويسمح بالكسور (12.5)'
+                : 'يُباع بالقطعة — الكمية أعداد صحيحة'
+            }
+          />
+          <View style={styles.saleModeRow}>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                saleMode === 'piece' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => setSaleMode('piece')}
+              activeOpacity={0.8}>
+              <Icon
+                name="box"
+                size={18}
+                color={saleMode === 'piece' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  saleMode === 'piece'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
+                ]}>
+                بالقطعة
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                saleMode === 'weight' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => setSaleMode('weight')}
+              activeOpacity={0.8}>
+              <Icon
+                name="scale"
+                size={18}
+                color={saleMode === 'weight' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  saleMode === 'weight'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
+                ]}>
+                بالوزن (كغ)
+              </Text>
+            </TouchableOpacity>
+          </View>
+
           {/* ── Details form ──────────────────────────────────── */}
           <SectionTitle title="بيانات المنتج" />
           <Field
@@ -636,7 +737,11 @@ export function ProductFormScreen() {
           </View>
           <Field
             ref={costRef}
-            label="سعر التكلفة للقطعة (₪) *"
+            label={
+              saleMode === 'weight'
+                ? 'سعر التكلفة للكيلو (₪) *'
+                : 'سعر التكلفة للقطعة (₪) *'
+            }
             value={costPrice}
             onChangeText={setCostPrice}
             keyboardType="numeric"
@@ -648,7 +753,11 @@ export function ProductFormScreen() {
             <View style={{flex: 1}}>
               <Field
                 ref={retailRef}
-                label="سعر المفرق (₪) *"
+                label={
+                  saleMode === 'weight'
+                    ? 'سعر المفرق للكيلو (₪) *'
+                    : 'سعر المفرق (₪) *'
+                }
                 value={retailPrice}
                 onChangeText={setRetailPrice}
                 keyboardType="numeric"
@@ -660,7 +769,9 @@ export function ProductFormScreen() {
             <View style={{flex: 1}}>
               <Field
                 ref={wholesaleRef}
-                label="سعر الجملة (₪)"
+                label={
+                  saleMode === 'weight' ? 'سعر الجملة للكيلو (₪)' : 'سعر الجملة (₪)'
+                }
                 value={wholesalePrice}
                 onChangeText={setWholesalePrice}
                 keyboardType="numeric"
@@ -670,20 +781,25 @@ export function ProductFormScreen() {
               />
             </View>
           </View>
-          {/* ── Stock entry: type in any unit, stored in pieces ── */}
+          {/* ── Stock entry: weight = fractional kg directly; piece
+              = type in any unit, stored in pieces ── */}
           <View style={styles.priceRow}>
             <View style={{flex: 1.2}}>
               <Field
                 ref={stockRef}
-                label={`الكمية ${
-                  stockUnitId != null
-                    ? `بـ${unitNameById.get(stockUnitId) ?? ''}`
-                    : `(${BASE_UNIT_NAME})`
-                }`}
+                label={
+                  saleMode === 'weight'
+                    ? `الكمية الحالية (${WEIGHT_UNIT_NAME})`
+                    : `الكمية ${
+                        stockUnitId != null
+                          ? `بـ${unitNameById.get(stockUnitId) ?? ''}`
+                          : `(${BASE_UNIT_NAME})`
+                      }`
+                }
                 value={stock}
                 onChangeText={setStock}
-                keyboardType="numeric"
-                placeholder="0"
+                keyboardType={saleMode === 'weight' ? 'decimal-pad' : 'numeric'}
+                placeholder={saleMode === 'weight' ? '0.0' : '0'}
                 returnKeyType="next"
                 onSubmitEditing={() => thresholdRef.current?.focus()}
               />
@@ -691,17 +807,27 @@ export function ProductFormScreen() {
             <View style={{flex: 1}}>
               <Field
                 ref={thresholdRef}
-                label="حد التنبيه"
+                label={
+                  saleMode === 'weight' ? 'حد التنبيه (كغ)' : 'حد التنبيه'
+                }
                 value={threshold}
                 onChangeText={setThreshold}
-                keyboardType="numeric"
-                placeholder={String(DEFAULT_LOW_STOCK_THRESHOLD)}
+                keyboardType={saleMode === 'weight' ? 'decimal-pad' : 'numeric'}
+                placeholder={
+                  saleMode === 'weight' ? '5' : String(DEFAULT_LOW_STOCK_THRESHOLD)
+                }
                 returnKeyType="done"
                 onSubmitEditing={() => Keyboard.dismiss()}
               />
             </View>
           </View>
-          {stockUnitChoices.length > 0 ? (
+          {saleMode === 'weight' ? (
+            <Text style={styles.stockHintText}>
+              منتج وزن — الأسعار لكل كيلو، والمخزون يُحفظ بالكيلوغرام بكسور
+              عشرية (مثال: 12.5). عند البيع تُفتح لوحة وزن مع أزرار وقية ونصف
+              كيلو.
+            </Text>
+          ) : stockUnitChoices.length > 0 ? (
             <View style={styles.stockUnitRow}>
               <Text style={styles.stockUnitLabel}>وحدة الإدخال:</Text>
               <ScrollView
@@ -780,7 +906,11 @@ export function ProductFormScreen() {
           {/* ── Units editor ─────────────────────────────────── */}
           <SectionTitle
             title="وحدات البيع"
-            hint="مثال: كرتونة = 24 قطعة — تُخصم من المخزون تلقائياً وتسهّل الجملة"
+            hint={
+              saleMode === 'weight'
+                ? 'مثال: وقية = 0.25 كغ — السعر يُحسب من سعر الكيلو تلقائياً'
+                : 'مثال: كرتونة = 24 قطعة — تُخصم من المخزون تلقائياً وتسهّل الجملة'
+            }
             action={
               <TouchableOpacity
                 onPress={() => navigation.navigate('ManageUnits' as never)}>
@@ -1118,6 +1248,31 @@ const useStyles = makeStyles(c =>
       gap: spacing.sm,
     },
     // ── Stock-entry unit chips ───────────────────────────────────
+    // v8.3 (round-12 #4): sale-mode picker (قطعة / وزن).
+    saleModeRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    saleModeChip: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.sm,
+      paddingVertical: spacing.md,
+      borderRadius: radius.md,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+    },
+    saleModeChipActive: {
+      backgroundColor: c.accent,
+      borderColor: c.accent,
+    },
+    saleModeText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
     stockUnitRow: {
       flexDirection: 'row',
       alignItems: 'center',
