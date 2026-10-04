@@ -86,7 +86,7 @@ interface PlatformUtilsNative {
 }
 
 /**
- * v8 scanner gateway — the camera preview lives in a NATIVE
+ * v8/v9 scanner gateway — the camera preview lives in a NATIVE
  * full-screen Activity (ScannerActivity), completely outside the RN
  * view tree. This is the module that opens it and resolves with the
  * result. Two FULLY INDEPENDENT engines:
@@ -96,6 +96,12 @@ interface PlatformUtilsNative {
  * auto-closes — every deduped read streams to JS as a
  * "selaScanBarcode" event; the promise resolves {cancelled:true}
  * when the merchant closes the scanner.
+ *
+ * v9 (round-13): the visual engine deliberately has NO continuous
+ * variant — the v8.2–v8.3 auto-capture/photo-stream machinery
+ * hard-crashed the merchant's device on every open. The visual flow
+ * is ONE deliberate photo per window, exactly as in v8.1.0 (the
+ * contract this device ran crash-free).
  */
 interface SelaScannerNativeModule {
   /** Opens the native scanner; resolves {code} / {path} / {cancelled}. */
@@ -110,20 +116,6 @@ interface SelaScannerNativeModule {
     code?: string;
     path?: string;
   }>;
-  /** v8.2: opens the continuous VISUAL multi-scan session — the
-   *  native window auto-captures and streams each photo path as a
-   *  "selaScanVisual" event {path, auto} until the merchant closes it. */
-  openScannerVisualContinuous(): Promise<{
-    cancelled?: boolean;
-    path?: string;
-  }>;
-  /** v8.2: reports each recognition outcome back INTO the live
-   *  scanner window (banner + vibrate + flash + counter). */
-  reportVisualResult(
-    kind: 'added' | 'dup' | 'miss',
-    name: string,
-    score: number,
-  ): void;
   /** Headless camera self-test → every step's outcome. */
   runDiagnostics(): Promise<{
     permissionGranted: boolean;

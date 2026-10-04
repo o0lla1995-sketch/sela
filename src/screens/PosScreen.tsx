@@ -50,15 +50,14 @@ import {VisionRecognitionService} from '../services/vision/VisionRecognitionServ
 import {findTopMatches} from '../services/vision/embedding';
 import {
   cameraPermissionMessage,
+  capturePhoto,
   ensureCameraPermission,
   openAppSettings,
   scanBarcodeContinuous,
-  scanVisualContinuous,
 } from '../services/vision/scanFlow';
-import {requirePlatformUtils, SelaScannerNative} from '../native/nativeBridge';
+import {requirePlatformUtils} from '../native/nativeBridge';
 import {
   BASE_UNIT_NAME,
-  DEFAULT_RECOGNITION_COOLDOWN_MS,
   QUICK_WEIGHTS,
   WEIGHT_UNIT_NAME,
   type ScannerMode,
@@ -110,6 +109,11 @@ export function PosScreen() {
   const toast = useToastStore(state => state.show);
 
   const [search, setSearch] = useState('');
+  /** v9 (round-13 #3): true while the search box holds KEYBOARD
+   *  focus — the cart folds to a one-line summary strip so the
+   *  product grid keeps the whole remaining height and the merchant
+   *  can actually SEE and tap the results above the keyboard. */
+  const [searchFocused, setSearchFocused] = useState(false);
   const [discountText, setDiscountText] = useState('');
   // v8: the scanner is a NATIVE full-screen activity — no in-RN
   // camera state left. scanBusy guards the launch, enginePicker is
@@ -132,10 +136,20 @@ export function PosScreen() {
   const [weightUnitRows, setWeightUnitRows] = useState<ProductUnit[] | null>(
     null,
   );
-  /** Weight products recognized DURING a scan session — they wait
-   *  here and their weight pads open one by one when the scanner
-   *  closes (the Loyverse scale-item pattern). */
+  /** Weight products recognized DURING a continuous barcode session
+   *  — they wait here and their weight pads open one by one when the
+   *  scanner closes (the Loyverse scale-item pattern). */
   const [pendingWeight, setPendingWeight] = useState<Product[]>([]);
+  /** v9 (round-13 #1): the visual-scan candidate strip — an INLINE
+   *  row (a regular View, NOT a Modal: this ROM renders RN Modals
+   *  black right after the native scanner window closes, the exact
+   *  v8.1.0 black-screen bug). Confident matches add straight to
+   *  the cart and leave the next candidates here for one-tap
+   *  corrections; a below-threshold shot shows the top candidates
+   *  for the merchant to pick. */
+  const [visionMatches, setVisionMatches] = useState<
+    {product: Product; score: number}[] | null
+  >(null);
 
   const scannerMode: ScannerMode = settings.scannerMode;
   const barcodeActive = scannerMode === 'barcode' || scannerMode === 'both';
@@ -227,25 +241,26 @@ export function PosScreen() {
     [addWeighted, beep, toast],
   );
 
-  /** v8.2 CONTINUOUS visual session: the native engine AUTO-captures
-   *  (no shutter press per product — round-11 #2), every photo
-   *  streams back here and each confident match jumps into the cart
-   *  BY ITSELF. The merchant waves product after product in front of
-   *  the camera and watches the session counter; a deliberate manual
-   *  shutter press adds instantly (bypasses the same-product window).
-   *  The old post-scan result sheet is GONE — a Modal opened right
-   *  after the native scanner window closed was what blacked the
-   *  screen on this device; the flow now stays 100% inside the
-   *  native window until the merchant closes it. */
+  /** v9 (round-13) VISUAL SCAN — back to the proven v8.1.0 contract:
+   *  ONE deliberate photo per native window (the exact flow this
+   *  device ran crash-free), then recognition happens here in the
+   *  POS screen with the cart fully visible:
+   *    • confident match  → straight into the cart + beep + toast,
+   *                        remaining candidates stay in the INLINE
+   *                        strip for one-tap corrections,
+   *    • weight product   → the weight pad opens directly,
+   *    • below threshold  → the top candidates fill the inline strip
+   *                        for the merchant to pick.
+   *  NO result-sheet Modal anywhere: this ROM renders RN Modals
+   *  BLACK right after the native scanner window closes — that was
+   *  the v8.1.0 "black screen after a successful scan" bug, and it
+   *  is structurally impossible now. */
   const runVisionScan = useCallback(async () => {
     if (scanBusy) {
       return;
     }
     const permission = await ensureCameraPermission();
     if (permission !== 'granted') {
-      // v8.3 (round-12 #1): a one-tap escape into the system
-      // settings when the permission is permanently denied — the
-      // system no longer shows the ask dialog in that state.
       Alert.alert(
         'إذن الكاميرا مطلوب',
         cameraPermissionMessage(permission),
@@ -269,112 +284,64 @@ export function PosScreen() {
       );
       return;
     }
-    try {
-      await VisionRecognitionService.loadModel();
-    } catch {
-      // embedPhoto below will surface a readable error instead.
-    }
     setScanBusy(true);
-    let added = 0;
-    const addErrors: string[] = [];
-    const lastAddAt = new Map<number, number>();
-    let processing = false;
+    setVisionMatches(null);
     try {
-      await scanVisualContinuous((photoPath, auto) => {
-        if (processing) {
-          // One recognition at a time — the native loop's own cadence
-          // leaves plenty of slack between photos.
+      const photoPath = await capturePhoto();
+      if (photoPath == null) {
+        // Merchant closed the native scanner.
+        return;
+      }
+      await VisionRecognitionService.loadModel();
+      const vector = await VisionRecognitionService.embedPhoto(photoPath);
+      const live = useCatalogStore.getState().embeddingsIndex;
+      if (live == null || live.ids.length === 0) {
+        return;
+      }
+      const top = findTopMatches(vector, live.flat, live.ids, live.dim, 4);
+      const allProducts = useCatalogStore.getState().products;
+      const matches = top
+        .map(match => ({
+          product: allProducts.find(entry => entry.id === match.productId),
+          score: match.score,
+        }))
+        .filter(
+          (match): match is {product: Product; score: number} =>
+            match.product != null,
+        );
+      if (matches.length === 0) {
+        toast('لم يتم التعرف على المنتج — جرّب زاوية أو إضاءة أفضل', 'error');
+        return;
+      }
+      const threshold = useSettingsStore.getState().settings.matchThreshold;
+      const best = matches[0];
+      if (best.score >= threshold) {
+        // Confident match → straight into the cart, like a barcode.
+        if (isWeightProduct(best.product)) {
+          beep();
+          openWeightPad(best.product);
           return;
         }
-        processing = true;
-        void (async () => {
-          try {
-            const vector = await VisionRecognitionService.embedPhoto(photoPath);
-            const live = useCatalogStore.getState().embeddingsIndex;
-            if (live == null || live.ids.length === 0) {
-              return;
-            }
-            const best = findTopMatches(
-              vector,
-              live.flat,
-              live.ids,
-              live.dim,
-              1,
-            )[0];
-            const product =
-              best == null
-                ? undefined
-                : useCatalogStore
-                    .getState()
-                    .products.find(entry => entry.id === best.productId);
-            const threshold =
-              useSettingsStore.getState().settings.matchThreshold;
-            if (best == null || product == null || best.score < threshold) {
-              SelaScannerNative?.reportVisualResult('miss', '', 0);
-              return;
-            }
-            const now = Date.now();
-            const last = lastAddAt.get(product.id);
-            if (
-              auto &&
-              last != null &&
-              now - last < DEFAULT_RECOGNITION_COOLDOWN_MS
-            ) {
-              // Same product still in front of the lens — acknowledge
-              // without adding (manual shutter bypasses this).
-              SelaScannerNative?.reportVisualResult(
-                'dup',
-                product.name,
-                best.score,
-              );
-              return;
-            }
-            // v8.3 (round-12 #4): weight products can't auto-add a
-            // whole kilo — queue the weight pad; it opens the moment
-            // the scanner window closes.
-            if (isWeightProduct(product)) {
-              setPendingWeight(prev =>
-                prev.some(entry => entry.id === product.id)
-                  ? prev
-                  : [...prev, product],
-              );
-              added++;
-              lastAddAt.set(product.id, now);
-              beep();
-              SelaScannerNative?.reportVisualResult(
-                'added',
-                `${product.name} — حدّد الوزن بعد الإغلاق`,
-                best.score,
-              );
-              return;
-            }
-            const result = addProduct(
-              product,
-              useCartStore.getState().pricingMode,
-              null,
-            );
-            if (result.added) {
-              added++;
-              lastAddAt.set(product.id, now);
-              beep();
-              SelaScannerNative?.reportVisualResult(
-                'added',
-                product.name,
-                best.score,
-              );
-            } else {
-              SelaScannerNative?.reportVisualResult('miss', '', 0);
-              if (result.reason != null && !addErrors.includes(result.reason)) {
-                addErrors.push(result.reason);
-              }
-            }
-          } catch {
-            SelaScannerNative?.reportVisualResult('miss', '', 0);
-          } finally {
-            processing = false;
+        const result = addProduct(
+          best.product,
+          useCartStore.getState().pricingMode,
+          null,
+        );
+        if (result.added) {
+          beep();
+          toast(`أُضيف للسلة: ${best.product.name}`, 'success');
+          // Keep the runner-ups one tap away in case the merchant
+          // spots a wrong pick.
+          if (matches.length > 1) {
+            setVisionMatches(matches.slice(1, 4));
           }
-        })();
-      });
+        } else if (result.reason) {
+          toast(result.reason, 'error');
+        }
+      } else {
+        // Below threshold → the merchant picks from the candidates.
+        setVisionMatches(matches.slice(0, 4));
+      }
     } catch (error) {
       toast(
         error instanceof Error ? error.message : 'فشل المسح البصري',
@@ -382,19 +349,28 @@ export function PosScreen() {
       );
     } finally {
       setScanBusy(false);
-      if (added > 0) {
-        toast(
-          `انتهت الجلسة — ${added} ${
-            added === 1 ? 'منتج' : 'منتجات'
-          } جاهزة في السلة`,
-          'success',
-        );
-      }
-      if (addErrors.length > 0) {
-        toast(addErrors[0], 'error');
-      }
     }
-  }, [scanBusy, addProduct, beep, toast]);
+  }, [scanBusy, addProduct, beep, toast, openWeightPad]);
+
+  /** v9: adds a candidate from the inline strip (weight products
+   *  open the pad instead). */
+  const pickVisionMatch = useCallback(
+    (product: Product) => {
+      setVisionMatches(null);
+      if (isWeightProduct(product)) {
+        beep();
+        openWeightPad(product);
+        return;
+      }
+      const result = addProduct(product, useCartStore.getState().pricingMode, null);
+      if (result.added) {
+        beep();
+      } else if (result.reason) {
+        toast(result.reason, 'error');
+      }
+    },
+    [addProduct, beep, toast, openWeightPad],
+  );
 
   /**
    * Barcode read → exact product lookup → cart or create prompt.
@@ -749,10 +725,62 @@ export function PosScreen() {
               <Text style={styles.scanButtonText}>{scannerLabel}</Text>
             </TouchableOpacity>
             <View style={{flex: 1}}>
-              <SearchInput value={search} onChange={setSearch} />
+              <SearchInput
+                value={search}
+                onChange={setSearch}
+                onFocus={() => {
+                  setSearchFocused(true);
+                  // v9: searching from inside the expanded cart folds
+                  // it back — results must be visible for search to
+                  // mean anything.
+                  setCartExpanded(false);
+                }}
+                onBlur={() => setSearchFocused(false)}
+              />
             </View>
           </View>
         </View>
+
+        {/* ── v9 (round-13 #1): visual-scan candidate strip ─────
+            INLINE (never a Modal — this ROM blacks RN Modals after
+            the native scanner closes). Confident picks already added
+            the product; the runner-ups stay one tap away. */}
+        {visionMatches != null && visionMatches.length > 0 ? (
+          <View style={styles.visionStrip}>
+            <View style={styles.visionStripHeader}>
+              <Icon name="scan" size={13} color={c.accent} />
+              <Text style={styles.visionStripTitle} numberOfLines={1}>
+                مرشحون من آخر مسحة — اضغط لإضافة
+              </Text>
+              <TouchableOpacity
+                onPress={() => setVisionMatches(null)}
+                hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                <Icon name="x" size={14} color={c.textDim} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.visionStripRow}>
+              {visionMatches.map(match => (
+                <TouchableOpacity
+                  key={`${match.product.id}-${match.score}`}
+                  style={styles.visionChip}
+                  onPress={() => pickVisionMatch(match.product)}
+                  activeOpacity={0.8}>
+                  <Text style={styles.visionChipName} numberOfLines={1}>
+                    {match.product.name}
+                  </Text>
+                  <Text style={styles.visionChipMeta} numberOfLines={1}>
+                    {formatMoney(priceOf(match.product))}
+                    {isWeightProduct(match.product) ? '/كغ' : ''} ·{' '}
+                    {Math.round(match.score * 100)}%
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        ) : null}
 
         {/* ── Products grid (hidden while the cart is expanded —
             round-11 #3: the expanded cart IS the workspace) ── */}
@@ -850,7 +878,30 @@ export function PosScreen() {
             </ScrollView>
           ))}
 
-        {/* ── Cart panel ───────────────────────────────────── */}
+        {/* ── Cart panel ─────────────────────────────────────
+            v9 (round-13 #3): while the search box holds keyboard
+            focus the cart folds to a ONE-LINE summary strip (or
+            vanishes when empty) — with adjustResize + a 50% cart
+            the products used to get squeezed to nothing behind the
+            keyboard, making search useless. Tapping the strip
+            dismisses the keyboard and the full cart returns. */}
+        {searchFocused && !cartExpanded ? (
+          lines.length === 0 ? null : (
+            <TouchableOpacity
+              style={styles.cartPeekRow}
+              activeOpacity={0.8}
+              onPress={() => {
+                Keyboard.dismiss();
+              }}>
+              <Icon name="cart" size={15} color={c.accent} />
+              <Text style={styles.cartPeekText} numberOfLines={1}>
+                السلة: {formatQty(totals.itemsCount, 2)} وحدة ·{' '}
+                {formatMoney(totals.total)}
+              </Text>
+              <Text style={styles.cartPeekHint}>إظهار السلة</Text>
+            </TouchableOpacity>
+          )
+        ) : (
         <View
           style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
           {lines.length === 0 ? (
@@ -1061,29 +1112,33 @@ export function PosScreen() {
             </>
           )}
         </View>
+        )}
       </View>
 
-      {/* ── v8 engine picker (only in "both" mode) ───────────
-          The camera itself now runs in a NATIVE full-screen
-          activity — it always fills the screen correctly and can
-          never show a black frame or overlap POS chrome. This tiny
-          sheet just picks WHICH independent engine to launch. */}
-      <Modal
-        visible={enginePickerOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setEnginePickerOpen(false)}>
-        <TouchableOpacity
-          style={styles.engineSheetOverlay}
-          activeOpacity={1}
-          onPress={() => setEnginePickerOpen(false)}>
+      {/* ── v9 engine picker (only in "both" mode) ───────────
+          The camera itself runs in a NATIVE full-screen activity.
+          v9 (round-13): this sheet is an INLINE overlay, NOT a Modal —
+          this ROM renders RN Modals black/broken around native
+          activity transitions, and the scan button must never risk
+          that again. The engine launch is also delayed one frame
+          after the sheet folds so the native window NEVER opens
+          mid-animation. */}
+      {enginePickerOpen ? (
+        <View style={styles.inlineOverlay}>
+          <TouchableOpacity
+            style={styles.inlineOverlayDim}
+            activeOpacity={1}
+            onPress={() => setEnginePickerOpen(false)}
+          />
           <View style={styles.engineSheet}>
             <Text style={styles.engineSheetTitle}>اختر طريقة المسح</Text>
             <TouchableOpacity
               style={styles.engineRow}
               onPress={() => {
                 setEnginePickerOpen(false);
-                void runBarcodeScan();
+                setTimeout(() => {
+                  void runBarcodeScan();
+                }, 140);
               }}
               activeOpacity={0.8}>
               <View style={styles.engineIconWrap}>
@@ -1101,7 +1156,9 @@ export function PosScreen() {
               style={styles.engineRow}
               onPress={() => {
                 setEnginePickerOpen(false);
-                void runVisionScan();
+                setTimeout(() => {
+                  void runVisionScan();
+                }, 140);
               }}
               activeOpacity={0.8}>
               <View style={styles.engineIconWrap}>
@@ -1110,14 +1167,14 @@ export function PosScreen() {
               <View style={{flex: 1}}>
                 <Text style={styles.engineRowTitle}>المسح البصري</Text>
                 <Text style={styles.engineRowMeta}>
-                  جلسة متواصلة — يُضاف المنتج للسلة تلقائياً عند التعرف عليه
+                  صورة واحدة لكل منتج — المطابق يُضاف للسلة تلقائياً
                 </Text>
               </View>
               <Icon name="chevronLeft" size={18} color={c.textFaint} />
             </TouchableOpacity>
           </View>
-        </TouchableOpacity>
-      </Modal>
+        </View>
+      ) : null}
 
       {/* ── Unit picker sheet ──────────────────────────────── */}
       <Modal
@@ -1263,15 +1320,15 @@ function WeightSheet({
   };
 
   return (
-    <Modal
-      visible
-      transparent
-      animationType="slide"
-      onRequestClose={onClose}>
-      <View style={styles.unitModalOverlay}>
-        <TouchableOpacity style={{flex: 1}} activeOpacity={1} onPress={onClose} />
-        <KeyboardAvoidingView behavior="padding" style={{width: '100%'}}>
-          <View style={styles.unitModalSheet}>
+    // v9 (round-13): INLINE absolute overlay — NOT a Modal. The
+    // weight pad opens right after a scan (recognized weight
+    // product), and this ROM renders RN Modals black after native
+    // activity transitions. An in-tree overlay is structurally
+    // immune to that bug.
+    <View style={styles.inlineOverlay}>
+      <TouchableOpacity style={styles.inlineOverlayDim} activeOpacity={1} onPress={onClose} />
+      <KeyboardAvoidingView behavior="padding" style={{width: '100%'}}>
+        <View style={styles.unitModalSheet}>
             <View style={styles.unitModalHandle} />
             <View style={styles.weightHeaderRow}>
               <View style={{flex: 1}}>
@@ -1374,8 +1431,7 @@ function WeightSheet({
             </View>
           </View>
         </KeyboardAvoidingView>
-      </View>
-    </Modal>
+    </View>
   );
 }
 
@@ -1418,9 +1474,13 @@ function UnitOption({
 function SearchInput({
   value,
   onChange,
+  onFocus,
+  onBlur,
 }: {
   value: string;
   onChange: (text: string) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }) {
   const c = useThemeColors();
   const styles = useStyles();
@@ -1431,6 +1491,8 @@ function SearchInput({
         style={styles.searchInput}
         value={value}
         onChangeText={onChange}
+        onFocus={onFocus}
+        onBlur={onBlur}
         placeholder="ابحث عن منتج أو باركود…"
         placeholderTextColor={c.textFaint}
         textAlign="right"
@@ -1494,12 +1556,25 @@ const useStyles = makeStyles(c =>
     },
 
     // Full-screen scanner overlay (v7 — three-zone layout)
-    // v8 engine picker sheet
-    engineSheetOverlay: {
+    // v9 (round-13): INLINE overlay — the Modal-free replacement for
+    // every scan-adjacent sheet (engine picker + weight pad). This
+    // ROM renders RN Modals black right after the native scanner
+    // window closes; an in-tree absolute overlay cannot do that.
+    inlineOverlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      justifyContent: 'flex-end',
+      zIndex: 40,
+      elevation: 40,
+    },
+    inlineOverlayDim: {
       flex: 1,
       backgroundColor: c.overlay,
-      justifyContent: 'flex-end',
     },
+    // v9 engine picker sheet (rendered inside inlineOverlay)
     engineSheet: {
       backgroundColor: c.surface,
       borderTopLeftRadius: radius.lg + 4,
@@ -1682,6 +1757,78 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.small,
       lineHeight: 18,
+    },
+    /** v9 (round-13 #3): the one-line cart summary shown while the
+     *  search box holds keyboard focus — tap it to drop the keyboard
+     *  and bring the full cart back. */
+    cartPeekRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.sm + 1,
+    },
+    cartPeekText: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    cartPeekHint: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+    },
+    /** v9 (round-13 #1): the INLINE visual-scan candidate strip. */
+    visionStrip: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: spacing.xs + 1,
+      gap: spacing.xs,
+    },
+    visionStripHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    visionStripTitle: {
+      flex: 1,
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 0.5,
+    },
+    visionStripRow: {
+      gap: spacing.sm,
+      paddingVertical: 2,
+    },
+    visionChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs + 1,
+      minWidth: 96,
+    },
+    visionChipName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    visionChipMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 0.5,
+      marginTop: 1,
+      fontVariant: ['tabular-nums'],
     },
     cartLinesWrap: {
       // v8.2: minHeight = TWO full cart rows (~2 × 42dp) — the

@@ -471,7 +471,13 @@ export function MoneyText({
         big ? styles.moneyBig : styles.money,
         color != null ? {color} : big ? {color: c.accent} : null,
       ]}
-      numberOfLines={1}>
+      numberOfLines={1}
+      /* v9 (round-13 #2): a long total (e.g. 1,234.50 ₪) used to
+         overflow the cart panel at display size — the big variant
+         now shrinks to fit its line instead of breaking layout. */
+      adjustsFontSizeToFit={big}
+      minimumFontScale={big ? 0.6 : undefined}
+      maxFontSizeMultiplier={big ? 1 : undefined}>
       {formatMoney(value)}
     </Text>
   );
@@ -612,7 +618,11 @@ const useDataStyles = makeStyles(c =>
     moneyBig: {
       color: c.accent,
       fontFamily: fonts.black,
-      fontSize: typography.display,
+      // v9 (round-13 #2): display 34 → 23 — the POS total used to
+      // exceed the cart panel's width on long amounts; 23 + the
+      // shrink-to-fit in MoneyText keeps it inside the frame at
+      // any amount length while staying the dominant number.
+      fontSize: 23,
       fontVariant: ['tabular-nums'],
     },
     statCard: {

@@ -1,5 +1,5 @@
 /**
- * scanFlow — v8 unified entry points for the NATIVE scanner engines.
+ * scanFlow — v8/v9 unified entry points for the NATIVE scanner engines.
  * ─────────────────────────────────────────────────────────────────
  * The camera now lives in ScannerActivity (its own native window).
  * These helpers wrap the promise API with the app's error contract:
@@ -11,15 +11,15 @@
  * auto-closes — each deduped read is delivered live to `onCode`, and
  * the promise resolves (null) when the merchant closes the scanner.
  *
- * v8.2 (round-11):
- *  • ensureCameraPermission() — the app now ASKS for the camera at
- *    runtime BEFORE the native window opens (round-11 #1: nothing
- *    ever requested it, so first launch died with "إذن الكاميرا
- *    غير ممنوح"). The native activity re-asks as a safety net.
- *  • scanVisualContinuous() — the visual engine's multi-scan session:
- *    the native window AUTO-captures (no shutter press per product),
- *    every photo streams to `onPhoto`, and recognized products jump
- *    into the cart by themselves (round-11 #2).
+ * v9 (round-13): scanVisualContinuous() is REMOVED. The v8.2–v8.3
+ * continuous VISUAL machinery (auto-capture loop + photo streaming
+ * + in-window feedback) is exactly what hard-crashed the merchant's
+ * device on every scanner open — while v8.1.0, the same native
+ * activity WITHOUT it, worked perfectly. The visual flow is once
+ * again ONE deliberate photo per window (capturePhoto), and the JS
+ * side re-opens the window for the next product. The runtime camera
+ * permission helpers added in v8.2 are KEPT (the dialog appeared and
+ * granted correctly on the device).
  */
 import {
   DeviceEventEmitter,
@@ -31,8 +31,6 @@ import {SelaScannerNative} from '../../native/nativeBridge';
 
 /** Native event streamed for every read during a continuous session. */
 const BARCODE_READ_EVENT = 'selaScanBarcode';
-/** Native event streamed for every photo in a continuous VISUAL session. */
-const VISUAL_PHOTO_EVENT = 'selaScanVisual';
 
 export type CameraPermissionResult = 'granted' | 'denied' | 'never_ask_again';
 
@@ -137,7 +135,10 @@ export async function scanBarcodeContinuous(
   }
 }
 
-/** Opens the native PHOTO engine (single shot) → image path, or null. */
+/** Opens the native PHOTO engine (single shot) → image path, or null.
+ *  v9: THE visual-scan primitive — one deliberate photo per window,
+ *  exactly the v8.1.0 contract the merchant's device ran crash-free.
+ *  The caller re-opens it for the next product. */
 export async function capturePhoto(): Promise<string | null> {
   if (SelaScannerNative == null) {
     throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
@@ -148,36 +149,4 @@ export async function capturePhoto(): Promise<string | null> {
     return null;
   }
   return result.path;
-}
-
-/**
- * v8.2 continuous VISUAL multi-scan session (photo engine). The
- * native window auto-captures on a calm cadence — no shutter press
- * per product — and every photo fires `onPhoto(path, auto)` live;
- * resolves when the merchant closes the scanner. Recognition and
- * cart-adding happen in the `onPhoto` handler; the outcome is
- * reported back via SelaScannerNative.reportVisualResult so the
- * scanner window itself celebrates each add.
- */
-export async function scanVisualContinuous(
-  onPhoto: (path: string, auto: boolean) => void,
-): Promise<void> {
-  if (SelaScannerNative == null) {
-    throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
-  }
-  await requireCameraPermission();
-  const listener: EmitterSubscription = DeviceEventEmitter.addListener(
-    VISUAL_PHOTO_EVENT,
-    event => {
-      const path = event?.path;
-      if (typeof path === 'string' && path.length > 0) {
-        onPhoto(path, event?.auto !== false);
-      }
-    },
-  );
-  try {
-    await SelaScannerNative.openScannerVisualContinuous();
-  } finally {
-    listener.remove();
-  }
 }
