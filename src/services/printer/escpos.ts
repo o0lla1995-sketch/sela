@@ -67,6 +67,21 @@ export class ReceiptBuilder {
     return this;
   }
 
+  /**
+   * v9.1 (round-14 #6): native ESC/POS barcode (GS k function B) —
+   * used for product LABEL printing. EAN13 takes 12 digits (the
+   * printer computes + prints the check digit); CODE128 takes any
+   * ASCII payload. Height is in dots (24–162, typical label 72).
+   */
+  barcode(
+    system: 'EAN13' | 'CODE128',
+    value: string,
+    heightDots = 72,
+  ): this {
+    this.ops.push({op: 'barcode', system, value, height: heightDots});
+    return this;
+  }
+
   /** A dashed separator across the paper width. */
   separator(width: number, char = '-'): this {
     return this.textLine(char.repeat(Math.max(8, width)));

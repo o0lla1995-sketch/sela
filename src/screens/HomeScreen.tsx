@@ -45,12 +45,13 @@ const QUICK_ACTIONS: {
   key: string;
   label: string;
   icon: IconName;
-  target: 'Pos' | 'ProductForm' | 'PrinterSettings' | 'Reports' | 'Stocktake';
+  target: 'Pos' | 'ProductForm' | 'PrinterSettings' | 'Reports' | 'Stocktake' | 'Invoices';
   accent?: boolean;
 }[] = [
   {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
   {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
   {key: 'stocktake', label: 'الجرد', icon: 'clipboard', target: 'Stocktake'},
+  {key: 'invoices', label: 'الفواتير', icon: 'inbox', target: 'Invoices'},
   {key: 'reports', label: 'التقارير', icon: 'chart', target: 'Reports'},
 ];
 
@@ -274,7 +275,16 @@ export function HomeScreen() {
         </View>
 
         {/* ── Recent invoices ────────────────────────────────── */}
-        <SectionTitle title="آخر الفواتير" />
+        <SectionTitle
+          title="آخر الفواتير"
+          hint="اضغط أي فاتورة لمراجعتها بالتفصيل"
+          action={
+            <TouchableOpacity
+              onPress={() => navigation.navigate('Invoices' as never)}>
+              <Text style={styles.allInvoicesLink}>كل الفواتير</Text>
+            </TouchableOpacity>
+          }
+        />
         {recentSales.length === 0 ? (
           <Card>
             <EmptyState
@@ -294,8 +304,12 @@ export function HomeScreen() {
         ) : (
           <Card style={{padding: 0, overflow: 'hidden'}}>
             {recentSales.map((sale, index) => (
-              <View
+              <TouchableOpacity
                 key={sale.id}
+                activeOpacity={0.8}
+                onPress={() =>
+                  navigation.navigate('InvoiceDetail', {saleId: sale.id})
+                }
                 style={[
                   styles.saleRow,
                   index < recentSales.length - 1 ? styles.saleRowBorder : null,
@@ -312,7 +326,7 @@ export function HomeScreen() {
                 <Text style={styles.saleAmount}>
                   {formatMoney(sale.total_amount)}
                 </Text>
-              </View>
+              </TouchableOpacity>
             ))}
           </Card>
         )}
@@ -353,6 +367,11 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.small,
       marginTop: 2,
+    },
+    allInvoicesLink: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
     versionBadge: {
       flexDirection: 'row',

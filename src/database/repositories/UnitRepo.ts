@@ -63,6 +63,38 @@ export const UnitRepo = {
     return result.insertId ?? -1;
   },
 
+  /**
+   * v9.1 (round-14 #4): find a unit by exact name or create it —
+   * used by the one-tap weight-package chips (وقية / نصف كغ…) so a
+   * merchant never has to leave the product form to add a package
+   * unit that doesn't exist yet.
+   */
+  async getOrCreate(name: string, short?: string): Promise<number> {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new Error('اسم الوحدة مطلوب');
+    }
+    const existing = await getDb().execute(
+      'SELECT id FROM units WHERE name = ? COLLATE NOCASE',
+      [trimmed],
+    );
+    const hit = existing.rows?._array?.[0] as {id?: number} | undefined;
+    if (hit?.id != null) {
+      return hit.id;
+    }
+    const orderResult = await getDb().execute(
+      'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM units',
+    );
+    const next = Number(
+      (orderResult.rows?._array?.[0] as {next?: number})?.next ?? 1,
+    );
+    const result = await getDb().execute(
+      'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
+      [trimmed, (short ?? trimmed).trim() || trimmed, next],
+    );
+    return result.insertId ?? -1;
+  },
+
   async rename(id: number, name: string, short: string): Promise<void> {
     const trimmed = name.trim();
     if (!trimmed) {
@@ -126,7 +158,12 @@ export const UnitRepo = {
       : null;
   },
 
-  /** Replaces the unit rows of a product inside an open transaction body. */
+  /** Replaces the unit rows of a product inside an open transaction body.
+   *  v9.1 (round-14 #4): conversions are FRACTIONAL-ALLOWING — a
+   *  weight sub-unit like وقية = 0.25 (كغ) is the whole point. The
+   *  old Math.max(1, …) clamp silently rewrote 0.25 → 1, which made
+   *  every weight package deduct a FULL kilo — this was the
+   *  "weight units are unsuitable" bug. */
   async replaceForProduct(
     productId: number,
     rows: {
@@ -142,10 +179,11 @@ export const UnitRepo = {
       productId,
     ]);
     for (const row of rows) {
-      const conversion = Math.max(1, Number(row.conversion) || 1);
-      if (conversion < 0.001) {
+      const conversion = Number(row.conversion);
+      if (!Number.isFinite(conversion) || conversion <= 0) {
         throw new Error('معامل التحويل غير صالح');
       }
+      const rounded = Math.round(conversion * 1000) / 1000;
       await db.execute(
         `INSERT OR REPLACE INTO product_units
           (product_id, unit_id, conversion, barcode, retail_price, wholesale_price)
@@ -153,7 +191,7 @@ export const UnitRepo = {
         [
           productId,
           row.unit_id,
-          conversion,
+          rounded,
           row.barcode?.trim() ? row.barcode.trim() : null,
           row.retail_price != null && row.retail_price > 0
             ? row.retail_price

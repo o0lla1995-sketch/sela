@@ -158,6 +158,46 @@ export const SaleRepo = {
     return rows.map(rowToItem);
   },
 
+  /** v9.1 (round-14 #5): a paged invoice with its line count — the
+   *  Invoices screen loads page after page as the merchant scrolls
+   *  back through history. */
+  async listPagePaged(
+    options: {limit: number; offset: number; search?: string},
+  ): Promise<(SaleRecord & {itemsCount: number})[]> {
+    const search = options.search?.trim() ?? '';
+    const rowsResult = search
+      ? await getDb().execute(
+          `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS items_count
+           FROM sales s
+           WHERE s.invoice_number LIKE ?
+           ORDER BY s.id DESC
+           LIMIT ? OFFSET ?`,
+          [`%${search}%`, options.limit, options.offset],
+        )
+      : await getDb().execute(
+          `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS items_count
+           FROM sales s
+           ORDER BY s.id DESC
+           LIMIT ? OFFSET ?`,
+          [options.limit, options.offset],
+        );
+    const rows = rowsResult.rows?._array ?? [];
+    return rows.map(row => ({
+      ...rowToSale(row),
+      itemsCount: Number(row.items_count ?? 0),
+    }));
+  },
+
+  /** v9.1: one invoice by id (the detail screen). */
+  async getById(saleId: number): Promise<SaleRecord | null> {
+    const result = await getDb().execute(
+      'SELECT * FROM sales WHERE id = ?',
+      [saleId],
+    );
+    const row = result.rows?._array?.[0];
+    return row ? rowToSale(row) : null;
+  },
+
   async countAll(): Promise<number> {
     const result = await getDb().execute('SELECT COUNT(*) AS cnt FROM sales');
     const row = result.rows?._array?.[0] as {cnt?: number} | undefined;

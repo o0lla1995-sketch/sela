@@ -16,9 +16,12 @@ export interface EscPosOp {
     | 'feed'
     | 'cut'
     | 'rawBase64'
-    | 'image';
+    | 'image'
+    | 'barcode';
   /** Text payload for op:'text' / op:'rawBase64'. */
   value?: string;
+  /** Barcode system for op:'barcode' (v9.1 label printing). */
+  system?: 'EAN13' | 'CODE128';
   /** Image file path for op:'image'. */
   path?: string;
   /** Max raster width in dots for op:'image' (58mm=384, 80mm=576). */
@@ -31,7 +34,8 @@ export interface EscPosOp {
   align?: number;
   /** Bold flag for op:'bold'. */
   on?: boolean;
-  /** Double-size flags for op:'size'. */
+  /** Double-size flags for op:'size'; barcode height in dots for
+   *  op:'barcode' (v9.1). */
   width?: number;
   height?: number;
   /** Feed line count for op:'feed'. */
@@ -116,6 +120,20 @@ interface SelaScannerNativeModule {
     code?: string;
     path?: string;
   }>;
+  /** v9.1 (round-14 #2): opens the continuous multi-shot VISUAL
+   *  session — every deliberate shutter press streams a "selaScanPhoto"
+   *  event with the saved photo path; resolves {cancelled:true} when
+   *  the merchant closes the scanner. */
+  openScannerPhotoMulti(): Promise<{
+    cancelled?: boolean;
+    code?: string;
+    path?: string;
+  }>;
+  /** v9.1 (round-14 #1): streams the JS-confirmed outcome of a read
+   *  back into the live scanner window — ok=true shows the green
+   *  "✓ added" banner + bumps the CONFIRMED counter; ok=false shows
+   *  the red informational banner (غير مسجل / لم يتم التعرف). */
+  notifyScanResult(ok: boolean, message: string): Promise<boolean>;
   /** Headless camera self-test → every step's outcome. */
   runDiagnostics(): Promise<{
     permissionGranted: boolean;
@@ -133,6 +151,16 @@ interface SelaScannerNativeModule {
 interface ImageDecoderNative {
   /** Photo → base64 RGB bytes (center-cropped square, size×size). */
   decodeRgb(path: string, size: number): Promise<string>;
+  /** v9.1 (round-14 #2): ensemble decode — zoom (deeper center crop,
+   *  (0,1]), fit (whole frame scaled to the square) and flip
+   *  (horizontal mirror, enrollment augmentation). */
+  decodeRgbEx(
+    path: string,
+    size: number,
+    zoom: number,
+    fit: boolean,
+    flip: boolean,
+  ): Promise<string>;
   /** Downscaled JPEG copy for thumbnails → new absolute path. */
   saveScaled(path: string, maxDim: number, quality: number): Promise<string>;
 }

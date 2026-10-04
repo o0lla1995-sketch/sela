@@ -5,7 +5,7 @@
  */
 import React, {useCallback, useState} from 'react';
 import {Dimensions, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useFocusEffect} from '@react-navigation/native';
+import {useFocusEffect, useNavigation} from '@react-navigation/native';
 import {
   AppButton,
   AppHeader,
@@ -43,6 +43,7 @@ const RANGE_OPTIONS: {value: ReportRangeKey; label: string}[] = [
 export function ReportsScreen() {
   const c = useThemeColors();
   const styles = useStyles();
+  const navigation = useNavigation<any>();
   const toast = useToastStore(state => state.show);
   const [rangeKey, setRangeKey] = useState<ReportRangeKey>('last7');
   const [bundle, setBundle] = useState<ReportBundle | null>(null);
@@ -113,6 +114,14 @@ export function ReportsScreen() {
         title="التقارير والمحاسبة"
         subtitle="المبيعات والتكاليف والأرباح"
         showBack={false}
+        right={
+          <AppButton
+            small
+            title="الفواتير"
+            icon="inbox"
+            onPress={() => navigation.navigate('Invoices' as never)}
+          />
+        }
       />
 
       <ScrollView

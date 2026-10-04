@@ -483,6 +483,8 @@ class ThermalPrinterModule(private val reactContext: ReactApplicationContext) :
    *   { op: "feed", lines: 3 }
    *   { op: "cut" }
    *   { op: "rawBase64", value: "..." }      // escape hatch for raw bytes
+   *   { op: "barcode", value: "...", system: "EAN13"|"CODE128", height: 72 }
+   *                                             // v9.1 label barcodes (GS k)
    */
   @ReactMethod
   fun printJob(commands: ReadableArray, promise: Promise) {
@@ -560,26 +562,6 @@ class ThermalPrinterModule(private val reactContext: ReactApplicationContext) :
             }
             "image" -> {
               // Raster image (store logo) — GS v 0 with Floyd-Steinberg
-              // dithering to 1-bit. Widths: 58mm = 384 dots, 80mm = 576.
-              val path = if (command.hasKey("path")) command.getString("path") ?: "" else ""
-              val maxWidth = if (command.hasKey("maxWidth")) command.getInt("maxWidth") else 384
-              val center = !command.hasKey("center") || command.getBoolean("center")
-              if (path.isNotEmpty()) {
-                val raster = buildRaster(path, maxWidth.coerceIn(64, 576))
-                if (raster != null) {
-                  if (center && raster.second < maxWidth) {
-                    // ESC $ relative print position (byte-aligned), then GS v 0.
-                    val byteOffset = ((maxWidth - raster.second) / 2 / 8) * 8
-                    buffer.write(byteArrayOf(0x1B, 0x24, (byteOffset and 0xFF).toByte(), ((byteOffset shr 8) and 0xFF).toByte()))
-                  }
-                  buffer.write(raster.first)
-                  // Reset relative position for the text that follows.
-                  buffer.write(byteArrayOf(0x1B, 0x24, 0x00, 0x00))
-                }
-              }
-            }
-            "image" -> {
-              // Raster image (store logo) — GS v 0 with Floyd-Steinberg
               // dithering to 1-bit. Widths: 58mm → 384 dots, 80mm → 576.
               val path = if (command.hasKey("path")) command.getString("path") ?: "" else ""
               val maxWidth = if (command.hasKey("maxWidth")) command.getInt("maxWidth") else 384
@@ -598,24 +580,38 @@ class ThermalPrinterModule(private val reactContext: ReactApplicationContext) :
                 }
               }
             }
-            "image" -> {
-              // Raster image (store logo) — GS v 0 with Floyd-Steinberg
-              // dithering to 1-bit. Widths: 58mm → 384 dots, 80mm → 576.
-              val path = if (command.hasKey("path")) command.getString("path") ?: "" else ""
-              val maxWidth = if (command.hasKey("maxWidth")) command.getInt("maxWidth") else 384
-              val center = !command.hasKey("center") || command.getBoolean("center")
-              if (path.isNotEmpty()) {
-                val raster = buildRaster(path, maxWidth.coerceIn(64, 576))
-                if (raster != null) {
-                  if (center && raster.second < maxWidth) {
-                    // Feed + ESC $ set relative position, then GS v 0.
-                    val offsetDots = (maxWidth - raster.second) / 2
-                    val byteOffset = offsetDots / 8 * 8 // whole-byte alignment
-                    buffer.write(byteArrayOf(0x1B, 0x24, (byteOffset and 0xFF).toByte(), ((byteOffset shr 8) and 0xFF).toByte()))
+            "barcode" -> {
+              // v9.1 (round-14 #6): native ESC/POS barcode for label
+              // printing — GS k FUNCTION B (length-prefixed, modern).
+              //   EAN13   -> m = 67, data = first 12 digits (the
+              //              printer firmware computes + prints the
+              //              check digit itself),
+              //   CODE128 -> m = 73, data = ASCII (code set B).
+              val value = if (command.hasKey("value")) command.getString("value") ?: "" else ""
+              val system = if (command.hasKey("system")) command.getString("system") ?: "CODE128" else "CODE128"
+              val height = if (command.hasKey("height")) command.getInt("height").coerceIn(24, 162) else 72
+              if (value.isNotEmpty()) {
+                val (m, data) = if (system == "EAN13") {
+                  val digits = value.filter { it.isDigit() }
+                  if (digits.length >= 12) {
+                    67 to (if (digits.length >= 13) digits.substring(0, 12) else digits)
+                  } else {
+                    0 to ""
                   }
-                  buffer.write(raster.first)
-                  // Reset alignment for the text that follows.
-                  buffer.write(byteArrayOf(0x1B, 0x24, 0x00, 0x00))
+                } else {
+                  val ascii = String(value.toByteArray(Charsets.US_ASCII), Charsets.US_ASCII)
+                    .filter { it.code in 32..126 }
+                  73 to ascii
+                }
+                if (m != 0 && data.isNotEmpty()) {
+                  val bytes = data.toByteArray(Charsets.US_ASCII)
+                  // GS h n — barcode height in dots.
+                  buffer.write(byteArrayOf(0x1D, 0x68, height.toByte()))
+                  // GS k m n d1..dn — function B barcode.
+                  buffer.write(byteArrayOf(0x1D, 0x6B, m.toByte(), bytes.size.toByte()))
+                  buffer.write(bytes)
+                  // Barcodes print on the following line feed.
+                  buffer.write(byteArrayOf(0x0A))
                 }
               }
             }

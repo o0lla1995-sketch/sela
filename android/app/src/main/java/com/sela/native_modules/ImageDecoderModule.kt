@@ -22,6 +22,13 @@ import kotlin.math.min
  *
  *  decodeRgb(path, size)  -> base64 of size*size*3 RGB bytes
  *                            (center-cropped to a square, downscaled)
+ *  decodeRgbEx(path, size, zoom, fit, flip) -> same, with the
+ *                            v9.1 ensemble controls (round-14 #2):
+ *                            zoom (0,1] = center square of
+ *                            min(w,h)*zoom — a deeper crop; fit =
+ *                            scale the WHOLE frame to the square
+ *                            (packaging context); flip = horizontal
+ *                            mirror (enrollment augmentation).
  *  saveScaled(path, maxDim, quality) -> writes a downscaled JPEG copy
  *                            (used for catalogue thumbnails) and
  *                            returns its absolute path.
@@ -36,9 +43,42 @@ class ImageDecoderModule(reactContext: ReactApplicationContext) :
 
   override fun getName(): String = "ImageDecoder"
 
-  // ── decodeRgb ────────────────────────────────────────────────
+  // -- decodeRgb (public API) ------------------------------------
   @ReactMethod
   fun decodeRgb(path: String, size: Int, promise: Promise) {
+    decodeRgbInternal(path, size, 1f, false, false, promise)
+  }
+
+  /**
+   * v9.1 (round-14 #2): ensemble decode — zoom (a deeper center
+   * crop), whole-frame fit (packaging context) and horizontal
+   * mirror (enrollment augmentation) on the SAME proven pipeline.
+   */
+  @ReactMethod
+  fun decodeRgbEx(
+    path: String,
+    size: Int,
+    zoom: Double,
+    fit: Boolean,
+    flip: Boolean,
+    promise: Promise
+  ) {
+    val z = when {
+      fit -> 1f
+      zoom <= 0.0 || zoom > 1.0 -> 1f
+      else -> zoom.toFloat()
+    }
+    decodeRgbInternal(path, size, z, fit, flip, promise)
+  }
+
+  private fun decodeRgbInternal(
+    path: String,
+    size: Int,
+    zoom: Float,
+    fit: Boolean,
+    flip: Boolean,
+    promise: Promise
+  ) {
     if (size <= 0 || size > 512) {
       promise.reject("E_ARGS", "حجم فك الترميز غير صالح", null)
       return
@@ -74,21 +114,37 @@ class ImageDecoderModule(reactContext: ReactApplicationContext) :
         return
       }
 
-      // 3. Center-crop to a square, then scale to the exact model input.
+      // 3. v9.1 ensemble crop for the model input:
+      //    fit      -> the WHOLE frame scaled to size x size (context),
+      //    zoom<=1  -> center square of side = min(w,h)*zoom (a deeper
+      //                crop zooms INTO the product; 1 = classic crop).
       val w = bitmap.width
       val h = bitmap.height
-      val side = min(w, h)
-      val left = (w - side) / 2
-      val top = (h - side) / 2
-      cropped = if (side == w && side == h) {
-        bitmap
+      cropped = if (fit) {
+        Bitmap.createScaledBitmap(bitmap, size, size, true)
       } else {
-        Bitmap.createBitmap(bitmap, left, top, side, side)
+        val side = (min(w, h) * zoom).toInt().coerceIn(8, min(w, h))
+        val left = (w - side) / 2
+        val top = (h - side) / 2
+        if (side == w && side == h) {
+          bitmap
+        } else {
+          Bitmap.createBitmap(bitmap, left, top, side, side)
+        }
       }
-      scaled = if (cropped.width == size) {
+      scaled = if (cropped.width == size && cropped.height == size) {
         cropped
       } else {
         Bitmap.createScaledBitmap(cropped, size, size, true)
+      }
+
+      // 3.5 v9.1: optional horizontal mirror (enrollment
+      //     augmentation — orientation-invariant fingerprints).
+      if (flip && scaled.width == size && scaled.height == size) {
+        val matrix = android.graphics.Matrix().apply { setScale(-1f, 1f) }
+        val mirrored = Bitmap.createBitmap(scaled, 0, 0, size, size, matrix, false)
+        recycleIfNot(scaled)
+        scaled = mirrored
       }
 
       // 4. Extract RGB bytes.

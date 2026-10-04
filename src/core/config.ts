@@ -23,6 +23,22 @@ export const NORM_STD = 127.5;
  */
 export const DEFAULT_MATCH_THRESHOLD = 0.78;
 
+/** v9.1 (round-14 #2): ambiguity margin — the best product only
+ *  auto-adds when the runner-up is at least this far BEHIND it.
+ *  Two lookalike products scoring 0.84 vs 0.83 is a coin flip: the
+ *  merchant gets the candidate strip instead of a silent wrong add
+ *  (the "distinguish products by fine details" guarantee). */
+export const VISION_AMBIGUITY_MARGIN = 0.035;
+
+/** v9.1 (round-14 #6): internal EAN-13 barcodes the app generates
+ *  for products without a manufacturer code — the in-store range
+ *  (prefix 20…) is reserved by the EAN standard for store use, so
+ *  every external scanner reads them as valid EAN-13 codes. */
+export const INTERNAL_EAN13_PREFIX = '20';
+
+/** v9.1: barcode height in dots for printed product labels. */
+export const LABEL_BARCODE_HEIGHT_DOTS = 72;
+
 /** Minimum time between two auto-adds of the SAME product (ms).
  *  v8.2: 1500 → 3500 — the ambient visual auto-capture keeps seeing
  *  the same product while it sits in front of the lens; a 3.5s
@@ -132,9 +148,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '9.0.0';
+export const APP_VERSION = '9.1.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 13;
+export const APP_BUILD_CODE = 14;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

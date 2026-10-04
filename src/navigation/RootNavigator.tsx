@@ -32,6 +32,10 @@ import {ManageUnitsScreen} from '../screens/inventory/ManageUnitsScreen';
 import {PrinterSettingsScreen} from '../screens/printer/PrinterSettingsScreen';
 import {DiagnosticsScreen} from '../screens/settings/DiagnosticsScreen';
 import {NotificationsScreen} from '../screens/NotificationsScreen';
+import {
+  InvoiceDetailScreen,
+  InvoicesScreen,
+} from '../screens/invoices/InvoicesScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -42,6 +46,9 @@ export type RootStackParamList = {
   PrinterSettings: undefined;
   Diagnostics: undefined;
   Notifications: undefined;
+  /** v9.1 (round-14 #5): the invoices center + full detail view. */
+  Invoices: undefined;
+  InvoiceDetail: {saleId: number} | undefined;
 };
 
 export type MainTabParamList = {
@@ -162,6 +169,11 @@ export function RootNavigator() {
         />
         <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} />
         <Stack.Screen name="Notifications" component={NotificationsScreen} />
+        <Stack.Screen name="Invoices" component={InvoicesScreen} />
+        <Stack.Screen
+          name="InvoiceDetail"
+          component={InvoiceDetailScreen}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );

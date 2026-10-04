@@ -44,6 +44,9 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         private const val REQUEST_SCAN = 47831
         /** v8.1: event name for live barcode reads in a continuous session. */
         private const val BARCODE_READ_EVENT = "selaScanBarcode"
+        /** v9.1: event name for live photo paths in a multi-shot
+         *  VISUAL session (round-14 #2). */
+        private const val PHOTO_TAKEN_EVENT = "selaScanPhoto"
     }
 
     private var pendingPromise: Promise? = null
@@ -68,6 +71,7 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         launchScanner(
             mode,
             continuous = false,
+            multi = false,
             promise = promise
         )
     }
@@ -90,11 +94,47 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         launchScanner(
             ScannerActivity.MODE_BARCODE,
             continuous = true,
+            multi = false,
             promise = promise
         )
     }
 
-    private fun launchScanner(mode: String, continuous: Boolean, promise: Promise) {
+    /**
+     * v9.1 (round-14 #2): the CONTINUOUS multi-shot VISUAL session.
+     * The native window stays open; every deliberate shutter press
+     * saves a photo and streams its path to JS as a "selaScanPhoto"
+     * event. The promise resolves {cancelled:true} when the merchant
+     * closes the scanner — the exact shape of the barcode session.
+     *
+     * SAFETY (this device's history): every capture is a MANUAL
+     * press of the same ImageCapture pipeline the crash-free
+     * v8.1.0 single-shot used — there is NO auto-capture timer and
+     * NO photo streaming loop (the two things that hard-crashed
+     * v8.2/v8.3). Only the file PATH crosses the bridge.
+     */
+    @ReactMethod
+    fun openScannerPhotoMulti(promise: Promise) {
+        launchScanner(
+            ScannerActivity.MODE_PHOTO,
+            continuous = false,
+            multi = true,
+            promise = promise
+        )
+    }
+
+    /**
+     * v9.1 (round-14 #1): JS feedback channel for streamed reads.
+     * ok=true → the read was a REGISTERED product (name shown in
+     * the green banner + the CONFIRMED counter +1); ok=false → the
+     * red informational banner (غير مسجل / لم يتم التعرف).
+     */
+    @ReactMethod
+    fun notifyScanResult(ok: Boolean, message: String, promise: Promise) {
+        runCatching { ScannerActivity.notifyResult(ok, message) }
+        promise.resolve(true)
+    }
+
+    private fun launchScanner(mode: String, continuous: Boolean, multi: Boolean, promise: Promise) {
         val activity: Activity? = currentActivity
         if (activity == null) {
             promise.reject("E_NO_ACTIVITY", "لا توجد نافذة نشطة لفتح الماسح", null)
@@ -127,6 +167,9 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
             // Stream sink — must exist before the activity can read.
             ScannerActivity.continuousSink = { code -> emitBarcodeRead(code) }
         }
+        if (multi) {
+            ScannerActivity.photoSink = { path -> emitPhotoTaken(path) }
+        }
         try {
             val intent = Intent(activity, ScannerActivity::class.java)
                 .putExtra(
@@ -138,10 +181,14 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
                     }
                 )
                 .putExtra(ScannerActivity.EXTRA_CONTINUOUS, continuous)
+                .putExtra(ScannerActivity.EXTRA_MULTI, multi)
             activity.startActivityForResult(intent, REQUEST_SCAN)
         } catch (error: Exception) {
             if (continuous) {
                 ScannerActivity.continuousSink = null
+            }
+            if (multi) {
+                ScannerActivity.photoSink = null
             }
             pendingPromise = null
             promise.reject(
@@ -163,6 +210,16 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** v9.1: live photo-path stream → JS event. Safe from any thread. */
+    private fun emitPhotoTaken(path: String) {
+        runCatching {
+            val params = Arguments.createMap().apply { putString("path", path) }
+            reactApplicationContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit(PHOTO_TAKEN_EVENT, params)
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════
     // ActivityEventListener
     // ═══════════════════════════════════════════════════════════
@@ -181,6 +238,8 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         // v8.1: the continuous session is over — drop the stream sink
         // immediately so no stale read can leak into the next session.
         ScannerActivity.continuousSink = null
+        // v9.1: same for the multi-shot visual session.
+        ScannerActivity.photoSink = null
 
         try {
             if (resultCode == Activity.RESULT_OK) {

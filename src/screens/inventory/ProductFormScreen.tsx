@@ -33,10 +33,21 @@ import {CategoryRepo} from '../../database/repositories/CategoryRepo';
 import {EmbeddingRepo} from '../../database/repositories/EmbeddingRepo';
 import {UnitRepo} from '../../database/repositories/UnitRepo';
 import {useCatalogStore} from '../../stores/catalogStore';
+import {usePrinterStore} from '../../stores/printerStore';
+import {useSettingsStore} from '../../stores/settingsStore';
 import {useToastStore} from '../../stores/toastStore';
 import {VisionRecognitionService} from '../../services/vision/VisionRecognitionService';
 import {scanBarcode, capturePhoto} from '../../services/vision/scanFlow';
 import {PlatformUtilsNative} from '../../native/nativeBridge';
+import {BarcodeView} from '../../components/BarcodeView';
+import {
+  generateInternalEan13,
+  isValidEan13,
+} from '../../services/BarcodeService';
+import {buildLabelJob} from '../../services/printer/label';
+import {ThermalPrinterService} from '../../services/printer/ThermalPrinterService';
+import {Stepper} from '../../components/ui';
+import {formatMoney, parseNumber} from '../../core/format';
 import {
   fonts,
   makeStyles,
@@ -45,7 +56,6 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {parseNumber} from '../../core/format';
 import {
   ANGLE_LABELS,
   ANGLE_LABELS_AR,
@@ -55,9 +65,24 @@ import {
 } from '../../core/config';
 import type {AngleLabel, Category, ProductUnit, Unit} from '../../core/types';
 
+/** v9.1 (round-14 #4): one-tap weight packages for WEIGHT products —
+ *  name + the kg amount it contains (وقية = 250غ the regional
+ *  staple). Tapping a chip creates the unit (if needed) and adds a
+ *  ready-priced unit row — no manual math, no wrong كلغ deduction. */
+const WEIGHT_PACKAGE_PRESETS: {name: string; kg: number}[] = [
+  {name: 'وقية', kg: 0.25},
+  {name: 'نصف كغ', kg: 0.5},
+  {name: 'كغ', kg: 1},
+  {name: '٢ كغ', kg: 2},
+  {name: '٥ كغ', kg: 5},
+];
+
 type AngleState = {
   embedding: Float32Array | null;
   thumbnailPath: string | null;
+  /** v9.1 (round-14 #2): the mirrored twin of `embedding` — stored
+   *  as "<angle>-m" so recognition matches either orientation. */
+  mirrored?: Float32Array | null;
 };
 
 interface UnitRowDraft {
@@ -88,6 +113,11 @@ export function ProductFormScreen() {
 
   const toast = useToastStore(state => state.show);
   const refreshCatalog = useCatalogStore(state => state.refresh);
+  const printerStatus = usePrinterStore(state => state.status);
+  const settings = useSettingsStore(state => state.settings);
+  // v9.1 (round-14 #6): label printing state.
+  const [labelCopies, setLabelCopies] = useState(1);
+  const [labelBusy, setLabelBusy] = useState(false);
 
   // ── Keyboard field chain (round-8: "صعوبة الانتقال بين الحقول
   //    من خلال لوحة المفاتيح") — زر التالي يقفز مباشرة للحقل
@@ -148,6 +178,14 @@ export function ProductFormScreen() {
         if (productId != null) {
           const product = await ProductRepo.getById(productId);
           const productUnits = await UnitRepo.listForProduct(productId);
+          // v9.1 (round-14 #2): load the EXISTING fingerprints into
+          //  the form — a price edit or rename used to silently wipe
+          //  all of a product's vision fingerprints (they never
+          //  loaded, and save() deleted every angle it didn't see).
+          //  They now round-trip untouched unless re-captured.
+          const savedVectors = await EmbeddingRepo.listForProduct(
+            productId,
+          );
           if (product != null && mounted) {
             setName(product.name);
             setBarcode(product.barcode ?? '');
@@ -164,6 +202,21 @@ export function ProductFormScreen() {
             setImageUri(product.image_uri);
             setSaleMode(product.sold_by_weight === 1 ? 'weight' : 'piece');
             setUnitRows(productUnits.map(unitRowToDraft));
+            setAngles(prev => {
+              const next = {...prev};
+              for (const entry of savedVectors) {
+                const base = entry.angle.replace(/-m$/, '') as AngleLabel;
+                const isMirror = entry.angle.endsWith('-m');
+                if (base === 'front' || base === 'back' || base === 'side') {
+                  next[base] = {
+                    ...next[base],
+                    embedding: isMirror ? next[base].embedding : entry.vector,
+                    mirrored: isMirror ? entry.vector : next[base].mirrored,
+                  };
+                }
+              }
+              return next;
+            });
           }
         }
       } catch (error) {
@@ -197,7 +250,12 @@ export function ProductFormScreen() {
    *  time, on every device.
    *  v8.3 (round-12 #3): a fresh thumbnail now REPLACES a dead
    *  image path too — restored backups used to leave a stale
-   *  image_uri that blocked new photos from ever showing. */
+   *  image_uri that blocked new photos from ever showing.
+   *  v9.1 (round-14 #2): MIRROR AUGMENTATION — besides the original
+   *  photo, the horizontally-flipped copy is embedded and stored as
+   *  a "<angle>-m" fingerprint. Recognition then matches products
+   *  held in either orientation; the merchant registers once and
+   *  gets double the coverage for free. */
   const captureAngle = useCallback(
     async (angle: AngleLabel) => {
       try {
@@ -207,12 +265,20 @@ export function ProductFormScreen() {
         }
         await VisionRecognitionService.loadModel();
         const embedding = await VisionRecognitionService.embedPhoto(photoPath);
+        let mirrored: Float32Array | null = null;
+        try {
+          mirrored = await VisionRecognitionService.embedPhotoEx(photoPath, {
+            flip: true,
+          });
+        } catch {
+          // The mirror is a bonus — never block enrollment on it.
+        }
         const thumbnailPath = await VisionRecognitionService.saveThumbnail(
           photoPath,
         );
         setAngles(prev => ({
           ...prev,
-          [angle]: {embedding, thumbnailPath},
+          [angle]: {embedding, thumbnailPath, mirrored},
         }));
         // v8.3: adopt the new photo when there is no image OR the
         // current one points at a file that no longer exists (a
@@ -258,6 +324,84 @@ export function ProductFormScreen() {
     }
   }, [toast]);
 
+  /** v9.1 (round-14 #6): generates a UNIQUE internal EAN-13 in the
+   *  in-store range (prefix 20…) — the Loyverse/Square pattern for
+   *  products without a manufacturer code. Uniqueness is checked
+   *  against products AND unit barcodes before adopting it. */
+  const generateBarcode = useCallback(async () => {
+    try {
+      setLabelBusy(true);
+      const code = await generateInternalEan13(async candidate => {
+        const productHit = await ProductRepo.findByBarcode(candidate);
+        if (productHit != null) {
+          return true;
+        }
+        const unitHit = await UnitRepo.findByBarcode(candidate);
+        return unitHit != null;
+      });
+      setBarcode(code);
+      toast(`تم توليد باركود داخلي: ${code}`, 'success');
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل توليد الباركود',
+        'error',
+      );
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [toast]);
+
+  /** v9.1 (round-14 #6): prints N product labels on the thermal
+   *  printer — name + price + a scannable barcode (EAN-13 or
+   *  CODE128). Works straight from the form (even before save):
+   *  the label prints what's on screen. */
+  const printLabel = useCallback(async () => {
+    const trimmed = barcode.trim();
+    if (trimmed.length === 0) {
+      toast('لا يوجد باركود للطباعة', 'error');
+      return;
+    }
+    if (printerStatus !== 'connected') {
+      toast('لا توجد طابعة متصلة — أوصل الطابعة من إعدادات الطباعة', 'error');
+      return;
+    }
+    const labelName = name.trim() || 'منتج';
+    const retail = parseNumber(retailPrice);
+    const price = Number.isNaN(retail) ? 0 : retail;
+    setLabelBusy(true);
+    try {
+      const job = buildLabelJob(
+        {
+          productName: labelName,
+          price,
+          priceNote:
+            saleMode === 'weight' ? `سعر الكيلو ${formatMoney(price)}` : null,
+          barcode: trimmed,
+          copies: labelCopies,
+        },
+        {paperWidth: settings.paperWidth, codepage: settings.codepage},
+      );
+      await ThermalPrinterService.printJob(job);
+      toast(`تم إرسال ${labelCopies} ملصق للطابعة`, 'success');
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل طباعة الملصق',
+        'error',
+      );
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [
+    barcode,
+    printerStatus,
+    name,
+    retailPrice,
+    saleMode,
+    labelCopies,
+    settings,
+    toast,
+  ]);
+
   // ── Unit rows ─────────────────────────────────────────────────
   const addUnitRow = useCallback(() => {
     const used = new Set(unitRows.map(row => row.unit_id));
@@ -291,11 +435,75 @@ export function ProductFormScreen() {
     setUnitRows(prev => prev.filter((_, i) => i !== index));
   }, []);
 
+  /** v9.1 (round-14 #4): scan a UNIT's barcode straight from the
+   *  camera into that unit row (a pre-packaged وقية pack, a whole
+   *  كرتونة…) — the same native engine as the main field, now
+   *  exactly where the merchant needs it. */
+  const scanUnitBarcode = useCallback(
+    async (index: number) => {
+      try {
+        const code = await scanBarcode();
+        if (code != null) {
+          updateUnitRow(index, {barcode: code});
+          toast(`تم تسجيل باركود الوحدة: ${code}`, 'success');
+        }
+      } catch (error) {
+        toast(
+          error instanceof Error ? error.message : 'فشل مسح الباركود',
+          'error',
+        );
+      }
+    },
+    [toast, updateUnitRow],
+  );
+
   const unitNameById = useMemo(() => {
     const map = new Map<number, string>();
     units.forEach(unit => map.set(unit.id, unit.name));
     return map;
   }, [units]);
+
+  /** v9.1 (round-14 #4): one-tap weight package — creates the unit
+   *  (وقية، نصف كغ…) if missing and adds a ready row with its kg
+   *  amount, so every weight product gets correct fractional
+   *  conversions without manual math. */
+  const addWeightPackage = useCallback(
+    async (preset: {name: string; kg: number}) => {
+      const existing = unitRows.find(
+        row => unitNameById.get(row.unit_id) === preset.name,
+      );
+      if (existing != null) {
+        toast(`وحدة ${preset.name} مضافة بالفعل`, 'info');
+        return;
+      }
+      try {
+        const unitId = await UnitRepo.getOrCreate(preset.name, preset.name);
+        // The units list may not contain it yet — refresh + add row.
+        const unitList = await UnitRepo.list();
+        setUnits(unitList);
+        setUnitRows(prev => [
+          ...prev,
+          {
+            unit_id: unitId,
+            conversion: String(preset.kg),
+            retail: '',
+            wholesale: '',
+            barcode: '',
+          },
+        ]);
+        toast(
+          `أُضيفت وحدة ${preset.name} = ${preset.kg} ${WEIGHT_UNIT_NAME}`,
+          'success',
+        );
+      } catch (error) {
+        toast(
+          error instanceof Error ? error.message : 'فشل إضافة الوحدة',
+          'error',
+        );
+      }
+    },
+    [unitRows, unitNameById, toast],
+  );
 
   // ── Stock entry in units (international standard) ────────────
   // Stock is always STORED in base pieces, but the merchant may
@@ -484,12 +692,22 @@ export function ProductFormScreen() {
 
       await UnitRepo.replaceForProduct(targetId, cleanedUnits);
 
-      // Save the captured embeddings (replace per-angle).
+      // Save the captured embeddings. v9.1 (round-14 #2):
+      //  - only angles PRESENT in the form state are touched - an
+      //    angle with no embedding (never captured, never loaded)
+      //    keeps whatever the DB already has (edit-no-longer-wipes),
+      //  - each captured angle stores BOTH the original vector and
+      //    its mirrored twin ("<angle>-m") for orientation-proof
+      //    recognition.
       for (const angle of ANGLE_LABELS) {
         const state = angles[angle];
-        await EmbeddingRepo.deleteOne(targetId, angle);
-        if (state.embedding != null) {
-          await EmbeddingRepo.save(targetId, angle, state.embedding);
+        if (state.embedding == null) {
+          continue;
+        }
+        await EmbeddingRepo.deleteOneWithMirror(targetId, angle);
+        await EmbeddingRepo.save(targetId, angle, state.embedding);
+        if (state.mirrored != null) {
+          await EmbeddingRepo.save(targetId, `${angle}-m`, state.mirrored);
         }
       }
 
@@ -734,7 +952,58 @@ export function ProductFormScreen() {
               activeOpacity={0.8}>
               <Icon name="barcode" size={20} color={c.onAccent} />
             </TouchableOpacity>
+            {/* v9.1 (round-14 #6): توليد — an internal EAN-13 in the
+                in-store range (20…) with a valid check digit — the
+                professional way to barcode products that have no
+                manufacturer code. */}
+            <TouchableOpacity
+              style={[styles.barcodeScanBtn, {backgroundColor: c.surfaceAlt}]}
+              onPress={() => void generateBarcode()}
+              activeOpacity={0.8}>
+              <Icon name="sparkles" size={20} color={c.accent} />
+            </TouchableOpacity>
           </View>
+          {/* v9.1 (round-14 #6): barcode preview + label printing —
+              the merchant sees exactly what will print (EAN-13 for
+              valid 13-digit codes, CODE128 otherwise) and can print
+              stickers for the shelf straight from this form. */}
+          {barcode.trim().length > 0 ? (
+            <Card style={styles.labelCard}>
+              <View style={styles.labelCardHead}>
+                <View style={{flex: 1}}>
+                  <Text style={styles.labelCardTitle}>معاينة الباركود</Text>
+                  <Text style={styles.labelCardMeta}>
+                    {isValidEan13(barcode.trim())
+                      ? 'EAN-13 صالح — يقرأه أي ماسح خارجي'
+                      : 'سيُطبع بنظام CODE128'}
+                  </Text>
+                </View>
+              </View>
+              <BarcodeView value={barcode.trim()} height={70} />
+              <View style={styles.labelCopiesRow}>
+                <Text style={styles.labelCopiesLabel}>عدد الملصقات:</Text>
+                <Stepper
+                  compact
+                  value={labelCopies}
+                  onIncrement={() =>
+                    setLabelCopies(v => Math.min(20, v + 1))
+                  }
+                  onDecrement={() => setLabelCopies(v => Math.max(1, v - 1))}
+                />
+              </View>
+              <AppButton
+                title={
+                  printerStatus === 'connected'
+                    ? `طباعة ${labelCopies} ملصق`
+                    : 'طباعة الملصق (أوصل الطابعة أولاً)'
+                }
+                icon="printer"
+                small
+                onPress={() => void printLabel()}
+                loading={labelBusy}
+              />
+            </Card>
+          ) : null}
           <Field
             ref={costRef}
             label={
@@ -908,7 +1177,7 @@ export function ProductFormScreen() {
             title="وحدات البيع"
             hint={
               saleMode === 'weight'
-                ? 'مثال: وقية = 0.25 كغ — السعر يُحسب من سعر الكيلو تلقائياً'
+                ? 'وحدات وزن جاهزة — الوقية 0.25 كغ والنصف 0.5 — والسعر يُحسب من سعر الكيلو تلقائياً'
                 : 'مثال: كرتونة = 24 قطعة — تُخصم من المخزون تلقائياً وتسهّل الجملة'
             }
             action={
@@ -918,6 +1187,34 @@ export function ProductFormScreen() {
               </TouchableOpacity>
             }
           />
+          {/* v9.1 (round-14 #4): one-tap weight packages — the
+              regional staples pre-wired with their kg amounts, so a
+              weight product's units are ALWAYS suitable (the actual
+              complaint) and never deduct a wrong amount. */}
+          {saleMode === 'weight' ? (
+            <View style={styles.weightPresetRow}>
+              <Text style={styles.weightPresetLabel}>حزم جاهزة:</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.weightPresetChips}>
+                {WEIGHT_PACKAGE_PRESETS.map(preset => (
+                  <TouchableOpacity
+                    key={preset.name}
+                    style={styles.weightPresetChip}
+                    onPress={() => void addWeightPackage(preset)}
+                    activeOpacity={0.8}>
+                    <Text style={styles.weightPresetChipName}>
+                      {preset.name}
+                    </Text>
+                    <Text style={styles.weightPresetChipMeta}>
+                      {preset.kg} {WEIGHT_UNIT_NAME}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
           {unitRows.length === 0 ? (
             <View style={styles.unitsEmpty}>
               <Icon name="scale" size={20} color={c.textFaint} />
@@ -986,13 +1283,17 @@ export function ProductFormScreen() {
                           unitFieldRefs.current[`${row.unit_id}:conversion`] =
                             handle;
                         }}
-                        label={`تحتوي (${BASE_UNIT_NAME})`}
+                        label={
+                          saleMode === 'weight'
+                            ? `الوزن (${WEIGHT_UNIT_NAME})`
+                            : `تحتوي (${BASE_UNIT_NAME})`
+                        }
                         value={row.conversion}
                         onChangeText={text =>
                           updateUnitRow(index, {conversion: text})
                         }
                         keyboardType="numeric"
-                        placeholder="24"
+                        placeholder={saleMode === 'weight' ? '0.25' : '24'}
                         returnKeyType="next"
                         onSubmitEditing={() =>
                           focusUnitField(`${row.unit_id}:retail`)
@@ -1056,6 +1357,15 @@ export function ProductFormScreen() {
                         onSubmitEditing={() => Keyboard.dismiss()}
                       />
                     </View>
+                    {/* v9.1 (round-14 #4): register the unit's barcode
+                        THROUGH THE CAMERA — scan the packed carton's
+                        code straight into this row. */}
+                    <TouchableOpacity
+                      style={styles.unitScanBtn}
+                      onPress={() => void scanUnitBarcode(index)}
+                      activeOpacity={0.8}>
+                      <Icon name="barcode" size={18} color={c.onAccent} />
+                    </TouchableOpacity>
                   </View>
                   {validConversion(row.unit_id) == null ? (
                     <Text style={styles.unitInvalidText}>
@@ -1063,8 +1373,13 @@ export function ProductFormScreen() {
                     </Text>
                   ) : (
                     <Text style={styles.unitSummaryText}>
-                      بيع 1 {unitNameById.get(row.unit_id) ?? ''} يخصم{' '}
-                      {parseNumber(row.conversion)} {BASE_UNIT_NAME} من المخزون
+                      {saleMode === 'weight'
+                        ? `بيع 1 ${
+                            unitNameById.get(row.unit_id) ?? ''
+                          } = ${parseNumber(row.conversion)} ${WEIGHT_UNIT_NAME} — يخصمها من المخزون`
+                        : `بيع 1 ${
+                            unitNameById.get(row.unit_id) ?? ''
+                          } يخصم ${parseNumber(row.conversion)} ${BASE_UNIT_NAME} من المخزون`}
                     </Text>
                   )}
                 </Card>
@@ -1323,6 +1638,71 @@ const useStyles = makeStyles(c =>
       maxWidth: 150,
     },
     unitPickChipText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    // v9.1 (round-14 #4/#6): weight-package chips + unit scan button
+    // + label printing card.
+    weightPresetRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      marginTop: -spacing.xs,
+    },
+    weightPresetLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    weightPresetChips: {gap: 6, paddingVertical: 2},
+    weightPresetChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 6,
+      alignItems: 'center',
+    },
+    weightPresetChipName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    weightPresetChipMeta: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+      fontVariant: ['tabular-nums'],
+    },
+    unitScanBtn: {
+      width: 46,
+      height: 50,
+      borderRadius: radius.sm,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    labelCard: {gap: spacing.sm, padding: spacing.md},
+    labelCardHead: {flexDirection: 'row', alignItems: 'center', gap: 6},
+    labelCardTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.small,
+    },
+    labelCardMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+    },
+    labelCopiesRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    labelCopiesLabel: {
+      color: c.textDim,
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },

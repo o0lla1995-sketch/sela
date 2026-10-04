@@ -169,6 +169,65 @@ export function findTopMatches(
   return results;
 }
 
+/**
+ * v9.1 (round-14 #2): MULTI-PROBE × per-product aggregation.
+ * ─────────────────────────────────────────────────────────────
+ * Every query photo produces SEVERAL probe vectors (ensemble crops:
+ * classic center, two deeper zooms, whole-frame fit). Each product's
+ * score is the MAX over (probes × its registered fingerprint rows) —
+ * so the best crop wins, and a product registered with several
+ * angles/mirrors gets full credit for its best row.
+ *
+ * Returns DISTINCT products ranked by their best score — unlike
+ * findTopMatches which ranks raw rows (4 rows of the same product
+ * used to eat the whole top-4 and hide the true alternatives).
+ */
+export function matchProductsMulti(
+  probes: Float32Array[],
+  flat: Float32Array,
+  ids: number[],
+  dim: number,
+  topN: number,
+): {productId: number; score: number}[] {
+  if (
+    flat == null ||
+    ids == null ||
+    ids.length === 0 ||
+    dim <= 0 ||
+    probes.length === 0
+  ) {
+    return [];
+  }
+  const usable = probes.filter(probe => probe.length === dim);
+  if (usable.length === 0) {
+    return [];
+  }
+  // productId → best cosine seen from ANY probe × ANY row.
+  const best = new Map<number, number>();
+  const rows = ids.length;
+  for (const probe of usable) {
+    for (let r = 0; r < rows; r++) {
+      let dot = 0;
+      const base = r * dim;
+      for (let d = 0; d < dim; d++) {
+        dot += probe[d] * flat[base + d];
+      }
+      if (dot > 1) {
+        dot = 1;
+      }
+      const productId = ids[r];
+      const previous = best.get(productId);
+      if (previous == null || dot > previous) {
+        best.set(productId, dot);
+      }
+    }
+  }
+  return Array.from(best.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, Math.max(1, topN))
+    .map(([productId, score]) => ({productId, score}));
+}
+
 /** Rounds + serializes a Float32 embedding to compact JSON. */
 export function serializeEmbedding(
   vec: Float32Array,

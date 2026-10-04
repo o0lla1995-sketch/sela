@@ -113,12 +113,39 @@ class ScannerActivity : Activity() {
         const val EXTRA_PATH = "path"
         const val EXTRA_ERROR = "error"
         const val EXTRA_CONTINUOUS = "continuous"
+        const val EXTRA_MULTI = "multi"
         const val MODE_BARCODE = "barcode"
         const val MODE_PHOTO = "photo"
 
         /** v8.1: sink the module registers so a continuous barcode
          *  session can stream each read to JS ("selaScanBarcode"). */
         @JvmStatic var continuousSink: ((code: String) -> Unit)? = null
+
+        /** v9.1 (round-14 #2): sink for the CONTINUOUS multi-shot
+         *  VISUAL session — every deliberate shutter press saves a
+         *  photo and streams its path to JS ("selaScanPhoto") while
+         *  the window STAYS OPEN, exactly like the barcode engine.
+         *  This is NOT the v8.2 auto-capture loop that crashed the
+         *  device: every capture is a deliberate manual press, one
+         *  at a time — the identical ImageCapture load of the
+         *  proven v8.1.0 single-shot flow. */
+        @JvmStatic var photoSink: ((path: String) -> Unit)? = null
+
+        /** v9.1: the live window, so the module can route JS scan
+         *  feedback (product name / غير مسجل) to the in-window
+         *  banner + CONFIRMED counter. Weak — never leaks. */
+        @JvmStatic private var liveInstance: java.lang.ref.WeakReference<ScannerActivity>? =
+            null
+
+        /** v9.1 (round-14 #1): JS confirms each streamed read —
+         *  registered products count, unknown barcodes do NOT.
+         *  Routed to the live window's banner + counter chip. */
+        @JvmStatic fun notifyResult(ok: Boolean, message: String) {
+            val activity = liveInstance?.get() ?: return
+            activity.runOnUiThread {
+                runCatching { activity.showScanResult(ok, message) }
+            }
+        }
 
         /** v8.3: how many scanner windows are ALIVE right now. The
          *  module uses this to detect a stale pendingPromise left by
@@ -182,6 +209,13 @@ class ScannerActivity : Activity() {
         isBarcodeMode && intent?.getBooleanExtra(EXTRA_CONTINUOUS, false) == true
     }
 
+    /** v9.1 (round-14 #2): multi-shot VISUAL session — the shutter
+     *  stays armed, every press saves a photo, streams the path to
+     *  JS and the window stays open until the merchant closes it. */
+    private val isMultiPhoto: Boolean by lazy {
+        !isBarcodeMode && intent?.getBooleanExtra(EXTRA_MULTI, false) == true
+    }
+
     // ── Camera ────────────────────────────────────────────────
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -195,6 +229,15 @@ class ScannerActivity : Activity() {
     private var lastCode: String? = null
     private var lastCodeAt = 0L
 
+    /** v9.1: CONFIRMED count — only reads JS confirmed as a
+     *  REGISTERED product (added / queued weight). This is what the
+     *  counter chip displays; raw reads no longer inflate it. */
+    private val confirmedCount = AtomicInteger(0)
+
+    /** v9.1: guards a second shutter press while a capture is still
+     *  saving (multi mode keeps the shutter armed). */
+    private val captureBusy = AtomicBoolean(false)
+
     /** The lifecycle the camera binds to — driven by this activity. */
     private val cameraHost = Host()
 
@@ -204,6 +247,11 @@ class ScannerActivity : Activity() {
     private lateinit var torchButton: TextView
     private lateinit var flashOverlay: View
     private lateinit var statusChip: TextView
+    /** v9.1: in-window feedback banner — "✓ أُضيف: ..." / "غير مسجل". */
+    private var resultBanner: TextView? = null
+    private val bannerHide = Runnable {
+        resultBanner?.visibility = View.GONE
+    }
 
     // ═══════════════════════════════════════════════════════════
     // Lifecycle
@@ -212,6 +260,7 @@ class ScannerActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         liveInstances.incrementAndGet()
+        liveInstance = java.lang.ref.WeakReference(this)
 
         // v8.3 CRASH SHIELD (round-12 #1):
         //  1. The UI is built and attached BEFORE anything else can
@@ -364,6 +413,14 @@ class ScannerActivity : Activity() {
         if (isContinuous) {
             ScannerActivity.continuousSink = null
         }
+        // v9.1: same for the multi-shot visual session + the live
+        // instance used for JS result feedback.
+        if (isMultiPhoto) {
+            ScannerActivity.photoSink = null
+        }
+        if (liveInstance?.get() === this) {
+            liveInstance = null
+        }
         runCatching { cameraHost.destroy() }
         runCatching { scannerClient.close() }
         runCatching { analysisExecutor.shutdown() }
@@ -439,6 +496,7 @@ class ScannerActivity : Activity() {
         statusChip = chip(
             when {
                 isContinuous -> "مسح متعدد · 0"
+                isMultiPhoto -> "بصري متعدد · 0"
                 isBarcodeMode -> "ماسح الباركود"
                 else -> "المسح البصري"
             },
@@ -459,6 +517,36 @@ class ScannerActivity : Activity() {
         )
         topBar.addView(torchButton)
         root.addView(topBar)
+
+        // 3.5) v9.1: in-window RESULT banner — JS confirms every
+        //     streamed read ("✓ اسم المنتج" / "غير مسجل") so the
+        //     merchant sees the outcome WITHOUT leaving the camera.
+        resultBanner = TextView(this).apply {
+            visibility = View.GONE
+            textSize = 14f
+            setPadding(dp(16), dp(9), dp(16), dp(9))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(14).toFloat()
+                setColor(Color.parseColor("#E6121216"))
+                setStroke(dp(1), Color.parseColor("#33FFFFFF"))
+            }
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            )
+        }
+        resultBanner?.setOnApplyWindowInsetsListener { v, insets ->
+            runCatching {
+                val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
+                    .getInsets(WindowInsetsCompat.Type.systemBars())
+                (v.layoutParams as FrameLayout.LayoutParams).topMargin =
+                    bars.top + dp(58)
+                v.requestLayout()
+            }
+            insets
+        }
+        root.addView(resultBanner)
 
         // 4) Mode-specific chrome.
         if (isBarcodeMode) {
@@ -513,7 +601,15 @@ class ScannerActivity : Activity() {
             shutter.setOnClickListener { capturePhoto() }
             root.addView(shutter)
 
-            root.addView(hintView("عبّئ الإطار بالمنتج ثم اضغط زر التصوير"))
+            root.addView(
+                hintView(
+                    if (isMultiPhoto) {
+                        "صوّر المنتجات واحداً تلو الآخر — كل صورة تُميّز وتُضاف للسلة · إغلاق للإنهاء"
+                    } else {
+                        "عبّئ الإطار بالمنتج ثم اضغط زر التصوير"
+                    }
+                )
+            )
         }
     }
 
@@ -749,7 +845,11 @@ class ScannerActivity : Activity() {
             }
             vibrate(40)
             flash(Color.parseColor("#3322C55E"), 200)
-            statusChip.text = "مسح متعدد · $reads"
+            // v9.1 (round-14 #1): the chip shows the CONFIRMED count
+            // only — JS confirms registered adds via notifyResult.
+            // A raw read that turns out unregistered must NOT bump
+            // the counter (the merchant's exact complaint).
+            statusChip.text = "مسح متعدد · ${confirmedCount.get()}"
         }
         // Stream to JS on the analysis thread (the emitter is
         // thread-safe); errors here must never kill the session.
@@ -775,11 +875,19 @@ class ScannerActivity : Activity() {
 
     /** v9: the EXACT v8.1.0 single-shot capture — one deliberate
      *  photo, one timestamped file, the window closes and returns
-     *  the path to JS (which re-opens it for the next product). */
+     *  the path to JS (which re-opens it for the next product).
+     *  v9.1 MULTI mode (round-14 #2): the same deliberate capture,
+     *  but the window STAYS OPEN — the path is streamed to JS via
+     *  photoSink and the shutter re-arms. Camera-pipeline load is
+     *  identical to single-shot (one capture per press — never the
+     *  v8.2 auto-loop that saturated budget HALs). */
     private fun capturePhoto() {
         val capture = imageCapture
         if (capture == null || settled.get()) {
             return
+        }
+        if (isMultiPhoto && !captureBusy.compareAndSet(false, true)) {
+            return // A capture is still saving — ignore the extra press.
         }
         vibrate(25)
         val dir = File(filesDir, "scans").apply { mkdirs() }
@@ -793,7 +901,21 @@ class ScannerActivity : Activity() {
                     // v8.3: shielded — a capture callback exception on
                     // an OEM HAL is process death otherwise.
                     runCatching {
-                        if (settled.compareAndSet(false, true)) {
+                        if (isMultiPhoto) {
+                            captureBusy.set(false)
+                            if (settled.get()) {
+                                return@runCatching
+                            }
+                            // Multi-shot: stream + keep the window open.
+                            flash(Color.parseColor("#66FFFFFF"), 140)
+                            vibrate(20)
+                            val photos = continuousReads.incrementAndGet()
+                            statusChip.text = "بصري متعدد · $photos"
+                            showScanResult(false, "جارٍ التعرّف…")
+                            runCatching {
+                                ScannerActivity.photoSink?.invoke(file.absolutePath)
+                            }
+                        } else if (settled.compareAndSet(false, true)) {
                             flash(Color.parseColor("#66FFFFFF"), 140)
                             setResultAndFinish(path = file.absolutePath)
                         }
@@ -802,6 +924,7 @@ class ScannerActivity : Activity() {
 
                 override fun onError(error: ImageCaptureException) {
                     runCatching {
+                        captureBusy.set(false)
                         if (settled.compareAndSet(false, true)) {
                             finishWithError(
                                 "فشل التقاط الصورة: ${error.javaClass.simpleName}" +
@@ -812,6 +935,34 @@ class ScannerActivity : Activity() {
                 }
             }
         )
+    }
+
+    // ── v9.1: in-window scan feedback ──────────────────────
+
+    /** Shows the JS-confirmed outcome of a streamed read:
+     *  ok=true  → green "✓ message" + CONFIRMED counter +1
+     *             (only registered products reach here),
+     *  ok=false → red informational message (غير مسجل / لم يتم
+     *             التعرف / جارٍ التعرّف…).
+     *  Round-14 #1: the counter chip counts CONFIRMED adds only. */
+    private fun showScanResult(ok: Boolean, message: String) {
+        val banner = resultBanner ?: return
+        if (ok) {
+            confirmedCount.incrementAndGet()
+        }
+        val count = confirmedCount.get()
+        statusChip.text = when {
+            isMultiPhoto -> "بصري متعدد · $count"
+            isContinuous -> "مسح متعدد · $count"
+            else -> statusChip.text
+        }
+        banner.text = if (ok) "✓ $message" else message
+        banner.setTextColor(
+            if (ok) Color.parseColor("#4ADE80") else Color.parseColor("#F87171")
+        )
+        banner.visibility = View.VISIBLE
+        banner.removeCallbacks(bannerHide)
+        banner.postDelayed(bannerHide, 1900)
     }
 
     // ── Torch ─────────────────────────────────────────────────

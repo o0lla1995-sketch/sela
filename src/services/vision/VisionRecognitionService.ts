@@ -31,6 +31,7 @@ import {
   bytesToModelInput,
   findBestMatch,
   l2NormalizeInPlace,
+  matchProductsMulti,
   serializeEmbedding,
 } from './embedding';
 
@@ -162,6 +163,104 @@ export const VisionRecognitionService = {
     vector.set(output as Float32Array);
     l2NormalizeInPlace(vector);
     return vector;
+  },
+
+  /**
+   * v9.1 (round-14 #2): ensemble variant of embedPhoto — one probe
+   * per (zoom / fit / flip) view of the SAME photo. Used by the POS
+   * scanner so the best crop wins (a product shot off-center or
+   * small in frame used to fail with the single classic crop).
+   */
+  async embedPhotoEx(
+    photoPath: string,
+    view: {zoom?: number; fit?: boolean; flip?: boolean},
+  ): Promise<Float32Array> {
+    if (model == null) {
+      throw new Error('نموذج التعرف غير محمّل');
+    }
+    if (ImageDecoderNative == null) {
+      throw new Error('وحدة معالجة الصور غير متوفرة في هذا الإصدار');
+    }
+    const size = info.loaded ? info.inputSize : MODEL_INPUT_SIZE;
+    const zoom = view.zoom ?? 1;
+    const fit = view.fit ?? false;
+    const flip = view.flip ?? false;
+
+    const b64 = await ImageDecoderNative.decodeRgbEx(
+      photoPath,
+      size,
+      zoom,
+      fit,
+      flip,
+    );
+    if (typeof b64 !== 'string' || b64.length === 0) {
+      throw new Error('تعذر استخراج بيانات الصورة');
+    }
+    const bytes = base64ToBytes(b64);
+    if (bytes.length < size * size * 3) {
+      throw new Error('بيانات الصورة غير مكتملة');
+    }
+    const input = bytesToModelInput(
+      bytes,
+      size,
+      NORM_MEAN,
+      NORM_STD,
+      info.channelsLast,
+    );
+    const outputs = model.runSync([input]);
+    const output = outputs?.[0];
+    if (output == null || output.length === 0) {
+      throw new Error('النموذج لم يُرجع نتيجة');
+    }
+    const vector = new Float32Array(output.length);
+    vector.set(output as Float32Array);
+    l2NormalizeInPlace(vector);
+    return vector;
+  },
+
+  /**
+   * v9.1 (round-14 #2): the STRONG query — a four-crop ensemble of
+   * one photo: classic center square, 0.78 zoom, 0.56 zoom and a
+   * whole-frame fit. A probe that fails to decode/infer is skipped
+   * (the remaining crops still match); at least one must succeed.
+   */
+  async embedPhotoEnsemble(photoPath: string): Promise<Float32Array[]> {
+    const views: {zoom?: number; fit?: boolean}[] = [
+      {zoom: 1},
+      {zoom: 0.78},
+      {zoom: 0.56},
+      {fit: true},
+    ];
+    const probes: Float32Array[] = [];
+    let lastError: unknown = null;
+    for (const view of views) {
+      try {
+        probes.push(await this.embedPhotoEx(photoPath, view));
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (probes.length === 0) {
+      throw lastError instanceof Error
+        ? lastError
+        : new Error('فشل تحليل صورة المسح');
+    }
+    return probes;
+  },
+
+  /**
+   * v9.1: ensemble matching — best cosine per DISTINCT product
+   * across all probes × all registered rows (see matchProductsMulti).
+   */
+  matchMulti(
+    probes: Float32Array[],
+    index: EmbeddingsIndex | null,
+    topN: number,
+  ): {productId: number; score: number}[] {
+    if (index == null) {
+      return [];
+    }
+    return matchProductsMulti(probes, index.flat, index.ids, index.dim, topN);
   },
 
   /** Serializes an embedding for database storage. */

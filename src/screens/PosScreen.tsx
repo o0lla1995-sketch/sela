@@ -10,9 +10,10 @@
  * is always reserved in base pieces. Manual selling never depends on
  * the camera being available.
  */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Alert,
+  BackHandler,
   Dimensions,
   Image,
   Keyboard,
@@ -47,18 +48,19 @@ import {InvoiceService} from '../services/InvoiceService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
-import {findTopMatches} from '../services/vision/embedding';
 import {
   cameraPermissionMessage,
-  capturePhoto,
   ensureCameraPermission,
+  notifyScanResult,
   openAppSettings,
   scanBarcodeContinuous,
+  scanVisualContinuous,
 } from '../services/vision/scanFlow';
-import {requirePlatformUtils} from '../native/nativeBridge';
+import {PlatformUtilsNative, requirePlatformUtils} from '../native/nativeBridge';
 import {
   BASE_UNIT_NAME,
   QUICK_WEIGHTS,
+  VISION_AMBIGUITY_MARGIN,
   WEIGHT_UNIT_NAME,
   type ScannerMode,
 } from '../core/config';
@@ -120,6 +122,16 @@ export function PosScreen() {
   // the "which engine?" sheet (scannerMode = both).
   const [scanBusy, setScanBusy] = useState(false);
   const [enginePickerOpen, setEnginePickerOpen] = useState(false);
+  // v9.1 (round-14 #3): timer handle for the delayed weight-sheet
+  // unmount (see closeWeightSheet).
+  const closeWeightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (closeWeightTimer.current != null) {
+        clearTimeout(closeWeightTimer.current);
+      }
+    };
+  }, []);
   // v8.2 (round-11 #3): cart expand toggle — the cart grows to fill
   // the whole screen (grid folds away) so the merchant can review a
   // long sale comfortably, then shrinks back to keep selling.
@@ -241,20 +253,41 @@ export function PosScreen() {
     [addWeighted, beep, toast],
   );
 
-  /** v9 (round-13) VISUAL SCAN — back to the proven v8.1.0 contract:
-   *  ONE deliberate photo per native window (the exact flow this
-   *  device ran crash-free), then recognition happens here in the
-   *  POS screen with the cart fully visible:
-   *    • confident match  → straight into the cart + beep + toast,
-   *                        remaining candidates stay in the INLINE
-   *                        strip for one-tap corrections,
-   *    • weight product   → the weight pad opens directly,
-   *    • below threshold  → the top candidates fill the inline strip
-   *                        for the merchant to pick.
-   *  NO result-sheet Modal anywhere: this ROM renders RN Modals
-   *  BLACK right after the native scanner window closes — that was
-   *  the v8.1.0 "black screen after a successful scan" bug, and it
-   *  is structurally impossible now. */
+  /** v9.1 (round-14 #3): the STUCK-keyboard fix — every close path
+   *  (hardware back, dim tap, إلغاء) lands here: the keyboard goes
+   *  down FIRST and the sheet stays mounted one tick longer so the
+   *  avoid-view unwinds with it still in the tree, THEN it unmounts.
+   *  The POS returns to its exact previous shape, every time. */
+  const closeWeightSheet = useCallback(() => {
+    Keyboard.dismiss();
+    closeWeightTimer.current = setTimeout(() => {
+      setWeightProduct(null);
+      setWeightUnitRows(null);
+    }, 120);
+  }, []);
+
+  /** v9.1 (round-14 #2) VISUAL SCAN — the CONTINUOUS multi-shot
+   *  session, the visual twin of the barcode session:
+   *    • the native camera window STAYS OPEN — the merchant
+   *      photographs product after product, one deliberate shutter
+   *      press each (the exact v8.1.0 capture pipeline — no
+   *      auto-capture loop, which is what crashed v8.2/v8.3),
+   *    • every photo is recognized LIVE while the window is on top:
+   *      a confident, UNAMBIGUOUS match goes straight into the cart
+   *      and the green "✓ <name>" banner confirms it inside the
+   *      camera window itself, plus the confirmed counter,
+   *    • a weight product queues its weight pad for when the window
+   *      closes (the Loyverse scale-item pattern),
+   *    • a low/ambiguous shot shows "لم يتم التعرف" in the window
+   *      and its candidates are collected for the inline strip that
+   *      appears the moment the merchant closes the scanner.
+   *  v9.1 quality engine (round-14 #2a): each photo runs a FOUR-CROP
+   *  ENSEMBLE (classic center + 0.78 zoom + 0.56 zoom + whole-frame
+   *  fit) scored per DISTINCT product across ALL its registered
+   *  fingerprints (3 angles × mirrors). The best product auto-adds
+   *  only when it ALSO beats the runner-up by VISION_AMBIGUITY_MARGIN
+   *  — two lookalikes scoring 0.84 vs 0.83 is a coin flip the
+   *  merchant settles with one tap, not a silent wrong add. */
   const runVisionScan = useCallback(async () => {
     if (scanBusy) {
       return;
@@ -286,69 +319,156 @@ export function PosScreen() {
     }
     setScanBusy(true);
     setVisionMatches(null);
-    try {
-      const photoPath = await capturePhoto();
-      if (photoPath == null) {
-        // Merchant closed the native scanner.
-        return;
-      }
-      await VisionRecognitionService.loadModel();
-      const vector = await VisionRecognitionService.embedPhoto(photoPath);
-      const live = useCatalogStore.getState().embeddingsIndex;
-      if (live == null || live.ids.length === 0) {
-        return;
-      }
-      const top = findTopMatches(vector, live.flat, live.ids, live.dim, 4);
-      const allProducts = useCatalogStore.getState().products;
-      const matches = top
-        .map(match => ({
-          product: allProducts.find(entry => entry.id === match.productId),
-          score: match.score,
-        }))
-        .filter(
-          (match): match is {product: Product; score: number} =>
-            match.product != null,
+    let confirmed = 0;
+    let ambiguous: {product: Product; score: number}[] = [];
+    /** Serializes photo processing — the shutter can fire faster
+     *  than the 4-crop ensemble completes on slow devices. */
+    const queue: string[] = [];
+    let processing = false;
+    const weightQueue: Product[] = [];
+
+    const processPhoto = async (photoPath: string) => {
+      try {
+        await VisionRecognitionService.loadModel();
+        const probes = await VisionRecognitionService.embedPhotoEnsemble(
+          photoPath,
         );
-      if (matches.length === 0) {
-        toast('لم يتم التعرف على المنتج — جرّب زاوية أو إضاءة أفضل', 'error');
-        return;
-      }
-      const threshold = useSettingsStore.getState().settings.matchThreshold;
-      const best = matches[0];
-      if (best.score >= threshold) {
-        // Confident match → straight into the cart, like a barcode.
-        if (isWeightProduct(best.product)) {
-          beep();
-          openWeightPad(best.product);
+        const live = useCatalogStore.getState().embeddingsIndex;
+        if (live == null || live.ids.length === 0) {
           return;
         }
-        const result = addProduct(
-          best.product,
-          useCartStore.getState().pricingMode,
-          null,
-        );
-        if (result.added) {
-          beep();
-          toast(`أُضيف للسلة: ${best.product.name}`, 'success');
-          // Keep the runner-ups one tap away in case the merchant
-          // spots a wrong pick.
-          if (matches.length > 1) {
-            setVisionMatches(matches.slice(1, 4));
-          }
-        } else if (result.reason) {
-          toast(result.reason, 'error');
+        const top = VisionRecognitionService.matchMulti(probes, live, 4);
+        const allProducts = useCatalogStore.getState().products;
+        const matches = top
+          .map(match => ({
+            product: allProducts.find(entry => entry.id === match.productId),
+            score: match.score,
+          }))
+          .filter(
+            (match): match is {product: Product; score: number} =>
+              match.product != null,
+          );
+        if (matches.length === 0) {
+          await notifyScanResult(false, 'لم يتم التعرف على المنتج');
+          return;
         }
-      } else {
-        // Below threshold → the merchant picks from the candidates.
-        setVisionMatches(matches.slice(0, 4));
+        const threshold = useSettingsStore.getState().settings.matchThreshold;
+        const best = matches[0];
+        const runnerUp = matches[1];
+        const ambiguousPick =
+          runnerUp != null && best.score - runnerUp.score < VISION_AMBIGUITY_MARGIN;
+        if (best.score >= threshold && !ambiguousPick) {
+          // Confident + unambiguous → straight into the cart.
+          if (isWeightProduct(best.product)) {
+            confirmed++;
+            beep();
+            await notifyScanResult(true, `وزن بانتظارك: ${best.product.name}`);
+            if (!weightQueue.some(entry => entry.id === best.product.id)) {
+              weightQueue.push(best.product);
+            }
+            return;
+          }
+          const result = addProduct(
+            best.product,
+            useCartStore.getState().pricingMode,
+            null,
+          );
+          if (result.added) {
+            confirmed++;
+            beep();
+            await notifyScanResult(true, `أُضيف: ${best.product.name}`);
+          } else if (result.reason) {
+            await notifyScanResult(false, result.reason);
+          }
+        } else {
+          // Low score or a lookalike tie → candidates for later.
+          await notifyScanResult(
+            ambiguousPick,
+            ambiguousPick
+              ? 'تقارب بين منتجين — اختر الصحيح بعد الإغلاق'
+              : 'لم يتم التعرف بثقة — اختر بعد الإغلاق',
+          );
+          for (const match of matches.slice(0, 3)) {
+            if (!ambiguous.some(entry => entry.product.id === match.product.id)) {
+              ambiguous.push(match);
+            }
+          }
+        }
+      } catch (error) {
+        await notifyScanResult(
+          false,
+          error instanceof Error ? error.message : 'فشل تحليل الصورة',
+        );
+      } finally {
+        // The full-res scan file has served its purpose — free the
+        // space (thumbnails/fingerprints are already stored).
+        if (PlatformUtilsNative != null) {
+          void PlatformUtilsNative.deleteFile(photoPath).catch(() => {});
+        }
       }
+    };
+
+    const drain = async () => {
+      if (processing) {
+        return;
+      }
+      processing = true;
+      try {
+        while (queue.length > 0) {
+          const next = queue.shift();
+          if (next != null) {
+            await processPhoto(next);
+          }
+        }
+      } finally {
+        processing = false;
+      }
+    };
+    // The LAST photo may still be mid-recognition when the merchant
+    // closes the scanner — the settle step awaits this so its result
+    // is never lost.
+    let drainPromise: Promise<void> = Promise.resolve();
+
+    try {
+      await scanVisualContinuous(path => {
+        queue.push(path);
+        drainPromise = drain();
+      });
     } catch (error) {
       toast(
         error instanceof Error ? error.message : 'فشل المسح البصري',
         'error',
       );
     } finally {
+      // The scanner window has closed — let the LAST in-flight photo
+      // finish before settling (its result must count too).
+      try {
+        await drainPromise;
+      } catch {
+        // A failed last photo must never break the settle step.
+      }
       setScanBusy(false);
+      if (weightQueue.length > 0) {
+        setPendingWeight(prev => {
+          const merged = [...prev];
+          for (const product of weightQueue) {
+            if (!merged.some(entry => entry.id === product.id)) {
+              merged.push(product);
+            }
+          }
+          return merged;
+        });
+      }
+      if (confirmed > 0) {
+        toast(
+          `انتهت جلسة المسح البصري — ${confirmed} منتج أُضيف للسلة`,
+          'success',
+        );
+      }
+      if (ambiguous.length > 0) {
+        ambiguous.sort((a, b) => b.score - a.score);
+        setVisionMatches(ambiguous.slice(0, 4));
+      }
     }
   }, [scanBusy, addProduct, beep, toast, openWeightPad]);
 
@@ -377,13 +497,18 @@ export function PosScreen() {
    * v8.1: `interactive: false` (continuous session) collects unknown
    * codes instead of showing an Alert — an RN Alert would be INVISIBLE
    * behind the fullscreen native scanner and would break the session.
+   * v9.1 (round-14 #1): returns the outcome so the continuous session
+   * counts ONLY registered adds — an unknown barcode never inflates
+   * the scan counter, exactly as the merchant asked.
    */
   const handleBarcode = useCallback(
     async (
       code: string,
       interactive: boolean = true,
       unknownCollector?: (code: string) => void,
-    ): Promise<void> => {
+    ): Promise<
+      {status: 'added' | 'queued' | 'unknown' | 'error'; name?: string} | void
+    > => {
       try {
         // 1. Base product barcode.
         const product = await ProductRepo.findByBarcode(code);
@@ -402,7 +527,7 @@ export function PosScreen() {
               );
             }
             beep();
-            return;
+            return {status: 'queued', name: product.name};
           }
           const result = addProduct(
             product,
@@ -411,10 +536,12 @@ export function PosScreen() {
           );
           if (result.added) {
             beep();
-          } else if (result.reason) {
+            return {status: 'added', name: product.name};
+          }
+          if (result.reason) {
             toast(result.reason, 'error');
           }
-          return;
+          return {status: 'error', name: product.name};
         }
         // 2. Unit-level barcode (a whole كرتونة).
         const unitHit = await UnitRepo.findByBarcode(code);
@@ -432,16 +559,21 @@ export function PosScreen() {
                 `أُضيفت وحدة ${unitHit.productUnit.unitName} من ${unitProduct.name}`,
                 'success',
               );
-            } else if (result.reason) {
+              return {
+                status: 'added',
+                name: `${unitProduct.name} (${unitHit.productUnit.unitName})`,
+              };
+            }
+            if (result.reason) {
               toast(result.reason, 'error');
             }
-            return;
+            return {status: 'error', name: unitProduct.name};
           }
         }
         // 3. Unknown → offer creating the product with this barcode.
         if (!interactive && unknownCollector != null) {
           unknownCollector(code);
-          return;
+          return {status: 'unknown'};
         }
         Alert.alert(
           'باركود غير معروف',
@@ -455,11 +587,13 @@ export function PosScreen() {
             },
           ],
         );
+        return {status: 'unknown'};
       } catch (error) {
         toast(
           error instanceof Error ? error.message : 'فشل البحث عن الباركود',
           'error',
         );
+        return {status: 'error'};
       }
     },
     [addProduct, beep, toast, navigation, openWeightPad],
@@ -470,6 +604,11 @@ export function PosScreen() {
    * never auto-closes; every deduped read streams in and is added
    * immediately. The merchant scans item after item without ever
    * leaving the camera, then presses إغلاق to finish.
+   * v9.1 (round-14 #1): the counter now counts ONLY confirmed,
+   * REGISTERED products — every read is processed to completion and
+   * its outcome is pushed LIVE into the scanner window (green
+   * "✓ أُضيف: <name>" + counter, red "غير مسجل"). A misread or
+   * unregistered barcode no longer pollutes the scan counter.
    */
   const runBarcodeScan = useCallback(async () => {
     if (scanBusy) {
@@ -477,15 +616,53 @@ export function PosScreen() {
     }
     setScanBusy(true);
     const unknown: string[] = [];
-    let reads = 0;
+    let confirmed = 0;
+    // Serializes DB lookups: reads can stream in faster than the
+    // lookups resolve; each is still processed exactly once.
+    const queue: string[] = [];
+    let processing = false;
+    // The LAST read may still be mid-lookup when the merchant closes
+    // the scanner — the settle step awaits this so it counts too.
+    let drainPromise: Promise<void> = Promise.resolve();
+    const drain = async () => {
+      if (processing) {
+        return;
+      }
+      processing = true;
+      try {
+        while (queue.length > 0) {
+          const code = queue.shift();
+          if (code == null) {
+            continue;
+          }
+          const outcome = await handleBarcode(code, false, unknownCode => {
+            if (!unknown.includes(unknownCode)) {
+              unknown.push(unknownCode);
+            }
+          });
+          if (outcome == null) {
+            continue;
+          }
+          if (outcome.status === 'added' || outcome.status === 'queued') {
+            confirmed++;
+            await notifyScanResult(
+              true,
+              outcome.status === 'queued'
+                ? `وزن بانتظارك: ${outcome.name ?? ''}`
+                : `أُضيف: ${outcome.name ?? ''}`,
+            );
+          } else if (outcome.status === 'unknown') {
+            await notifyScanResult(false, `غير مسجل: ${code}`);
+          }
+        }
+      } finally {
+        processing = false;
+      }
+    };
     try {
       await scanBarcodeContinuous(code => {
-        reads++;
-        void handleBarcode(code, false, unknownCode => {
-          if (!unknown.includes(unknownCode)) {
-            unknown.push(unknownCode);
-          }
-        });
+        queue.push(code);
+        drainPromise = drain();
       });
     } catch (error) {
       toast(
@@ -493,9 +670,19 @@ export function PosScreen() {
         'error',
       );
     } finally {
+      // Let the LAST in-flight lookup finish before the summary.
+      try {
+        await drainPromise;
+      } catch {
+        // Never break the settle step on a failed lookup.
+      }
       setScanBusy(false);
-      if (reads > 0) {
-        toast(`انتهت جلسة المسح — ${reads} قراءة أُضيفت للسلة`, 'success');
+      // v9.1 (round-14 #1): the summary counts CONFIRMED adds only.
+      if (confirmed > 0) {
+        toast(
+          `انتهت جلسة المسح — ${confirmed} منتج مسجل أُضيف للسلة`,
+          'success',
+        );
       }
       if (unknown.length > 0) {
         const sample = unknown.slice(0, 3).join('، ');
@@ -1122,8 +1309,12 @@ export function PosScreen() {
           activity transitions, and the scan button must never risk
           that again. The engine launch is also delayed one frame
           after the sheet folds so the native window NEVER opens
-          mid-animation. */}
+          mid-animation.
+          v9.1: hardware back closes the sheet too (an inline
+          overlay has no onRequestClose of its own). */}
       {enginePickerOpen ? (
+        <>
+        <BackHandlerCloser active={enginePickerOpen} onClose={() => setEnginePickerOpen(false)} />
         <View style={styles.inlineOverlay}>
           <TouchableOpacity
             style={styles.inlineOverlayDim}
@@ -1167,13 +1358,15 @@ export function PosScreen() {
               <View style={{flex: 1}}>
                 <Text style={styles.engineRowTitle}>المسح البصري</Text>
                 <Text style={styles.engineRowMeta}>
-                  صورة واحدة لكل منتج — المطابق يُضاف للسلة تلقائياً
+                  جلسة متعددة — صوّر المنتجات واحداً تلو الآخر وكل تعرّف
+                  مؤكد يُضاف للسلة فوراً
                 </Text>
               </View>
               <Icon name="chevronLeft" size={18} color={c.textFaint} />
             </TouchableOpacity>
           </View>
         </View>
+        </>
       ) : null}
 
       {/* ── Unit picker sheet ──────────────────────────────── */}
@@ -1254,15 +1447,17 @@ export function PosScreen() {
           sold. Prices are per kilo; the merchant types the weight
           (decimal) or taps a quick chip (وقية 250غ / نصف كغ / كيلو…)
           and the live total = kg × kilo price. Sub-units from the
-          product's unit rows (وقية = 0.25 كغ…) add by their unit. */}
+          product's unit rows (وقية = 0.25 كغ…) add by their unit.
+          v9.1 (round-14 #3): closing (back button / dim / إلغاء)
+          dismisses the keyboard FIRST and keeps the sheet mounted
+          for ~120ms so the KeyboardAvoidingView restores cleanly —
+          unmounting a focused input mid-keyboard-animation used to
+          leave the whole POS layout stuck pushed up. */}
       <WeightSheet
         product={weightProduct}
         unitRows={weightUnitRows}
         pricingMode={pricingMode}
-        onClose={() => {
-          setWeightProduct(null);
-          setWeightUnitRows(null);
-        }}
+        onClose={closeWeightSheet}
         onConfirm={confirmWeight}
       />
     </View>
@@ -1298,6 +1493,20 @@ function WeightSheet({
   useEffect(() => {
     setWeightText('');
   }, [product?.id]);
+
+  // v9.1 (round-14 #3): hardware back closes the pad — it is an
+  // inline overlay (NOT a Modal), so without this the back button
+  // used to navigate away with the pad still hanging on screen.
+  useEffect(() => {
+    if (product == null) {
+      return;
+    }
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onClose();
+      return true;
+    });
+    return () => sub.remove();
+  }, [product, onClose]);
 
   if (product == null) {
     return null;
@@ -1438,6 +1647,28 @@ function WeightSheet({
 // ────────────────────────────────────────────────────────────────
 // Sub-components
 // ────────────────────────────────────────────────────────────────
+
+/** v9.1: hardware-back closer for INLINE overlays (they have no
+ *  onRequestClose of their own — Modal-only API). */
+function BackHandlerCloser({
+  active,
+  onClose,
+}: {
+  active: boolean;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!active) {
+      return;
+    }
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onClose();
+      return true;
+    });
+    return () => sub.remove();
+  }, [active, onClose]);
+  return null;
+}
 
 function UnitOption({
   label,

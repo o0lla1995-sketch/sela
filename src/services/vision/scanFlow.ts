@@ -32,6 +32,28 @@ import {SelaScannerNative} from '../../native/nativeBridge';
 /** Native event streamed for every read during a continuous session. */
 const BARCODE_READ_EVENT = 'selaScanBarcode';
 
+/** v9.1 (round-14 #2): photo path streamed for every shutter press
+ *  during a continuous VISUAL session. */
+const PHOTO_TAKEN_EVENT = 'selaScanPhoto';
+
+/**
+ * v9.1 (round-14 #1): pushes the JS-confirmed outcome of a streamed
+ * read into the LIVE scanner window — ok=true shows the green
+ * "✓ added: <name>" banner and bumps the CONFIRMED counter (only
+ * REGISTERED products count — an unknown barcode never inflates the
+ * scan counter again); ok=false shows the red informational banner.
+ */
+export async function notifyScanResult(
+  ok: boolean,
+  message: string,
+): Promise<void> {
+  try {
+    await SelaScannerNative?.notifyScanResult(ok, message);
+  } catch {
+    // The window may already be closing — feedback is best-effort.
+  }
+}
+
 export type CameraPermissionResult = 'granted' | 'denied' | 'never_ask_again';
 
 /**
@@ -138,7 +160,9 @@ export async function scanBarcodeContinuous(
 /** Opens the native PHOTO engine (single shot) → image path, or null.
  *  v9: THE visual-scan primitive — one deliberate photo per window,
  *  exactly the v8.1.0 contract the merchant's device ran crash-free.
- *  The caller re-opens it for the next product. */
+ *  The caller re-opens it for the next product. Used by the product
+ *  form (fingerprint enrollment) and anywhere a single shot is
+ *  needed. */
 export async function capturePhoto(): Promise<string | null> {
   if (SelaScannerNative == null) {
     throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
@@ -149,4 +173,40 @@ export async function capturePhoto(): Promise<string | null> {
     return null;
   }
   return result.path;
+}
+
+/**
+ * v9.1 (round-14 #2): CONTINUOUS multi-shot VISUAL session — the
+ * visual twin of scanBarcodeContinuous(). The native camera window
+ * stays open; every deliberate shutter press streams the saved photo
+ * path to `onPhoto` immediately (recognition + cart-adding happen in
+ * JS while the window stays on top), and the promise resolves when
+ * the merchant closes the scanner.
+ *
+ * SAFETY: every capture is a MANUAL press of the same ImageCapture
+ * pipeline the crash-free v8.1.0 single-shot used — no auto-capture
+ * timer, no photo streaming loop (the two things that hard-crashed
+ * v8.2/v8.3). Only the file path crosses the bridge.
+ */
+export async function scanVisualContinuous(
+  onPhoto: (path: string) => void,
+): Promise<void> {
+  if (SelaScannerNative == null) {
+    throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
+  }
+  await requireCameraPermission();
+  const listener: EmitterSubscription = DeviceEventEmitter.addListener(
+    PHOTO_TAKEN_EVENT,
+    event => {
+      const path = event?.path;
+      if (typeof path === 'string' && path.length > 0) {
+        onPhoto(path);
+      }
+    },
+  );
+  try {
+    await SelaScannerNative.openScannerPhotoMulti();
+  } finally {
+    listener.remove();
+  }
 }
