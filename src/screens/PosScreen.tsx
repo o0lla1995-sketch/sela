@@ -10,14 +10,13 @@
  * is always reserved in base pieces. Manual selling never depends on
  * the camera being available.
  */
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Alert,
   BackHandler,
   Dimensions,
   Image,
   Keyboard,
-  KeyboardAvoidingView,
   LayoutAnimation,
   Modal,
   ScrollView,
@@ -28,7 +27,6 @@ import {
   UIManager,
   View,
 } from 'react-native';
-import {useNavigation} from '@react-navigation/native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {
   AppButton,
@@ -54,6 +52,7 @@ import {
   notifyScanResult,
   openAppSettings,
   scanBarcodeContinuous,
+  scanBothContinuous,
   scanVisualContinuous,
 } from '../services/vision/scanFlow';
 import {PlatformUtilsNative, requirePlatformUtils} from '../native/nativeBridge';
@@ -83,10 +82,46 @@ const GRID_TILE = Math.floor(
     GRID_COLUMNS,
 );
 
+/** v9.2 (round-15 #4): ONE shared session context for every scan
+ *  engine (barcode / visual / combined) — tracks the CONFIRMED add
+ *  count, per-product counts for "×2, ×3…" confirmations, the
+ *  lookalike candidates for the inline strip, and the weight
+ *  products whose pads open when the window closes. */
+function makeScanSession() {
+  return {
+    confirmed: 0,
+    counts: new Map<number, number>(),
+    ambiguous: [] as {product: Product; score: number}[],
+    weightQueue: [] as Product[],
+  };
+}
+type ScanSession = ReturnType<typeof makeScanSession>;
+
+/** v9.2 (round-15 #4): the add-confirmation message — product name +
+ *  how many times this session + its price, e.g.
+ *  "أُضيف: حليب ١ لتر ×2 · 6.00 ₪". */
+function addedMessage(
+  session: ScanSession,
+  product: Product,
+  unitPrice: number,
+  prefix = 'أُضيف',
+): string {
+  const count = session.counts.get(product.id) ?? 1;
+  const price = unitPrice > 0 ? ` · ${formatMoney(unitPrice)}` : '';
+  return `${prefix}: ${product.name}${count > 1 ? ` ×${count}` : ''}${price}`;
+}
+
+/** v9.2 (round-15 #2): the outcome of one barcode read — 'unknown'
+ *  is fully SILENT (no banner, no counter, no prompt). */
+type BarcodeOutcome =
+  | {status: 'added'; name: string; product: Product; unitPrice: number}
+  | {status: 'queued'; name: string}
+  | {status: 'unknown'}
+  | {status: 'error'; name?: string};
+
 export function PosScreen() {
   const c = useThemeColors();
   const styles = useStyles();
-  const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
 
   const lines = useCartStore(state => state.lines);
@@ -118,20 +153,9 @@ export function PosScreen() {
   const [searchFocused, setSearchFocused] = useState(false);
   const [discountText, setDiscountText] = useState('');
   // v8: the scanner is a NATIVE full-screen activity — no in-RN
-  // camera state left. scanBusy guards the launch, enginePicker is
-  // the "which engine?" sheet (scannerMode = both).
+  // camera state left. scanBusy guards the launch. In 'both' mode
+  // (v9.2) ONE combined window opens with in-camera engine switching.
   const [scanBusy, setScanBusy] = useState(false);
-  const [enginePickerOpen, setEnginePickerOpen] = useState(false);
-  // v9.1 (round-14 #3): timer handle for the delayed weight-sheet
-  // unmount (see closeWeightSheet).
-  const closeWeightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    return () => {
-      if (closeWeightTimer.current != null) {
-        clearTimeout(closeWeightTimer.current);
-      }
-    };
-  }, []);
   // v8.2 (round-11 #3): cart expand toggle — the cart grows to fill
   // the whole screen (grid folds away) so the merchant can review a
   // long sale comfortably, then shrinks back to keep selling.
@@ -148,7 +172,7 @@ export function PosScreen() {
   const [weightUnitRows, setWeightUnitRows] = useState<ProductUnit[] | null>(
     null,
   );
-  /** Weight products recognized DURING a continuous barcode session
+  /** Weight products recognized DURING a continuous scan session
    *  — they wait here and their weight pads open one by one when the
    *  scanner closes (the Loyverse scale-item pattern). */
   const [pendingWeight, setPendingWeight] = useState<Product[]>([]);
@@ -234,7 +258,10 @@ export function PosScreen() {
     }
   }, [weightProduct, pendingWeight, openWeightPad]);
 
-  /** v8.3: confirm the weight pad → fractional kg line in the cart. */
+  /** v8.3: confirm the weight pad → fractional kg line in the cart.
+   *  v9.2 (round-15 #4): a CONFIRMATION toast spells out exactly
+   *  what landed in the cart — weight × kilo price = total — so the
+   *  merchant never doubts a weight sale again. */
   const confirmWeight = useCallback(
     (product: Product, kg: number, unit: ProductUnit | null) => {
       const result = addWeighted(
@@ -245,6 +272,31 @@ export function PosScreen() {
       );
       if (result.added) {
         beep();
+        const unitPrice =
+          unit != null
+            ? unitPriceFor(
+                product,
+                unit,
+                useCartStore.getState().pricingMode,
+              )
+            : product.retail_price;
+        const effectiveMode = useCartStore.getState().pricingMode;
+        const basePrice =
+          effectiveMode === 'WHOLESALE'
+            ? product.wholesale_price
+            : product.retail_price;
+        toast(
+          unit != null
+            ? `أُضيفت وحدة ${unit.unitName} من ${product.name} — ${formatQty(
+                kg * unit.conversion,
+              )} ${WEIGHT_UNIT_NAME} = ${formatMoney(unitPrice)}`
+            : `أُضيف ${formatQty(kg)} ${WEIGHT_UNIT_NAME} من ${
+                product.name
+              } — ${formatQty(kg)} × ${formatMoney(basePrice)} = ${formatMoney(
+                kg * basePrice,
+              )}`,
+          'success',
+        );
         setWeightProduct(null);
       } else if (result.reason) {
         toast(result.reason, 'error');
@@ -253,45 +305,18 @@ export function PosScreen() {
     [addWeighted, beep, toast],
   );
 
-  /** v9.1 (round-14 #3): the STUCK-keyboard fix — every close path
-   *  (hardware back, dim tap, إلغاء) lands here: the keyboard goes
-   *  down FIRST and the sheet stays mounted one tick longer so the
-   *  avoid-view unwinds with it still in the tree, THEN it unmounts.
-   *  The POS returns to its exact previous shape, every time. */
+  /** v9.2 (round-15 #1): the weight pad now uses a BUILT-IN numeric
+   *  keypad — no system keyboard is ever summoned, so there is
+   *  nothing to dismiss and no KeyboardAvoidingView to get stuck:
+   *  closing (hardware back / dim / إلغاء) simply unmounts the
+   *  sheet and the POS keeps its exact shape, every time. */
   const closeWeightSheet = useCallback(() => {
-    Keyboard.dismiss();
-    closeWeightTimer.current = setTimeout(() => {
-      setWeightProduct(null);
-      setWeightUnitRows(null);
-    }, 120);
+    setWeightProduct(null);
+    setWeightUnitRows(null);
   }, []);
 
-  /** v9.1 (round-14 #2) VISUAL SCAN — the CONTINUOUS multi-shot
-   *  session, the visual twin of the barcode session:
-   *    • the native camera window STAYS OPEN — the merchant
-   *      photographs product after product, one deliberate shutter
-   *      press each (the exact v8.1.0 capture pipeline — no
-   *      auto-capture loop, which is what crashed v8.2/v8.3),
-   *    • every photo is recognized LIVE while the window is on top:
-   *      a confident, UNAMBIGUOUS match goes straight into the cart
-   *      and the green "✓ <name>" banner confirms it inside the
-   *      camera window itself, plus the confirmed counter,
-   *    • a weight product queues its weight pad for when the window
-   *      closes (the Loyverse scale-item pattern),
-   *    • a low/ambiguous shot shows "لم يتم التعرف" in the window
-   *      and its candidates are collected for the inline strip that
-   *      appears the moment the merchant closes the scanner.
-   *  v9.1 quality engine (round-14 #2a): each photo runs a FOUR-CROP
-   *  ENSEMBLE (classic center + 0.78 zoom + 0.56 zoom + whole-frame
-   *  fit) scored per DISTINCT product across ALL its registered
-   *  fingerprints (3 angles × mirrors). The best product auto-adds
-   *  only when it ALSO beats the runner-up by VISION_AMBIGUITY_MARGIN
-   *  — two lookalikes scoring 0.84 vs 0.83 is a coin flip the
-   *  merchant settles with one tap, not a silent wrong add. */
-  const runVisionScan = useCallback(async () => {
-    if (scanBusy) {
-      return;
-    }
+  /** v9.2: shared camera-permission guard for every engine entry. */
+  const guardCameraPermission = useCallback(async (): Promise<boolean> => {
     const permission = await ensureCameraPermission();
     if (permission !== 'granted') {
       Alert.alert(
@@ -307,27 +332,28 @@ export function PosScreen() {
           },
         ],
       );
-      return;
+      return false;
     }
-    const index = useCatalogStore.getState().embeddingsIndex;
-    if (index == null || index.ids.length === 0) {
-      toast(
-        'لا توجد بصمات بصرية محفوظة — سجّل صور المنتجات من شاشة المنتج أولاً',
-        'error',
-      );
-      return;
-    }
-    setScanBusy(true);
-    setVisionMatches(null);
-    let confirmed = 0;
-    let ambiguous: {product: Product; score: number}[] = [];
-    /** Serializes photo processing — the shutter can fire faster
-     *  than the 4-crop ensemble completes on slow devices. */
-    const queue: string[] = [];
-    let processing = false;
-    const weightQueue: Product[] = [];
+    return true;
+  }, []);
 
-    const processPhoto = async (photoPath: string) => {
+  /**
+   * v9.2 (round-15 #4): ONE photo-recognition pipeline shared by the
+   * visual and combined sessions. v9.1 quality engine (round-14
+   * #2a): each photo runs a FOUR-CROP ENSEMBLE (classic center +
+   * 0.78 zoom + 0.56 zoom + whole-frame fit) scored per DISTINCT
+   * product across ALL its registered fingerprints (3 angles ×
+   * mirrors). The best product auto-adds only when it ALSO beats the
+   * runner-up by VISION_AMBIGUITY_MARGIN — two lookalikes scoring
+   * 0.84 vs 0.83 is a coin flip the merchant settles with one tap,
+   * not a silent wrong add.
+   * v9.2 (round-15 #4): every outcome is confirmed LIVE inside the
+   * camera window with an actionable message — what was added (name
+   * + ×N + price), what to do with a weight product, and HOW to fix
+   * a miss (get closer / fill the frame / retake).
+   */
+  const processVisionPhoto = useCallback(
+    async (photoPath: string, session: ScanSession) => {
       try {
         await VisionRecognitionService.loadModel();
         const probes = await VisionRecognitionService.embedPhotoEnsemble(
@@ -335,6 +361,10 @@ export function PosScreen() {
         );
         const live = useCatalogStore.getState().embeddingsIndex;
         if (live == null || live.ids.length === 0) {
+          await notifyScanResult(
+            false,
+            'لا توجد بصمات بصرية بعد — سجّل صور المنتجات من شاشة المنتج',
+          );
           return;
         }
         const top = VisionRecognitionService.matchMulti(probes, live, 4);
@@ -349,34 +379,57 @@ export function PosScreen() {
               match.product != null,
           );
         if (matches.length === 0) {
-          await notifyScanResult(false, 'لم يتم التعرف على المنتج');
+          await notifyScanResult(
+            false,
+            'لم يتم التعرف — اقترب أكثر واملأ الإطار بالمنتج ثم أعد التصوير',
+          );
           return;
         }
         const threshold = useSettingsStore.getState().settings.matchThreshold;
         const best = matches[0];
         const runnerUp = matches[1];
         const ambiguousPick =
-          runnerUp != null && best.score - runnerUp.score < VISION_AMBIGUITY_MARGIN;
+          runnerUp != null &&
+          best.score - runnerUp.score < VISION_AMBIGUITY_MARGIN;
         if (best.score >= threshold && !ambiguousPick) {
           // Confident + unambiguous → straight into the cart.
           if (isWeightProduct(best.product)) {
-            confirmed++;
+            session.confirmed++;
+            session.counts.set(
+              best.product.id,
+              (session.counts.get(best.product.id) ?? 0) + 1,
+            );
             beep();
-            await notifyScanResult(true, `وزن بانتظارك: ${best.product.name}`);
-            if (!weightQueue.some(entry => entry.id === best.product.id)) {
-              weightQueue.push(best.product);
+            await notifyScanResult(
+              true,
+              `منتج وزن — أدخل وزنه عند الإغلاق: ${best.product.name}`,
+            );
+            if (
+              !session.weightQueue.some(entry => entry.id === best.product.id)
+            ) {
+              session.weightQueue.push(best.product);
             }
             return;
           }
-          const result = addProduct(
-            best.product,
-            useCartStore.getState().pricingMode,
-            null,
-          );
+          const mode = useCartStore.getState().pricingMode;
+          const result = addProduct(best.product, mode, null);
           if (result.added) {
-            confirmed++;
+            session.confirmed++;
+            session.counts.set(
+              best.product.id,
+              (session.counts.get(best.product.id) ?? 0) + 1,
+            );
             beep();
-            await notifyScanResult(true, `أُضيف: ${best.product.name}`);
+            await notifyScanResult(
+              true,
+              addedMessage(
+                session,
+                best.product,
+                mode === 'WHOLESALE'
+                  ? best.product.wholesale_price
+                  : best.product.retail_price,
+              ),
+            );
           } else if (result.reason) {
             await notifyScanResult(false, result.reason);
           }
@@ -385,19 +438,25 @@ export function PosScreen() {
           await notifyScanResult(
             ambiguousPick,
             ambiguousPick
-              ? 'تقارب بين منتجين — اختر الصحيح بعد الإغلاق'
-              : 'لم يتم التعرف بثقة — اختر بعد الإغلاق',
+              ? 'منتجان متشابهان — سيظهران عند الإغلاق لتختار الصحيح'
+              : 'التعرف غير مؤكد — اقترب وتصوّر مرة أخرى، أو اختر المرشحين عند الإغلاق',
           );
           for (const match of matches.slice(0, 3)) {
-            if (!ambiguous.some(entry => entry.product.id === match.product.id)) {
-              ambiguous.push(match);
+            if (
+              !session.ambiguous.some(
+                entry => entry.product.id === match.product.id,
+              )
+            ) {
+              session.ambiguous.push(match);
             }
           }
         }
       } catch (error) {
         await notifyScanResult(
           false,
-          error instanceof Error ? error.message : 'فشل تحليل الصورة',
+          error instanceof Error
+            ? `فشل تحليل الصورة: ${error.message}`
+            : 'فشل تحليل الصورة — أعد التصوير',
         );
       } finally {
         // The full-res scan file has served its purpose — free the
@@ -406,8 +465,76 @@ export function PosScreen() {
           void PlatformUtilsNative.deleteFile(photoPath).catch(() => {});
         }
       }
-    };
+    },
+    [addProduct, beep],
+  );
 
+  /** v9.2: the post-close settle step shared by the visual and
+   *  combined sessions — queued weight pads open one by one, the
+   *  summary confirms the session's confirmed count, and lookalike
+   *  candidates land in the inline strip for one-tap correction. */
+  const settleScanSession = useCallback(
+    (session: ScanSession, engineLabel: string) => {
+      if (session.weightQueue.length > 0) {
+        setPendingWeight(prev => {
+          const merged = [...prev];
+          for (const product of session.weightQueue) {
+            if (!merged.some(entry => entry.id === product.id)) {
+              merged.push(product);
+            }
+          }
+          return merged;
+        });
+      }
+      if (session.confirmed > 0) {
+        toast(
+          `اكتملت جلسة ${engineLabel} — أُضيف ${session.confirmed} منتج للسلة`,
+          'success',
+        );
+      }
+      if (session.ambiguous.length > 0) {
+        const sorted = [...session.ambiguous].sort(
+          (a, b) => b.score - a.score,
+        );
+        setVisionMatches(sorted.slice(0, 4));
+      }
+    },
+    [toast],
+  );
+
+  /**
+   * v9.1 (round-14 #2) VISUAL SCAN — the CONTINUOUS multi-shot
+   * session (the recognition itself lives in processVisionPhoto):
+   * the native camera window STAYS OPEN — the merchant photographs
+   * product after product, one deliberate shutter press each (the
+   * exact v8.1.0 capture pipeline — no auto-capture loop, which is
+   * what crashed v8.2/v8.3). Confident matches go straight into
+   * the cart with the live in-window confirmation; weight products
+   * queue their pads; ambiguous shots collect candidates for the
+   * inline strip that appears the moment the merchant closes it.
+   */
+  const runVisionScan = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    if (!(await guardCameraPermission())) {
+      return;
+    }
+    const index = useCatalogStore.getState().embeddingsIndex;
+    if (index == null || index.ids.length === 0) {
+      toast(
+        'لا توجد بصمات بصرية محفوظة — سجّل صور المنتجات من شاشة المنتج أولاً',
+        'error',
+      );
+      return;
+    }
+    setScanBusy(true);
+    setVisionMatches(null);
+    const session = makeScanSession();
+    /** Serializes photo processing — the shutter can fire faster
+     *  than the 4-crop ensemble completes on slow devices. */
+    const queue: string[] = [];
+    let processing = false;
     const drain = async () => {
       if (processing) {
         return;
@@ -417,7 +544,7 @@ export function PosScreen() {
         while (queue.length > 0) {
           const next = queue.shift();
           if (next != null) {
-            await processPhoto(next);
+            await processVisionPhoto(next, session);
           }
         }
       } finally {
@@ -448,29 +575,15 @@ export function PosScreen() {
         // A failed last photo must never break the settle step.
       }
       setScanBusy(false);
-      if (weightQueue.length > 0) {
-        setPendingWeight(prev => {
-          const merged = [...prev];
-          for (const product of weightQueue) {
-            if (!merged.some(entry => entry.id === product.id)) {
-              merged.push(product);
-            }
-          }
-          return merged;
-        });
-      }
-      if (confirmed > 0) {
-        toast(
-          `انتهت جلسة المسح البصري — ${confirmed} منتج أُضيف للسلة`,
-          'success',
-        );
-      }
-      if (ambiguous.length > 0) {
-        ambiguous.sort((a, b) => b.score - a.score);
-        setVisionMatches(ambiguous.slice(0, 4));
-      }
+      settleScanSession(session, 'المسح البصري');
     }
-  }, [scanBusy, addProduct, beep, toast, openWeightPad]);
+  }, [
+    scanBusy,
+    toast,
+    processVisionPhoto,
+    settleScanSession,
+    guardCameraPermission,
+  ]);
 
   /** v9: adds a candidate from the inline strip (weight products
    *  open the pad instead). */
@@ -493,50 +606,42 @@ export function PosScreen() {
   );
 
   /**
-   * Barcode read → exact product lookup → cart or create prompt.
-   * v8.1: `interactive: false` (continuous session) collects unknown
-   * codes instead of showing an Alert — an RN Alert would be INVISIBLE
-   * behind the fullscreen native scanner and would break the session.
-   * v9.1 (round-14 #1): returns the outcome so the continuous session
-   * counts ONLY registered adds — an unknown barcode never inflates
-   * the scan counter, exactly as the merchant asked.
+   * Barcode read → exact product lookup → cart add.
+   * v8.3 (round-12 #4): weight products queue their weight pad for
+   *  when the scanner closes — no invented whole-kilo adds.
+   * v9.2 (round-15 #2): an UNREGISTERED barcode is now completely
+   *  SILENT — no "غير مسجل" banner, no end-of-session prompt, no
+   *  counter bump. The merchant asked for exactly that: scan, and
+   *  only registered products respond.
    */
   const handleBarcode = useCallback(
-    async (
-      code: string,
-      interactive: boolean = true,
-      unknownCollector?: (code: string) => void,
-    ): Promise<
-      {status: 'added' | 'queued' | 'unknown' | 'error'; name?: string} | void
-    > => {
+    async (code: string): Promise<BarcodeOutcome | void> => {
       try {
         // 1. Base product barcode.
         const product = await ProductRepo.findByBarcode(code);
         if (product != null) {
-          // v8.3 (round-12 #4): weight products open the weight pad
-          // (during a continuous session they queue for it instead —
-          // no invented whole-kilo adds).
           if (isWeightProduct(product)) {
-            if (interactive) {
-              openWeightPad(product);
-            } else {
-              setPendingWeight(prev =>
-                prev.some(entry => entry.id === product.id)
-                  ? prev
-                  : [...prev, product],
-              );
-            }
+            setPendingWeight(prev =>
+              prev.some(entry => entry.id === product.id)
+                ? prev
+                : [...prev, product],
+            );
             beep();
             return {status: 'queued', name: product.name};
           }
-          const result = addProduct(
-            product,
-            useCartStore.getState().pricingMode,
-            null,
-          );
+          const mode = useCartStore.getState().pricingMode;
+          const result = addProduct(product, mode, null);
           if (result.added) {
             beep();
-            return {status: 'added', name: product.name};
+            return {
+              status: 'added',
+              name: product.name,
+              product,
+              unitPrice:
+                mode === 'WHOLESALE'
+                  ? product.wholesale_price
+                  : product.retail_price,
+            };
           }
           if (result.reason) {
             toast(result.reason, 'error');
@@ -548,20 +653,19 @@ export function PosScreen() {
         if (unitHit != null) {
           const unitProduct = await ProductRepo.getById(unitHit.productId);
           if (unitProduct != null) {
-            const result = addProduct(
-              unitProduct,
-              useCartStore.getState().pricingMode,
-              unitHit.productUnit,
-            );
+            const mode = useCartStore.getState().pricingMode;
+            const result = addProduct(unitProduct, mode, unitHit.productUnit);
             if (result.added) {
               beep();
-              toast(
-                `أُضيفت وحدة ${unitHit.productUnit.unitName} من ${unitProduct.name}`,
-                'success',
-              );
               return {
                 status: 'added',
                 name: `${unitProduct.name} (${unitHit.productUnit.unitName})`,
+                product: unitProduct,
+                unitPrice: unitPriceFor(
+                  unitProduct,
+                  unitHit.productUnit,
+                  mode,
+                ),
               };
             }
             if (result.reason) {
@@ -570,23 +674,7 @@ export function PosScreen() {
             return {status: 'error', name: unitProduct.name};
           }
         }
-        // 3. Unknown → offer creating the product with this barcode.
-        if (!interactive && unknownCollector != null) {
-          unknownCollector(code);
-          return {status: 'unknown'};
-        }
-        Alert.alert(
-          'باركود غير معروف',
-          `لا يوجد منتج مسجل بالباركود ${code}. هل تريد إضافة منتج جديد بهذا الباركود؟`,
-          [
-            {text: 'إلغاء', style: 'cancel'},
-            {
-              text: 'إضافة منتج',
-              onPress: () =>
-                navigation.navigate('ProductForm', {barcode: code}),
-            },
-          ],
-        );
+        // 3. Unknown → SILENT (round-15 #2): no message, no counter.
         return {status: 'unknown'};
       } catch (error) {
         toast(
@@ -596,7 +684,7 @@ export function PosScreen() {
         return {status: 'error'};
       }
     },
-    [addProduct, beep, toast, navigation, openWeightPad],
+    [addProduct, beep, toast],
   );
 
   /**
@@ -604,19 +692,21 @@ export function PosScreen() {
    * never auto-closes; every deduped read streams in and is added
    * immediately. The merchant scans item after item without ever
    * leaving the camera, then presses إغلاق to finish.
-   * v9.1 (round-14 #1): the counter now counts ONLY confirmed,
-   * REGISTERED products — every read is processed to completion and
-   * its outcome is pushed LIVE into the scanner window (green
-   * "✓ أُضيف: <name>" + counter, red "غير مسجل"). A misread or
-   * unregistered barcode no longer pollutes the scan counter.
+   * v9.1 (round-14 #1): the counter counts ONLY confirmed,
+   * REGISTERED products.
+   * v9.2 (round-15 #2 + #4): unknown barcodes are fully SILENT, and
+   * every confirmed add gets the rich in-window confirmation
+   * (name + ×N + price).
    */
   const runBarcodeScan = useCallback(async () => {
     if (scanBusy) {
       return;
     }
+    if (!(await guardCameraPermission())) {
+      return;
+    }
     setScanBusy(true);
-    const unknown: string[] = [];
-    let confirmed = 0;
+    const session = makeScanSession();
     // Serializes DB lookups: reads can stream in faster than the
     // lookups resolve; each is still processed exactly once.
     const queue: string[] = [];
@@ -635,25 +725,29 @@ export function PosScreen() {
           if (code == null) {
             continue;
           }
-          const outcome = await handleBarcode(code, false, unknownCode => {
-            if (!unknown.includes(unknownCode)) {
-              unknown.push(unknownCode);
-            }
-          });
+          const outcome = await handleBarcode(code);
           if (outcome == null) {
             continue;
           }
-          if (outcome.status === 'added' || outcome.status === 'queued') {
-            confirmed++;
+          if (outcome.status === 'added') {
+            session.confirmed++;
+            session.counts.set(
+              outcome.product.id,
+              (session.counts.get(outcome.product.id) ?? 0) + 1,
+            );
             await notifyScanResult(
               true,
-              outcome.status === 'queued'
-                ? `وزن بانتظارك: ${outcome.name ?? ''}`
-                : `أُضيف: ${outcome.name ?? ''}`,
+              addedMessage(session, outcome.product, outcome.unitPrice),
             );
-          } else if (outcome.status === 'unknown') {
-            await notifyScanResult(false, `غير مسجل: ${code}`);
+          } else if (outcome.status === 'queued') {
+            session.confirmed++;
+            await notifyScanResult(
+              true,
+              `منتج وزن — أدخل وزنه عند الإغلاق: ${outcome.name}`,
+            );
           }
+          // v9.2 (round-15 #2): 'unknown' stays SILENT — the read is
+          // simply not confirmed. No banner, no counter, no prompts.
         }
       } finally {
         processing = false;
@@ -677,36 +771,141 @@ export function PosScreen() {
         // Never break the settle step on a failed lookup.
       }
       setScanBusy(false);
-      // v9.1 (round-14 #1): the summary counts CONFIRMED adds only.
-      if (confirmed > 0) {
+      // The summary counts CONFIRMED adds only.
+      if (session.confirmed > 0) {
         toast(
-          `انتهت جلسة المسح — ${confirmed} منتج مسجل أُضيف للسلة`,
+          `اكتملت جلسة الباركود — أُضيف ${session.confirmed} منتج للسلة`,
           'success',
         );
       }
-      if (unknown.length > 0) {
-        const sample = unknown.slice(0, 3).join('، ');
-        const shown =
-          unknown.length === 1
-            ? sample
-            : `${sample} (${unknown.length} أكواد غير مسجلة)`;
-        Alert.alert(
-          'باركود غير مسجل',
-          `لا يوجد منتج مسجل بالباركود ${shown}. هل تريد إضافة منتج جديد بأول باركود؟`,
-          [
-            {text: 'إلغاء', style: 'cancel'},
-            {
-              text: 'إضافة منتج',
-              onPress: () =>
-                navigation.navigate('ProductForm', {
-                  barcode: unknown[0],
-                }),
-            },
-          ],
-        );
-      }
     }
-  }, [scanBusy, handleBarcode, toast, navigation]);
+  }, [scanBusy, handleBarcode, toast, guardCameraPermission]);
+
+  /**
+   * v9.2 (round-15 #5) COMBINED session — "both" mode is now ONE
+   * native window with BOTH engines: it starts on the BARCODE
+   * engine and a big switcher INSIDE the camera window flips to the
+   * VISUAL engine (and back) without ever closing the camera. The
+   * merchant scans barcodes, photographs a homemade item without a
+   * code, then scans again — one session, zero round-trips, exactly
+   * the easy switching the merchant asked for.
+   * Both engines stream live into this one handler: every barcode
+   * read is looked up and added, every shutter press runs the
+   * 4-crop recognition, and the shared confirmed counter + banner
+   * respond to both.
+   */
+  const runCombinedScan = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    if (!(await guardCameraPermission())) {
+      return;
+    }
+    const index = useCatalogStore.getState().embeddingsIndex;
+    if (index == null || index.ids.length === 0) {
+      toast(
+        'لا توجد بصمات بصرية محفوظة — الباركود سيعمل فوراً، وللبصري سجّل صور المنتجات من شاشة المنتج',
+        'info',
+        4000,
+      );
+    }
+    setScanBusy(true);
+    setVisionMatches(null);
+    const session = makeScanSession();
+    // Two INDEPENDENT queues — barcode lookups are quick DB reads
+    // while photo recognition is the heavy 4-crop ensemble; neither
+    // ever blocks the other, whichever engine is active.
+    const codes: string[] = [];
+    let processingCode = false;
+    let codeDrain: Promise<void> = Promise.resolve();
+    const drainCodes = async () => {
+      if (processingCode) {
+        return;
+      }
+      processingCode = true;
+      try {
+        while (codes.length > 0) {
+          const code = codes.shift();
+          if (code == null) {
+            continue;
+          }
+          const outcome = await handleBarcode(code);
+          if (outcome == null) {
+            continue;
+          }
+          if (outcome.status === 'added') {
+            session.confirmed++;
+            session.counts.set(
+              outcome.product.id,
+              (session.counts.get(outcome.product.id) ?? 0) + 1,
+            );
+            await notifyScanResult(
+              true,
+              addedMessage(session, outcome.product, outcome.unitPrice),
+            );
+          } else if (outcome.status === 'queued') {
+            session.confirmed++;
+            await notifyScanResult(
+              true,
+              `منتج وزن — أدخل وزنه عند الإغلاق: ${outcome.name}`,
+            );
+          }
+          // Unknown → SILENT (round-15 #2).
+        }
+      } finally {
+        processingCode = false;
+      }
+    };
+    const photos: string[] = [];
+    let processingPhoto = false;
+    let photoDrain: Promise<void> = Promise.resolve();
+    const drainPhotos = async () => {
+      if (processingPhoto) {
+        return;
+      }
+      processingPhoto = true;
+      try {
+        while (photos.length > 0) {
+          const next = photos.shift();
+          if (next != null) {
+            await processVisionPhoto(next, session);
+          }
+        }
+      } finally {
+        processingPhoto = false;
+      }
+    };
+    try {
+      await scanBothContinuous(
+        code => {
+          codes.push(code);
+          codeDrain = drainCodes();
+        },
+        path => {
+          photos.push(path);
+          photoDrain = drainPhotos();
+        },
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل جلسة المسح',
+        'error',
+      );
+    } finally {
+      // Let the LAST in-flight barcode lookup AND photo finish before
+      // settling (both results must count).
+      await Promise.allSettled([codeDrain, photoDrain]);
+      setScanBusy(false);
+      settleScanSession(session, 'المسح');
+    }
+  }, [
+    scanBusy,
+    toast,
+    handleBarcode,
+    processVisionPhoto,
+    settleScanSession,
+    guardCameraPermission,
+  ]);
 
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -824,17 +1023,19 @@ export function PosScreen() {
   );
 
   /** v8: scan entry — dispatches to the right NATIVE engine.
-   *  barcode/visual modes open their engine directly; 'both' shows
-   *  a small picker sheet. Each engine is fully independent. */
+   *  barcode/visual modes open their engine directly; v9.2 (round-15
+   *  #5) 'both' opens ONE combined window whose in-camera switcher
+   * flips between باركود and بصري while the camera keeps running —
+   * the separate picker sheet is gone. */
   const openScanner = useCallback(() => {
     if (scannerMode === 'barcode') {
       void runBarcodeScan();
     } else if (scannerMode === 'visual') {
       void runVisionScan();
     } else {
-      setEnginePickerOpen(true);
+      void runCombinedScan();
     }
-  }, [scannerMode, runBarcodeScan, runVisionScan]);
+  }, [scannerMode, runBarcodeScan, runVisionScan, runCombinedScan]);
 
   /** Round-8: explicit EMPTY-CART action with a confirm step. */
   const confirmClearCart = useCallback(() => {
@@ -1302,73 +1503,6 @@ export function PosScreen() {
         )}
       </View>
 
-      {/* ── v9 engine picker (only in "both" mode) ───────────
-          The camera itself runs in a NATIVE full-screen activity.
-          v9 (round-13): this sheet is an INLINE overlay, NOT a Modal —
-          this ROM renders RN Modals black/broken around native
-          activity transitions, and the scan button must never risk
-          that again. The engine launch is also delayed one frame
-          after the sheet folds so the native window NEVER opens
-          mid-animation.
-          v9.1: hardware back closes the sheet too (an inline
-          overlay has no onRequestClose of its own). */}
-      {enginePickerOpen ? (
-        <>
-        <BackHandlerCloser active={enginePickerOpen} onClose={() => setEnginePickerOpen(false)} />
-        <View style={styles.inlineOverlay}>
-          <TouchableOpacity
-            style={styles.inlineOverlayDim}
-            activeOpacity={1}
-            onPress={() => setEnginePickerOpen(false)}
-          />
-          <View style={styles.engineSheet}>
-            <Text style={styles.engineSheetTitle}>اختر طريقة المسح</Text>
-            <TouchableOpacity
-              style={styles.engineRow}
-              onPress={() => {
-                setEnginePickerOpen(false);
-                setTimeout(() => {
-                  void runBarcodeScan();
-                }, 140);
-              }}
-              activeOpacity={0.8}>
-              <View style={styles.engineIconWrap}>
-                <Icon name="barcode" size={22} color={c.accent} />
-              </View>
-              <View style={{flex: 1}}>
-                <Text style={styles.engineRowTitle}>مسح الباركود</Text>
-                <Text style={styles.engineRowMeta}>
-                  جلسة متعددة — امسح عدة منتجات وكل قراءة تُضاف للسلة فوراً
-                </Text>
-              </View>
-              <Icon name="chevronLeft" size={18} color={c.textFaint} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.engineRow}
-              onPress={() => {
-                setEnginePickerOpen(false);
-                setTimeout(() => {
-                  void runVisionScan();
-                }, 140);
-              }}
-              activeOpacity={0.8}>
-              <View style={styles.engineIconWrap}>
-                <Icon name="camera" size={22} color={c.accent} />
-              </View>
-              <View style={{flex: 1}}>
-                <Text style={styles.engineRowTitle}>المسح البصري</Text>
-                <Text style={styles.engineRowMeta}>
-                  جلسة متعددة — صوّر المنتجات واحداً تلو الآخر وكل تعرّف
-                  مؤكد يُضاف للسلة فوراً
-                </Text>
-              </View>
-              <Icon name="chevronLeft" size={18} color={c.textFaint} />
-            </TouchableOpacity>
-          </View>
-        </View>
-        </>
-      ) : null}
-
       {/* ── Unit picker sheet ──────────────────────────────── */}
       <Modal
         visible={unitPickerLine != null}
@@ -1444,15 +1578,16 @@ export function PosScreen() {
       </Modal>
 
       {/* ── v8.3 (round-12 #4): WEIGHT pad — how weight products are
-          sold. Prices are per kilo; the merchant types the weight
-          (decimal) or taps a quick chip (وقية 250غ / نصف كغ / كيلو…)
-          and the live total = kg × kilo price. Sub-units from the
-          product's unit rows (وقية = 0.25 كغ…) add by their unit.
-          v9.1 (round-14 #3): closing (back button / dim / إلغاء)
-          dismisses the keyboard FIRST and keeps the sheet mounted
-          for ~120ms so the KeyboardAvoidingView restores cleanly —
-          unmounting a focused input mid-keyboard-animation used to
-          leave the whole POS layout stuck pushed up. */}
+          sold. Prices are per kilo; the merchant enters the weight on
+          the BUILT-IN numeric keypad or taps a quick chip (وقية 250غ
+          / نصف كغ / كيلو…) and the live total = kg × kilo price.
+          Sub-units from the product's unit rows (وقية = 0.25 كغ…)
+          add by their unit.
+          v9.2 (round-15 #1): the keypad is IN-APP — the SYSTEM
+          keyboard is never summoned for weight entry, so the sheet
+          can never be pushed up / cut off / left hanging: it sits
+          compact and fixed at the bottom, and closing it (back /
+          dim / إلغاء) always restores the POS exactly. */}
       <WeightSheet
         product={weightProduct}
         unitRows={weightUnitRows}
@@ -1464,11 +1599,24 @@ export function PosScreen() {
   );
 }
 
-/**
- * v8.3: the weight pad itself — a bottom sheet with a big decimal
- * input, the regional quick-weight chips, the product's sellable
- * sub-units (وقية…) and a live price preview.
- */
+/** Keypad key descriptor (built-in weight keypad). */
+const KEYPAD_KEYS: string[][] = [
+  ['7', '8', '9'],
+  ['4', '5', '6'],
+  ['1', '2', '3'],
+  ['.', '0', '⌫'],
+];
+
+/** v9.2 (round-15 #1): the weight pad itself — a compact bottom
+ *  sheet with a BUILT-IN decimal keypad (the professional-POS
+ *  pattern — Loyverse/Square weight dialogs), the regional
+ *  quick-weight chips, the product's sellable sub-units (وقية…)
+ *  and a live price preview.
+ *  There is NO TextInput and NO KeyboardAvoidingView anywhere in
+ *  this sheet: the system keyboard is never opened, so the three
+ *  round-14/15 complaints (huge sheet, top cut off by the keyboard,
+ *  sheet stuck at the top after closing the keyboard) are all
+ *  structurally impossible now. */
 function WeightSheet({
   product,
   unitRows,
@@ -1494,20 +1642,6 @@ function WeightSheet({
     setWeightText('');
   }, [product?.id]);
 
-  // v9.1 (round-14 #3): hardware back closes the pad — it is an
-  // inline overlay (NOT a Modal), so without this the back button
-  // used to navigate away with the pad still hanging on screen.
-  useEffect(() => {
-    if (product == null) {
-      return;
-    }
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      onClose();
-      return true;
-    });
-    return () => sub.remove();
-  }, [product, onClose]);
-
   if (product == null) {
     return null;
   }
@@ -1528,6 +1662,29 @@ function WeightSheet({
     setWeightText('');
   };
 
+  /** One keypad press — digit / decimal point / backspace. */
+  const pressKey = (key: string) => {
+    setWeightText(prev => {
+      if (key === '⌫') {
+        return prev.length <= 1 ? '' : prev.slice(0, -1);
+      }
+      if (key === '.') {
+        if (prev.includes('.')) {
+          return prev;
+        }
+        return prev === '' ? '0.' : `${prev}.`;
+      }
+      // A digit — cap at 6 significant chars (up to 999.999 كغ).
+      if (prev.replace('.', '').length >= 6) {
+        return prev;
+      }
+      if (prev === '0') {
+        return key;
+      }
+      return prev + key;
+    });
+  };
+
   return (
     // v9 (round-13): INLINE absolute overlay — NOT a Modal. The
     // weight pad opens right after a scan (recognized weight
@@ -1535,51 +1692,81 @@ function WeightSheet({
     // activity transitions. An in-tree overlay is structurally
     // immune to that bug.
     <View style={styles.inlineOverlay}>
-      <TouchableOpacity style={styles.inlineOverlayDim} activeOpacity={1} onPress={onClose} />
-      <KeyboardAvoidingView behavior="padding" style={{width: '100%'}}>
-        <View style={styles.unitModalSheet}>
-            <View style={styles.unitModalHandle} />
-            <View style={styles.weightHeaderRow}>
-              <View style={{flex: 1}}>
-                <Text style={styles.unitModalTitle} numberOfLines={1}>
-                  {product.name}
-                </Text>
-                <Text style={styles.weightKiloPrice}>
-                  سعر الكيلو ({pricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}):{' '}
-                  {formatMoney(kiloPrice)}
-                </Text>
-              </View>
-              <View style={styles.weightStockChip}>
-                <Text style={styles.weightStockText}>
-                  {formatQty(product.stock_quantity)} {WEIGHT_UNIT_NAME} متوفر
-                </Text>
-              </View>
-            </View>
+      <TouchableOpacity
+        style={styles.inlineOverlayDim}
+        activeOpacity={1}
+        onPress={onClose}
+      />
+      <BackHandlerCloser active={product != null} onClose={onClose} />
+      <View style={styles.weightSheet}>
+        <View style={styles.unitModalHandle} />
+        {/* Compact header: name + kilo price + stock chip (always
+            visible — outside the scroll). */}
+        <View style={styles.weightHeaderRow}>
+          <View style={{flex: 1}}>
+            <Text style={styles.weightSheetTitle} numberOfLines={1}>
+              {product.name}
+            </Text>
+            <Text style={styles.weightKiloPrice} numberOfLines={1}>
+              سعر الكيلو ({pricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}):{' '}
+              {formatMoney(kiloPrice)} · المتاح{' '}
+              {formatQty(product.stock_quantity)} {WEIGHT_UNIT_NAME}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.weightClearChip}
+            onPress={() => setWeightText('')}
+            activeOpacity={0.75}>
+            <Text style={styles.weightClearText}>مسح</Text>
+          </TouchableOpacity>
+        </View>
 
-            {/* The weight input — big, decimal, auto-focused. */}
-            <View style={styles.weightInputRow}>
-              <TextInput
-                style={styles.weightInput}
-                value={weightText}
-                onChangeText={setWeightText}
-                keyboardType="decimal-pad"
-                placeholder="0.000"
-                placeholderTextColor={c.textFaint}
-                autoFocus
-                selectTextOnFocus
-              />
-              <Text style={styles.weightInputUnit}>{WEIGHT_UNIT_NAME}</Text>
-            </View>
+        {/* The scrollable middle — the sheet NEVER outgrows the
+            screen: on small devices the middle scrolls while the
+            header and the action buttons stay pinned. */}
+        <ScrollView
+          style={styles.weightScroll}
+          contentContainerStyle={styles.weightScrollContent}
+          showsVerticalScrollIndicator={false}>
+          {/* The weight display — driven by the keypad below. */}
+          <View style={styles.weightDisplayRow}>
+            <Text
+              style={[
+                styles.weightDisplay,
+                weightText === '' ? {color: c.textFaint} : null,
+              ]}>
+              {weightText === '' ? '0' : weightText}
+            </Text>
+            <Text style={styles.weightDisplayUnit}>{WEIGHT_UNIT_NAME}</Text>
             {total > 0 ? (
-              <Text style={styles.weightLiveTotal}>
-                {formatQty(validWeight)} {WEIGHT_UNIT_NAME} ×{' '}
-                {formatMoney(kiloPrice)} = {formatMoney(total)}
+              <Text style={styles.weightDisplayTotal} numberOfLines={1}>
+                = {formatMoney(total)}
               </Text>
             ) : null}
+          </View>
 
+          {/* Keypad + quick weights side by side — compact, fixed. */}
+          <View style={styles.weightPadRow}>
+            <View style={styles.keypad}>
+              {KEYPAD_KEYS.map((row, rowIndex) => (
+                <View key={rowIndex} style={styles.keypadRow}>
+                  {row.map(key => (
+                    <TouchableOpacity
+                      key={key}
+                      style={[
+                        styles.keypadKey,
+                        key === '⌫' ? styles.keypadKeyDanger : null,
+                      ]}
+                      onPress={() => pressKey(key)}
+                      activeOpacity={0.65}>
+                      <Text style={styles.keypadKeyText}>{key}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ))}
+            </View>
             {/* Regional quick weights — وقية / نصف كغ / كيلو… */}
-            <Text style={styles.weightQuickLabel}>أوزان سريعة:</Text>
-            <View style={styles.weightQuickRow}>
+            <View style={styles.weightQuickColumn}>
               {QUICK_WEIGHTS.map(entry => (
                 <TouchableOpacity
                   key={entry.kg}
@@ -1596,50 +1783,51 @@ function WeightSheet({
                 </TouchableOpacity>
               ))}
             </View>
-
-            {/* The product's own sellable sub-units (وقية = 0.25 كغ). */}
-            {unitRows != null && unitRows.length > 0 ? (
-              <>
-                <Text style={styles.weightQuickLabel}>وحدات المنتج:</Text>
-                {unitRows.map(row => {
-                  const price = unitPriceFor(product, row, pricingMode);
-                  return (
-                    <TouchableOpacity
-                      key={row.id}
-                      style={styles.weightUnitRow}
-                      onPress={() => {
-                        onConfirm(product, 1, row);
-                        setWeightText('');
-                      }}
-                      activeOpacity={0.75}>
-                      <Text style={styles.weightUnitName}>{row.unitName}</Text>
-                      <Text style={styles.weightUnitMeta}>
-                        {formatQty(row.conversion)} {WEIGHT_UNIT_NAME} ·{' '}
-                        {formatMoney(price)}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </>
-            ) : null}
-
-            <View style={styles.weightActionRow}>
-              <AppButton
-                title="إلغاء"
-                variant="secondary"
-                onPress={onClose}
-                style={{flex: 1}}
-              />
-              <AppButton
-                title={`أضف للسلة${total > 0 ? ` · ${formatMoney(total)}` : ''}`}
-                icon="check"
-                onPress={confirm}
-                disabled={validWeight <= 0}
-                style={{flex: 1.6}}
-              />
-            </View>
           </View>
-        </KeyboardAvoidingView>
+
+          {/* The product's own sellable sub-units (وقية = 0.25 كغ). */}
+          {unitRows != null && unitRows.length > 0 ? (
+            <View style={styles.weightUnitsWrap}>
+              <Text style={styles.weightQuickLabel}>وحدات المنتج:</Text>
+              {unitRows.map(row => {
+                const price = unitPriceFor(product, row, pricingMode);
+                return (
+                  <TouchableOpacity
+                    key={row.id}
+                    style={styles.weightUnitRow}
+                    onPress={() => {
+                      onConfirm(product, 1, row);
+                      setWeightText('');
+                    }}
+                    activeOpacity={0.75}>
+                    <Text style={styles.weightUnitName}>{row.unitName}</Text>
+                    <Text style={styles.weightUnitMeta}>
+                      {formatQty(row.conversion)} {WEIGHT_UNIT_NAME} ·{' '}
+                      {formatMoney(price)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          ) : null}
+        </ScrollView>
+
+        <View style={styles.weightActionRow}>
+          <AppButton
+            title="إلغاء"
+            variant="secondary"
+            onPress={onClose}
+            style={{flex: 1}}
+          />
+          <AppButton
+            title={`أضف للسلة${total > 0 ? ` · ${formatMoney(total)}` : ''}`}
+            icon="check"
+            onPress={confirm}
+            disabled={validWeight <= 0}
+            style={{flex: 1.8}}
+          />
+        </View>
+      </View>
     </View>
   );
 }
@@ -1805,51 +1993,9 @@ const useStyles = makeStyles(c =>
       flex: 1,
       backgroundColor: c.overlay,
     },
-    // v9 engine picker sheet (rendered inside inlineOverlay)
-    engineSheet: {
-      backgroundColor: c.surface,
-      borderTopLeftRadius: radius.lg + 4,
-      borderTopRightRadius: radius.lg + 4,
-      padding: spacing.lg,
-      gap: spacing.sm,
-      paddingBottom: spacing.xl,
-    },
-    engineSheetTitle: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.body,
-      textAlign: 'center',
-      marginBottom: spacing.xs,
-    },
-    engineRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      borderRadius: radius.md,
-      padding: spacing.md,
-    },
-    engineIconWrap: {
-      width: 44,
-      height: 44,
-      borderRadius: radius.md,
-      backgroundColor: c.accentSofter,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    engineRowTitle: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.caption,
-    },
-    engineRowMeta: {
-      color: c.textDim,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-      marginTop: 2,
-    },
+    // v9 engine switcher sheet — REMOVED in v9.2 (round-15 #5):
+    // 'both' mode is now ONE combined native window with an
+    // in-camera engine switcher; no JS-side picker is needed.
 
     // Grid
     grid: {
@@ -2237,7 +2383,9 @@ const useStyles = makeStyles(c =>
       marginTop: spacing.sm,
     },
 
-    // ── v8.3 (round-12 #4): weight pad ──────────────────────────
+    // ── v9.2 (round-15 #1): weight pad — BUILT-IN keypad ────────
+    // No TextInput → no system keyboard → no KeyboardAvoidingView:
+    // the sheet is compact, bottom-pinned and can never get stuck.
     weightBadge: {
       position: 'absolute',
       top: spacing.xs + 2,
@@ -2249,6 +2397,27 @@ const useStyles = makeStyles(c =>
       alignItems: 'center',
       justifyContent: 'center',
     },
+    weightSheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      paddingBottom: spacing.lg + 4,
+      gap: spacing.sm,
+      maxHeight: '84%',
+    },
+    weightScroll: {
+      flexShrink: 1,
+    },
+    weightScrollContent: {
+      gap: spacing.sm,
+    },
+    weightSheetTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body + 1,
+      textAlign: 'right',
+    },
     weightHeaderRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -2257,22 +2426,24 @@ const useStyles = makeStyles(c =>
     weightKiloPrice: {
       color: c.accent,
       fontFamily: fonts.bold,
-      fontSize: typography.caption,
-      textAlign: 'center',
+      fontSize: typography.caption - 0.5,
+      textAlign: 'right',
+      marginTop: 1,
     },
-    weightStockChip: {
-      backgroundColor: c.surfaceHi,
+    weightClearChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
       borderRadius: radius.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 4,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs + 1,
     },
-    weightStockText: {
-      color: c.textDim,
+    weightClearText: {
+      color: c.danger,
       fontFamily: fonts.bold,
-      fontSize: typography.micro + 0.5,
-      fontVariant: ['tabular-nums'],
+      fontSize: typography.small,
     },
-    weightInputRow: {
+    weightDisplayRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
@@ -2283,47 +2454,70 @@ const useStyles = makeStyles(c =>
       paddingHorizontal: spacing.md,
       paddingVertical: spacing.xs + 2,
     },
-    weightInput: {
+    weightDisplay: {
       flex: 1,
       color: c.text,
       fontFamily: fonts.black,
       fontSize: 30,
       textAlign: 'center',
-      paddingVertical: spacing.sm,
       fontVariant: ['tabular-nums'],
     },
-    weightInputUnit: {
+    weightDisplayUnit: {
       color: c.accent,
       fontFamily: fonts.bold,
       fontSize: typography.body,
     },
-    weightLiveTotal: {
+    weightDisplayTotal: {
       color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.caption,
-      textAlign: 'center',
+      fontFamily: fonts.black,
+      fontSize: typography.body,
       fontVariant: ['tabular-nums'],
     },
-    weightQuickLabel: {
-      color: c.textFaint,
-      fontFamily: fonts.bold,
-      fontSize: typography.micro + 1,
-      marginTop: spacing.xs,
-    },
-    weightQuickRow: {
+    weightPadRow: {
       flexDirection: 'row',
-      flexWrap: 'wrap',
       gap: spacing.sm,
     },
-    weightQuickChip: {
+    keypad: {
+      flex: 2.1,
+      gap: spacing.xs + 2,
+    },
+    keypadRow: {
+      flexDirection: 'row',
+      gap: spacing.xs + 2,
+    },
+    keypadKey: {
+      flex: 1,
+      height: 52,
+      borderRadius: radius.md,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
       alignItems: 'center',
+      justifyContent: 'center',
+    },
+    keypadKeyDanger: {
+      borderColor: c.danger,
+    },
+    keypadKeyText: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: 22,
+      fontVariant: ['tabular-nums'],
+    },
+    weightQuickColumn: {
+      flex: 1,
+      gap: spacing.xs + 2,
+    },
+    weightQuickChip: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
       backgroundColor: c.surfaceAlt,
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: radius.md,
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.xs + 2,
-      minWidth: 76,
+      paddingHorizontal: spacing.xs,
+      minHeight: 34,
     },
     weightQuickValue: {
       color: c.text,
@@ -2337,6 +2531,14 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro,
       marginTop: 1,
     },
+    weightQuickLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    weightUnitsWrap: {
+      gap: spacing.xs,
+    },
     weightUnitRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -2347,6 +2549,7 @@ const useStyles = makeStyles(c =>
       borderRadius: radius.md,
       paddingHorizontal: spacing.md,
       paddingVertical: spacing.sm + 2,
+      marginBottom: spacing.xs,
     },
     weightUnitName: {
       color: c.text,
@@ -2362,7 +2565,6 @@ const useStyles = makeStyles(c =>
     weightActionRow: {
       flexDirection: 'row',
       gap: spacing.sm,
-      marginTop: spacing.xs,
     },
     unitOption: {
       flexDirection: 'row',

@@ -123,6 +123,26 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * v9.2 (round-15 #5): the COMBINED session — ONE native window
+     * with BOTH engines and an in-camera switcher. The window starts
+     * on the BARCODE engine; a big toggle inside the window flips to
+     * the VISUAL engine (and back) with a normal user-paced CameraX
+     * rebind — the camera never closes. Barcode reads stream as
+     * "selaScanBarcode" events and shutter presses as "selaScanPhoto"
+     * events; the promise resolves {cancelled:true} when the merchant
+     * closes the scanner.
+     */
+    @ReactMethod
+    fun openScannerBoth(promise: Promise) {
+        launchScanner(
+            ScannerActivity.MODE_BOTH,
+            continuous = true,
+            multi = true,
+            promise = promise
+        )
+    }
+
+    /**
      * v9.1 (round-14 #1): JS feedback channel for streamed reads.
      * ok=true → the read was a REGISTERED product (name shown in
      * the green banner + the CONFIRMED counter +1); ok=false → the
@@ -174,10 +194,12 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
             val intent = Intent(activity, ScannerActivity::class.java)
                 .putExtra(
                     ScannerActivity.EXTRA_MODE,
-                    if (mode == ScannerActivity.MODE_PHOTO) {
-                        ScannerActivity.MODE_PHOTO
-                    } else {
-                        ScannerActivity.MODE_BARCODE
+                    when (mode) {
+                        ScannerActivity.MODE_PHOTO -> ScannerActivity.MODE_PHOTO
+                        // v9.2 (round-15 #5): the combined window —
+                        // in-camera engine switching while live.
+                        ScannerActivity.MODE_BOTH -> ScannerActivity.MODE_BOTH
+                        else -> ScannerActivity.MODE_BARCODE
                     }
                 )
                 .putExtra(ScannerActivity.EXTRA_CONTINUOUS, continuous)

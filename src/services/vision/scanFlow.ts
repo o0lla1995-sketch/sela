@@ -210,3 +210,53 @@ export async function scanVisualContinuous(
     listener.remove();
   }
 }
+
+/**
+ * v9.2 (round-15 #5): the COMBINED session — ONE native window with
+ * BOTH engines. A big switcher INSIDE the camera window flips the
+ * active engine (باركود ⇄ بصري) at runtime without ever closing the
+ * camera, so a merchant in "both" mode glides between scanning
+ * labels and photographing code-less products in the same session.
+ * Both engines stream live: every barcode read fires `onCode`, every
+ * deliberate shutter press fires `onPhoto`, and the promise resolves
+ * when the merchant closes the scanner.
+ *
+ * SAFETY (this device's history): identical engine loads to the
+ * proven sessions — ML Kit frame analysis on the barcode side, ONE
+ * manual ImageCapture per press on the visual side. Switching
+ * engines is a normal user-paced CameraX rebind (preview + one use
+ * case), never an auto-loop.
+ */
+export async function scanBothContinuous(
+  onCode: (code: string) => void,
+  onPhoto: (path: string) => void,
+): Promise<void> {
+  if (SelaScannerNative == null) {
+    throw new Error('وحدة الماسح غير متوفرة في هذا الإصدار من التطبيق');
+  }
+  await requireCameraPermission();
+  const barcodeListener: EmitterSubscription = DeviceEventEmitter.addListener(
+    BARCODE_READ_EVENT,
+    event => {
+      const code = event?.code;
+      if (typeof code === 'string' && code.length > 0) {
+        onCode(code);
+      }
+    },
+  );
+  const photoListener: EmitterSubscription = DeviceEventEmitter.addListener(
+    PHOTO_TAKEN_EVENT,
+    event => {
+      const path = event?.path;
+      if (typeof path === 'string' && path.length > 0) {
+        onPhoto(path);
+      }
+    },
+  );
+  try {
+    await SelaScannerNative.openScannerBoth();
+  } finally {
+    barcodeListener.remove();
+    photoListener.remove();
+  }
+}

@@ -5,7 +5,7 @@
  * first-run seed of default Arabic categories.
  */
 import {open, type DB} from '@op-engineering/op-sqlite';
-import {DB_NAME, DEFAULT_UNITS} from '../core/config';
+import {DB_NAME, DEFAULT_UNITS, STANDARD_UNITS_V5} from '../core/config';
 import {logDiag} from '../core/diagnostics';
 import {storage, getNumber, KEYS} from '../storage/storage';
 
@@ -27,7 +27,8 @@ const DDL_STATEMENTS: string[] = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     short_name TEXT NOT NULL,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'piece'
   )`,
   `CREATE TABLE IF NOT EXISTS product_units (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -271,6 +272,61 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 4;
   }
 
+  if (version < 5) {
+    // v9.2 (round-15 #3): units.kind — the unit TYPE (piece /
+    // weight / volume / length) so weight products offer weight
+    // units (وقية، رطل…) and piece products offer packaging units
+    // (كرتونة، علبة…).
+    const kindCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('units') WHERE name = 'kind'",
+    );
+    const hasKind =
+      (kindCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasKind) {
+      await database.execute(
+        "ALTER TABLE units ADD COLUMN kind TEXT NOT NULL DEFAULT 'piece'",
+      );
+    }
+    // Classify every EXISTING unit by its name (old installs).
+    const kindByName: Record<string, string> = {
+      كيلوغرام: 'weight',
+      كيلو: 'weight',
+      غرام: 'weight',
+      وقية: 'weight',
+      'نصف كيلو': 'weight',
+      رطل: 'weight',
+      أونصة: 'weight',
+      لتر: 'volume',
+      مليلتر: 'volume',
+      جالون: 'volume',
+      متر: 'length',
+      سنتيمتر: 'length',
+    };
+    for (const [name, kind] of Object.entries(kindByName)) {
+      await database.execute('UPDATE units SET kind = ? WHERE name = ?', [
+        kind,
+        name,
+      ]);
+    }
+    // Top up the FULL standard catalog (names that don't exist yet
+    // are inserted with their kind; existing ones keep their id).
+    for (const unit of STANDARD_UNITS_V5) {
+      const existing = await database.execute(
+        'SELECT id FROM units WHERE name = ? COLLATE NOCASE',
+        [unit.name],
+      );
+      const hit = existing.rows?._array?.[0] as {id?: number} | undefined;
+      if (hit?.id == null) {
+        await database.execute(
+          "INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM units), ?)",
+          [unit.name, unit.short, unit.kind],
+        );
+      }
+    }
+    logDiag('db', 'ترحيل v5: أنواع الوحدات + كتالوج الوحدات الكامل');
+    version = 5;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -320,8 +376,8 @@ export async function initDatabase(): Promise<void> {
         let order = 0;
         for (const unit of DEFAULT_UNITS) {
           await db.execute(
-            'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
-            [unit.name, unit.short, order++],
+            'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
+            [unit.name, unit.short, order++, unit.kind],
           );
         }
         logDiag('db', `تمت إضافة ${DEFAULT_UNITS.length} وحدات افتراضية`);

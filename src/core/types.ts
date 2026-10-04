@@ -11,12 +11,20 @@ export interface Category {
   productCount?: number;
 }
 
+/** v9.2 (round-15 #3): a unit's TYPE — units are categorized so
+ *  weight products get weight units (كيلو، وقية، رطل…) and piece
+ *  products get packaging units (كرتونة، علبة…): the merchant sees
+ *  exactly the units that suit how the product is sold. */
+export type UnitKind = 'piece' | 'weight' | 'volume' | 'length';
+
 /** A user-defined sellable unit (قطعة، كرتونة، كيلو…). */
 export interface Unit {
   id: number;
   name: string;
   short_name: string;
   sort_order: number;
+  /** v9.2: the unit type — defaults to 'piece' on old rows. */
+  kind: UnitKind;
 }
 
 /** A unit attached to a product with its conversion + price overrides. */

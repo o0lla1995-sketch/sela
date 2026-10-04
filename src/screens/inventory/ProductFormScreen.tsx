@@ -477,7 +477,12 @@ export function ProductFormScreen() {
         return;
       }
       try {
-        const unitId = await UnitRepo.getOrCreate(preset.name, preset.name);
+        // v9.2 (round-15 #3): weight packages are WEIGHT-kind units.
+        const unitId = await UnitRepo.getOrCreate(
+          preset.name,
+          preset.name,
+          'weight',
+        );
         // The units list may not contain it yet — refresh + add row.
         const unitList = await UnitRepo.list();
         setUnits(unitList);
@@ -1238,13 +1243,21 @@ export function ProductFormScreen() {
                     </TouchableOpacity>
                   </View>
                   {/* Unit selector — content-sized wrap chips: names can
-                      never overlap regardless of their length. */}
+                      never overlap regardless of their length.
+                      v9.2 (round-15 #3): the picker offers ONLY units of
+                      the matching TYPE — weight products see weight units
+                      (وقية، رطل…) and piece products see packaging units
+                      (كرتونة، علبة…); a unit already attached to the row
+                      always stays visible. */}
                   <View style={styles.unitPickWrap}>
                     {units
                       .filter(
                         unit =>
                           unit.id === row.unit_id ||
-                          !unitRows.some(r => r.unit_id === unit.id),
+                          (!unitRows.some(r => r.unit_id === unit.id) &&
+                            (saleMode === 'weight'
+                              ? unit.kind === 'weight'
+                              : unit.kind === 'piece')),
                       )
                       .map(unit => {
                         const active = row.unit_id === unit.id;
@@ -1359,7 +1372,12 @@ export function ProductFormScreen() {
                     </View>
                     {/* v9.1 (round-14 #4): register the unit's barcode
                         THROUGH THE CAMERA — scan the packed carton's
-                        code straight into this row. */}
+                        code straight into this row.
+                        v9.2 (round-15 #3): the button is BOTTOM-aligned
+                        with the barcode FIELD itself (the row aligns
+                        flex-end so the label-less button sits level
+                        with the input box, not raised beside the
+                        label). */}
                     <TouchableOpacity
                       style={styles.unitScanBtn}
                       onPress={() => void scanUnitBarcode(index)}
@@ -1561,6 +1579,9 @@ const useStyles = makeStyles(c =>
     unitFieldsRow: {
       flexDirection: 'row',
       gap: spacing.sm,
+      // v9.2 (round-15 #3): bottom-align so the label-less scan
+      // button sits level with the INPUT boxes, not the labels.
+      alignItems: 'flex-end',
     },
     // ── Stock-entry unit chips ───────────────────────────────────
     // v8.3 (round-12 #4): sale-mode picker (قطعة / وزن).
@@ -1677,7 +1698,9 @@ const useStyles = makeStyles(c =>
     },
     unitScanBtn: {
       width: 46,
-      height: 50,
+      // v9.2 (round-15 #3): matches the Field input box height —
+      // perfectly flush with the barcode field beside it.
+      height: 47,
       borderRadius: radius.sm,
       backgroundColor: c.accent,
       alignItems: 'center',

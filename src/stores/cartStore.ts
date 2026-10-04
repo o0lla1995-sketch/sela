@@ -19,6 +19,13 @@ import {
 } from '../core/config';
 import type {CartLine, PricingMode, Product, ProductUnit} from '../core/types';
 
+/** v9.2 (round-15 #4): compact quantity for stock messages — trims
+ *  float noise (12.500 → 12.5) so "المتاح 12.5 كغ" reads naturally. */
+function formatQtyForMessage(value: number): string {
+  const rounded = Math.round(value * 1000) / 1000;
+  return String(rounded);
+}
+
 /** Price of one chosen unit under a pricing mode. */
 export function unitPriceFor(
   product: Product,
@@ -191,7 +198,13 @@ export const useCartStore = create<CartState>((set, get) => ({
     if (alreadyInCart + conversion > product.stock_quantity) {
       return {
         added: false,
-        reason: `الكمية المتاحة من ${product.name} هي ${product.stock_quantity} قطعة فقط (في السلة: ${alreadyInCart})`,
+        // v9.2 (round-15 #4): a clearer, actionable stock message —
+        // what's left, what's already in the cart, and in what unit.
+        reason: `نفدت الكمية — المتاح من ${
+          unit != null ? `${product.name} (${unit.unitName})` : product.name
+        } هو ${formatQtyForMessage(
+          product.stock_quantity - alreadyInCart,
+        )} قطعة فقط${alreadyInCart > 0 ? ` (في السلة ${formatQtyForMessage(alreadyInCart)} قطعة)` : ''}`,
       };
     }
 
@@ -236,9 +249,14 @@ export const useCartStore = create<CartState>((set, get) => ({
       );
       return {
         added: false,
-        reason: `المتاح من ${product.name} هو ${
-          Math.round(available * 1000) / 1000
-        } كغ فقط (في السلة: ${Math.round(alreadyInCart * 1000) / 1000} كغ)`,
+        // v9.2 (round-15 #4): clearer weight-stock message.
+        reason: `نفدت الكمية — المتاح من ${
+          unit != null ? `${product.name} (${unit.unitName})` : product.name
+        } هو ${formatQtyForMessage(available)} كغ فقط${
+          alreadyInCart > 0
+            ? ` (في السلة ${formatQtyForMessage(alreadyInCart)} كغ)`
+            : ''
+        }`,
       };
     }
 

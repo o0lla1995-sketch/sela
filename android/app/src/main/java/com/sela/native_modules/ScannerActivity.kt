@@ -117,6 +117,11 @@ class ScannerActivity : Activity() {
         const val MODE_BARCODE = "barcode"
         const val MODE_PHOTO = "photo"
 
+        /** v9.2 (round-15 #5): the COMBINED window — both engines in
+         *  ONE activity with an in-camera switcher; the merchant
+         *  flips باركود ⇄ بصري without ever closing the camera. */
+        const val MODE_BOTH = "both"
+
         /** v8.1: sink the module registers so a continuous barcode
          *  session can stream each read to JS ("selaScanBarcode"). */
         @JvmStatic var continuousSink: ((code: String) -> Unit)? = null
@@ -198,22 +203,37 @@ class ScannerActivity : Activity() {
         }
     }
 
-    private val isBarcodeMode: Boolean by lazy {
-        intent?.getStringExtra(EXTRA_MODE) != MODE_PHOTO
+    private val modeValue: String by lazy {
+        intent?.getStringExtra(EXTRA_MODE) ?: MODE_BARCODE
     }
 
-    /** v8.1 continuous multi-scan (BARCODE only — the visual engine
-     *  is a deliberate single shot per window in v9): never
-     *  auto-close; stream every deduped read to JS. */
+    /** v9.2 (round-15 #5): the COMBINED window — both engines in one
+     *  activity with the in-camera switcher. */
+    private val isBothMode: Boolean by lazy { modeValue == MODE_BOTH }
+
+    /** The ACTIVE engine. Fixed by the launch mode in barcode/photo
+     *  windows; in the combined window the merchant flips it live
+     *  with the switcher (starts on BARCODE). */
+    private var engineIsBarcode: Boolean = true
+
+    private val isBarcodeMode: Boolean
+        get() = engineIsBarcode
+
+    /** v8.1 continuous multi-scan (BARCODE); in the combined window
+     *  the barcode engine ALWAYS runs continuous (the switcher just
+     *  rebinds the use case — the session never auto-closes). */
     private val isContinuous: Boolean by lazy {
-        isBarcodeMode && intent?.getBooleanExtra(EXTRA_CONTINUOUS, false) == true
+        (modeValue == MODE_BARCODE &&
+            intent?.getBooleanExtra(EXTRA_CONTINUOUS, false) == true) ||
+            isBothMode
     }
 
-    /** v9.1 (round-14 #2): multi-shot VISUAL session — the shutter
-     *  stays armed, every press saves a photo, streams the path to
-     *  JS and the window stays open until the merchant closes it. */
+    /** v9.1 (round-14 #2) multi-shot VISUAL session; in the combined
+     *  window the photo engine ALWAYS runs multi-shot. */
     private val isMultiPhoto: Boolean by lazy {
-        !isBarcodeMode && intent?.getBooleanExtra(EXTRA_MULTI, false) == true
+        (modeValue == MODE_PHOTO &&
+            intent?.getBooleanExtra(EXTRA_MULTI, false) == true) ||
+            isBothMode
     }
 
     // ── Camera ────────────────────────────────────────────────
@@ -247,11 +267,20 @@ class ScannerActivity : Activity() {
     private lateinit var torchButton: TextView
     private lateinit var flashOverlay: View
     private lateinit var statusChip: TextView
-    /** v9.1: in-window feedback banner — "✓ أُضيف: ..." / "غير مسجل". */
+    /** v9.1: in-window feedback banner — "✓ أُضيف: ...". */
     private var resultBanner: TextView? = null
     private val bannerHide = Runnable {
         resultBanner?.visibility = View.GONE
     }
+    /** v9.2 (round-15 #5): engine chrome + the in-camera switcher.
+     *  Both chromes exist in the combined window; visibility follows
+     *  the active engine. */
+    private var scanLine: View? = null
+    private var barcodeHint: TextView? = null
+    private var shutter: View? = null
+    private var photoHint: TextView? = null
+    private var switchBarcodeSeg: TextView? = null
+    private var switchPhotoSeg: TextView? = null
 
     // ═══════════════════════════════════════════════════════════
     // Lifecycle
@@ -271,6 +300,9 @@ class ScannerActivity : Activity() {
         //     the whole app; now every failure becomes a readable
         //     error handed back to JS with the exception class name.
         try {
+            // v9.2: the ACTIVE engine follows the launch mode (the
+            // combined window starts on BARCODE and flips live).
+            engineIsBarcode = modeValue != MODE_PHOTO
             buildUi()
             setContentView(root)
         } catch (error: Throwable) {
@@ -493,15 +525,7 @@ class ScannerActivity : Activity() {
         val closeButton = chip("إغلاق", chipBg, stroke).apply {
             setOnClickListener { finishCancelled() }
         }
-        statusChip = chip(
-            when {
-                isContinuous -> "مسح متعدد · 0"
-                isMultiPhoto -> "بصري متعدد · 0"
-                isBarcodeMode -> "ماسح الباركود"
-                else -> "المسح البصري"
-            },
-            chipBg, stroke
-        )
+        statusChip = chip(statusChipText(), chipBg, stroke)
         torchButton = chip("الفلاش", chipBg, stroke).apply {
             setOnClickListener { toggleTorch() }
         }
@@ -548,37 +572,44 @@ class ScannerActivity : Activity() {
         }
         root.addView(resultBanner)
 
-        // 4) Mode-specific chrome.
-        if (isBarcodeMode) {
+        // 4) Mode-specific chrome. In the COMBINED window (v9.2)
+        //    BOTH chromes exist and visibility follows the active
+        //    engine; in single-engine windows only that engine's
+        //    chrome is built (byte-for-byte the proven v9.1 path).
+        if (modeValue != MODE_PHOTO) {
             // Red laser line with a subtle animated sweep.
-            val line = View(this).apply {
+            scanLine = View(this).apply {
                 setBackgroundColor(Color.parseColor("#FF3B30"))
                 layoutParams = FrameLayout.LayoutParams(
                     dp(230), dp(2), Gravity.CENTER
                 )
             }
-            root.addView(line)
-            animateScanLine(line)
+            root.addView(scanLine)
+            animateScanLine(scanLine!!)
 
-            root.addView(
-                hintView(
-                    if (isContinuous) {
-                        "امسح عدة منتجات — كل قراءة تُضاف للسلة فوراً · إغلاق للإنهاء"
+            barcodeHint = hintView(
+                if (isContinuous) {
+                    if (isBothMode) {
+                        "امسح ملصق الباركود — كل قراءة تُضاف للسلة · بدّل للبصري بالمفتاح بالأسفل"
                     } else {
-                        "وجّه الكاميرا نحو ملصق الباركود — يُقفل تلقائياً عند القراءة"
+                        "امسح عدة منتجات — كل قراءة تُضاف للسلة فوراً · إغلاق للإنهاء"
                     }
-                )
+                } else {
+                    "وجّه الكاميرا نحو ملصق الباركود — يُقفل تلقائياً عند القراءة"
+                }
             )
-        } else {
+            root.addView(barcodeHint)
+        }
+        if (modeValue != MODE_BARCODE) {
             // Shutter: big white ring + inner disc, bottom-center.
             // v9: single deliberate shot per window (the v8.1 flow the
             // merchant's device ran crash-free).
-            val shutter = FrameLayout(this).apply {
+            shutter = FrameLayout(this).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     dp(74), dp(74), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 )
             }
-            shutter.addView(View(this).apply {
+            shutter!!.addView(View(this).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setStroke(dp(4), Color.WHITE)
@@ -589,7 +620,7 @@ class ScannerActivity : Activity() {
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
             })
-            shutter.addView(View(this).apply {
+            shutter!!.addView(View(this).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(Color.WHITE)
@@ -598,17 +629,146 @@ class ScannerActivity : Activity() {
                     dp(56), dp(56), Gravity.CENTER
                 )
             })
-            shutter.setOnClickListener { capturePhoto() }
+            shutter!!.setOnClickListener { capturePhoto() }
             root.addView(shutter)
 
-            root.addView(
-                hintView(
-                    if (isMultiPhoto) {
-                        "صوّر المنتجات واحداً تلو الآخر — كل صورة تُميّز وتُضاف للسلة · إغلاق للإنهاء"
+            photoHint = hintView(
+                if (isMultiPhoto) {
+                    if (isBothMode) {
+                        "صوّر المنتج واحداً تلو الآخر — كل تعرّف يُضاف للسلة · بدّل للباركود بالمفتاح بالأسفل"
                     } else {
-                        "عبّئ الإطار بالمنتج ثم اضغط زر التصوير"
+                        "صوّر المنتجات واحداً تلو الآخر — كل صورة تُميّز وتُضاف للسلة · إغلاق للإنهاء"
                     }
+                } else {
+                    "عبّئ الإطار بالمنتج ثم اضغط زر التصوير"
+                }
+            )
+            root.addView(photoHint)
+        }
+
+        // 5) v9.2 (round-15 #5): the in-camera ENGINE SWITCHER — a
+        //    big two-segment pill (باركود | بصري) that flips the
+        //    active engine with one tap, camera never closing. The
+        //    merchant's exact ask: easy switching while both engines
+        //    are selected and the camera is running.
+        if (isBothMode) {
+            val switcher = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(24).toFloat()
+                    setColor(Color.parseColor("#CC1C1C22"))
+                    setStroke(dp(1), Color.parseColor("#33FFFFFF"))
+                }
+                setPadding(dp(6), dp(6), dp(6), dp(6))
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 )
+            }
+            switchBarcodeSeg = engineSegment("باركود").apply {
+                setOnClickListener { switchEngine(toBarcode = true) }
+            }
+            switchPhotoSeg = engineSegment("بصري").apply {
+                setOnClickListener { switchEngine(toBarcode = false) }
+            }
+            switcher.addView(switchBarcodeSeg)
+            switcher.addView(switchPhotoSeg)
+            switcher.setOnApplyWindowInsetsListener { v, insets ->
+                runCatching {
+                    val bars = WindowInsetsCompat.toWindowInsetsCompat(insets)
+                        .getInsets(WindowInsetsCompat.Type.systemBars())
+                    (v.layoutParams as FrameLayout.LayoutParams).bottomMargin =
+                        bars.bottom + dp(170)
+                    v.requestLayout()
+                }
+                insets
+            }
+            root.addView(switcher)
+            updateEngineChrome()
+            updateSwitcherUi()
+        }
+    }
+
+    /** v9.2: one switcher segment (باركود / بصري). */
+    private fun engineSegment(label: String): TextView =
+        TextView(this).apply {
+            text = label
+            textSize = 15f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(dp(22), dp(10), dp(22), dp(10))
+        }
+
+    /** v9.2: the status-chip text for the current window state. */
+    private fun statusChipText(): String = when {
+        isBothMode ->
+            (if (engineIsBarcode) "باركود" else "بصري") +
+                " · ${confirmedCount.get()}"
+        isContinuous -> "مسح متعدد · ${confirmedCount.get()}"
+        isMultiPhoto -> "بصري متعدد · ${confirmedCount.get()}"
+        engineIsBarcode -> "ماسح الباركود"
+        else -> "المسح البصري"
+    }
+
+    private fun updateStatusChip() {
+        statusChip.text = statusChipText()
+    }
+
+    /** v9.2: flip the chrome visibility to the active engine. */
+    private fun updateEngineChrome() {
+        val barcodeActive = engineIsBarcode
+        scanLine?.visibility = if (barcodeActive) View.VISIBLE else View.GONE
+        barcodeHint?.visibility = if (barcodeActive) View.VISIBLE else View.GONE
+        shutter?.visibility = if (barcodeActive) View.GONE else View.VISIBLE
+        photoHint?.visibility = if (barcodeActive) View.GONE else View.VISIBLE
+    }
+
+    /** v9.2: highlight the active switcher segment (app accent). */
+    private fun updateSwitcherUi() {
+        val segments = listOfNotNull(switchBarcodeSeg, switchPhotoSeg)
+        if (segments.isEmpty()) {
+            return
+        }
+        val accent = Color.parseColor("#F97316")
+        val activeBg = GradientDrawable().apply {
+            cornerRadius = dp(19).toFloat()
+            setColor(accent)
+        }
+        for (segment in segments) {
+            val active =
+                (segment === switchBarcodeSeg) == engineIsBarcode
+            segment.background = if (active) activeBg else null
+            segment.setTextColor(if (active) Color.WHITE else Color.parseColor("#C8C8CE"))
+        }
+    }
+
+    /**
+     * v9.2 (round-15 #5): flip the active engine INSIDE the combined
+     * window — a normal user-paced CameraX rebind (unbind → bind the
+     * other engine's use case), exactly one switch per tap, never an
+     * auto-loop. The camera window stays open the whole time; this
+     * is the easy live switching the merchant asked for.
+     */
+    private fun switchEngine(toBarcode: Boolean) {
+        if (toBarcode == engineIsBarcode || settled.get() || isFinishing) {
+            return
+        }
+        engineIsBarcode = toBarcode
+        vibrate(25)
+        updateEngineChrome()
+        updateSwitcherUi()
+        updateStatusChip()
+        // Drop any stale capture handle — the photo engine builds a
+        // fresh one when the merchant switches back.
+        imageCapture = null
+        try {
+            startCamera()
+        } catch (error: Throwable) {
+            // v8.3-style shield: never crash for a rebind failure.
+            finishWithError(
+                "تعذر تبديل المحرك: " + error.javaClass.simpleName +
+                    (error.message?.let { " — $it" } ?: "")
             )
         }
     }
@@ -847,9 +1007,9 @@ class ScannerActivity : Activity() {
             flash(Color.parseColor("#3322C55E"), 200)
             // v9.1 (round-14 #1): the chip shows the CONFIRMED count
             // only — JS confirms registered adds via notifyResult.
-            // A raw read that turns out unregistered must NOT bump
-            // the counter (the merchant's exact complaint).
-            statusChip.text = "مسح متعدد · ${confirmedCount.get()}"
+            // v9.2: unified through statusChipText() (combined window
+            // shows the ACTIVE engine + confirmed count).
+            updateStatusChip()
         }
         // Stream to JS on the analysis thread (the emitter is
         // thread-safe); errors here must never kill the session.
@@ -909,8 +1069,8 @@ class ScannerActivity : Activity() {
                             // Multi-shot: stream + keep the window open.
                             flash(Color.parseColor("#66FFFFFF"), 140)
                             vibrate(20)
-                            val photos = continuousReads.incrementAndGet()
-                            statusChip.text = "بصري متعدد · $photos"
+                            continuousReads.incrementAndGet()
+                            updateStatusChip()
                             showScanResult(false, "جارٍ التعرّف…")
                             runCatching {
                                 ScannerActivity.photoSink?.invoke(file.absolutePath)
@@ -925,7 +1085,17 @@ class ScannerActivity : Activity() {
                 override fun onError(error: ImageCaptureException) {
                     runCatching {
                         captureBusy.set(false)
-                        if (settled.compareAndSet(false, true)) {
+                        if (isMultiPhoto) {
+                            // v9.2 (round-15 #5): in a multi-shot or
+                            // combined window ONE failed capture (e.g.
+                            // the merchant flipped the engine mid-save)
+                            // must NEVER end the session — say it in the
+                            // banner and keep the window open.
+                            showScanResult(
+                                false,
+                                "فشل التقاط الصورة — أعد المحاولة"
+                            )
+                        } else if (settled.compareAndSet(false, true)) {
                             finishWithError(
                                 "فشل التقاط الصورة: ${error.javaClass.simpleName}" +
                                     (error.message?.let { " — $it" } ?: "")
@@ -942,20 +1112,17 @@ class ScannerActivity : Activity() {
     /** Shows the JS-confirmed outcome of a streamed read:
      *  ok=true  → green "✓ message" + CONFIRMED counter +1
      *             (only registered products reach here),
-     *  ok=false → red informational message (غير مسجل / لم يتم
-     *             التعرف / جارٍ التعرّف…).
-     *  Round-14 #1: the counter chip counts CONFIRMED adds only. */
+     *  ok=false → red informational message (لم يتم التعرف /
+     *             جارٍ التعرّف… / فشل الالتقاط…).
+     *  Round-14 #1: the counter chip counts CONFIRMED adds only.
+     *  v9.2: unified chip text (combined window shows the ACTIVE
+     *  engine name + confirmed count). */
     private fun showScanResult(ok: Boolean, message: String) {
         val banner = resultBanner ?: return
         if (ok) {
             confirmedCount.incrementAndGet()
         }
-        val count = confirmedCount.get()
-        statusChip.text = when {
-            isMultiPhoto -> "بصري متعدد · $count"
-            isContinuous -> "مسح متعدد · $count"
-            else -> statusChip.text
-        }
+        updateStatusChip()
         banner.text = if (ok) "✓ $message" else message
         banner.setTextColor(
             if (ok) Color.parseColor("#4ADE80") else Color.parseColor("#F87171")

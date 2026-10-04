@@ -52,7 +52,14 @@ interface BackupFile {
   createdAt: string;
   appVersion: string;
   categories: {id: number; name: string}[];
-  units: {id: number; name: string; short_name: string; sort_order: number}[];
+  units: {
+    id: number;
+    name: string;
+    short_name: string;
+    sort_order: number;
+    /** v9.2 (round-15 #3): the unit type (old backups: undefined). */
+    kind?: string;
+  }[];
   products: {
     id: number;
     name: string;
@@ -144,7 +151,7 @@ export const BackupService = {
       stocktakeItems,
     ] = await Promise.all([
       db.execute('SELECT id, name FROM categories'),
-      db.execute('SELECT id, name, short_name, sort_order FROM units'),
+      db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
       db.execute(
         'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, created_at FROM products',
       ),
@@ -214,6 +221,7 @@ export const BackupService = {
         name: String(row.name ?? ''),
         short_name: String(row.short_name ?? ''),
         sort_order: Number(row.sort_order ?? 0),
+        kind: String(row.kind ?? 'piece'),
       })),
       products: rowsOf(products).map(row => ({
         id: Number(row.id),
@@ -444,11 +452,18 @@ export const BackupService = {
           continue;
         }
         const inserted = await tx.execute(
-          'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
+          'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
           [
             unit.name,
             unit.short_name || unit.name,
             Number(unit.sort_order ?? 0),
+            // v9.2: carry the unit type through the restore (old
+            // backups default to 'piece').
+            unit.kind === 'weight' ||
+            unit.kind === 'volume' ||
+            unit.kind === 'length'
+              ? unit.kind
+              : 'piece',
           ],
         );
         unitMap.set(Number(unit.id), Number(inserted.insertId));

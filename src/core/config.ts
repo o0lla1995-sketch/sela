@@ -1,6 +1,7 @@
 /**
  * Global tunables for the vision pipeline and the POS behaviour.
  */
+import type {UnitKind} from './types';
 
 /** Required input resolution of the bundled MobileNetV3-Small embedder. */
 export const MODEL_INPUT_SIZE = 224;
@@ -91,20 +92,54 @@ export const WEIGHT_QTY_DECIMALS = 3;
 /** v8.3: floating-point slack when comparing fractional stock (1 g). */
 export const QTY_EPSILON = 0.001;
 
-/** Units seeded on first run (name, short name). */
-export const DEFAULT_UNITS: {name: string; short: string}[] = [
-  {name: 'قطعة', short: 'ق'},
-  {name: 'كرتونة', short: 'كرت'},
-  {name: 'علبة', short: 'علب'},
-  {name: 'كيس', short: 'كيس'},
-  {name: 'كيلوغرام', short: 'كغ'},
-  {name: 'غرام', short: 'غ'},
-  {name: 'وقية', short: 'وقية'},
-  {name: 'لتر', short: 'ل'},
-  {name: 'دزينة', short: 'دز'},
-  {name: 'زجاجة', short: 'زج'},
-  {name: 'متر', short: 'م'},
+/** v9.2 (round-15 #3): units seeded on first run — now a FULL
+ *  catalog with its TYPE (kind). The merchant asked for ALL the
+ *  units with their types, with weight clearly distinguished from
+ *  piece — so weight products get weight units (كيلو، غرام، وقية،
+ *  رطل، أونصة…), piece products get packaging units (كرتونة، علبة،
+ *  كيس، دستة…), and volume/length units are there too. */
+export const DEFAULT_UNITS: {name: string; short: string; kind: UnitKind}[] = [
+  // ── قطعة (packaging / count) ──
+  {name: 'قطعة', short: 'ق', kind: 'piece'},
+  {name: 'كرتونة', short: 'كرت', kind: 'piece'},
+  {name: 'علبة', short: 'علب', kind: 'piece'},
+  {name: 'كيس', short: 'كيس', kind: 'piece'},
+  {name: 'دزينة', short: 'دز', kind: 'piece'},
+  {name: 'زجاجة', short: 'زج', kind: 'piece'},
+  {name: 'عبوة', short: 'عبوة', kind: 'piece'},
+  {name: 'حزمة', short: 'حزمة', kind: 'piece'},
+  {name: 'صندوق', short: 'صندوق', kind: 'piece'},
+  {name: 'شوال', short: 'شوال', kind: 'piece'},
+  {name: 'صينية', short: 'صينية', kind: 'piece'},
+  {name: 'طبق', short: 'طبق', kind: 'piece'},
+  // ── وزن ──
+  {name: 'كيلوغرام', short: 'كغ', kind: 'weight'},
+  {name: 'غرام', short: 'غ', kind: 'weight'},
+  {name: 'وقية', short: 'وقية', kind: 'weight'},
+  {name: 'نصف كيلو', short: 'نصف', kind: 'weight'},
+  {name: 'رطل', short: 'رطل', kind: 'weight'},
+  {name: 'أونصة', short: 'أونصة', kind: 'weight'},
+  // ── حجم ──
+  {name: 'لتر', short: 'ل', kind: 'volume'},
+  {name: 'مليلتر', short: 'مل', kind: 'volume'},
+  {name: 'جالون', short: 'جالون', kind: 'volume'},
+  // ── طول ──
+  {name: 'متر', short: 'م', kind: 'length'},
+  {name: 'سنتيمتر', short: 'سم', kind: 'length'},
 ];
+
+/** v9.2 (round-15 #3): Arabic labels for the unit kinds. */
+export const UNIT_KIND_LABELS: Record<UnitKind, string> = {
+  piece: 'قطعة',
+  weight: 'وزن',
+  volume: 'حجم',
+  length: 'طول',
+};
+
+/** v9.2 (round-15 #3): the FULL standard catalog used by the v5
+ *  migration to top up existing installs (name → kind). */
+export const STANDARD_UNITS_V5: {name: string; short: string; kind: UnitKind}[] =
+  DEFAULT_UNITS;
 
 /** Embedding JSON serialization precision (float decimals). */
 export const EMBEDDING_DECIMALS = 6;
@@ -137,7 +172,7 @@ export const CURRENCY = '₪';
 export const DB_NAME = 'sela.db';
 
 /** Schema version — bump + add a migration branch when changing DDL. */
-export const DB_SCHEMA_VERSION = 4;
+export const DB_SCHEMA_VERSION = 5;
 
 /** App display name (Latin, per merchant request) used everywhere. */
 export const APP_NAME = 'sela';
@@ -148,9 +183,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '9.1.0';
+export const APP_VERSION = '9.2.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 14;
+export const APP_BUILD_CODE = 15;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

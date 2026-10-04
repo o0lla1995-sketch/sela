@@ -1,9 +1,20 @@
 /**
  * Units repository — user-defined sellable units (قطعة، كرتونة، كيلو…)
  * plus per-product unit rows with conversion factors and price overrides.
+ * v9.2 (round-15 #3): every unit carries a TYPE (kind — piece /
+ * weight / volume / length) so weight products offer weight units
+ * and piece products offer packaging units.
  */
 import {getDb, toMessage} from '../connection';
-import type {ProductUnit, Unit} from '../../core/types';
+import type {ProductUnit, Unit, UnitKind} from '../../core/types';
+
+/** Safe kind for a raw DB row (old rows default to 'piece'). */
+function kindOf(row: Record<string, unknown>): UnitKind {
+  const value = String(row.kind ?? 'piece');
+  return value === 'weight' || value === 'volume' || value === 'length'
+    ? value
+    : 'piece';
+}
 
 function rowToUnit(row: Record<string, unknown>): Unit {
   return {
@@ -11,6 +22,7 @@ function rowToUnit(row: Record<string, unknown>): Unit {
     name: String(row.name ?? ''),
     short_name: String(row.short_name ?? ''),
     sort_order: Number(row.sort_order ?? 0),
+    kind: kindOf(row),
   };
 }
 
@@ -30,14 +42,22 @@ function rowToProductUnit(row: Record<string, unknown>): ProductUnit {
 }
 
 export const UnitRepo = {
+  /** v9.2: grouped by TYPE first (piece → weight → volume → length)
+   *  so the management screen and pickers read naturally. */
   async list(): Promise<Unit[]> {
     const result = await getDb().execute(
-      'SELECT * FROM units ORDER BY sort_order ASC, id ASC',
+      `SELECT * FROM units
+       ORDER BY CASE kind
+         WHEN 'piece' THEN 0
+         WHEN 'weight' THEN 1
+         WHEN 'volume' THEN 2
+         ELSE 3
+       END, sort_order ASC, id ASC`,
     );
     return (result.rows?._array ?? []).map(rowToUnit);
   },
 
-  async create(name: string, short: string): Promise<number> {
+  async create(name: string, short: string, kind: UnitKind = 'piece'): Promise<number> {
     const trimmed = name.trim();
     if (!trimmed) {
       throw new Error('اسم الوحدة مطلوب');
@@ -57,8 +77,8 @@ export const UnitRepo = {
       (orderResult.rows?._array?.[0] as {next?: number})?.next ?? 1,
     );
     const result = await getDb().execute(
-      'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
-      [trimmed, short.trim() || trimmed, next],
+      'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
+      [trimmed, short.trim() || trimmed, next, kind],
     );
     return result.insertId ?? -1;
   },
@@ -68,8 +88,13 @@ export const UnitRepo = {
    * used by the one-tap weight-package chips (وقية / نصف كغ…) so a
    * merchant never has to leave the product form to add a package
    * unit that doesn't exist yet.
+   * v9.2 (round-15 #3): carries the unit TYPE through.
    */
-  async getOrCreate(name: string, short?: string): Promise<number> {
+  async getOrCreate(
+    name: string,
+    short?: string,
+    kind: UnitKind = 'piece',
+  ): Promise<number> {
     const trimmed = name.trim();
     if (!trimmed) {
       throw new Error('اسم الوحدة مطلوب');
@@ -89,20 +114,32 @@ export const UnitRepo = {
       (orderResult.rows?._array?.[0] as {next?: number})?.next ?? 1,
     );
     const result = await getDb().execute(
-      'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
-      [trimmed, (short ?? trimmed).trim() || trimmed, next],
+      'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
+      [trimmed, (short ?? trimmed).trim() || trimmed, next, kind],
     );
     return result.insertId ?? -1;
   },
 
-  async rename(id: number, name: string, short: string): Promise<void> {
+  async rename(
+    id: number,
+    name: string,
+    short: string,
+    kind?: UnitKind,
+  ): Promise<void> {
     const trimmed = name.trim();
     if (!trimmed) {
       throw new Error('اسم الوحدة مطلوب');
     }
+    if (kind == null) {
+      await getDb().execute(
+        'UPDATE units SET name = ?, short_name = ? WHERE id = ?',
+        [trimmed, short.trim() || trimmed, id],
+      );
+      return;
+    }
     await getDb().execute(
-      'UPDATE units SET name = ?, short_name = ? WHERE id = ?',
-      [trimmed, short.trim() || trimmed, id],
+      'UPDATE units SET name = ?, short_name = ?, kind = ? WHERE id = ?',
+      [trimmed, short.trim() || trimmed, kind, id],
     );
   },
 

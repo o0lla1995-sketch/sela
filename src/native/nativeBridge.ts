@@ -129,6 +129,17 @@ interface SelaScannerNativeModule {
     code?: string;
     path?: string;
   }>;
+  /** v9.2 (round-15 #5): opens the COMBINED session — ONE native
+   *  window with BOTH engines and an in-camera switcher (باركود ⇄
+   *  بصري) that flips the active engine WITHOUT closing the camera.
+   * Barcode reads stream as "selaScanBarcode" events, shutter
+   * presses stream "selaScanPhoto" events; resolves {cancelled:true}
+   * when the merchant closes the scanner. */
+  openScannerBoth(): Promise<{
+    cancelled?: boolean;
+    code?: string;
+    path?: string;
+  }>;
   /** v9.1 (round-14 #1): streams the JS-confirmed outcome of a read
    *  back into the live scanner window — ok=true shows the green
    *  "✓ added" banner + bumps the CONFIRMED counter; ok=false shows
