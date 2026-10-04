@@ -12,7 +12,7 @@
  *     grand total — and إعادة الطباعة reprint on the thermal
  *     printer with the store's receipt settings.
  */
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   ScrollView,
@@ -93,11 +93,19 @@ export function InvoicesScreen() {
     [loadedCount],
   );
 
+  // Latest search + loader in refs so the focus callback stays
+  // identity-stable (empty deps — otherwise useFocusEffect re-fires
+  // on every load and loops) while never going stale.
+  const searchRef = useRef(search);
+  searchRef.current = search;
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
   useFocusEffect(
     useCallback(() => {
-      void load('', true);
       // Reload fresh whenever the screen gains focus (a new sale may
-      // have just completed).
+      // have just completed) — WITH the active query.
+      void loadRef.current(searchRef.current, true);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []),
   );
