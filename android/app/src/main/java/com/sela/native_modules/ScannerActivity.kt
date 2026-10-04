@@ -274,10 +274,11 @@ class ScannerActivity : Activity() {
     }
     /** v9.2 (round-15 #5): engine chrome + the in-camera switcher.
      *  Both chromes exist in the combined window; visibility follows
-     *  the active engine. */
+     *  the active engine. (shutter is a FrameLayout — addView needs
+     *  the ViewGroup type, not plain View.) */
     private var scanLine: View? = null
     private var barcodeHint: TextView? = null
-    private var shutter: View? = null
+    private var shutter: FrameLayout? = null
     private var photoHint: TextView? = null
     private var switchBarcodeSeg: TextView? = null
     private var switchPhotoSeg: TextView? = null
