@@ -200,6 +200,23 @@ interface SelaImagePickerNative {
   pickStoreLogo(maxDim: number): Promise<string>;
 }
 
+/**
+ * v13 (round-19 #2): app-lock biometric prompt (BiometricModule.kt).
+ * availability() → 'available' | 'none_enrolled' | 'unavailable'
+ * (the module is missing entirely only on broken installs → treat
+ * undefined as 'unavailable'). authenticate() resolves false for
+ * user-cancel / lockout / missing hardware — the PIN pad is always
+ * the fallback.
+ */
+interface SelaBiometricNativeModule {
+  availability(): Promise<'available' | 'none_enrolled' | 'unavailable'>;
+  authenticate(
+    title: string,
+    subtitle: string,
+    cancelText: string,
+  ): Promise<boolean>;
+}
+
 type MaybeModule<T> = T | undefined;
 
 export const ThermalPrinterNative: MaybeModule<ThermalPrinterNative> =
@@ -219,6 +236,37 @@ export const SelaImagePickerNative: MaybeModule<SelaImagePickerNative> =
 
 export const SelaScannerNative: MaybeModule<SelaScannerNativeModule> =
   NativeModules.SelaScanner as MaybeModule<SelaScannerNativeModule>;
+
+export const SelaBiometricNative: MaybeModule<SelaBiometricNativeModule> =
+  NativeModules.SelaBiometric as MaybeModule<SelaBiometricNativeModule>;
+
+/** v13 (round-19 #2): biometric availability that never throws —
+ *  missing module / native error both mean "unavailable". */
+export async function biometricAvailability(): Promise<
+  'available' | 'none_enrolled' | 'unavailable'
+> {
+  try {
+    return (await SelaBiometricNative?.availability()) ?? 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
+
+/** v13: one biometric prompt attempt — false on cancel/lockout/error. */
+export async function biometricAuthenticate(
+  title: string,
+  subtitle: string,
+  cancelText: string,
+): Promise<boolean> {
+  try {
+    return (
+      (await SelaBiometricNative?.authenticate(title, subtitle, cancelText)) ??
+      false
+    );
+  } catch {
+    return false;
+  }
+}
 
 /** Opens the native BARCODE scanner — throws if unavailable. */
 export function requireBarcodeScanner(): SelaScannerNativeModule {

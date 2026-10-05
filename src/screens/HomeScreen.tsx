@@ -90,25 +90,37 @@ export function HomeScreen() {
     }[]
   >([]);
   // v12 (round-18 #4): the debts & treasury report on the dashboard.
+  // v13 (round-19 #1): the outstanding figure now comes from the
+  // SERVER-synced صِلة customers cache (Σ outstanding_minor — shrinks
+  // when customers repay through the صِلة app), plus the local rows
+  // still awaiting upload so nothing is understated while offline.
   const [debtTotals, setDebtTotals] = useState<{
     allMinor: number;
     allCount: number;
     pendingMinor: number;
     pendingCount: number;
   } | null>(null);
+  const [serverBalances, setServerBalances] = useState<{
+    totalMinor: number;
+    debtorsCount: number;
+    lastSyncedAt: string | null;
+  } | null>(null);
   const [treasuryRevenue, setTreasuryRevenue] = useState<number | null>(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [todayBundle, latest, silaTotals, allRevenue] = await Promise.all([
-        ReportService.loadBundle('today'),
-        SaleRepo.listRecent(3),
-        SilaRepo.totals(),
-        SaleRepo.allTimeRevenue(),
-      ]);
+      const [todayBundle, latest, silaTotals, balances, allRevenue] =
+        await Promise.all([
+          ReportService.loadBundle('today'),
+          SaleRepo.listRecent(3),
+          SilaRepo.totals(),
+          SilaRepo.customersOutstandingTotal(),
+          SaleRepo.allTimeRevenue(),
+        ]);
       setBundle(todayBundle);
       setRecentSales(latest);
       setDebtTotals(silaTotals);
+      setServerBalances(balances);
       setTreasuryRevenue(allRevenue);
     } catch {
       // Dashboard is informational — previous data stays shown.
@@ -119,6 +131,13 @@ export function HomeScreen() {
     const unsubscribe = navigation.addListener('focus', () => {
       void loadData();
       void StockAlertsService.evaluate();
+      // v13 (round-19 #1): refresh the صِلة balances the moment the
+      // merchant lands on the dashboard — «الديون القائمة» و«الرصيد
+      // بعد السداد» now mirror the debts screen (repayments included)
+      // instead of summing local debt rows that never shrink.
+      void SilaSync.refreshBalances().then(() => {
+        void loadData();
+      });
     });
     return unsubscribe;
   }, [navigation, loadData]);
@@ -134,8 +153,14 @@ export function HomeScreen() {
     });
   }, [toast, loadData]);
 
-  const debtTotalShekels = (debtTotals?.allMinor ?? 0) / 100;
-  const treasuryCash = (treasuryRevenue ?? 0) - debtTotalShekels;
+  // v13 (round-19 #1): صِلة-server outstanding (post-repayment) +
+  // local rows the server doesn't know about yet = the real figure.
+  const outstandingShekels =
+    ((serverBalances?.totalMinor ?? 0) + (debtTotals?.pendingMinor ?? 0)) / 100;
+  const treasuryCash = (treasuryRevenue ?? 0) - outstandingShekels;
+  const debtorsCount =
+    (serverBalances?.debtorsCount ?? 0) +
+    ((debtTotals?.pendingCount ?? 0) > 0 ? 1 : 0);
 
   return (
     <View style={styles.screen}>
@@ -222,7 +247,7 @@ export function HomeScreen() {
         {/* ── v12 (round-18 #4): debts & treasury report ──── */}
         <SectionTitle
           title="الديون والخزينة"
-          hint="إجمالي ديون صِلة القائمة والنقد المحصّل"
+          hint="يتزامن مع صِلة وتُخصم منه الأقساط المسدّدة"
           action={
             silaPairing != null ? (
               <TouchableOpacity
@@ -252,18 +277,23 @@ export function HomeScreen() {
           <>
             <View style={styles.statsRow}>
               <StatCard
-                label={`الديون القائمة · ${debtTotals?.allCount ?? 0} فاتورة`}
-                value={formatMoney(debtTotalShekels)}
+                label={`الديون القائمة · ${debtorsCount} مدين`}
+                value={formatMoney(outstandingShekels)}
                 tone="danger"
                 icon="qrFrame"
               />
               <StatCard
-                label="الخزينة النقدية (بعد الديون)"
+                label="الرصيد بعد السداد"
                 value={formatMoney(treasuryCash)}
                 tone={treasuryCash >= 0 ? 'success' : 'danger'}
                 icon="wallet"
               />
             </View>
+            {serverBalances?.lastSyncedAt != null ? (
+              <Text style={styles.balancesStamp}>
+                محدّث من صِلة · {relativeTime(serverBalances.lastSyncedAt)}
+              </Text>
+            ) : null}
             {silaPending > 0 || (debtTotals?.pendingCount ?? 0) > 0 ? (
               <TouchableOpacity
                 style={styles.silaPendingRow}
@@ -517,6 +547,14 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.micro + 2,
       textAlign: 'left',
+    },
+    // v13 (round-19 #1): "when was this synced from صِلة" caption.
+    balancesStamp: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+      marginTop: -2,
     },
     seeAll: {
       color: c.accent,

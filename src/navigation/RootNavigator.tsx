@@ -37,6 +37,7 @@ import {
   InvoicesScreen,
 } from '../screens/invoices/InvoicesScreen';
 import {SilaScreen} from '../screens/sila/SilaScreen';
+import {SecuritySettingsScreen} from '../screens/settings/SecuritySettingsScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -52,6 +53,8 @@ export type RootStackParamList = {
   InvoiceDetail: {saleId: number} | undefined;
   /** v11 (SILA): merchant pairing + debt dashboard (الدين الفلسطيني). */
   Sila: undefined;
+  /** v13 (round-19 #2): app-lock setup (fingerprint + 4-digit PIN). */
+  Security: undefined;
 };
 
 export type MainTabParamList = {
@@ -179,6 +182,7 @@ export function RootNavigator() {
           options={{animation: 'slide_from_bottom'}}
         />
         <Stack.Screen name="Sila" component={SilaScreen} />
+        <Stack.Screen name="Security" component={SecuritySettingsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

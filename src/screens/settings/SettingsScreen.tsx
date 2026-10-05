@@ -569,6 +569,13 @@ export function SettingsScreen() {
             hint="حالة الكاميرا والنموذج وقاعدة البيانات والطابعة"
             onPress={() => navigation.navigate('Diagnostics' as never)}
           />
+          {/* v13 (round-19 #2): app-lock entry — fingerprint + PIN. */}
+          <SettingRow
+            icon="fingerprint"
+            label="قفل التطبيق"
+            hint="فتح سيلا بالبصمة أو برمز من 4 أرقام عند التشغيل"
+            onPress={() => navigation.navigate('Security' as never)}
+          />
         </Card>
 
         {/* ── v11 (SILA): merchant account linking + debts ────── */}

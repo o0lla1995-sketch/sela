@@ -18,6 +18,8 @@ import com.facebook.react.uimanager.ViewManager
  *  - SelaScanner    : v8 native full-screen scanner engines
  *                     (ScannerActivity — barcode ML Kit + photo
  *                     capture) + headless camera diagnostics.
+ *  - SelaBiometric  : v13 app-lock fingerprint prompt
+ *                     (androidx.biometric BiometricPrompt).
  *
  * NOTE v8: the old SelaCameraView in-RN camera component is GONE —
  * the preview now lives in its own native Activity window, which is
@@ -33,7 +35,8 @@ class SelaPackage : ReactPackage {
     ImageDecoderModule(reactContext),
     NotificationsModule(reactContext),
     ImagePickerModule(reactContext),
-    SelaScannerModule(reactContext)
+    SelaScannerModule(reactContext),
+    BiometricModule(reactContext)
   )
 
   override fun createViewManagers(

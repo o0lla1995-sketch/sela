@@ -76,6 +76,8 @@ export type IconName =
   | 'phone'
   | 'shield'
   | 'lock'
+  | 'fingerprint'
+  | 'backspace'
   | 'mail';
 
 interface IconProps {
@@ -136,6 +138,24 @@ const P: Record<IconName, React.ReactNode> = {
     <G>
       <Rect x={5} y={10.5} width={14} height={9.5} rx={2.2} />
       <Path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
+    </G>
+  ),
+  /** v13 (round-19 #2): fingerprint ridge set for the app-lock. */
+  fingerprint: (
+    <G>
+      <Path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" />
+      <Path d="M14 21.34c-.46.29-.98.44-1.5.44-.52 0-1.04-.15-1.5-.44" />
+      <Path d="M8 20.03C7.5 21.25 6.5 22 5.5 22 4 22 3 20 3 17c0-1 .17-2.34.42-3.67" />
+      <Path d="M18.5 22c1.5 0 2.5-2 2.5-5 0-6-2.5-12-9-12S3 11 3 17c0 1 .17 2.34.42 3.67" />
+      <Path d="M12 12c0 4.42.42 8.42 1.5 10.57" />
+    </G>
+  ),
+  /** v13: keypad delete key. */
+  backspace: (
+    <G>
+      <Path d="M21 4H8l-6 8 6 8h13a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 21 4Z" />
+      <Path d="m12 9.5 5 5" />
+      <Path d="m17 9.5-5 5" />
     </G>
   ),
   /** Envelope. */

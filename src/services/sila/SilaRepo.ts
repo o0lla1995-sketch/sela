@@ -346,6 +346,41 @@ export const SilaRepo = {
     }
   },
 
+  /** v13 (round-19 #1): the SERVER view of the merchant's outstanding
+   *  debts — Σ outstanding_minor across the cached صِلة customers.
+   *  Unlike totals() (local debt rows ever created), this number is
+   *  refreshed from /api/pos/customers so repayments made through the
+   *  SILA app immediately reduce it — exactly what the merchant sees
+   *  on the debts screen. The Home report now uses this. */
+  async customersOutstandingTotal(): Promise<{
+    totalMinor: number;
+    debtorsCount: number;
+    lastSyncedAt: string | null;
+  }> {
+    try {
+      const result = await getDb().execute(
+        `SELECT
+           COALESCE(SUM(outstanding_minor), 0) AS total_minor,
+           COALESCE(SUM(CASE WHEN outstanding_minor > 0 THEN 1 ELSE 0 END), 0) AS debtors,
+           MAX(last_synced_at) AS last_sync
+         FROM sila_customers`,
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        total_minor?: number | null;
+        debtors?: number | null;
+        last_sync?: string | null;
+      };
+      return {
+        totalMinor: Number(row.total_minor ?? 0),
+        debtorsCount: Number(row.debtors ?? 0),
+        lastSyncedAt: row.last_sync ?? null,
+      };
+    } catch (error) {
+      logDiag('sila', `تعذر جمع أرصدة الزبائن: ${toMessage(error)}`, 'warn');
+      return {totalMinor: 0, debtorsCount: 0, lastSyncedAt: null};
+    }
+  },
+
   // ── customers cache (§7) ───────────────────────────────────────
 
   async upsertCustomers(

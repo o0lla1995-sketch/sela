@@ -192,6 +192,30 @@ async function syncCustomersCycle(): Promise<void> {
   logDiag('sila', `تم تحديث أرصدة ${rows.length} زبون من صِلة`);
 }
 
+/** v13 (round-19 #1): isolated customers-only refresh — the Home
+ *  dashboard calls this on focus so «الديون القائمة» و«الرصيد بعد
+ *  السداد» mirror the صِلة server (repayments included) with the
+ *  same freshness as the debts screen, instead of summing local
+ *  debt rows that never shrink. Never throws; resolves to true when
+ *  new balances landed. */
+async function refreshBalancesCycle(): Promise<boolean> {
+  const store = useSilaStore.getState();
+  if (store.pairing == null) {
+    return false;
+  }
+  if (running) {
+    return false; // a full cycle is already refreshing everything
+  }
+  try {
+    await syncCustomersCycle();
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logDiag('sila', `تحديث أرصدة الزبائن فشل: ${message}`, 'warn');
+    return false;
+  }
+}
+
 async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
   const store = useSilaStore.getState();
   const pairing = store.pairing;
@@ -402,6 +426,20 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
       }
     }
 
+    // v13 (round-19 #1): light customers refresh on EVERY healthy
+    // cycle — previously it only ran when the queue was empty, so
+    // while debts were still pending (or right after they synced)
+    // the Home report kept stale balances that ignored repayments
+    // made through the صِلة app. Isolated — never poisons state.
+    if (!deviceInvalid && !transientFailure) {
+      try {
+        await syncCustomersCycle();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logDiag('sila', `تحديث أرصدة الزبائن فشل: ${message}`, 'warn');
+      }
+    }
+
     await useSilaStore.getState().refreshCounts();
 
     if (deviceInvalid) {
@@ -559,6 +597,14 @@ export const SilaSync = {
    *  with a spoken outcome for the UI toast (round-18 #1). */
   async syncNow(): Promise<SilaSyncOutcome> {
     return runCycle(true);
+  },
+
+  /** v13 (round-19 #1): light balances-only refresh for the Home
+   *  dashboard — pulls /api/pos/customers (updated_since cursor →
+   * cheap) so the debts & treasury report reflects صِلة-side
+   * repayments. Safe offline (resolves false, never throws). */
+  async refreshBalances(): Promise<boolean> {
+    return refreshBalancesCycle();
   },
 
   /** Exponential backoff hint for the UI (§11). */

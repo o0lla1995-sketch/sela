@@ -25,6 +25,7 @@ import {GestureHandlerRootView} from 'react-native-gesture-handler';
 
 import {RootNavigator} from './src/navigation/RootNavigator';
 import {LicenseGate} from './src/components/LicenseGate';
+import {AppLockGate} from './src/components/AppLockGate';
 import {Toaster as UIToaster} from './src/components/ui';
 import {ErrorBoundary as Boundary} from './src/components/ErrorBoundary';
 import {initDatabase} from './src/database/connection';
@@ -127,9 +128,16 @@ export default function App(): React.JSX.Element {
           ) : boot === 'error' ? (
             <BootError message={bootError ?? 'خطأ غير معروف'} />
           ) : (
-            <LicenseGate>
-              <RootNavigator />
-            </LicenseGate>
+            // v13 (round-19 #2): cold-start lock — when fingerprint
+            // and/or a 4-digit PIN is configured the gate paints a
+            // full-screen lock overlay above everything (fingerprint
+            // prompt fires automatically); the app tree stays mounted
+            // underneath so nothing is lost on unlock.
+            <AppLockGate>
+              <LicenseGate>
+                <RootNavigator />
+              </LicenseGate>
+            </AppLockGate>
           )}
           <UIToaster />
         </Boundary>

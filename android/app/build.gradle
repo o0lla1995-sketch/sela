@@ -79,8 +79,8 @@ android {
         applicationId "com.sela"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 18
-        versionName "12.0.0"
+        versionCode 19
+        versionName "13.0.0"
     }
 
     // Prevent Android from compressing the bundled .tflite model in the APK.
@@ -117,6 +117,11 @@ dependencies {
 
     // Explicit androidx.core for NotificationCompat (stock alerts).
     implementation("androidx.core:core-ktx:1.13.1")
+
+    // v13 (round-19 #2): app-lock fingerprint prompt. RN 0.74's
+    // ReactActivity extends AppCompatActivity (a FragmentActivity),
+    // so BiometricPrompt plugs straight into MainActivity.
+    implementation("androidx.biometric:biometric:1.1.0")
 
     // ── Camera stack v4 (hand-written CameraX + offline ML Kit) ──
     // All three use cases are bound 4:3 in one session (see
