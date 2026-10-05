@@ -10,7 +10,7 @@
  * is always reserved in base pieces. Manual selling never depends on
  * the camera being available.
  */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Alert,
   BackHandler,
@@ -1307,10 +1307,15 @@ export function PosScreen() {
     navigation,
   ]);
 
-  /** v11 (SILA §9.2): the confirm step — one atomic action: the
-   *  sale is created, the debt row enters the queue with ONE
-   *  idempotency key, and the debt receipt prints automatically
-   *  when a printer is live. */
+  /** v14 (round-20 #2): synchronous double-tap guard — a second
+   *  tap in the SAME frame as the first (before `busy` re-renders)
+   *  must not open a second atomic transaction. */
+  const debtCommittingRef = useRef(false);
+
+  /** v11 (SILA §9.2): the confirm step — ONE atomic transaction (v14
+   *  round-20 #2): invoice + items + stock decrements + the debt
+   *  queue row commit together or not at all. A failure leaves
+   *  NOTHING recorded and the cart intact for a clean retry. */
   const confirmDebtSale = useCallback(async () => {
     if (debtConfirm == null) {
       return;
@@ -1319,6 +1324,10 @@ export function PosScreen() {
       setDebtConfirm(null);
       return;
     }
+    if (debtCommittingRef.current) {
+      return;
+    }
+    debtCommittingRef.current = true;
     setBusy(true);
     Keyboard.dismiss();
     try {
@@ -1361,8 +1370,16 @@ export function PosScreen() {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      toast(message, 'error');
+      // v14 (round-20 #2): the whole debt sale is ONE atomic
+      // transaction now — reaching this catch means NOTHING was
+      // recorded: no invoice, no stock deduction, no debt row. The
+      // cart stays exactly as it was for the merchant to retry.
+      toast(
+        `فشل إتمام عملية الدين: ${message} — لم يُسجَّل البيع ولم يُخصم من المخزون`,
+        'error',
+      );
     } finally {
+      debtCommittingRef.current = false;
       setBusy(false);
     }
   }, [

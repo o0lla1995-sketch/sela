@@ -183,9 +183,7 @@ export function ProductFormScreen() {
           //  all of a product's vision fingerprints (they never
           //  loaded, and save() deleted every angle it didn't see).
           //  They now round-trip untouched unless re-captured.
-          const savedVectors = await EmbeddingRepo.listForProduct(
-            productId,
-          );
+          const savedVectors = await EmbeddingRepo.listForProduct(productId);
           if (product != null && mounted) {
             setName(product.name);
             setBarcode(product.barcode ?? '');
@@ -199,9 +197,56 @@ export function ProductFormScreen() {
                 : '',
             );
             setCategoryId(product.category_id ?? 'none');
-            setImageUri(product.image_uri);
             setSaleMode(product.sold_by_weight === 1 ? 'weight' : 'piece');
             setUnitRows(productUnits.map(unitRowToDraft));
+            // v14 (round-20 #4): the enrollment PHOTOS reload with the
+            // fingerprints. The three angle tiles used to show empty
+            // camera placeholders for a registered product («لا تظهر
+            // صور الأمامية والخلفية والجانبية رغم أنه مسجل») because
+            // the thumbnails were never persisted — they now travel
+            // with each fingerprint row. Dead photo paths (a backup
+            // restored without its image files) fall back to the
+            // placeholder until re-captured; the same validation
+            // applies to the main catalogue image.
+            const alive = async (
+              path: string | null,
+            ): Promise<string | null> => {
+              if (path == null) {
+                return null;
+              }
+              if (PlatformUtilsNative == null) {
+                return path;
+              }
+              try {
+                return (await PlatformUtilsNative.fileExists(path))
+                  ? path
+                  : null;
+              } catch {
+                return path;
+              }
+            };
+            const thumbnails: Partial<Record<AngleLabel, string | null>> = {};
+            for (const entry of savedVectors) {
+              const base = entry.angle.replace(/-m$/, '') as AngleLabel;
+              if (
+                (base === 'front' || base === 'back' || base === 'side') &&
+                entry.thumbnailPath != null &&
+                thumbnails[base] == null
+              ) {
+                thumbnails[base] = entry.thumbnailPath;
+              }
+            }
+            const [mainImage, frontPhoto, backPhoto, sidePhoto] =
+              await Promise.all([
+                alive(product.image_uri),
+                alive(thumbnails.front ?? null),
+                alive(thumbnails.back ?? null),
+                alive(thumbnails.side ?? null),
+              ]);
+            if (!mounted) {
+              return;
+            }
+            setImageUri(mainImage);
             setAngles(prev => {
               const next = {...prev};
               for (const entry of savedVectors) {
@@ -214,6 +259,15 @@ export function ProductFormScreen() {
                     mirrored: isMirror ? entry.vector : next[base].mirrored,
                   };
                 }
+              }
+              if (frontPhoto != null) {
+                next.front = {...next.front, thumbnailPath: frontPhoto};
+              }
+              if (backPhoto != null) {
+                next.back = {...next.back, thumbnailPath: backPhoto};
+              }
+              if (sidePhoto != null) {
+                next.side = {...next.side, thumbnailPath: sidePhoto};
               }
               return next;
             });
@@ -595,7 +649,7 @@ export function ProductFormScreen() {
     const weighted = saleMode === 'weight';
     // v8.3: weight products keep fractional kg stock (12.5 كغ) —
     // only PIECE products round the entered stock to whole units.
-    const stockConversion = weighted ? 1 : (validConversion(stockUnitId) ?? 1);
+    const stockConversion = weighted ? 1 : validConversion(stockUnitId) ?? 1;
     const stockRaw = stock.trim() ? parseNumber(stock) * stockConversion : 0;
     const stockValue = weighted
       ? Math.round((Number.isNaN(stockRaw) ? 0 : stockRaw) * 1000) / 1000
@@ -704,15 +758,28 @@ export function ProductFormScreen() {
       //  - each captured angle stores BOTH the original vector and
       //    its mirrored twin ("<angle>-m") for orientation-proof
       //    recognition.
+      // v14 (round-20 #4): each save also carries the angle's PHOTO
+      //    (thumbnail_path) so the form shows the enrollment image
+      //    again on reopen — legacy rows keep null until re-captured.
       for (const angle of ANGLE_LABELS) {
         const state = angles[angle];
         if (state.embedding == null) {
           continue;
         }
         await EmbeddingRepo.deleteOneWithMirror(targetId, angle);
-        await EmbeddingRepo.save(targetId, angle, state.embedding);
+        await EmbeddingRepo.save(
+          targetId,
+          angle,
+          state.embedding,
+          state.thumbnailPath,
+        );
         if (state.mirrored != null) {
-          await EmbeddingRepo.save(targetId, `${angle}-m`, state.mirrored);
+          await EmbeddingRepo.save(
+            targetId,
+            `${angle}-m`,
+            state.mirrored,
+            state.thumbnailPath,
+          );
         }
       }
 
@@ -990,9 +1057,7 @@ export function ProductFormScreen() {
                 <Stepper
                   compact
                   value={labelCopies}
-                  onIncrement={() =>
-                    setLabelCopies(v => Math.min(20, v + 1))
-                  }
+                  onIncrement={() => setLabelCopies(v => Math.min(20, v + 1))}
                   onDecrement={() => setLabelCopies(v => Math.max(1, v - 1))}
                 />
               </View>
@@ -1044,7 +1109,9 @@ export function ProductFormScreen() {
               <Field
                 ref={wholesaleRef}
                 label={
-                  saleMode === 'weight' ? 'سعر الجملة للكيلو (₪)' : 'سعر الجملة (₪)'
+                  saleMode === 'weight'
+                    ? 'سعر الجملة للكيلو (₪)'
+                    : 'سعر الجملة (₪)'
                 }
                 value={wholesalePrice}
                 onChangeText={setWholesalePrice}
@@ -1081,14 +1148,14 @@ export function ProductFormScreen() {
             <View style={{flex: 1}}>
               <Field
                 ref={thresholdRef}
-                label={
-                  saleMode === 'weight' ? 'حد التنبيه (كغ)' : 'حد التنبيه'
-                }
+                label={saleMode === 'weight' ? 'حد التنبيه (كغ)' : 'حد التنبيه'}
                 value={threshold}
                 onChangeText={setThreshold}
                 keyboardType={saleMode === 'weight' ? 'decimal-pad' : 'numeric'}
                 placeholder={
-                  saleMode === 'weight' ? '5' : String(DEFAULT_LOW_STOCK_THRESHOLD)
+                  saleMode === 'weight'
+                    ? '5'
+                    : String(DEFAULT_LOW_STOCK_THRESHOLD)
                 }
                 returnKeyType="done"
                 onSubmitEditing={() => Keyboard.dismiss()}
@@ -1394,10 +1461,14 @@ export function ProductFormScreen() {
                       {saleMode === 'weight'
                         ? `بيع 1 ${
                             unitNameById.get(row.unit_id) ?? ''
-                          } = ${parseNumber(row.conversion)} ${WEIGHT_UNIT_NAME} — يخصمها من المخزون`
+                          } = ${parseNumber(
+                            row.conversion,
+                          )} ${WEIGHT_UNIT_NAME} — يخصمها من المخزون`
                         : `بيع 1 ${
                             unitNameById.get(row.unit_id) ?? ''
-                          } يخصم ${parseNumber(row.conversion)} ${BASE_UNIT_NAME} من المخزون`}
+                          } يخصم ${parseNumber(
+                            row.conversion,
+                          )} ${BASE_UNIT_NAME} من المخزون`}
                     </Text>
                   )}
                 </Card>

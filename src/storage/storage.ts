@@ -14,6 +14,12 @@ export const KEYS = {
   cartDraft: 'cart_draft_v2',
   invoiceCounter: 'invoice_counter_v1',
   invoiceDay: 'invoice_day_v1',
+  /** v14 (round-20 #1/#3): debt sales carry their OWN numbering
+   *  series (INV-D-…) — a separate counter so credit invoices can
+   *  never collide with cash invoices, on this device or on the
+   *  صِلة server (which remembers every pos_invoice_ref forever). */
+  debtInvoiceCounter: 'debt_invoice_counter_v1',
+  debtInvoiceDay: 'debt_invoice_day_v1',
   savedPrinter: 'saved_printer_v1',
   seededFlag: 'db_seeded_v1',
   notifications: 'notifications_v1',

@@ -139,7 +139,7 @@ export function InvoicesScreen() {
         <SearchBar
           value={search}
           onChangeText={onSearch}
-          placeholder="ابحث برقم الفاتورة (INV-…)"
+          placeholder="ابحث برقم الفاتورة (INV-… أو INV-D-…)"
         />
         {loading ? (
           <View style={styles.center}>
@@ -188,7 +188,12 @@ export function InvoicesScreen() {
                     {formatDateTime(row.created_at)} · {row.itemsCount} صنف
                   </Text>
                 </View>
-                {debtRefs.has(row.invoice_number) ? (
+                {/* v14 (round-20 #3): INV-D numbers are debt invoices
+                    by construction — badge them even if the queue row
+                    was somehow lost; queue membership (older INV-
+                    format debts) keeps working as before. */}
+                {debtRefs.has(row.invoice_number) ||
+                row.invoice_number.startsWith('INV-D-') ? (
                   <View style={styles.debtChip}>
                     <Icon name="qrFrame" size={11} color={c.warning} />
                     <Text style={styles.debtChipText}>دين</Text>

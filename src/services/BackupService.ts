@@ -96,6 +96,9 @@ interface BackupFile {
     product_id: number;
     angle_label: string;
     embedding_data: string;
+    /** v14 (round-20 #4): the enrollment photo path — optional so
+     * older backup files (without it) still restore. */
+    thumbnail_path?: string | null;
   }[];
   sales: {
     id: number;
@@ -204,7 +207,7 @@ export const BackupService = {
         'SELECT product_id, unit_id, conversion, barcode, retail_price, wholesale_price FROM product_units',
       ),
       db.execute(
-        'SELECT product_id, angle_label, embedding_data FROM product_embeddings',
+        'SELECT product_id, angle_label, embedding_data, thumbnail_path FROM product_embeddings',
       ),
       db.execute(
         'SELECT id, invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at FROM sales',
@@ -310,6 +313,10 @@ export const BackupService = {
         product_id: Number(row.product_id),
         angle_label: String(row.angle_label ?? 'front'),
         embedding_data: String(row.embedding_data ?? '[]'),
+        thumbnail_path:
+          row.thumbnail_path == null || row.thumbnail_path === ''
+            ? null
+            : String(row.thumbnail_path),
       })),
       sales: rowsOf(sales).map(row => ({
         id: Number(row.id),
@@ -637,11 +644,12 @@ export const BackupService = {
             continue;
           }
           await tx.execute(
-            'INSERT INTO product_embeddings (product_id, embedding_data, angle_label) VALUES (?, ?, ?)',
+            'INSERT INTO product_embeddings (product_id, embedding_data, angle_label, thumbnail_path) VALUES (?, ?, ?, ?)',
             [
               newProductId,
               embedding.embedding_data,
               embedding.angle_label || 'front',
+              embedding.thumbnail_path ?? null,
             ],
           );
           embeddings += 1;

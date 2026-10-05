@@ -18,14 +18,31 @@ import type {
  *  coverage at zero user effort). */
 export type StoredAngle = AngleLabel | `${AngleLabel}-m`;
 
+/**
+ * v14 (round-20 #4): per-angle load result — the fingerprint plus
+ * its enrollment PHOTO path (null when the row predates thumbnail
+ * persistence or the photo file is gone).
+ */
+export interface ProductAngleRow {
+  angle: string;
+  vector: Float32Array;
+  thumbnailPath: string | null;
+}
+
 export const EmbeddingRepo = {
-  /** Saves one enrollment vector for a product angle (replaces
-   *  existing). v9.1: angle widened to StoredAngle so mirrored
-   *  fingerprints ("front-m"…) store beside their originals. */
+  /**
+   * Saves one enrollment vector for a product angle (replaces
+   * existing). v9.1: angle widened to StoredAngle so mirrored
+   * fingerprints ("front-m"…) store beside their originals.
+   * v14 (round-20 #4): the enrollment thumbnail is persisted WITH
+   * the vector so the product form can show the photo again on
+   * reopen — the "registered product shows no images" complaint.
+   */
   async save(
     productId: number,
     angle: StoredAngle,
     vector: Float32Array,
+    thumbnailPath?: string | null,
   ): Promise<void> {
     if (vector.length === 0) {
       throw new Error('المتجه فارغ — لا يمكن حفظ البصمة');
@@ -40,13 +57,13 @@ export const EmbeddingRepo = {
     const row = existing.rows?._array?.[0] as {id?: number} | undefined;
     if (row?.id != null) {
       await getDb().execute(
-        'UPDATE product_embeddings SET embedding_data = ? WHERE id = ?',
-        [JSON.stringify(json), row.id],
+        'UPDATE product_embeddings SET embedding_data = ?, thumbnail_path = ? WHERE id = ?',
+        [JSON.stringify(json), thumbnailPath ?? null, row.id],
       );
     } else {
       await getDb().execute(
-        'INSERT INTO product_embeddings (product_id, embedding_data, angle_label) VALUES (?, ?, ?)',
-        [productId, JSON.stringify(json), angle],
+        'INSERT INTO product_embeddings (product_id, embedding_data, angle_label, thumbnail_path) VALUES (?, ?, ?, ?)',
+        [productId, JSON.stringify(json), angle, thumbnailPath ?? null],
       );
     }
   },
@@ -77,19 +94,21 @@ export const EmbeddingRepo = {
     return decoded;
   },
 
-  /** v9.1 (round-14 #2): every saved vector of ONE product — used by
-   *  the product form so EDITING a product (a price fix, a rename)
-   *  no longer wipes its vision fingerprints: they load into the
-   *  form and are re-saved untouched unless re-captured. */
-  async listForProduct(
-    productId: number,
-  ): Promise<{angle: string; vector: Float32Array}[]> {
+  /**
+   * v9.1 (round-14 #2): every saved vector of ONE product — used by
+   * the product form so EDITING a product (a price fix, a rename)
+   * no longer wipes its vision fingerprints: they load into the
+   * form and are re-saved untouched unless re-captured.
+   * v14 (round-20 #4): now also returns each angle's stored PHOTO so
+   * the form shows the real enrollment image, not a placeholder.
+   */
+  async listForProduct(productId: number): Promise<ProductAngleRow[]> {
     const result = await getDb().execute(
-      'SELECT embedding_data, angle_label FROM product_embeddings WHERE product_id = ?',
+      'SELECT embedding_data, angle_label, thumbnail_path FROM product_embeddings WHERE product_id = ?',
       [productId],
     );
     const rows = result.rows?._array ?? [];
-    const out: {angle: string; vector: Float32Array}[] = [];
+    const out: ProductAngleRow[] = [];
     for (const row of rows) {
       try {
         const parsed = JSON.parse(String(row.embedding_data)) as number[];
@@ -97,7 +116,14 @@ export const EmbeddingRepo = {
         for (let i = 0; i < parsed.length; i += 1) {
           vector[i] = parsed[i];
         }
-        out.push({angle: String(row.angle_label ?? 'front'), vector});
+        out.push({
+          angle: String(row.angle_label ?? 'front'),
+          vector,
+          thumbnailPath:
+            row.thumbnail_path == null || row.thumbnail_path === ''
+              ? null
+              : String(row.thumbnail_path),
+        });
       } catch {
         // Corrupt row — skip.
       }
@@ -148,18 +174,24 @@ export const EmbeddingRepo = {
 
   /** Builds the flat worklet index from all decoded embeddings. */
   buildIndex(embeddings: DecodedEmbedding[]): EmbeddingsIndex | null {
-    if (embeddings.length === 0) return null;
+    if (embeddings.length === 0) {
+      return null;
+    }
     const dim = embeddings[0].vector.length;
     const ids: number[] = [];
     const flat = new Float32Array(embeddings.length * dim);
     let offset = 0;
     for (const entry of embeddings) {
-      if (entry.vector.length !== dim) continue;
+      if (entry.vector.length !== dim) {
+        continue;
+      }
       flat.set(entry.vector, offset);
       ids.push(entry.productId);
       offset += dim;
     }
-    if (ids.length === 0) return null;
+    if (ids.length === 0) {
+      return null;
+    }
     return {ids, flat, dim};
   },
 

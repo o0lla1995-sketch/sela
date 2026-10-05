@@ -23,14 +23,31 @@ import {uuidV4} from './sila/qr';
 import type {CartLine, PricingMode, SaleWithItems} from '../core/types';
 import type {ReceiptSettings} from './printer/receipt';
 
-/** INV-YYYYMMDD-NNNN for a day + sequence. */
+/** INV-YYYYMMDD-NNNN for a day + sequence (CASH series). */
 function formatInvoiceNumber(day: string, seq: number): string {
   return `INV-${day.replace(/-/g, '')}-${String(seq).padStart(4, '0')}`;
 }
 
-/** Parses the numeric suffix of an invoice number (0 when malformed). */
+/** v14 (round-20 #3): INV-D-YYYYMMDD-NNNN — the DEBT series. A
+ *  distinctive D segment separates credit invoices from cash
+ *  invoices at a glance (list, receipt, debt screen), and keeps
+ *  the two counters from ever stealing numbers from each other. */
+function formatDebtInvoiceNumber(day: string, seq: number): string {
+  return `INV-D-${day.replace(/-/g, '')}-${String(seq).padStart(4, '0')}`;
+}
+
+/** Parses the numeric suffix of a CASH invoice number (0 when
+ *  malformed). INV-D-… numbers deliberately do NOT match — they
+ *  belong to the debt series. */
 function invoiceSequence(number: string): number {
   const match = /^(?:INV-\d{8}-)?(\d+)$/.exec(String(number ?? '').trim());
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+/** v14 (round-20 #1): numeric suffix of a DEBT invoice number
+ *  (0 when malformed, non-debt numbers included). */
+function debtInvoiceSequence(number: string): number {
+  const match = /^(?:INV-D-\d{8}-)?(\d+)$/.exec(String(number ?? '').trim());
   return match ? parseInt(match[1], 10) : 0;
 }
 
@@ -52,11 +69,57 @@ async function maxSequenceInDb(prefix: string): Promise<number> {
     // The reservation still works from the MMKV counter alone.
     logDiag(
       'sale',
-      `تعذر قراء تسلسل الفواتير: ${
+      `تعذر قراءة تسلسل الفواتير: ${
         error instanceof Error ? error.message : String(error)
       }`,
       'warn',
     );
+  }
+  return max;
+}
+
+/**
+ * v14 (round-20 #1): the highest DEBT sequence for a day across BOTH
+ * tables that can remember credit numbers —
+ *  - sales (INV-D-… invoices actually on this device),
+ *  - sila_debt_queue (the pos_invoice_ref of every debt row ever
+ *    enqueued here, INCLUDING failed ones whose sale rows were lost
+ *    to an old-backup restore — the exact source of the
+ *    «تعارض الدين مع رقم فاتورة مسبق» failures: the reservation used
+ *    to regenerate a number the queue still holds, the UNIQUE
+ *    constraint fired and the whole debt sale collapsed).
+ * Reconciling against the queue too means a freshly generated debt
+ * number is always AFTER the last one the queue remembers.
+ */
+async function maxDebtSequenceInDb(debtPrefix: string): Promise<number> {
+  let max = 0;
+  const consider = (value: unknown) => {
+    const seq = debtInvoiceSequence(String(value ?? ''));
+    if (seq > max) {
+      max = seq;
+    }
+  };
+  try {
+    const salesResult = await getDb().execute(
+      'SELECT invoice_number FROM sales WHERE invoice_number LIKE ?',
+      [`${debtPrefix}%`],
+    );
+    for (const row of salesResult.rows?._array ?? []) {
+      consider(row.invoice_number);
+    }
+  } catch {
+    // Best effort — the MMKV counter alone stays monotonic.
+  }
+  try {
+    const queueResult = await getDb().execute(
+      'SELECT pos_invoice_ref FROM sila_debt_queue WHERE pos_invoice_ref LIKE ?',
+      [`${debtPrefix}%`],
+    );
+    for (const row of queueResult.rows?._array ?? []) {
+      consider(row.pos_invoice_ref);
+    }
+  } catch {
+    // Table missing on very old installs — ignore.
   }
   return max;
 }
@@ -85,6 +148,72 @@ async function reserveInvoiceNumber(): Promise<string> {
   setNumber(KEYS.invoiceCounter, next);
   setString(KEYS.invoiceDay, today);
   return formatInvoiceNumber(today, next);
+}
+
+/**
+ * v14 (round-20 #1/#3): DB-AWARE reservation for the DEBT series —
+ * the same reconciliation discipline as the cash series, but across
+ * the debt counter AND both debt-number sources (sales + the صِلة
+ * debt queue). The next credit invoice number is always AFTER the
+ * last one any of them remembers, so a restored backup or a failed
+ * sync row can never make a new debt sale collide with a number the
+ * queue (or the صِلة server behind it) already holds.
+ */
+async function reserveDebtInvoiceNumber(): Promise<string> {
+  const today = localToday();
+  const prefix = `INV-D-${today.replace(/-/g, '')}-`;
+  const dbMax = await maxDebtSequenceInDb(prefix);
+  const lastDay = getString(KEYS.debtInvoiceDay, '');
+  const counter = getNumber(KEYS.debtInvoiceCounter, 0);
+  const mmkvNext = lastDay === today ? counter + 1 : 1;
+  const next = Math.max(mmkvNext, dbMax + 1);
+  setNumber(KEYS.debtInvoiceCounter, next);
+  setString(KEYS.debtInvoiceDay, today);
+  return formatDebtInvoiceNumber(today, next);
+}
+
+/** v14 (round-20 #1): "YYYYMMDD" → "YYYY-MM-DD". */
+function dayOf(compact: string): string {
+  return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
+}
+
+/**
+ * v14 (round-20 #1): NEVER-BACKWARDS counter reconcile.
+ * Picks, per series, whichever (day, sequence) is further along —
+ * the LATER day wins outright; the same day keeps the HIGHER
+ * sequence. An older restore can pull the database behind, but the
+ * MMKV counters stay at the furthest point this device ever reached,
+ * so the next invoice of that series continues after the last one
+ * ever issued here (what the merchant asked for verbatim).
+ */
+function reconcileNeverBackwards(
+  byDay: Map<string, number>,
+  dayKey: string,
+  counterKey: string,
+): void {
+  let dbDay = '';
+  let dbSeq = 0;
+  for (const [day, seq] of byDay) {
+    if (day > dbDay) {
+      dbDay = day;
+      dbSeq = seq;
+    } else if (day === dbDay && seq > dbSeq) {
+      dbSeq = seq;
+    }
+  }
+  const mmkvDay = getString(dayKey, '');
+  const mmkvSeq = getNumber(counterKey, 0);
+  if (dbDay === '') {
+    return; // Nothing new to learn for this series.
+  }
+  if (mmkvDay > dbDay || (mmkvDay === dbDay && mmkvSeq >= dbSeq)) {
+    // MMKV is already at (or past) the DB — keep it. Moving it
+    // backwards here is exactly the rewind that re-issued numbers
+    // the صِلة server already holds.
+    return;
+  }
+  setString(dayKey, dbDay);
+  setNumber(counterKey, dbSeq);
 }
 
 export interface CompleteSaleOptions {
@@ -118,17 +247,41 @@ export const InvoiceService = {
     // v10 (round-16 #1): a UNIQUE collision (a number this device
     // didn't know about — e.g. mid-sale restore races) re-reserves
     // from the DB and retries instead of failing the sale.
+    // v14 (round-20 #1): debt sales reserve from the SEPARATE
+    // INV-D series and v14 (round-20 #2) the debt-queue row joins
+    // the SAME transaction — a UNIQUE hit on either sales or
+    // sila_debt_queue rolls EVERYTHING back and the loop retries
+    // with a fresh number. A failed debt sale is therefore never
+    // half-recorded: no invoice, no stock decrement, no queue row.
+    const isDebt = options.debt != null;
     let result: SaleWithItems | null = null;
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 4 && result == null; attempt += 1) {
-      const invoiceNumber = await reserveInvoiceNumber();
+      const invoiceNumber = isDebt
+        ? await reserveDebtInvoiceNumber()
+        : await reserveInvoiceNumber();
       try {
-        // One atomic transaction: sale + items + stock decrements.
+        // One atomic transaction: sale + items + stock decrements
+        // (+ the debt-queue row for credit sales).
         result = await SaleRepo.createSale({
           invoiceNumber,
           lines: options.lines,
           discount: options.discount,
           paymentType: options.paymentType,
+          debtRow:
+            options.debt == null
+              ? undefined
+              : {
+                  idempotencyKey: uuidV4(),
+                  customerId: options.debt.customerId,
+                  customerName: options.debt.customerName,
+                  customerPhoneLast4: options.debt.customerPhoneLast4,
+                  customerCard: options.debt.customerCard,
+                  offlineQr: options.debt.offlineQr,
+                  amountMinor: options.debt.amountMinor,
+                  description: `بيع بالدين — فاتورة ${invoiceNumber}`,
+                  scannedAt: new Date().toISOString(),
+                },
         });
       } catch (error) {
         lastError = error;
@@ -146,32 +299,19 @@ export const InvoiceService = {
     if (result == null) {
       throw lastError instanceof Error
         ? lastError
-        : new Error('تعذر حجز رقم فاتورة — حاول مرة أخرى');
+        : new Error(
+            isDebt
+              ? 'تعذر حجز رقم فاتورة الدين — لم يُسجَّل البيع، أعد المحاولة'
+              : 'تعذر حجز رقم فاتورة — حاول مرة أخرى',
+          );
     }
 
     logDiag(
       'sale',
-      `تم إتمام البيع ${
-        result.sale.invoice_number
+      `تم إتمام البيع ${result.sale.invoice_number}${
+        isDebt ? ' (دين)' : ''
       } بمبلغ ${result.sale.total_amount.toFixed(2)} ₪`,
     );
-
-    // v11 (SILA §9.2): the debt row is created AT SALE TIME — one
-    // idempotency key, replayed verbatim on every retry (§7).
-    if (options.debt != null) {
-      await SilaRepo.enqueue({
-        idempotencyKey: uuidV4(),
-        customerId: options.debt.customerId,
-        customerName: options.debt.customerName,
-        customerPhoneLast4: options.debt.customerPhoneLast4,
-        customerCard: options.debt.customerCard,
-        offlineQr: options.debt.offlineQr,
-        amountMinor: options.debt.amountMinor,
-        posInvoiceRef: result.sale.invoice_number,
-        description: `بيع بضاعة — فاتورة ${result.sale.invoice_number}`,
-        scannedAt: new Date().toISOString(),
-      });
-    }
 
     if (options.print) {
       try {
@@ -279,46 +419,95 @@ export const InvoiceService = {
   },
 
   /**
-   * v10 (round-16 #1): re-syncs the MMKV invoice counter with the
-   * DATABASE after a backup restore — walks every stored invoice,
-   * finds the latest day + its highest sequence and stores them, so
-   * the very first post-restore sale continues after the last
-   * restored invoice instead of colliding with it.
+   * v10 (round-16 #1) → v14 (round-20 #1): re-syncs the MMKV invoice
+   * counters with the DATABASE after a backup restore.
+   * ─────────────────────────────────────────────────────────────────
+   * v10 reconciled by OVERWRITING the counter from the DB — correct
+   * when the restore brought NEWER numbers, but it also moved the
+   * counter BACKWARDS when the restore was OLDER than what this
+   * device had already issued. The next sale then regenerated a
+   * number the صِلة server still remembers (it never forgets a
+   * pos_invoice_ref) → DUPLICATE_INVOICE_REF → «عملية الدين فاشلة»
+   * — the merchant's exact complaint: the debt conflicted with a
+   * pre-existing invoice number because no invoice was created after
+   * the last one.
+   * v14 rule: the counters only ever move FORWARD. For each series
+   * (cash INV-… and debt INV-D-…) the reconcile picks whichever
+   * (day, sequence) is further along — the later day wins, and
+   * within the same day the higher sequence wins. Restoring an old
+   * backup can therefore lower the DATABASE contents but never the
+   * numbering: the next invoice of each series is always issued
+   * AFTER the last one this device ever printed, exactly as the
+   * merchant expects. Debt numbers additionally reconcile against
+   * the sila_debt_queue refs (failed rows can outlive their sales).
    */
   async syncInvoiceCounterFromDb(): Promise<void> {
     try {
       const result = await getDb().execute('SELECT invoice_number FROM sales');
-      let bestDay = '';
-      let bestSeq = 0;
-      const byDay = new Map<string, number>();
+      const cashByDay = new Map<string, number>();
+      const debtByDay = new Map<string, number>();
       for (const row of result.rows?._array ?? []) {
-        const value = String(row.invoice_number ?? '');
-        const match = /^INV-(\d{8})-(\d+)$/.exec(value.trim());
-        if (match == null) {
+        const value = String(row.invoice_number ?? '').trim();
+        let match = /^INV-(\d{8})-(\d+)$/.exec(value);
+        if (match != null) {
+          const day = dayOf(match[1]);
+          cashByDay.set(
+            day,
+            Math.max(cashByDay.get(day) ?? 0, parseInt(match[2], 10)),
+          );
           continue;
         }
-        const day = `${match[1].slice(0, 4)}-${match[1].slice(
-          4,
-          6,
-        )}-${match[1].slice(6, 8)}`;
-        const seq = parseInt(match[2], 10);
-        byDay.set(day, Math.max(byDay.get(day) ?? 0, seq));
-        if (day > bestDay) {
-          bestDay = day;
+        match = /^INV-D-(\d{8})-(\d+)$/.exec(value);
+        if (match != null) {
+          const day = dayOf(match[1]);
+          debtByDay.set(
+            day,
+            Math.max(debtByDay.get(day) ?? 0, parseInt(match[2], 10)),
+          );
         }
       }
-      if (bestDay !== '') {
-        bestSeq = byDay.get(bestDay) ?? 0;
-        setString(KEYS.invoiceDay, bestDay);
-        setNumber(KEYS.invoiceCounter, bestSeq);
-        logDiag(
-          'sale',
-          `تمت مزامنة عداد الفواتير مع قاعدة البيانات: آخر فاتورة ${formatInvoiceNumber(
-            bestDay,
-            bestSeq,
-          )}`,
+      // Debt refs also live in the queue — failed rows can outlive
+      // their sales rows (old-backup restores), so count them too.
+      try {
+        const queue = await getDb().execute(
+          'SELECT pos_invoice_ref FROM sila_debt_queue',
         );
+        for (const row of queue.rows?._array ?? []) {
+          const match = /^INV-D-(\d{8})-(\d+)$/.exec(
+            String(row.pos_invoice_ref ?? '').trim(),
+          );
+          if (match != null) {
+            const day = dayOf(match[1]);
+            debtByDay.set(
+              day,
+              Math.max(debtByDay.get(day) ?? 0, parseInt(match[2], 10)),
+            );
+          }
+        }
+      } catch {
+        // Very old installs without the table — sales cover it.
       }
+
+      reconcileNeverBackwards(cashByDay, KEYS.invoiceDay, KEYS.invoiceCounter);
+      reconcileNeverBackwards(
+        debtByDay,
+        KEYS.debtInvoiceDay,
+        KEYS.debtInvoiceCounter,
+      );
+
+      logDiag(
+        'sale',
+        `تمت مزامنة عدادات الفواتير (نقدي ${getString(
+          KEYS.invoiceDay,
+          '',
+        )} #${getNumber(KEYS.invoiceCounter, 0)} / دين ${getString(
+          KEYS.debtInvoiceDay,
+          '',
+        )} #${getNumber(
+          KEYS.debtInvoiceCounter,
+          0,
+        )}) — لا تتراجع الأرقام أبداً`,
+      );
     } catch (error) {
       // The DB-aware reservation still recovers on the next sale.
       logDiag(

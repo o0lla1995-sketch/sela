@@ -19,6 +19,24 @@ export interface CreateSaleInput {
   /** Absolute discount in ₪ applied to the whole invoice. */
   discount: number;
   paymentType: PricingMode;
+  /** v14 (round-20 #1/#2): when present the sale is a صِلة credit
+   *  sale — the debt-queue row is inserted INSIDE the very same
+   *  SQLite transaction as the invoice, its items and the stock
+   *  decrements. Any failure (a UNIQUE invoice-ref conflict, an
+   *  oversell, a crash) rolls the WHOLE operation back: no half
+   *  sale is ever left behind — the exact "failed but recorded"
+   *  complaint. */
+  debtRow?: {
+    idempotencyKey: string;
+    customerId: string | null;
+    customerName: string | null;
+    customerPhoneLast4: string | null;
+    customerCard: string | null;
+    offlineQr: string | null;
+    amountMinor: number;
+    description: string;
+    scannedAt: string;
+  };
 }
 
 function rowToSale(row: Record<string, unknown>): SaleRecord {
@@ -121,6 +139,33 @@ export const SaleRepo = {
             `الكمية المتوفرة من "${line.name}" غير كافية (${baseQty} قطعة مطلوبة)`,
           );
         }
+      }
+
+      // v14 (round-20 #1/#2): the صِلة debt row joins the SAME
+      // transaction — a pos_invoice_ref conflict (or any other
+      // failure) aborts the invoice, the items AND the stock
+      // decrements together. The sale can no longer be "recorded
+      // while the debt operation failed".
+      if (input.debtRow != null) {
+        await tx.execute(
+          `INSERT INTO sila_debt_queue (
+            idempotency_key, customer_id, customer_name, customer_phone_last4,
+            customer_card, offline_qr, amount_minor, currency, pos_invoice_ref,
+            description, scanned_at, state
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ILS', ?, ?, ?, 'pending')`,
+          [
+            input.debtRow.idempotencyKey,
+            input.debtRow.customerId,
+            input.debtRow.customerName,
+            input.debtRow.customerPhoneLast4,
+            input.debtRow.customerCard,
+            input.debtRow.offlineQr,
+            input.debtRow.amountMinor,
+            input.invoiceNumber,
+            input.debtRow.description,
+            input.debtRow.scannedAt,
+          ],
+        );
       }
     });
 

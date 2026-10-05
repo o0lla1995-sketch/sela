@@ -83,6 +83,7 @@ const DDL_STATEMENTS: string[] = [
     product_id INTEGER NOT NULL,
     embedding_data TEXT NOT NULL,
     angle_label TEXT,
+    thumbnail_path TEXT,
     FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
   )`,
   `CREATE TABLE IF NOT EXISTS sales (
@@ -401,6 +402,26 @@ async function applyMigrations(database: DB): Promise<void> {
     );
     logDiag('db', 'ترحيل v6: جداول ديون صِلة (الطابور + ذاكرة الزبائن)');
     version = 6;
+  }
+
+  if (version < 7) {
+    // v14 (round-20 #4): product_embeddings.thumbnail_path — the
+    // enrollment PHOTO of each angle was never persisted, so
+    // reopening a registered product showed the three angle tiles
+    // as empty camera placeholders («لا تظهر صور الأمامية والخلفية
+    // والجانبية رغم أن المنتج مسجل»). The thumbnail now lives
+    // beside its fingerprint and reloads with the form.
+    const embCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('product_embeddings') WHERE name = 'thumbnail_path'",
+    );
+    const hasThumb = (embCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasThumb) {
+      await database.execute(
+        'ALTER TABLE product_embeddings ADD COLUMN thumbnail_path TEXT',
+      );
+      logDiag('db', 'ترحيل v7: عمود صور بصمات المنتج (thumbnail_path)');
+    }
+    version = 7;
   }
 
   if (version !== storedVersion) {
