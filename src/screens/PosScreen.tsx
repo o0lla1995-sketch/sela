@@ -50,7 +50,8 @@ import {UnitRepo} from '../database/repositories/UnitRepo';
 import {SilaRepo} from '../services/sila/SilaRepo';
 import {SilaSync} from '../services/sila/SilaSync';
 import {parseSilaQr} from '../services/sila/qr';
-import type {SilaCustomer} from '../core/types';
+import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
+import type {LocalCustomerBalance, SilaCustomer} from '../core/types';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {
   cameraPermissionMessage,
@@ -222,7 +223,10 @@ export function PosScreen() {
     customerCard: string | null;
     offlineQr: string | null;
     amountMinor: number;
-    amountSource: 'card' | 'offline' | 'picker';
+    amountSource: 'card' | 'offline' | 'picker' | 'local';
+    /** v16 (round-22 #4): the LOCAL debt-book account when the sale
+     *  is charged on the store's own customer (دفتر المتجر). */
+    localCustomerId?: number;
   } | null>(null);
   /** v11: true while the customer-QR camera window is open. */
   const [debtBusy, setDebtBusy] = useState(false);
@@ -232,6 +236,13 @@ export function PosScreen() {
   const [customerPicker, setCustomerPicker] = useState(false);
   const [pickerCustomers, setPickerCustomers] = useState<SilaCustomer[]>([]);
   const [pickerQuery, setPickerQuery] = useState('');
+  /** v16 (round-22 #4): the LOCAL debt-book picker — customers of
+   *  this store (دفتر المتجر), searched live, charged directly. */
+  const [localPicker, setLocalPicker] = useState(false);
+  const [localCustomers, setLocalCustomers] = useState<
+    LocalCustomerBalance[]
+  >([]);
+  const [localQuery, setLocalQuery] = useState('');
 
   const scannerMode: ScannerMode = settings.scannerMode;
   const barcodeActive = scannerMode === 'barcode' || scannerMode === 'both';
@@ -1214,29 +1225,63 @@ export function PosScreen() {
     if (busy || debtBusy) {
       return;
     }
-    if (!silaPaired) {
-      Alert.alert(
-        'البيع بالدين عبر صِلة',
-        'لتفعيل البيع بالدين، اربط حساب التاجر في تطبيق صِلة أولاً — العملية تستغرق أقل من دقيقة.',
-        [
-          {text: 'لاحقاً', style: 'cancel'},
-          {
-            text: 'ربط الآن',
-            onPress: () => navigation.navigate('Sila' as never),
-          },
-        ],
-      );
-      return;
-    }
+    // v16 (round-22 #4): the chooser opens even WITHOUT صِلة pairing —
+    // the LOCAL debt book (دفتر المتجر) is standalone. The صِلة
+    // paths inside keep their pairing guards + guidance.
     setDebtChooser(true);
-  }, [
-    lines.length,
-    busy,
-    debtBusy,
-    silaPaired,
-    toast,
-    navigation,
-  ]);
+  }, [lines.length, busy, debtBusy, toast]);
+
+  /** v16 (round-22 #4): the cross-system dedupe guard — a scanned
+   *  صِلة QR whose cid is LINKED to a local account means this
+   *  person already has debts in the store's own book; the sale is
+   *  redirected to the LOCAL book so the same person never carries
+   *  parallel truths on both sides. Returns true when redirected.
+   *  (Defined before scanDebtQr — it's in that callback's deps.) */
+  const redirectLinkedLocalCustomer = useCallback(
+    async (cid: string | null, name: string): Promise<boolean> => {
+      if (cid == null) {
+        return false;
+      }
+      try {
+        const linked = await LocalDebtsRepo.bySilaCustomerId(cid);
+        if (linked == null) {
+          return false;
+        }
+        Alert.alert(
+          'هذا الزبون له حساب في دفتر المتجر',
+          `«${linked.name}» مرتبط بهذا حساب صِلة. لتجنب احتساب الدين مرتين، سيُسجَّل الدين على حسابه المحلي في دفتر المتجر بدلاً من رفعه إلى صِلة.`,
+          [
+            {
+              text: 'تسجيل محلي',
+              style: 'default',
+              onPress: () =>
+                setDebtConfirm({
+                  customerId: null,
+                  customerName: linked.name,
+                  customerPhoneLast4: linked.phone
+                    ? linked.phone.replace(/\D/g, '').slice(-4)
+                    : null,
+                  customerCard: null,
+                  offlineQr: null,
+                  amountMinor: Math.round(totals.total * 100),
+                  amountSource: 'local',
+                  localCustomerId: linked.id,
+                }),
+            },
+            {
+              text: 'إلغاء العملية',
+              style: 'cancel',
+              onPress: () => undefined,
+            },
+          ],
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [totals.total],
+  );
 
   /** v15 (round-21 #5): the SCAN path — the QR flow exactly as
    *  before, now entered from the chooser sheet. */
@@ -1285,6 +1330,11 @@ export function PosScreen() {
           );
           return;
         }
+        // v16 (round-22 #4): a cid LINKED to a local account → the
+        // debt belongs in the store's own book (dedupe guard).
+        if (await redirectLinkedLocalCustomer(payload.cid, payload.name)) {
+          return;
+        }
         setDebtConfirm({
           customerId: payload.cid,
           customerName: payload.name,
@@ -1303,6 +1353,10 @@ export function PosScreen() {
         }
         if (payload.amountMinor <= 0) {
           toast('الرمز لا يحمل مبلغاً صالحاً — اطلب رمزاً جديداً', 'error');
+          return;
+        }
+        // v16 (round-22 #4): same dedupe guard for offline codes.
+        if (await redirectLinkedLocalCustomer(payload.cid, 'زبون صِلة')) {
           return;
         }
         // Offline codes carry cid + amount only — the display name
@@ -1344,6 +1398,7 @@ export function PosScreen() {
     debtBusy,
     silaPaired,
     totals.total,
+    redirectLinkedLocalCustomer,
     toast,
     navigation,
   ]);
@@ -1351,11 +1406,19 @@ export function PosScreen() {
   /** v15 (round-21 #5): the PICK path — cached صِلة customers with a
    *  live search box. Selecting one opens the SAME confirmation
    *  sheet, with the debt amount = the invoice total (no signed QR
-   *  involved; the upload identifies the customer by cid §2.2). */
+   *  involved; the upload identifies the customer by cid §2.2).
+   *  v16 (round-22 #1): when the cache is empty but the device is
+   *  paired, one balances refresh is attempted FIRST (empty ≠ no
+   *  customers — it may just mean no successful pull yet), then the
+   *  list is reloaded before showing the empty toast. */
   const openCustomerPicker = useCallback(async () => {
     setDebtChooser(false);
     try {
-      const list = await SilaRepo.listCustomers();
+      let list = await SilaRepo.listCustomers();
+      if (list.length === 0 && silaPaired) {
+        await SilaSync.refreshBalances();
+        list = await SilaRepo.listCustomers();
+      }
       if (list.length === 0) {
         toast(
           'لا يوجد زبائن صِلة محفوظون بعد — أمسح رمز الزبون أو زامن صِلة أولاً',
@@ -1373,7 +1436,7 @@ export function PosScreen() {
         'error',
       );
     }
-  }, [toast]);
+  }, [toast, silaPaired]);
 
   const pickDebtCustomer = useCallback(
     (customer: SilaCustomer) => {
@@ -1386,6 +1449,58 @@ export function PosScreen() {
         offlineQr: null,
         amountMinor: Math.round(totals.total * 100),
         amountSource: 'picker',
+      });
+    },
+    [totals.total],
+  );
+
+  /** v16 (round-22 #4): the LOCAL debt-book picker — customers of
+   *  THIS store (دفتر المتجر) with live search; picking one charges
+   *  the sale directly on their local account (INV-L series, never
+   *  uploaded to صِلة). */
+  const openLocalPicker = useCallback(async () => {
+    setDebtChooser(false);
+    try {
+      const list = await LocalDebtsRepo.listWithBalances();
+      if (list.length === 0) {
+        Alert.alert(
+          'دفتر المتجر فارغ',
+          'أنشئ أولاً حساب دين لزبون متجرك (رقم هوية + اسم + جوال) من شاشة «دفتر ديون المتجر»',
+          [
+            {text: 'لاحقاً', style: 'cancel'},
+            {
+              text: 'فتح الدفتر',
+              onPress: () => navigation.navigate('LocalDebts' as never),
+            },
+          ],
+        );
+        return;
+      }
+      setLocalQuery('');
+      setLocalCustomers(list);
+      setLocalPicker(true);
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'تعذر تحميل دفتر المتجر',
+        'error',
+      );
+    }
+  }, [toast, navigation]);
+
+  const pickLocalCustomer = useCallback(
+    (entry: LocalCustomerBalance) => {
+      setLocalPicker(false);
+      setDebtConfirm({
+        customerId: null,
+        customerName: entry.customer.name,
+        customerPhoneLast4: entry.customer.phone
+          ? entry.customer.phone.replace(/\D/g, '').slice(-4)
+          : null,
+        customerCard: null,
+        offlineQr: null,
+        amountMinor: Math.round(totals.total * 100),
+        amountSource: 'local',
+        localCustomerId: entry.customer.id,
       });
     },
     [totals.total],
@@ -1426,7 +1541,7 @@ export function PosScreen() {
       Math.abs(debtConfirm.amountMinor - Math.round(totals.total * 100)) > 0
     ) {
       toast(
-        `مبلغ الرمز ${formatMoney(debtConfirm.amountMinor / 100)} ₪ يختلف عن قيمة الفاتورة ${formatMoney(totals.total)} ₪ — لا يُسجَّل الدين`,
+        `مبلغ الرمز ${formatMoney(debtConfirm.amountMinor / 100)} يختلف عن قيمة الفاتورة ${formatMoney(totals.total)} — لا يُسجَّل الدين`,
         'error',
         5000,
       );
@@ -1453,24 +1568,42 @@ export function PosScreen() {
         onPrintError: message =>
           toast(`تم تسجيل الدين لكن الطباعة فشلت: ${message}`, 'error'),
         productNames: new Map(lines.map(line => [line.productId, line.name])),
-        debt: {
-          customerId: debtConfirm.customerId,
-          customerName: debtConfirm.customerName,
-          customerPhoneLast4: debtConfirm.customerPhoneLast4,
-          customerCard: debtConfirm.customerCard,
-          offlineQr: debtConfirm.offlineQr,
-          amountMinor: debtConfirm.amountMinor,
-        },
+        // v16 (round-22 #4): a LOCAL debt-book sale charges the
+        // store's own account (INV-L series, never uploaded) — the
+        // صِلة queue path stays untouched for صِلة sources.
+        ...(debtConfirm.amountSource === 'local'
+          ? {
+              localDebt: {
+                localCustomerId: debtConfirm.localCustomerId ?? -1,
+                customerName: debtConfirm.customerName,
+                customerPhoneLast4: debtConfirm.customerPhoneLast4,
+              },
+            }
+          : {
+              debt: {
+                customerId: debtConfirm.customerId,
+                customerName: debtConfirm.customerName,
+                customerPhoneLast4: debtConfirm.customerPhoneLast4,
+                customerCard: debtConfirm.customerCard,
+                offlineQr: debtConfirm.offlineQr,
+                amountMinor: debtConfirm.amountMinor,
+              },
+            }),
       });
       clear();
       setDiscountText('');
       setDebtConfirm(null);
       void refreshCatalog();
       void useSilaStore.getState().refreshCounts();
-      // Opportunistic sync — quietly drains the queue when online.
-      void SilaSync.syncNow();
+      // Opportunistic sync — quietly drains the queue when online
+      // (صِلة sales only; local-book sales never upload).
+      if (debtConfirm.amountSource !== 'local') {
+        void SilaSync.syncNow();
+      }
       toast(
-        `تم تسجيل الدين على ${debtConfirm.customerName} — سيُزامن مع صِلة تلقائياً`,
+        debtConfirm.amountSource === 'local'
+          ? `تم تسجيل الدين على ${debtConfirm.customerName} في دفتر المتجر`
+          : `تم تسجيل الدين على ${debtConfirm.customerName} — سيُزامن مع صِلة تلقائياً`,
         'success',
       );
     } catch (error) {
@@ -1965,10 +2098,11 @@ export function PosScreen() {
                     loading={busy}
                     style={{flex: 1.5}}
                   />
-                  {/* v11 (round-17 #2): البيع بالدين عبر صِلة — opens the
-                    camera to scan the customer's QR. A compact icon
-                    chip keeps the checkout row light; the pending
-                    badge shows unsynced debts at a glance. */}
+                  {/* v11 (round-17 #2): البيع بالدين — v16 (round-22 #4)
+                    opens the chooser: صِلة QR / صِلة customers / the
+                    STORE-LOCAL debt book (works without صِلة). The
+                    pending badge shows unsynced صِلة debts at a
+                    glance. */}
                   <TouchableOpacity
                     style={[
                       styles.debtBtn,
@@ -1979,14 +2113,14 @@ export function PosScreen() {
                     disabled={busy || debtBusy}
                     activeOpacity={0.8}>
                     <Icon
-                      name={silaPaired ? 'qrFrame' : 'lock'}
+                      name={silaPaired ? 'qrFrame' : 'book'}
                       size={16}
-                      color={silaPaired ? c.accent : c.textDim}
+                      color={silaPaired ? c.accent : c.warning}
                     />
                     <Text
                       style={[
                         styles.debtBtnText,
-                        {color: silaPaired ? c.accent : c.textDim},
+                        {color: silaPaired ? c.accent : c.warning},
                       ]}>
                       دين
                     </Text>
@@ -2113,14 +2247,30 @@ export function PosScreen() {
           />
           <View style={styles.debtModalSheet}>
             <View style={styles.unitModalHandle} />
-            <Text style={styles.debtModalTitle}>بيع بالدين — صِلة</Text>
+            <Text style={styles.debtModalTitle}>بيع بالدين</Text>
             <Text style={styles.chooserHint}>
-              اختر كيفية تحديد الزبون المدين
+              {silaPaired
+                ? 'اختر كيفية تحديد الزبون المدين'
+                : 'دفتر المتجر يعمل دون صِلة — خيارات صِلة تحتاج ربط الحساب'}
             </Text>
             <TouchableOpacity
-              style={styles.chooserBtn}
+              style={[styles.chooserBtn, !silaPaired && {opacity: 0.55}]}
               onPress={() => {
                 setDebtChooser(false);
+                if (!silaPaired) {
+                  Alert.alert(
+                    'البيع بالدين عبر صِلة',
+                    'لتفعيل مسار صِلة، اربط حساب التاجر من شاشة صِلة — أو استخدم «زبون من دفتر المتجر» لتسجيل الدين محلياً.',
+                    [
+                      {text: 'لاحقاً', style: 'cancel'},
+                      {
+                        text: 'ربط الآن',
+                        onPress: () => navigation.navigate('Sila' as never),
+                      },
+                    ],
+                  );
+                  return;
+                }
                 void scanDebtQr();
               }}
               activeOpacity={0.85}>
@@ -2136,8 +2286,25 @@ export function PosScreen() {
               <Icon name="chevronLeft" size={16} color={c.textFaint} />
             </TouchableOpacity>
             <TouchableOpacity
-              style={styles.chooserBtn}
-              onPress={() => void openCustomerPicker()}
+              style={[styles.chooserBtn, !silaPaired && {opacity: 0.55}]}
+              onPress={() => {
+                setDebtChooser(false);
+                if (!silaPaired) {
+                  Alert.alert(
+                    'البيع بالدين عبر صِلة',
+                    'لتفعيل مسار صِلة، اربط حساب التاجر من شاشة صِلة — أو استخدم «زبون من دفتر المتجر» لتسجيل الدين محلياً.',
+                    [
+                      {text: 'لاحقاً', style: 'cancel'},
+                      {
+                        text: 'ربط الآن',
+                        onPress: () => navigation.navigate('Sila' as never),
+                      },
+                    ],
+                  );
+                  return;
+                }
+                void openCustomerPicker();
+              }}
               activeOpacity={0.85}>
               <View style={styles.chooserIcon}>
                 <Icon name="list" size={22} color={c.accent} />
@@ -2146,6 +2313,25 @@ export function PosScreen() {
                 <Text style={styles.chooserTitle}>اختيار من الزبائن</Text>
                 <Text style={styles.chooserText}>
                   زبائن صِلة المعروفون لدى متجرك — دين مباشر بقيمة الفاتورة
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={16} color={c.textFaint} />
+            </TouchableOpacity>
+            {/* v16 (round-22 #4): the STORE-LOCAL debt book — customers
+                of this store only (ID number + name + phone), charged
+                locally, never uploaded to صِلة. */}
+            <TouchableOpacity
+              style={[styles.chooserBtn, {borderColor: c.accentSoft}]}
+              onPress={() => void openLocalPicker()}
+              activeOpacity={0.85}>
+              <View style={styles.chooserIcon}>
+                <Icon name="book" size={22} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.chooserTitle}>زبون من دفتر المتجر</Text>
+                <Text style={styles.chooserText}>
+                  حساب دين محلي (رقم هوية) — يُسجّل الدين في دفترك ولا يُرفع
+                  لصِلة
                 </Text>
               </View>
               <Icon name="chevronLeft" size={16} color={c.textFaint} />
@@ -2231,6 +2417,81 @@ export function PosScreen() {
         </View>
       ) : null}
 
+      {/* ── v16 (round-22 #4): the LOCAL debt-book picker — store\n          customers by ID number, live search, direct charge. ── */}
+      {localPicker ? (
+        <View style={styles.debtOverlay}>
+          <TouchableOpacity
+            style={styles.debtOverlayDim}
+            activeOpacity={1}
+            onPress={() => setLocalPicker(false)}
+          />
+          <BackHandlerCloser
+            active={localPicker}
+            onClose={() => setLocalPicker(false)}
+          />
+          <View style={styles.pickerSheet}>
+            <View style={styles.unitModalHandle} />
+            <Text style={styles.debtModalTitle}>زبائن دفتر المتجر</Text>
+            <TextInput
+              style={styles.pickerSearch}
+              value={localQuery}
+              onChangeText={setLocalQuery}
+              placeholder="ابحث بالاسم أو الهوية أو الجوال…"
+              placeholderTextColor={c.textFaint}
+            />
+            <ScrollView
+              style={styles.pickerList}
+              contentContainerStyle={styles.pickerListContent}
+              keyboardShouldPersistTaps="handled">
+              {localCustomers
+                .filter(entry => {
+                  const q = localQuery.trim();
+                  if (q.length === 0) {
+                    return true;
+                  }
+                  return (
+                    entry.customer.name.includes(q) ||
+                    entry.customer.id_number.includes(q) ||
+                    (entry.customer.phone ?? '').includes(q)
+                  );
+                })
+                .map(entry => (
+                  <TouchableOpacity
+                    key={entry.customer.id}
+                    style={styles.pickerRow}
+                    onPress={() => pickLocalCustomer(entry)}
+                    activeOpacity={0.85}>
+                    <View style={styles.pickerAvatar}>
+                      <Text style={styles.pickerInitial}>
+                        {entry.customer.name.trim().charAt(0) || 'ز'}
+                      </Text>
+                    </View>
+                    <View style={{flex: 1}}>
+                      <Text style={styles.pickerName} numberOfLines={1}>
+                        {entry.customer.name}
+                      </Text>
+                      <Text style={styles.pickerMeta}>
+                        هوية {entry.customer.id_number}
+                        {entry.outstandingMinor > 0
+                          ? ` · دين قائم ${formatMoney(
+                              entry.outstandingMinor / 100,
+                            )}`
+                          : ' · بلا دين'}
+                      </Text>
+                    </View>
+                    <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                  </TouchableOpacity>
+                ))}
+            </ScrollView>
+            <AppButton
+              title="إلغاء"
+              variant="secondary"
+              onPress={() => setLocalPicker(false)}
+            />
+          </View>
+        </View>
+      ) : null}
+
       {/* ── v11 (SILA §9.2): debt confirmation sheet — the customer
           QR was scanned and parsed offline; one look (name / amount /
           mode) and one tap commits the sale + debt queue row.
@@ -2251,12 +2512,24 @@ export function PosScreen() {
           />
           <View style={styles.debtModalSheet}>
             <View style={styles.unitModalHandle} />
-            <Text style={styles.debtModalTitle}>بيع بالدين — صِلة</Text>
+            <Text style={styles.debtModalTitle}>
+              {debtConfirm?.amountSource === 'local'
+                ? 'بيع بالدين — دفتر المتجر'
+                : 'بيع بالدين — صِلة'}
+            </Text>
 
             {/* Customer block */}
             <View style={styles.debtCustomerCard}>
               <View style={styles.debtCustomerIcon}>
-                <Icon name="qrFrame" size={22} color={c.accent} />
+                <Icon
+                  name={
+                    debtConfirm?.amountSource === 'local'
+                      ? 'book'
+                      : 'qrFrame'
+                  }
+                  size={22}
+                  color={c.accent}
+                />
               </View>
               <View style={{flex: 1}}>
                 <Text style={styles.debtCustomerName} numberOfLines={1}>
@@ -2269,6 +2542,8 @@ export function PosScreen() {
                     ? 'رمز موقّع من الزبون — المبلغ من الرمز'
                     : debtConfirm?.amountSource === 'picker'
                     ? 'زبون مختار من قائمة صِلة — المبلغ من الفاتورة'
+                    : debtConfirm?.amountSource === 'local'
+                    ? 'حساب دفتر المتجر — يُسجّل محلياً ولا يُرفع لصِلة'
                     : 'بطاقة زبون صِلة — المبلغ من الفاتورة'}
                 </Text>
               </View>
@@ -2290,7 +2565,7 @@ export function PosScreen() {
                 <Icon name="alert" size={15} color={c.danger} />
                 <Text style={styles.debtWarnText}>
                   مبلغ الرمز ({formatMoney((debtConfirm?.amountMinor ?? 0) / 100)})
-                  ₪ يختلف عن قيمة فاتورة البيع ({formatMoney(totals.total)} ₪)
+                  يختلف عن قيمة فاتورة البيع ({formatMoney(totals.total)})
                   — لا يمكن تسجيل الدين. اطلب من الزبون رمزاً بمبلغ الفاتورة
                   نفسه أو عدّل السلة.
                 </Text>
@@ -2313,8 +2588,9 @@ export function PosScreen() {
             <View style={styles.debtHintRow}>
               <Icon name="refresh" size={14} color={c.textDim} />
               <Text style={styles.debtHintText}>
-                يُسجَّل الدين الآن محلياً ويُزامن مع صِلة تلقائياً عند توفر
-                الإنترنت
+                {debtConfirm?.amountSource === 'local'
+                  ? 'يُسجَّل في دفتر المتجر محلياً — دون رفع إلى صِلة'
+                  : 'يُسجَّل الدين الآن محلياً ويُزامن مع صِلة تلقائياً عند توفر الإنترنت'}
               </Text>
             </View>
 

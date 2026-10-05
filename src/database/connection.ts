@@ -180,6 +180,42 @@ const DDL_STATEMENTS: string[] = [
   )`,
   'CREATE INDEX IF NOT EXISTS idx_sila_dq_state ON sila_debt_queue(state, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_sila_pq_state ON sila_payment_queue(state, created_at)',
+  // ── v16 (round-22 #4): the STORE-LOCAL debt book — customers of
+  // this store with ID number / name / phone, their debts (INV-L
+  // series) and repayments (RCP-L series). NEVER uploaded to صِلة;
+  // the migration path re-registers them as fresh INV-D debts.
+  `CREATE TABLE IF NOT EXISTS local_customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_number TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    phone TEXT,
+    notes TEXT,
+    sila_customer_id TEXT,
+    sila_linked_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS local_debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_customer_id INTEGER NOT NULL REFERENCES local_customers(id) ON DELETE CASCADE,
+    invoice_ref TEXT NOT NULL UNIQUE,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+    description TEXT,
+    migrated INTEGER NOT NULL DEFAULT 0,
+    migrated_ref TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS local_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_customer_id INTEGER NOT NULL REFERENCES local_customers(id) ON DELETE CASCADE,
+    receipt_ref TEXT NOT NULL UNIQUE,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+    method TEXT NOT NULL DEFAULT 'cash'
+      CHECK (method IN ('cash','card','other')),
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_local_debts_cust ON local_debts(local_customer_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_local_pays_cust ON local_payments(local_customer_id, created_at DESC)',
 ];
 
 const DEFAULT_CATEGORIES: string[] = [
@@ -512,6 +548,57 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 8;
   }
 
+  if (version < 9) {
+    // v16 (round-22 #4): the STORE-LOCAL debt book — accounts for
+    // customers recorded by ID number / name / phone with debts and
+    // repayments that never leave this device (fresh DDL above
+    // covers new installs; this heals older ones).
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS local_customers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_number TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        phone TEXT,
+        notes TEXT,
+        sila_customer_id TEXT,
+        sila_linked_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS local_debts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_customer_id INTEGER NOT NULL REFERENCES local_customers(id) ON DELETE CASCADE,
+        invoice_ref TEXT NOT NULL UNIQUE,
+        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+        description TEXT,
+        migrated INTEGER NOT NULL DEFAULT 0,
+        migrated_ref TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS local_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_customer_id INTEGER NOT NULL REFERENCES local_customers(id) ON DELETE CASCADE,
+        receipt_ref TEXT NOT NULL UNIQUE,
+        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+        method TEXT NOT NULL DEFAULT 'cash'
+          CHECK (method IN ('cash','card','other')),
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_local_debts_cust ON local_debts(local_customer_id, created_at DESC)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_local_pays_cust ON local_payments(local_customer_id, created_at DESC)',
+    );
+    logDiag('db', 'ترحيل v9: دفتر ديون المتجر المحلي (زبائن + ديون + سدادّات)');
+    version = 9;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -592,8 +679,11 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM sila_customers');
   await database.execute('DELETE FROM sila_debt_queue');
   await database.execute('DELETE FROM sila_payment_queue');
+  await database.execute('DELETE FROM local_payments');
+  await database.execute('DELETE FROM local_debts');
+  await database.execute('DELETE FROM local_customers');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue','local_customers','local_debts','local_payments')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

@@ -25,6 +25,14 @@ export const KEYS = {
    *  invoices (§3.1 pos_receipt_ref فريد لكل متجر). */
   paymentReceiptCounter: 'payment_receipt_counter_v1',
   paymentReceiptDay: 'payment_receipt_day_v1',
+  /** v16 (round-22 #4): the LOCAL debt-book series — INV-L-… debts and
+   *  RCP-L-… repayments never leave this device (a separate series so
+   *  a future migration to صِلة can take fresh INV-D numbers without
+   *  any collision). */
+  localDebtCounter: 'local_debt_counter_v1',
+  localDebtDay: 'local_debt_day_v1',
+  localReceiptCounter: 'local_receipt_counter_v1',
+  localReceiptDay: 'local_receipt_day_v1',
   savedPrinter: 'saved_printer_v1',
   seededFlag: 'db_seeded_v1',
   notifications: 'notifications_v1',

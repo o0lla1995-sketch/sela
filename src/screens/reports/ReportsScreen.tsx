@@ -198,7 +198,7 @@ export function ReportsScreen() {
                 <View style={styles.debtCell}>
                   <Text style={styles.debtLabel}>فواتير دين بالفترة</Text>
                   <Text style={[styles.debtValue, {color: c.warning}]}>
-                    {formatMoney(bundle.debts.salesAmount)} ₪
+                    {formatMoney(bundle.debts.salesAmount)}
                   </Text>
                   <Text style={styles.debtMeta}>
                     {bundle.debts.salesCount} فاتورة دين (INV-D)
@@ -207,7 +207,7 @@ export function ReportsScreen() {
                 <View style={styles.debtCell}>
                   <Text style={styles.debtLabel}>سدادّات مستلمة</Text>
                   <Text style={[styles.debtValue, {color: c.success}]}>
-                    {formatMoney(bundle.debts.paymentsAmount)} ₪
+                    {formatMoney(bundle.debts.paymentsAmount)}
                   </Text>
                   <Text style={styles.debtMeta}>
                     {bundle.debts.paymentsCount} إيصال سداد
@@ -246,7 +246,7 @@ export function ReportsScreen() {
                         ديون عبر تطبيق صِلة (للمعلومية)
                       </Text>
                       <Text style={[styles.debtValue, {color: c.info}]}>
-                        {formatMoney(bundle.debts.appOutstandingMinor / 100)} ₪
+                        {formatMoney(bundle.debts.appOutstandingMinor / 100)}
                       </Text>
                       <Text style={styles.debtMeta}>
                         ليست من مبيعات متجرك — لا تدخل أرباحك

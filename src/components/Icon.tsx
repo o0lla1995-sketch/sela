@@ -72,6 +72,11 @@ export type IconName =
   | 'shapes'
   | 'swap'
   | 'qrFrame'
+  | 'user'
+  | 'users'
+  | 'book'
+  | 'idCard'
+  | 'link'
   | 'key'
   | 'phone'
   | 'shield'
@@ -486,6 +491,45 @@ const P: Record<IconName, React.ReactNode> = {
     <G>
       <Path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2" />
       <Circle cx={12} cy={12} r={2.2} />
+    </G>
+  ),
+  /** v16 (round-22 #4): single person — local debt accounts. */
+  user: (
+    <G>
+      <Circle cx={12} cy={8} r={3.6} />
+      <Path d="M5 20c.7-3.6 3.6-5.6 7-5.6s6.3 2 7 5.6" />
+    </G>
+  ),
+  /** v16: multiple people — the debt book screen. */
+  users: (
+    <G>
+      <Circle cx={9} cy={8.5} r={3.2} />
+      <Path d="M3 19.5c.6-3.1 3.1-4.9 6-4.9s5.4 1.8 6 4.9" />
+      <Path d="M16 5.6a3.2 3.2 0 0 1 0 6.3M17.6 14.9c2 .7 3.2 2.3 3.4 4.6" />
+    </G>
+  ),
+  /** v16: ledger book — the store debt book. */
+  book: (
+    <G>
+      <Path d="M4 5.5A2 2 0 0 1 6 3.5h13v16H6a2 2 0 0 0-2 2z" />
+      <Path d="M4 19.5a2 2 0 0 1 2-2h13" />
+      <Path d="M8.5 8h7M8.5 11.5h7" />
+    </G>
+  ),
+  /** v16: ID card — customer identity by ID number. */
+  idCard: (
+    <G>
+      <Rect x={3} y={5} width={18} height={14} rx={2.4} />
+      <Circle cx={8.6} cy={11} r={1.9} />
+      <Path d="M5.6 16c.4-1.6 1.6-2.5 3-2.5s2.6.9 3 2.5" />
+      <Path d="M14.5 9.5h4.5M14.5 12.5h4.5M14.5 15.5h3" />
+    </G>
+  ),
+  /** v16: link — connecting a local account to a صِلة account. */
+  link: (
+    <G>
+      <Path d="M10 14a4 4 0 0 0 6 .4l2.5-2.5a4 4 0 0 0-5.6-5.6L11.4 7.7" />
+      <Path d="M14 10a4 4 0 0 0-6-.4L5.5 12.1a4 4 0 0 0 5.6 5.6l1.5-1.4" />
     </G>
   ),
 };

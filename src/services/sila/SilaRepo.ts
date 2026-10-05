@@ -311,6 +311,85 @@ export const SilaRepo = {
     return row ? rowToDebt(row as Record<string, unknown>) : null;
   },
 
+  /**
+   * v16 (round-22 #1): renumber a debt whose upload collided
+   * server-side (DUPLICATE_INVOICE_REF — the server never forgets a
+   * pos_invoice_ref, and a fresh install restarts the numbering).
+   * The queue row AND the sale row move to the fresh number together
+   * so the receipt, the invoices center and the upload all agree.
+   */
+  async renumberDebtInvoice(
+    oldRef: string,
+    newRef: string,
+  ): Promise<boolean> {
+    if (oldRef === newRef || oldRef.length === 0 || newRef.length === 0) {
+      return false;
+    }
+    const db = getDb();
+    try {
+      await db.transaction(async tx => {
+        await tx.execute(
+          `UPDATE sila_debt_queue
+           SET pos_invoice_ref = ?, state = 'pending', retry_count = 0
+           WHERE pos_invoice_ref = ?`,
+          [newRef, oldRef],
+        );
+        await tx.execute(
+          'UPDATE sales SET invoice_number = ? WHERE invoice_number = ?',
+          [newRef, oldRef],
+        );
+      });
+      logDiag(
+        'sila',
+        `أُعيد ترقيم الدين ${oldRef} ← ${newRef} (الرقم السابق محجوز في صِلة)`,
+      );
+      return true;
+    } catch (error) {
+      logDiag(
+        'sila',
+        `فشل إعادة ترقيم الدين ${oldRef}: ${toMessage(error)}`,
+        'warn',
+      );
+      return false;
+    }
+  },
+
+  /**
+   * v16 (round-22 #1): the receipts twin of renumberDebtInvoice —
+   * a cashier payment whose upload collided (DUPLICATE_RECEIPT_REF
+   * after a reinstall restarted RCP numbering) moves to a fresh
+   * receipt number and returns to the queue.
+   */
+  async renumberPaymentReceipt(
+    oldRef: string,
+    newRef: string,
+  ): Promise<boolean> {
+    if (oldRef === newRef || oldRef.length === 0 || newRef.length === 0) {
+      return false;
+    }
+    const db = getDb();
+    try {
+      await db.execute(
+        `UPDATE sila_payment_queue
+         SET pos_receipt_ref = ?, state = 'pending', retry_count = 0
+         WHERE pos_receipt_ref = ?`,
+        [newRef, oldRef],
+      );
+      logDiag(
+        'sila',
+        `أُعيد ترقيم إيصال السداد ${oldRef} ← ${newRef}`,
+      );
+      return true;
+    } catch (error) {
+      logDiag(
+        'sila',
+        `فشل إعادة ترقيم الإيصال ${oldRef}: ${toMessage(error)}`,
+        'warn',
+      );
+      return false;
+    }
+  },
+
   /** All invoice numbers that carry a SILA debt — used to badge the
    *  invoices center rows (one query, no per-row lookups). */
   async allDebtInvoiceRefs(): Promise<Set<string>> {

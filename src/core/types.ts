@@ -429,6 +429,62 @@ export interface SilaPaymentRow {
   created_at: string;
 }
 
+/** v16 (round-22 #4): a STORE-LOCAL debt account — a customer of
+ *  THIS store recorded with ID number / name / phone, whose debts
+ *  live ONLY in the store's books (never uploaded to صِلة unless the
+ *  merchant later migrates them). Separate from sila customers by
+ *  design; the ID number is the cross-system dedupe key. */
+export interface LocalCustomer {
+  id: number;
+  id_number: string;
+  name: string;
+  phone: string | null;
+  notes: string | null;
+  /** صِلة cid once this person is linked to a صِلة account (scan of
+   *  their QR) — enables the migration path and the dedupe guard. */
+  sila_customer_id: string | null;
+  sila_linked_at: string | null;
+  created_at: string;
+}
+
+/** v16 (round-22 #4): a debt recorded on a local customer (INV-L
+ *  series — locally only; migrated rows carry the صِلة reference
+ *  they were re-registered under). */
+export interface LocalDebt {
+  id: number;
+  local_customer_id: number;
+  invoice_ref: string;
+  amount_minor: number;
+  description: string | null;
+  /** 1 once this debt was re-registered in صِلة via the migration
+   *  (ترحيل الديون إلى صِلة). */
+  migrated: number;
+  migrated_ref: string | null;
+  created_at: string;
+}
+
+/** v16 (round-22 #4): a repayment received from a local customer
+ *  (RCP-L series — reduces the local balance; never uploaded). */
+export interface LocalPayment {
+  id: number;
+  local_customer_id: number;
+  receipt_ref: string;
+  amount_minor: number;
+  method: 'cash' | 'card' | 'other';
+  note: string | null;
+  created_at: string;
+}
+
+/** Derived per-customer balance for the local debt book. */
+export interface LocalCustomerBalance {
+  customer: LocalCustomer;
+  debtTotalMinor: number;
+  paidTotalMinor: number;
+  outstandingMinor: number;
+  debtsCount: number;
+  lastActivityAt: string | null;
+}
+
 /** Derives the stock state for a product given the global default threshold. */
 export function stockStateOf(
   product: Pick<Product, 'stock_quantity' | 'low_stock_threshold'>,

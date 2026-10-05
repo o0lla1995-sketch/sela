@@ -35,10 +35,11 @@ import {
   EMBEDDING_MODEL_VERSION,
 } from '../core/config';
 import {InvoiceService} from './InvoiceService';
+import {SilaSync} from './sila/SilaSync';
 import {logDiag} from '../core/diagnostics';
 import type {AppSettings} from '../stores/settingsStore';
 
-const BACKUP_VERSION = 3;
+const BACKUP_VERSION = 4;
 const JSON_MIME = 'application/json';
 
 export interface BackupSummary {
@@ -198,6 +199,36 @@ interface BackupFile {
     retry_count: number;
     created_at: string;
   }[];
+  /** v16 (round-22 #4): the STORE-LOCAL debt book — accounts by ID
+   *  number + their INV-L debts and RCP-L repayments. All local,
+   *  never uploaded; restoring brings the whole book back. */
+  local_customers?: {
+    id: number;
+    id_number: string;
+    name: string;
+    phone: string | null;
+    notes: string | null;
+    sila_customer_id: string | null;
+    sila_linked_at: string | null;
+    created_at: string;
+  }[];
+  local_debts?: {
+    local_customer_id: number;
+    invoice_ref: string;
+    amount_minor: number;
+    description: string | null;
+    migrated: number;
+    migrated_ref: string | null;
+    created_at: string;
+  }[];
+  local_payments?: {
+    local_customer_id: number;
+    receipt_ref: string;
+    amount_minor: number;
+    method: string;
+    note: string | null;
+    created_at: string;
+  }[];
   /** v8.3: embedded product image files (base64 JPEG) — keyed by
    *  `name`, referenced by the products' original image paths. */
   images?: {name: string; data: string}[];
@@ -232,6 +263,9 @@ export const BackupService = {
       silaDebts,
       silaCustomers,
       silaPayments,
+      localCustomers,
+      localDebts,
+      localPayments,
     ] = await Promise.all([
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
@@ -277,6 +311,21 @@ export const BackupService = {
                 outstanding_after, synced_at, error_code, error_message,
                 retry_count, created_at
          FROM sila_payment_queue`,
+      ).catch(() => ({rows: {_array: []}})),
+      db.execute(
+        `SELECT id, id_number, name, phone, notes, sila_customer_id,
+                sila_linked_at, created_at
+         FROM local_customers`,
+      ).catch(() => ({rows: {_array: []}})),
+      db.execute(
+        `SELECT local_customer_id, invoice_ref, amount_minor, description,
+                migrated, migrated_ref, created_at
+         FROM local_debts`,
+      ).catch(() => ({rows: {_array: []}})),
+      db.execute(
+        `SELECT local_customer_id, receipt_ref, amount_minor, method, note,
+                created_at
+         FROM local_payments`,
       ).catch(() => ({rows: {_array: []}})),
     ]);
 
@@ -474,6 +523,39 @@ export const BackupService = {
         error_message:
           row.error_message == null ? null : String(row.error_message),
         retry_count: Number(row.retry_count ?? 0),
+        created_at: String(row.created_at ?? ''),
+      })),
+      // v16 (round-22 #4): the store-local debt book travels with
+      // the backup — accounts (with their صِلة links), INV-L debts
+      // and RCP-L repayments, verbatim (all IDs remapped on restore).
+      local_customers: rowsOf(localCustomers).map(row => ({
+        id: Number(row.id ?? 0),
+        id_number: String(row.id_number ?? ''),
+        name: String(row.name ?? ''),
+        phone: row.phone == null ? null : String(row.phone),
+        notes: row.notes == null ? null : String(row.notes),
+        sila_customer_id:
+          row.sila_customer_id == null ? null : String(row.sila_customer_id),
+        sila_linked_at:
+          row.sila_linked_at == null ? null : String(row.sila_linked_at),
+        created_at: String(row.created_at ?? ''),
+      })),
+      local_debts: rowsOf(localDebts).map(row => ({
+        local_customer_id: Number(row.local_customer_id ?? 0),
+        invoice_ref: String(row.invoice_ref ?? ''),
+        amount_minor: Number(row.amount_minor ?? 0),
+        description: row.description == null ? null : String(row.description),
+        migrated: Number(row.migrated ?? 0),
+        migrated_ref:
+          row.migrated_ref == null ? null : String(row.migrated_ref),
+        created_at: String(row.created_at ?? ''),
+      })),
+      local_payments: rowsOf(localPayments).map(row => ({
+        local_customer_id: Number(row.local_customer_id ?? 0),
+        receipt_ref: String(row.receipt_ref ?? ''),
+        amount_minor: Number(row.amount_minor ?? 0),
+        method: String(row.method ?? 'cash'),
+        note: row.note == null ? null : String(row.note),
         created_at: String(row.created_at ?? ''),
       })),
       images,
@@ -1007,6 +1089,94 @@ export const BackupService = {
         }
       }
 
+      // v16 (round-22 #4): the STORE-LOCAL debt book. Customer rows
+      // remap their ids (the same discipline as categories/products)
+      // so debts and repayments keep pointing at the right account;
+      // refs (INV-L / RCP-L) restore verbatim — they're this store's
+      // own namespace, never uploaded anywhere.
+      await tx.execute('DELETE FROM local_payments');
+      await tx.execute('DELETE FROM local_debts');
+      await tx.execute('DELETE FROM local_customers');
+      await tx.execute(
+        "DELETE FROM sqlite_sequence WHERE name IN ('local_customers','local_debts','local_payments')",
+      );
+      const localCustomerMap = new Map<number, number>();
+      for (const customer of doc.local_customers ?? []) {
+        if (!customer.id_number || !customer.name) {
+          continue;
+        }
+        const insert = await tx.execute(
+          `INSERT INTO local_customers
+            (id_number, name, phone, notes, sila_customer_id, sila_linked_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            customer.id_number,
+            customer.name,
+            customer.phone ?? null,
+            customer.notes ?? null,
+            customer.sila_customer_id ?? null,
+            customer.sila_linked_at ?? null,
+            customer.created_at || nowLocal(),
+          ],
+        );
+        if (customer.id != null && insert.insertId != null) {
+          localCustomerMap.set(customer.id, insert.insertId);
+        }
+      }
+      let localDebtsRestored = 0;
+      for (const debt of doc.local_debts ?? []) {
+        const mappedId = localCustomerMap.get(debt.local_customer_id);
+        if (mappedId == null || !debt.invoice_ref) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO local_debts
+              (local_customer_id, invoice_ref, amount_minor, description, migrated, migrated_ref, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              mappedId,
+              debt.invoice_ref,
+              Number(debt.amount_minor ?? 0),
+              debt.description ?? null,
+              Number(debt.migrated ?? 0),
+              debt.migrated_ref ?? null,
+              debt.created_at || nowLocal(),
+            ],
+          );
+          localDebtsRestored += 1;
+        } catch {
+          // Duplicate ref — first copy wins.
+        }
+      }
+      for (const payment of doc.local_payments ?? []) {
+        const mappedId = localCustomerMap.get(payment.local_customer_id);
+        if (mappedId == null || !payment.receipt_ref) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO local_payments
+              (local_customer_id, receipt_ref, amount_minor, method, note, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              mappedId,
+              payment.receipt_ref,
+              Number(payment.amount_minor ?? 0),
+              payment.method || 'cash',
+              payment.note ?? null,
+              payment.created_at || nowLocal(),
+            ],
+          );
+        } catch {
+          // Duplicate ref — first copy wins.
+        }
+      }
+      logDiag(
+        'backup',
+        `استُعيد دفتر المتجر: ${localCustomerMap.size} زبون و${localDebtsRestored} دين محلي`,
+      );
+
       // Counters land on the outer summary object (TS-friendly).
       summary.categories = categoryMap.size;
       summary.units = unitMap.size;
@@ -1028,6 +1198,17 @@ export const BackupService = {
       await InvoiceService.syncInvoiceCounterFromDb();
     } catch {
       // The DB-aware reservation recovers on the next sale anyway.
+    }
+
+    // v16 (round-22 #1): the restored DB may be OLDER than what the
+    // صِلة server remembers (numbers uploaded from an earlier install
+    // that the backup never saw) — advance today's counters past the
+    // server's refs so restored-state uploads don't bounce
+    // DUPLICATE_*_REF. Quiet + offline-safe.
+    try {
+      void SilaSync.advanceCountersFromServer();
+    } catch {
+      // Pairing may be absent — nothing to advance against.
     }
 
     logDiag(

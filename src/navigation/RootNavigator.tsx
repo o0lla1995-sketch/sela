@@ -37,6 +37,7 @@ import {
   InvoicesScreen,
 } from '../screens/invoices/InvoicesScreen';
 import {SilaScreen} from '../screens/sila/SilaScreen';
+import {LocalDebtsScreen} from '../screens/debts/LocalDebtsScreen';
 import {SecuritySettingsScreen} from '../screens/settings/SecuritySettingsScreen';
 
 export type RootStackParamList = {
@@ -53,6 +54,9 @@ export type RootStackParamList = {
   InvoiceDetail: {saleId: number} | undefined;
   /** v11 (SILA): merchant pairing + debt dashboard (الدين الفلسطيني). */
   Sila: undefined;
+  /** v16 (round-22 #4): the STORE-LOCAL debt book — customer
+   *  accounts by ID number, local debts & repayments. */
+  LocalDebts: undefined;
   /** v13 (round-19 #2): app-lock setup (fingerprint + 4-digit PIN). */
   Security: undefined;
 };
@@ -182,6 +186,7 @@ export function RootNavigator() {
           options={{animation: 'slide_from_bottom'}}
         />
         <Stack.Screen name="Sila" component={SilaScreen} />
+        <Stack.Screen name="LocalDebts" component={LocalDebtsScreen} />
         <Stack.Screen name="Security" component={SecuritySettingsScreen} />
       </Stack.Navigator>
     </NavigationContainer>

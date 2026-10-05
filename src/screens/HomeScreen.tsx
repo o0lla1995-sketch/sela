@@ -30,6 +30,7 @@ import {usePrinterStore} from '../stores/printerStore';
 import {useSilaStore} from '../stores/silaStore';
 import {SilaRepo} from '../services/sila/SilaRepo';
 import {SilaSync} from '../services/sila/SilaSync';
+import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {useToastStore} from '../stores/toastStore';
 import {
   fonts,
@@ -113,6 +114,16 @@ export function HomeScreen() {
     allMinor: number;
     todayMinor: number;
   } | null>(null);
+  // v16 (round-22 #4): the STORE-LOCAL debt book totals — the main
+  // «الدين الإجمالي» card merges them with the صِلة store-origin
+  // part; the Sila-APP part stays informational (للمعلومية).
+  const [localBook, setLocalBook] = useState<{
+    outstandingMinor: number;
+    debtsMinor: number;
+    paymentsMinor: number;
+    customersCount: number;
+    debtorsCount: number;
+  } | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -123,6 +134,7 @@ export function HomeScreen() {
         balances,
         allRevenue,
         paymentTotals,
+        localTotals,
       ] = await Promise.all([
         ReportService.loadBundle('today'),
         SaleRepo.listRecent(3),
@@ -130,6 +142,7 @@ export function HomeScreen() {
         SilaRepo.customersOutstandingTotal(),
         SaleRepo.allTimeRevenue(),
         SilaRepo.paymentsTotals(),
+        LocalDebtsRepo.totals(),
       ]);
       setBundle(todayBundle);
       setRecentSales(latest);
@@ -140,6 +153,7 @@ export function HomeScreen() {
         allMinor: paymentTotals.allMinor,
         todayMinor: paymentTotals.todayMinor,
       });
+      setLocalBook(localTotals);
     } catch {
       // Dashboard is informational — previous data stays shown.
     }
@@ -193,11 +207,22 @@ export function HomeScreen() {
   // outstanding) double-counted and shrank on every repayment.
   const creditSalesShekels = (debtTotals?.allMinor ?? 0) / 100;
   const collectedShekels = (paymentsReceived?.allMinor ?? 0) / 100;
+  // v16 (round-22 #4): local-book figures — outstanding, collected
+  // repayments, and the credit-sales total (goods that left with no
+  // cash; they ARE in revenue — same asset-swap discipline §3.4).
+  const localOutstandingShekels = (localBook?.outstandingMinor ?? 0) / 100;
+  const localCollectedShekels = (localBook?.paymentsMinor ?? 0) / 100;
+  const localDebtsShekels = (localBook?.debtsMinor ?? 0) / 100;
   const treasuryCash =
-    (treasuryRevenue ?? 0) - creditSalesShekels + collectedShekels;
+    (treasuryRevenue ?? 0) -
+    creditSalesShekels -
+    localDebtsShekels +
+    collectedShekels +
+    localCollectedShekels;
   const debtorsCount =
     (serverBalances?.debtorsCount ?? 0) +
-    ((debtTotals?.pendingCount ?? 0) > 0 ? 1 : 0);
+    ((debtTotals?.pendingCount ?? 0) > 0 ? 1 : 0) +
+    (localBook?.debtorsCount ?? 0);
 
   return (
     <View style={styles.screen}>
@@ -284,40 +309,88 @@ export function HomeScreen() {
         {/* ── v12 (round-18 #4): debts & treasury report ──── */}
         <SectionTitle
           title="الديون والخزينة"
-          hint="يتزامن مع صِلة وتُخصم منه الأقساط المسدّدة"
+          hint="ديون دفترك المحلي + ديون صِلة — منفصلة لا تختلط"
           action={
-            silaPairing != null ? (
+            <View style={{flexDirection: 'row', gap: spacing.md}}>
               <TouchableOpacity
-                onPress={() => navigation.navigate('Sila' as never)}>
-                <Text style={styles.seeAll}>سجل الديون</Text>
+                onPress={() => navigation.navigate('LocalDebts' as never)}>
+                <Text style={styles.seeAll}>دفتر المتجر</Text>
               </TouchableOpacity>
-            ) : undefined
+              {silaPairing != null ? (
+                <TouchableOpacity
+                  onPress={() => navigation.navigate('Sila' as never)}>
+                  <Text style={styles.seeAll}>سجل صِلة</Text>
+                </TouchableOpacity>
+              ) : undefined}
+            </View>
           }
         />
         {silaPairing == null ? (
-          <TouchableOpacity
-            style={styles.silaCtaCard}
-            onPress={() => navigation.navigate('Sila' as never)}
-            activeOpacity={0.8}>
-            <View style={styles.silaCtaIcon}>
-              <Icon name="qrFrame" size={20} color={c.accent} />
-            </View>
-            <View style={{flex: 1}}>
-              <Text style={styles.silaCtaTitle}>فعّل البيع بالدين — صِلة</Text>
-              <Text style={styles.silaCtaText}>
-                اربط حساب التاجر لتسجيل فواتير الدين ومتابعتها هنا
-              </Text>
-            </View>
-            <Icon name="chevronLeft" size={16} color={c.textFaint} />
-          </TouchableOpacity>
+          <>
+            <TouchableOpacity
+              style={styles.silaCtaCard}
+              onPress={() => navigation.navigate('Sila' as never)}
+              activeOpacity={0.8}>
+              <View style={styles.silaCtaIcon}>
+                <Icon name="qrFrame" size={20} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.silaCtaTitle}>فعّل البيع بالدين — صِلة</Text>
+                <Text style={styles.silaCtaText}>
+                  اربط حساب التاجر لتسجيل فواتير الدين ومتابعتها هنا
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={16} color={c.textFaint} />
+            </TouchableOpacity>
+            {/* v16 (round-22 #4): the LOCAL debt book works WITHOUT
+                صِلة — accounts by ID number, debts & repayments in
+                the store's own books. */}
+            <TouchableOpacity
+              style={[styles.silaCtaCard, {marginTop: spacing.md}]}
+              onPress={() => navigation.navigate('LocalDebts' as never)}
+              activeOpacity={0.8}>
+              <View style={styles.silaCtaIcon}>
+                <Icon name="book" size={20} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.silaCtaTitle}>دفتر ديون المتجر</Text>
+                <Text style={styles.silaCtaText}>
+                  حسابات دين محلية بالهوية والاسم والجوال — بدون تطبيق صِلة
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={16} color={c.textFaint} />
+            </TouchableOpacity>
+            {localBook != null && localBook.outstandingMinor !== 0 ? (
+              <View style={styles.statsRow}>
+                <StatCard
+                  label={`ديون الدفتر المحلي · ${localBook.debtorsCount} مدين`}
+                  value={formatMoney(localBook.outstandingMinor / 100)}
+                  tone="danger"
+                  icon="book"
+                />
+                <StatCard
+                  label="النقد بالخزينة"
+                  value={formatMoney(treasuryCash)}
+                  tone={treasuryCash >= 0 ? 'success' : 'danger'}
+                  icon="wallet"
+                />
+              </View>
+            ) : null}
+          </>
         ) : (
           <>
             <View style={styles.statsRow}>
+              {/* v16 (round-22 #4): the MAIN card is the TOTAL debt —
+                  the local debt book + the صِلة store-origin part —
+                  exactly as requested: «في الديون يظهر الدين
+                  الإجمالي». */}
               <StatCard
-                label={`ديون فواتير متجري · ${debtorsCount} مدين`}
-                value={formatMoney(storeOutstandingShekels)}
-                tone="danger"
-                icon="qrFrame"
+                label={`الدين الإجمالي القائم · ${debtorsCount} مدين`}
+                value={formatMoney(
+                  storeOutstandingShekels + localOutstandingShekels,
+                )}
+                tone={storeOutstandingShekels + localOutstandingShekels > 0 ? 'danger' : 'success'}
+                icon="book"
               />
               <StatCard
                 label="النقد بالخزينة"
@@ -326,22 +399,52 @@ export function HomeScreen() {
                 icon="wallet"
               />
             </View>
-            {/* v15 (§3.3/§3.4): the split strip — Sila-app debts are
-                informational only and NEVER enter the treasury. */}
+            {/* v15 (§3.3/§3.4) + v16 (round-22 #4): the split strip —
+                the total splits into the local book, the صِلة
+                store-origin part, and the Sila-APP part which is
+                informational only and NEVER enters the treasury
+                («ديون تطبيق صلة للمعلومية فقط — ديون مستخدم صلة
+                المرتبطة بالمتجر»). */}
             <View style={styles.splitStrip}>
+              <View style={styles.splitStripCell}>
+                <Text style={styles.splitStripLabel}>منها دفتر المتجر</Text>
+                <Text style={[styles.splitStripValue, {color: c.warning}]}>
+                  {formatMoney(localOutstandingShekels)}
+                </Text>
+              </View>
+              <View style={styles.splitStripDivider} />
+              <View style={styles.splitStripCell}>
+                <Text style={styles.splitStripLabel}>منها فواتير متجري (صِلة)</Text>
+                <Text style={[styles.splitStripValue, {color: c.accent}]}>
+                  {formatMoney(storeOutstandingShekels)}
+                </Text>
+              </View>
+              <View style={styles.splitStripDivider} />
               <View style={styles.splitStripCell}>
                 <Text style={styles.splitStripLabel}>
                   ديون تطبيق صِلة (للمعلومية)
                 </Text>
                 <Text style={[styles.splitStripValue, {color: c.info}]}>
-                  {formatMoney(appDebtsShekels)} ₪
+                  {formatMoney(appDebtsShekels)}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.splitStrip}>
+              <View style={styles.splitStripCell}>
+                <Text style={styles.splitStripLabel}>
+                  سدادّات مستلمة (صِلة)
+                </Text>
+                <Text style={[styles.splitStripValue, {color: c.success}]}>
+                  {formatMoney(collectedShekels)}
                 </Text>
               </View>
               <View style={styles.splitStripDivider} />
               <View style={styles.splitStripCell}>
-                <Text style={styles.splitStripLabel}>سدادّات مستلمة</Text>
+                <Text style={styles.splitStripLabel}>
+                  سدادّات مستلمة (دفتر المتجر)
+                </Text>
                 <Text style={[styles.splitStripValue, {color: c.success}]}>
-                  {formatMoney(collectedShekels)} ₪
+                  {formatMoney(localCollectedShekels)}
                 </Text>
               </View>
             </View>

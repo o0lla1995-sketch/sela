@@ -381,6 +381,27 @@ export interface SilaCustomerServerRow {
   last_payment_at?: string | null;
   last_payment_amount_minor?: number | null;
   last_payment_method?: string | null;
+  /** v16 (round-22 #1): last ledger entries with their origin —
+   *  recent_entries carries pos_invoice_ref / pos_receipt_ref per
+   *  entry (0069), recent_pos_refs is the older per-debt list. Both
+   *  feed the counter-advance that prevents DUPLICATE_*_REF after a
+   *  reinstall restarts the numbering. */
+  recent_entries?: {
+    entry_type?: string;
+    amount_signed?: number;
+    origin?: string;
+    reference_code?: string | null;
+    pos_invoice_ref?: string | null;
+    pos_receipt_ref?: string | null;
+    payment_method?: string | null;
+    created_at?: string;
+  }[];
+  recent_pos_refs?: {
+    reference_code?: string | null;
+    pos_invoice_ref?: string | null;
+    amount_minor?: number;
+    synced_at?: string;
+  }[];
 }
 
 export async function silaFetchCustomers(

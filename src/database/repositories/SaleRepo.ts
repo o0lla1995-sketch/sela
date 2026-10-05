@@ -37,6 +37,16 @@ export interface CreateSaleInput {
     description: string;
     scannedAt: string;
   };
+  /** v16 (round-22 #4): when present the sale is a STORE-LOCAL
+   *  credit sale (دفتر المتجر) — the debt lands in local_debts
+   *  inside the SAME transaction, never in the صِلة queue. The
+   *  invoice number is the INV-L series ref. */
+  localDebtRow?: {
+    localCustomerId: number;
+    customerName: string;
+    amountMinor: number;
+    description: string;
+  };
 }
 
 function rowToSale(row: Record<string, unknown>): SaleRecord {
@@ -164,6 +174,23 @@ export const SaleRepo = {
             input.invoiceNumber,
             input.debtRow.description,
             input.debtRow.scannedAt,
+          ],
+        );
+      }
+
+      // v16 (round-22 #4): the store-LOCAL debt twin — same atomic
+      // discipline, different table (local_debts, INV-L series,
+      // never uploaded).
+      if (input.localDebtRow != null) {
+        await tx.execute(
+          `INSERT INTO local_debts (
+            local_customer_id, invoice_ref, amount_minor, description
+          ) VALUES (?, ?, ?, ?)`,
+          [
+            input.localDebtRow.localCustomerId,
+            input.invoiceNumber,
+            input.localDebtRow.amountMinor,
+            input.localDebtRow.description,
           ],
         );
       }

@@ -48,7 +48,9 @@ import {
   silaErrorAdvice,
   type SilaDebtRecordInput,
   type SilaPaymentRecordInput,
+  type SilaCustomerServerRow,
 } from './SilaApi';
+import {InvoiceService} from '../InvoiceService';
 import {APP_VERSION} from '../../core/config';
 
 const CYCLE_MS = 60 * 1000;
@@ -233,6 +235,55 @@ async function syncCustomersCycle(): Promise<void> {
   logDiag('sila', `تم تحديث أرصدة ${rows.length} زبون من صِلة`);
 }
 
+/**
+ * v16 (round-22 #1): the refs the صِلة server already remembers, from
+ * the full customers feed (recent_entries + recent_pos_refs). Used to
+ * push today's debt/receipt counters PAST the server's memory after
+ * pairing, a restore, or a DUPLICATE collision — a fresh install
+ * restarts the numbering at 0001 while the server never forgets a
+ * ref, so every upload would otherwise bounce DUPLICATE_*_REF.
+ */
+function serverKnownRefs(rows: SilaCustomerServerRow[]): string[] {
+  const refs: string[] = [];
+  for (const row of rows) {
+    for (const entry of row.recent_entries ?? []) {
+      if (entry.pos_invoice_ref != null) {
+        refs.push(entry.pos_invoice_ref);
+      }
+      if (entry.pos_receipt_ref != null) {
+        refs.push(entry.pos_receipt_ref);
+      }
+    }
+    for (const ref of row.recent_pos_refs ?? []) {
+      if (ref.pos_invoice_ref != null) {
+        refs.push(ref.pos_invoice_ref);
+      }
+    }
+  }
+  return refs;
+}
+
+/** v16 (round-22 #1): pull the customers feed (cursor bypassed) and
+ *  advance today's counters beyond every ref the server shows. Safe
+ *  offline (resolves quietly); returns the number of refs seen. */
+async function advanceCountersFromServer(): Promise<number> {
+  const store = useSilaStore.getState();
+  const pairing = store.pairing;
+  if (pairing == null) {
+    return 0;
+  }
+  try {
+    const rows = await silaFetchCustomers(pairing, null);
+    const refs = serverKnownRefs(rows);
+    if (refs.length > 0) {
+      await InvoiceService.advanceCountersFromServerRefs(refs);
+    }
+    return refs.length;
+  } catch {
+    return 0; // offline / transient — the renumber path still heals.
+  }
+}
+
 /** v13 (round-19 #1): isolated customers-only refresh — the Home
  *  dashboard calls this on focus so «الديون القائمة» و«الرصيد بعد
  *  السداد» mirror the صِلة server (repayments included) with the
@@ -370,6 +421,33 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
     let paymentsSyncedThisCycle = 0;
     let deviceInvalid = false;
     let transientFailure = false;
+    // v16 (round-22 #1): renumber bookkeeping — a DUPLICATE_*_REF on
+    // a pending row means this device re-issued a number the صِلة
+    // server already remembers (fresh install / old-backup restore
+    // restarted the numbering). The row is RENUMBERED to a fresh
+    // high number and retried — NEVER marked synced (the old v15
+    // behaviour silently swallowed brand-new debts as "duplicates"
+    // of unrelated earlier transactions — the exact complaint
+    // «تُسجّل في التطبيق ولا تُزامن في صِلة»). Max 2 renumbers per row
+    // per cycle; the remainder walks forward next cycle.
+    const debtRenumbers = new Map<number, number>();
+    const paymentRenumbers = new Map<number, number>();
+    let renumberedDebts = 0;
+    let renumberedReceipts = 0;
+    let countersAdvancedThisCycle = false;
+    const ensureCountersAdvanced = async () => {
+      if (countersAdvancedThisCycle) {
+        return;
+      }
+      countersAdvancedThisCycle = true;
+      const seen = await advanceCountersFromServer();
+      if (seen > 0) {
+        logDiag(
+          'sila',
+          `تعارض ترقيم مع صِلة — تقدّم العدادات خلف ${seen} مرجع يعرفه الخادم`,
+        );
+      }
+    };
 
     for (let batch = 0; batch < MAX_BATCHES_PER_CYCLE; batch += 1) {
       const pendingRows = await SilaRepo.pendingBatch(100);
@@ -402,36 +480,66 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
             });
             syncedThisCycle += 1;
             // Cache the customer name/balance for the balances screen.
+            // v16 (round-22 #1): GUARDED — a cache write failure must
+            // never push an already-synced row back to pending (the
+            // old unguarded call poisoned whole batches: one bad
+            // upsert retried synced debts forever and skipped the
+            // customers refresh → empty list + zero treasury).
             if (result.customer_name && row.customer_id) {
-              await SilaRepo.upsertCustomers(
-                [
-                  {
-                    customerId: row.customer_id,
-                    name: result.customer_name,
-                    phoneLast4:
-                      result.customer_phone_last4 ??
-                      row.customer_phone_last4 ??
-                      null,
-                    outstandingMinor: result.outstanding_minor ?? 0,
-                  },
-                ],
-                nowIso(),
-              );
+              try {
+                await SilaRepo.upsertCustomers(
+                  [
+                    {
+                      customerId: row.customer_id,
+                      name: result.customer_name,
+                      phoneLast4:
+                        result.customer_phone_last4 ??
+                        row.customer_phone_last4 ??
+                        null,
+                      outstandingMinor: result.outstanding_minor ?? 0,
+                    },
+                  ],
+                  nowIso(),
+                );
+              } catch (error) {
+                logDiag(
+                  'sila',
+                  `تحديث ذاكرة زبون بعد المزامنة فشل: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                  'warn',
+                );
+              }
             }
           } else {
             const code = result.error ?? 'UNKNOWN';
-            // v15 (§2.5): DUPLICATE_INVOICE_REF = this invoice is
-            // ALREADY recorded in صِلة → the row is effectively synced
-            // (bind the reference the server repeated, if any). The
-            // old behaviour parked these as failed forever.
+            // v16 (round-22 #1): DUPLICATE_INVOICE_REF on a PENDING
+            // row = NUMBERING COLLISION (this row was never the
+            // transaction the server holds under that ref — a true
+            // replay answers ok/idempotent_replay at step 0 and never
+            // reaches the duplicate guard). Renumber to a fresh high
+            // number and let the next batch retry the upload; the
+            // debt reaches صِلة under its new ref and the sale row is
+            // renumbered with it so the receipt stays consistent.
             if (code === 'DUPLICATE_INVOICE_REF') {
-              await SilaRepo.markSynced(row.local_id, {
-                referenceCode:
-                  result.existing_reference_code ?? result.reference_code ?? '',
-                transactionId: result.transaction_id ?? '',
-                outstandingAfter: result.outstanding_minor ?? 0,
-              });
-              syncedThisCycle += 1;
+              const attempts = debtRenumbers.get(row.local_id) ?? 0;
+              if (attempts >= 2) {
+                await SilaRepo.markRetry(row.local_id);
+                continue;
+              }
+              debtRenumbers.set(row.local_id, attempts + 1);
+              await ensureCountersAdvanced();
+              const freshRef =
+                await InvoiceService.reserveDebtNumberForRenumber();
+              const moved = await SilaRepo.renumberDebtInvoice(
+                row.pos_invoice_ref,
+                freshRef,
+              );
+              if (moved) {
+                renumberedDebts += 1;
+              } else {
+                await SilaRepo.markRetry(row.local_id);
+              }
               continue;
             }
             const error = new SilaApiError(200, code, result.message ?? '');
@@ -543,16 +651,27 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
           } else {
             const code = result.error ?? 'UNKNOWN';
             if (code === 'DUPLICATE_RECEIPT_REF') {
-              // §2.5: already recorded — treat as synced.
-              await SilaRepo.markPaymentSynced(row.local_id, {
-                referenceCode:
-                  result.existing_reference_code ??
-                  result.reference_code ??
-                  '',
-                transactionId: result.transaction_id ?? '',
-                outstandingAfter: result.outstanding_minor ?? 0,
-              });
-              paymentsSyncedThisCycle += 1;
+              // v16 (round-22 #1): same collision discipline as debts
+              // — a pending receipt that collides was re-issued by a
+              // reinstall; renumber it to a fresh RCP ref and retry.
+              // (A true replay returns ok/idempotent_replay above.)
+              const attempts = paymentRenumbers.get(row.local_id) ?? 0;
+              if (attempts >= 2) {
+                await SilaRepo.markPaymentRetry(row.local_id);
+                continue;
+              }
+              paymentRenumbers.set(row.local_id, attempts + 1);
+              await ensureCountersAdvanced();
+              const freshReceipt = await SilaRepo.reserveReceiptRef();
+              const moved = await SilaRepo.renumberPaymentReceipt(
+                row.pos_receipt_ref,
+                freshReceipt,
+              );
+              if (moved) {
+                renumberedReceipts += 1;
+              } else {
+                await SilaRepo.markPaymentRetry(row.local_id);
+              }
               continue;
             }
             const error = new SilaApiError(200, code, result.message ?? '');
@@ -660,6 +779,16 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
     if (paymentsSyncedThisCycle > 0) {
       parts.push(`رُفع ${paymentsSyncedThisCycle} سداد`);
     }
+    if (renumberedDebts > 0 || renumberedReceipts > 0) {
+      const bits: string[] = [];
+      if (renumberedDebts > 0) {
+        bits.push(`${renumberedDebts} فاتورة دين`);
+      }
+      if (renumberedReceipts > 0) {
+        bits.push(`${renumberedReceipts} إيصال`);
+      }
+      parts.push(`أُعيد ترقيم ${bits.join(' و')} بعد تعارض مع أرقام قديمة في صِلة`);
+    }
     const stillWaiting = after.pending + paymentAfter.pending;
     const message =
       parts.length > 0
@@ -753,6 +882,12 @@ export const SilaSync = {
         useSilaStore.getState().refreshCounts(),
       );
     }
+    // v16 (round-22 #1): pairing-time counter advance — right after
+    // (re)pairing, jump today's debt/receipt counters past every ref
+    // the server remembers so a fresh install doesn't re-issue
+    // INV-D-…-0001 that the server already holds (every upload would
+    // bounce DUPLICATE_*_REF). Quiet + offline-safe.
+    void advanceCountersFromServer();
     if (timer != null) {
       return;
     }
@@ -808,6 +943,14 @@ export const SilaSync = {
    * repayments. Safe offline (resolves false, never throws). */
   async refreshBalances(): Promise<boolean> {
     return refreshBalancesCycle();
+  },
+
+  /** v16 (round-22 #1): public pairing/restore hook — advances the
+   *  TODAY debt + receipt counters past every ref the صِلة server
+   *  remembers (from the full customers feed). Call after a
+   *  successful pair and after a backup restore. */
+  async advanceCountersFromServer(): Promise<number> {
+    return advanceCountersFromServer();
   },
 
   /** Exponential backoff hint for the UI (§11). */

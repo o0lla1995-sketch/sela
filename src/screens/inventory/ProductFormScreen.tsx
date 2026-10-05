@@ -153,6 +153,21 @@ export function ProductFormScreen() {
    *  kilo, fractional kg stock, weight pad at the POS). */
   const [saleMode, setSaleMode] = useState<'piece' | 'weight'>('piece');
   const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
+  // ── v16 (round-22 #3): استلام البضاعة — quick receiving with
+  // AUTO-FILL. The merchant picks how the goods arrived (by carton
+  // or by weight-bag), enters counts + the package price, and the
+  // form fills itself: total quantity, per-piece/per-kg cost, price
+  // suggestions, even the matching sale-unit row (كرتونة/كيس) with
+  // its conversion and prices. "أهم شيء سهولة إضافة البضائع".
+  const [receiveMode, setReceiveMode] = useState<'none' | 'carton' | 'bag'>(
+    'none',
+  );
+  const [cartonsCount, setCartonsCount] = useState('');
+  const [piecesPerCarton, setPiecesPerCarton] = useState('');
+  const [cartonCost, setCartonCost] = useState('');
+  const [bagsCount, setBagsCount] = useState('');
+  const [kgPerBag, setKgPerBag] = useState('');
+  const [bagCost, setBagCost] = useState('');
   const [angles, setAngles] = useState<Record<AngleLabel, AngleState>>({
     front: {embedding: null, thumbnailPath: null},
     back: {embedding: null, thumbnailPath: null},
@@ -588,6 +603,228 @@ export function ProductFormScreen() {
     [unitRowsById],
   );
 
+  // ── v16 (round-22 #3): receiving math ───────────────────────
+  /** Round UP to a pleasant price step (0.25 for retail, 0.1 for
+   *  wholesale) so suggestions look like real shelf prices. */
+  const suggestPrice = useCallback(
+    (cost: number, margin: number, step: number): number => {
+      const raw = cost * (1 + margin);
+      return Math.max(step, Math.ceil(raw / step) * step);
+    },
+    [],
+  );
+
+  /** Carton receiving: n cartons × p pieces, carton price → total
+   *  pieces (stock), per-piece cost, retail/wholesale suggestions.
+   *  All derived live while the merchant types. */
+  const cartonMath = useMemo(() => {
+    const n = parseNumber(cartonsCount);
+    const p = parseNumber(piecesPerCarton);
+    const cost = parseNumber(cartonCost);
+    if (
+      receiveMode !== 'carton' ||
+      Number.isNaN(n) ||
+      n <= 0 ||
+      Number.isNaN(p) ||
+      p <= 0
+    ) {
+      return null;
+    }
+    const totalPieces = Math.round(n * p);
+    const perPiece = Number.isNaN(cost) || cost <= 0 ? null : cost / p;
+    return {
+      totalPieces,
+      perPiece,
+      retail:
+        perPiece != null
+          ? suggestPrice(perPiece, 0.25, 0.25)
+          : null,
+      wholesale:
+        perPiece != null ? suggestPrice(perPiece, 0.12, 0.1) : null,
+      cartonRetail:
+        perPiece != null
+          ? Math.round(suggestPrice(perPiece, 0.25, 0.25) * p * 100) / 100
+          : null,
+    };
+  }, [receiveMode, cartonsCount, piecesPerCarton, cartonCost, suggestPrice]);
+
+  /** Bag/weight receiving: n bags × k kg, bag price → total kg
+   *  (stock), per-kg cost, per-kg price suggestions. */
+  const bagMath = useMemo(() => {
+    const n = parseNumber(bagsCount);
+    const k = parseNumber(kgPerBag);
+    const cost = parseNumber(bagCost);
+    if (
+      receiveMode !== 'bag' ||
+      Number.isNaN(n) ||
+      n <= 0 ||
+      Number.isNaN(k) ||
+      k <= 0
+    ) {
+      return null;
+    }
+    const totalKg = Math.round(n * k * 1000) / 1000;
+    const perKg = Number.isNaN(cost) || cost <= 0 ? null : cost / k;
+    return {
+      totalKg,
+      perKg,
+      retail: perKg != null ? suggestPrice(perKg, 0.25, 0.25) : null,
+      wholesale: perKg != null ? suggestPrice(perKg, 0.12, 0.1) : null,
+    };
+  }, [receiveMode, bagsCount, kgPerBag, bagCost, suggestPrice]);
+
+  /** v16 (round-22 #3): receiving → live auto-fill of stock + cost.
+   *  The merchant still sets (or adopts the suggested) sale prices —
+   *  exactly the requested split: "يتم تعبئة الكمية وسعر التكلفة وهو
+   *  يضيف سعر البيع والجملة". */
+  useEffect(() => {
+    if (cartonMath != null) {
+      setStock(String(cartonMath.totalPieces));
+      if (cartonMath.perPiece != null) {
+        setCostPrice(
+          String(Math.round(cartonMath.perPiece * 1000) / 1000),
+        );
+      }
+    }
+  }, [cartonMath]);
+
+  useEffect(() => {
+    if (bagMath != null) {
+      setStock(String(bagMath.totalKg));
+      if (bagMath.perKg != null) {
+        setCostPrice(String(Math.round(bagMath.perKg * 1000) / 1000));
+      }
+    }
+  }, [bagMath]);
+
+  /** v16 (round-22 #3): switching the receiving mode also switches
+   *  the sale mode (carton = pieces, bag = weight) and resets the
+   *  other mode's inputs so no stale numbers linger. */
+  const switchReceiveMode = useCallback(
+    (mode: 'none' | 'carton' | 'bag') => {
+      setReceiveMode(mode);
+      if (mode === 'carton') {
+        setSaleMode('piece');
+        setBagsCount('');
+        setKgPerBag('');
+        setBagCost('');
+      } else if (mode === 'bag') {
+        setSaleMode('weight');
+        setCartonsCount('');
+        setPiecesPerCarton('');
+        setCartonCost('');
+      }
+    },
+    [],
+  );
+
+  /** v16 (round-22 #3): apply a receiving suggestion to the price
+   *  fields — one tap, no math. */
+  const applySuggestion = useCallback(
+    (retail: number | null, wholesale: number | null) => {
+      if (retail != null) {
+        setRetailPrice(String(Math.round(retail * 100) / 100));
+      }
+      if (wholesale != null) {
+        setWholesalePrice(String(Math.round(wholesale * 100) / 100));
+      }
+    },
+    [],
+  );
+
+  /** v16 (round-22 #3): ensure a matching sale-unit row for the
+   *  receiving package — كرتونة (piece kind, conversion = pieces per
+   *  carton) or كيس (weight kind, conversion = kg per bag) — with
+   *  auto-filled conversion and prices derived from the product's
+   *  base prices. Creates the unit itself when missing. */
+  const ensureReceivingUnit = useCallback(
+    async (kind: 'carton' | 'bag') => {
+      try {
+        const name = kind === 'carton' ? 'كرتونة' : 'كيس';
+        const unitKind = kind === 'carton' ? 'piece' : 'weight';
+        const conversion =
+          kind === 'carton'
+            ? parseNumber(piecesPerCarton)
+            : parseNumber(kgPerBag);
+        if (Number.isNaN(conversion) || conversion <= 0) {
+          return;
+        }
+        const existing = unitRows.find(
+          row => unitNameById.get(row.unit_id) === name,
+        );
+        if (existing != null) {
+          // Refresh its conversion to what the merchant typed.
+          setUnitRows(prev =>
+            prev.map(row =>
+              unitNameById.get(row.unit_id) === name
+                ? {
+                    ...row,
+                    conversion: String(conversion),
+                    retail:
+                      row.retail.trim().length > 0
+                        ? row.retail
+                        : '',
+                  }
+                : row,
+            ),
+          );
+          return;
+        }
+        const unitId = await UnitRepo.getOrCreate(name, name, unitKind);
+        const unitList = await UnitRepo.list();
+        setUnits(unitList);
+        setUnitRows(prev => [
+          ...prev,
+          {
+            unit_id: unitId,
+            conversion: String(conversion),
+            retail: '',
+            wholesale: '',
+            barcode: '',
+          },
+        ]);
+      } catch {
+        // A unit row is a convenience — never block receiving on it.
+      }
+    },
+    [unitRows, unitNameById, piecesPerCarton, kgPerBag],
+  );
+
+  /** v16 (round-22 #3): apply receiving prices (incl. the unit
+   *  row's own prices) — called by the suggestion buttons so both
+   *  the base prices and the كرتونة/كيس row prices fill together. */
+  const applyReceivingPrices = useCallback(
+    (retail: number | null, wholesale: number | null) => {
+      applySuggestion(retail, wholesale);
+      const kind = receiveMode === 'bag' ? 'bag' : 'carton';
+      const name = kind === 'carton' ? 'كرتونة' : 'كيس';
+      const conversion =
+        kind === 'carton' ? parseNumber(piecesPerCarton) : parseNumber(kgPerBag);
+      if (
+        !Number.isNaN(conversion) &&
+        conversion > 0 &&
+        retail != null &&
+        wholesale != null
+      ) {
+        setUnitRows(prev =>
+          prev.map(row =>
+            unitNameById.get(row.unit_id) === name
+              ? {
+                  ...row,
+                  conversion: String(conversion),
+                  retail: String(Math.round(retail * conversion * 100) / 100),
+                  wholesale: String(
+                    Math.round(wholesale * conversion * 100) / 100,
+                  ),
+                }
+              : row,
+          ),
+        );
+      }
+    },
+    [receiveMode, applySuggestion, unitNameById, piecesPerCarton, kgPerBag],
+  );
+
   /** Unit rows usable as a stock-entry unit (valid conversion). */
   const stockUnitChoices = useMemo(
     () => unitRows.filter(row => validConversion(row.unit_id) != null),
@@ -638,6 +875,26 @@ export function ProductFormScreen() {
       unitNameById.get(stockUnitId) ?? ''
     } = ${basePieces} ${BASE_UNIT_NAME} محفوظة في المخزون`;
   }, [stock, stockUnitId, unitNameById, validConversion]);
+
+  /** v16 (round-22 #3): when the receiving math becomes valid,
+   *  make sure the matching كرتونة/كيس unit row exists (guarded by
+   *  a ref so it runs once per conversion value, not per keystroke). */
+  const ensuredConversionRef = useRef<string>('');
+  useEffect(() => {
+    if (receiveMode === 'carton' && cartonMath != null) {
+      const key = `carton:${piecesPerCarton}`;
+      if (ensuredConversionRef.current !== key) {
+        ensuredConversionRef.current = key;
+        void ensureReceivingUnit('carton');
+      }
+    } else if (receiveMode === 'bag' && bagMath != null) {
+      const key = `bag:${kgPerBag}`;
+      if (ensuredConversionRef.current !== key) {
+        ensuredConversionRef.current = key;
+        void ensureReceivingUnit('bag');
+      }
+    }
+  }, [receiveMode, cartonMath, bagMath, piecesPerCarton, kgPerBag, ensureReceivingUnit]);
 
   const save = useCallback(async () => {
     const trimmedName = name.trim();
@@ -1074,6 +1331,226 @@ export function ProductFormScreen() {
               />
             </Card>
           ) : null}
+          {/* ── v16 (round-22 #3): استلام البضاعة — smart receiving
+              with AUTO-FILL. The merchant picks how the goods arrived
+              (cartons or weight bags), types counts + package price,
+              and quantity/cost/suggested prices (and the matching
+              كرتونة/كيس sale unit) fill themselves. ─────────────── */}
+          <SectionTitle
+            title="استلام البضاعة (تعبئة تلقائية)"
+            hint={
+              receiveMode === 'none'
+                ? 'اختر كيف وصلت البضاعة — الكمية والتكلفة والأسعار المقترحة تُملأ تلقائياً'
+                : receiveMode === 'carton'
+                ? 'عدد الكراتين × القطع بالكرتونة — الكمية وتكلفة القطعة تُحسب وتُملأ تلقائياً'
+                : 'عدد الأكياس × وزن الكيس — الكمية بالكيلو وتكلفة الكيلو تُحسب وتُملأ تلقائياً'
+            }
+          />
+          <View style={styles.saleModeRow}>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                receiveMode === 'none' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => switchReceiveMode('none')}
+              activeOpacity={0.8}>
+              <Icon
+                name="edit"
+                size={18}
+                color={receiveMode === 'none' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  receiveMode === 'none' ? {color: c.onAccent} : {color: c.textDim},
+                ]}>
+                يدوي
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                receiveMode === 'carton' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => switchReceiveMode('carton')}
+              activeOpacity={0.8}>
+              <Icon
+                name="box"
+                size={18}
+                color={receiveMode === 'carton' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  receiveMode === 'carton' ? {color: c.onAccent} : {color: c.textDim},
+                ]}>
+                بالكرتونة
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                receiveMode === 'bag' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => switchReceiveMode('bag')}
+              activeOpacity={0.8}>
+              <Icon
+                name="scale"
+                size={18}
+                color={receiveMode === 'bag' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  receiveMode === 'bag' ? {color: c.onAccent} : {color: c.textDim},
+                ]}>
+                بالوزن (كيس)
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {receiveMode === 'carton' ? (
+            <Card style={styles.receiveCard}>
+              <View style={styles.unitFieldsRow}>
+                <View style={{flex: 1}}>
+                  <Field
+                    label="عدد الكراتين"
+                    value={cartonsCount}
+                    onChangeText={setCartonsCount}
+                    keyboardType="numeric"
+                    placeholder="3"
+                    returnKeyType="next"
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    label={`قطع بالكرتونة (${BASE_UNIT_NAME})`}
+                    value={piecesPerCarton}
+                    onChangeText={setPiecesPerCarton}
+                    keyboardType="numeric"
+                    placeholder="24"
+                    returnKeyType="next"
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    label="سعر الكرتونة (₪)"
+                    value={cartonCost}
+                    onChangeText={setCartonCost}
+                    keyboardType="numeric"
+                    placeholder="48.00"
+                    returnKeyType="done"
+                  />
+                </View>
+              </View>
+              {cartonMath != null ? (
+                <View style={styles.receiveSummary}>
+                  <Text style={styles.receiveSummaryText}>
+                    {cartonMath.totalPieces} {BASE_UNIT_NAME} إجمالاً
+                    {cartonMath.perPiece != null
+                      ? ` · تكلفة ${BASE_UNIT_NAME} ${cartonMath.perPiece.toFixed(3)}`
+                      : ''}
+                    {cartonMath.cartonRetail != null
+                      ? ` · سعر الكرتونة المقترح ${cartonMath.cartonRetail.toFixed(2)}`
+                      : ''}
+                  </Text>
+                  {cartonMath.retail != null && cartonMath.wholesale != null ? (
+                    <TouchableOpacity
+                      style={styles.receiveSuggestBtn}
+                      onPress={() =>
+                        applyReceivingPrices(
+                          cartonMath.retail,
+                          cartonMath.wholesale,
+                        )
+                      }
+                      activeOpacity={0.85}>
+                      <Icon name="sparkles" size={15} color={c.onAccent} />
+                      <Text style={styles.receiveSuggestText}>
+                        اعتماد الأسعار المقترحة — مفرق{' '}
+                        {cartonMath.retail.toFixed(2)} وجملة{' '}
+                        {cartonMath.wholesale.toFixed(2)} للقطعة (+ وحدة
+                        الكرتونة تلقائياً)
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              ) : (
+                <Text style={styles.receiveHintText}>
+                  أدخل عدد الكراتين وعدد القطع بالكرتونة — الكمية وتكلفة
+                  القطعة تُملأ تلقائياً في الحقول أدناه
+                </Text>
+              )}
+            </Card>
+          ) : null}
+
+          {receiveMode === 'bag' ? (
+            <Card style={styles.receiveCard}>
+              <View style={styles.unitFieldsRow}>
+                <View style={{flex: 1}}>
+                  <Field
+                    label="عدد الأكياس"
+                    value={bagsCount}
+                    onChangeText={setBagsCount}
+                    keyboardType="numeric"
+                    placeholder="10"
+                    returnKeyType="next"
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    label={`وزن الكيس (${WEIGHT_UNIT_NAME})`}
+                    value={kgPerBag}
+                    onChangeText={setKgPerBag}
+                    keyboardType="decimal-pad"
+                    placeholder="25"
+                    returnKeyType="next"
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    label="سعر الكيس (₪)"
+                    value={bagCost}
+                    onChangeText={setBagCost}
+                    keyboardType="numeric"
+                    placeholder="90.00"
+                    returnKeyType="done"
+                  />
+                </View>
+              </View>
+              {bagMath != null ? (
+                <View style={styles.receiveSummary}>
+                  <Text style={styles.receiveSummaryText}>
+                    {bagMath.totalKg} {WEIGHT_UNIT_NAME} إجمالاً
+                    {bagMath.perKg != null
+                      ? ` · تكلفة ${WEIGHT_UNIT_NAME} ${bagMath.perKg.toFixed(3)}`
+                      : ''}
+                  </Text>
+                  {bagMath.retail != null && bagMath.wholesale != null ? (
+                    <TouchableOpacity
+                      style={styles.receiveSuggestBtn}
+                      onPress={() =>
+                        applyReceivingPrices(bagMath.retail, bagMath.wholesale)
+                      }
+                      activeOpacity={0.85}>
+                      <Icon name="sparkles" size={15} color={c.onAccent} />
+                      <Text style={styles.receiveSuggestText}>
+                        اعتماد الأسعار المقترحة — مفرق{' '}
+                        {bagMath.retail.toFixed(2)} وجملة{' '}
+                        {bagMath.wholesale.toFixed(2)} للكيلو (+ وحدة الكيس
+                        تلقائياً)
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              ) : (
+                <Text style={styles.receiveHintText}>
+                  أدخل عدد الأكياس ووزن الكيس — الكمية بالكيلو وتكلفة الكيلو
+                  تُملأ تلقائياً في الحقول أدناه
+                </Text>
+              )}
+            </Card>
+          ) : null}
+
           <Field
             ref={costRef}
             label={
@@ -1369,9 +1846,45 @@ export function ProductFormScreen() {
                             : `تحتوي (${BASE_UNIT_NAME})`
                         }
                         value={row.conversion}
-                        onChangeText={text =>
-                          updateUnitRow(index, {conversion: text})
-                        }
+                        onChangeText={text => {
+                          // v16 (round-22 #3): typing the conversion
+                          // AUTO-FILLS the unit's prices from the
+                          // product's base prices (per piece / per
+                          // kg) the moment it becomes valid — the
+                          // requested "عند إضافة وحدة للبيع أيضا يتم
+                          // تعبئة الحقول المناسبة بشكل تلقائي". Only
+                          // fields the merchant hasn't typed himself.
+                          const conv = parseNumber(text);
+                          const baseRetail = parseNumber(retailPrice);
+                          const baseWholesale = wholesalePrice.trim()
+                            ? parseNumber(wholesalePrice)
+                            : baseRetail;
+                          const patch: Partial<UnitRowDraft> = {
+                            conversion: text,
+                          };
+                          if (
+                            !Number.isNaN(conv) &&
+                            conv > 0 &&
+                            !Number.isNaN(baseRetail) &&
+                            baseRetail > 0
+                          ) {
+                            if (row.retail.trim().length === 0) {
+                              patch.retail = String(
+                                Math.round(baseRetail * conv * 100) / 100,
+                              );
+                            }
+                            if (
+                              row.wholesale.trim().length === 0 &&
+                              !Number.isNaN(baseWholesale) &&
+                              baseWholesale > 0
+                            ) {
+                              patch.wholesale = String(
+                                Math.round(baseWholesale * conv * 100) / 100,
+                              );
+                            }
+                          }
+                          updateUnitRow(index, patch);
+                        }}
                         keyboardType="numeric"
                         placeholder={saleMode === 'weight' ? '0.25' : '24'}
                         returnKeyType="next"
@@ -1713,6 +2226,40 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
       marginTop: -spacing.xs,
       fontVariant: ['tabular-nums'],
+    },
+    // ── v16 (round-22 #3): receiving card ─────────────────────────
+    receiveCard: {
+      gap: spacing.sm,
+      paddingVertical: spacing.md,
+    },
+    receiveSummary: {
+      gap: 6,
+    },
+    receiveSummaryText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    receiveSuggestBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.accent,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.sm + 2,
+    },
+    receiveSuggestText: {
+      color: c.onAccent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+      flex: 1,
+    },
+    receiveHintText: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
     },
     // ── Unit-row picker chips (wrap → names can never overlap) ──
     unitPickWrap: {

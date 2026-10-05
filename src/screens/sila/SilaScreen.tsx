@@ -31,6 +31,7 @@ import {
   SectionTitle,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
+import {useNavigation} from '@react-navigation/native';
 import {useSilaStore} from '../../stores/silaStore';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {usePrinterStore} from '../../stores/printerStore';
@@ -57,6 +58,7 @@ import {uuidV4} from '../../services/sila/qr';
 export function SilaScreen() {
   const c = useThemeColors();
   const styles = useStyles();
+  const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const toast = useToastStore(state => state.show);
 
@@ -135,6 +137,11 @@ export function SilaScreen() {
         setCodeText('');
         SilaSync.start();
         void SilaSync.syncNow();
+        // v16 (round-22 #1): fresh pairing on a reinstalled device —
+        // jump today's debt/receipt counters past every ref the صِلة
+        // server remembers so new numbers don't collide with the
+        // server's memory from earlier installs.
+        void SilaSync.advanceCountersFromServer();
         toast(
           `تم ربط المتجر بحساب «${result.merchant_name}» في صِلة`,
           'success',
@@ -277,7 +284,7 @@ export function SilaScreen() {
       toast(
         `المبلغ أكبر من الدين القائم (${formatMoney(
           customer.outstanding_minor / 100,
-        )} ₪) — لا يُستلم عبر صِلة أكثر من المستحق`,
+        )}) — لا يُستلم عبر صِلة أكثر من المستحق`,
         'error',
       );
       return;
@@ -300,7 +307,7 @@ export function SilaScreen() {
       setPayAmountText('');
       await reload();
       toast(
-        `سُجّل سداد ${formatMoney(amount)} ₪ من ${customer.name} — إيصال ${receiptRef} سيُرفع لصِلة`,
+        `سُجّل سداد ${formatMoney(amount)} من ${customer.name} — إيصال ${receiptRef} سيُرفع لصِلة`,
         'success',
         5000,
       );
@@ -547,6 +554,25 @@ export function SilaScreen() {
 
             {/* Debt queue */}
             <SectionTitle title="سجل الديون" />
+            {/* v16 (round-22 #4): the STORE-LOCAL debt book — a
+                dedicated page, separate from صِلة customers (accounts
+                by ID number; debts stay in this store's books). */}
+            <TouchableOpacity
+              style={styles.localBookCard}
+              onPress={() => navigation.navigate('LocalDebts' as never)}
+              activeOpacity={0.85}>
+              <View style={styles.localBookIcon}>
+                <Icon name="book" size={20} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.localBookTitle}>دفتر ديون المتجر</Text>
+                <Text style={styles.localBookText}>
+                  حسابات دين محلية بالهوية والاسم والجوال — منفصلة عن زبائن
+                  صِلة، مع ترحيل الديون إلى صِلة عند الربط
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={16} color={c.textFaint} />
+            </TouchableOpacity>
             {queue.length === 0 ? (
               <Card style={styles.emptyCard}>
                 <Text style={styles.emptyText}>
@@ -651,7 +677,7 @@ export function SilaScreen() {
                             ? {color: c.danger}
                             : {color: c.success},
                         ]}>
-                        {formatMoney(customer.outstanding_minor / 100)} ₪
+                        {formatMoney(customer.outstanding_minor / 100)}
                       </Text>
                       <Text style={styles.customerBalanceLabel}>دين قائم</Text>
                     </View>
@@ -696,7 +722,7 @@ export function SilaScreen() {
                               styles.splitValue,
                               {color: c.warning},
                             ]}>
-                            {formatMoney(customer.other_minor / 100)} ₪
+                            {formatMoney(customer.other_minor / 100)}
                           </Text>
                         </View>
                       ) : null}
@@ -711,7 +737,7 @@ export function SilaScreen() {
                           {customer.last_payment_amount_minor != null
                             ? ` — ${formatMoney(
                                 customer.last_payment_amount_minor / 100,
-                              )} ₪`
+                              )}`
                             : ''}
                         </Text>
                       ) : null}
@@ -765,7 +791,7 @@ export function SilaScreen() {
                       </Text>
                       <Text style={styles.queueInvoice}>
                         {row.pos_receipt_ref} ·{' '}
-                        {formatMoney(row.amount_minor / 100)} ₪ ·{' '}
+                        {formatMoney(row.amount_minor / 100)} ·{' '}
                         {formatDateTime(
                           row.created_at.replace('T', ' ').slice(0, 19),
                         )}
@@ -825,11 +851,11 @@ export function SilaScreen() {
                   </Text>
                   <Text style={styles.payCustomerMeta}>
                     الدين القائم:{' '}
-                    {formatMoney(paySheet.outstanding_minor / 100)} ₪
+                    {formatMoney(paySheet.outstanding_minor / 100)}
                     {paySheet.app_outstanding_minor > 0
                       ? ` (منها ${formatMoney(
                           paySheet.app_outstanding_minor / 100,
-                        )} ₪ عبر تطبيق صِلة)`
+                        )} عبر تطبيق صِلة)`
                       : ''}
                   </Text>
                 </View>
@@ -1150,6 +1176,37 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro,
     },
     emptyCard: {},
+    // v16 (round-22 #4): the local debt-book entry card.
+    localBookCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surface,
+      borderWidth: 1.5,
+      borderColor: c.accentSoft,
+      borderRadius: radius.lg,
+      padding: spacing.md,
+    },
+    localBookIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      backgroundColor: c.accentSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    localBookTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: 14,
+    },
+    localBookText: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      lineHeight: 16.5,
+      marginTop: 2,
+    },
     emptyText: {
       color: c.textDim,
       fontFamily: fonts.regular,

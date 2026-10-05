@@ -19,6 +19,7 @@ import {buildReceiptJob} from './printer/receipt';
 import {buildDebtReceiptJob} from './printer/debtReceipt';
 import {ThermalPrinterService} from './printer/ThermalPrinterService';
 import {SilaRepo} from './sila/SilaRepo';
+import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {uuidV4} from './sila/qr';
 import type {CartLine, PricingMode, SaleWithItems} from '../core/types';
 import type {ReceiptSettings} from './printer/receipt';
@@ -240,6 +241,15 @@ export interface CompleteSaleOptions {
      *  when present, otherwise the invoice total (§4 rules). */
     amountMinor: number;
   };
+  /** v16 (round-22 #4): when set the sale is a STORE-LOCAL credit
+   *  sale (دفتر المتجر) — the debt lands ONLY in local_debts (INV-L
+   *  series) and never syncs to صِلة. The debt amount is always the
+   *  invoice total. */
+  localDebt?: {
+    localCustomerId: number;
+    customerName: string;
+    customerPhoneLast4: string | null;
+  };
 }
 
 export const InvoiceService = {
@@ -254,11 +264,14 @@ export const InvoiceService = {
     // with a fresh number. A failed debt sale is therefore never
     // half-recorded: no invoice, no stock decrement, no queue row.
     const isDebt = options.debt != null;
+    const isLocalDebt = options.localDebt != null;
     let result: SaleWithItems | null = null;
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 4 && result == null; attempt += 1) {
       const invoiceNumber = isDebt
         ? await reserveDebtInvoiceNumber()
+        : isLocalDebt
+        ? await LocalDebtsRepo.reserveLocalDebtRef()
         : await reserveInvoiceNumber();
       try {
         // One atomic transaction: sale + items + stock decrements
@@ -281,6 +294,28 @@ export const InvoiceService = {
                   amountMinor: options.debt.amountMinor,
                   description: `بيع بالدين — فاتورة ${invoiceNumber}`,
                   scannedAt: new Date().toISOString(),
+                },
+          localDebtRow:
+            options.localDebt == null
+              ? undefined
+              : {
+                  localCustomerId: options.localDebt.localCustomerId,
+                  customerName: options.localDebt.customerName,
+                  amountMinor: (() => {
+                    // Mirror SaleRepo's total: subtotal − clamped
+                    // discount (the debt is ALWAYS the invoice total
+                    // for local book sales — no signed QR involved).
+                    const subtotal = options.lines.reduce(
+                      (sum, line) => sum + line.unitPrice * line.quantity,
+                      0,
+                    );
+                    const discount = Math.min(
+                      Math.max(options.discount, 0),
+                      subtotal,
+                    );
+                    return Math.round((subtotal - discount) * 100);
+                  })(),
+                  description: `بيع بالدين (دفتر المتجر) — فاتورة ${invoiceNumber}`,
                 },
         });
       } catch (error) {
@@ -329,6 +364,18 @@ export const InvoiceService = {
                   productNameById: names,
                   customerName: options.debt.customerName,
                   customerPhoneLast4: options.debt.customerPhoneLast4,
+                  referenceCode: null,
+                },
+                options.receiptSettings,
+              )
+            : options.localDebt != null
+            ? buildDebtReceiptJob(
+                {
+                  sale: result.sale,
+                  items: result.items,
+                  productNameById: names,
+                  customerName: options.localDebt.customerName,
+                  customerPhoneLast4: options.localDebt.customerPhoneLast4,
                   referenceCode: null,
                 },
                 options.receiptSettings,
@@ -518,5 +565,72 @@ export const InvoiceService = {
         'warn',
       );
     }
+  },
+
+  /** v16 (round-22 #1): a FRESH debt number for renumbering a debt
+   *  whose upload collided server-side (DUPLICATE_INVOICE_REF after a
+   *  reinstall restarted the numbering). Uses the same DB-aware
+   *  never-rewind reservation as a new sale. */
+  async reserveDebtNumberForRenumber(): Promise<string> {
+    return reserveDebtInvoiceNumber();
+  },
+
+  /**
+   * v16 (round-22 #1): advance the TODAY counters past refs the صِلة
+   * server already remembers.
+   * ─────────────────────────────────────────────────────────────────
+   * The server NEVER forgets a pos_invoice_ref / pos_receipt_ref — a
+   * fresh install (or an old-backup restore) can re-issue numbers the
+   * server holds from an earlier device, so every upload answers
+   * DUPLICATE_*_REF. The refs the server knows are visible in the
+   * customers feed (recent_entries / recent_pos_refs) — after pairing
+   * and after a restore we bump today's debt + receipt counters beyond
+   * the highest sequence seen there, so most new numbers are fresh
+   * from the start (the renumber path covers whatever the feed didn't
+   * show — it only carries the last entries per customer).
+   */
+  async advanceCountersFromServerRefs(
+    refs: string[],
+  ): Promise<{debt: number; receipts: number}> {
+    const today = localToday();
+    const compact = today.replace(/-/g, '');
+    let debtMax = 0;
+    let receiptMax = 0;
+    for (const raw of refs) {
+      const value = String(raw ?? '').trim();
+      let match = /^INV-D-(\d{8})-(\d+)$/.exec(value);
+      if (match != null) {
+        if (match[1] === compact) {
+          debtMax = Math.max(debtMax, parseInt(match[2], 10));
+        }
+        continue;
+      }
+      match = /^RCP-(\d{8})-(\d+)$/.exec(value);
+      if (match != null && match[1] === compact) {
+        receiptMax = Math.max(receiptMax, parseInt(match[2], 10));
+      }
+    }
+    // Debt series.
+    const debtDay = getString(KEYS.debtInvoiceDay, '');
+    const debtCounter = getNumber(KEYS.debtInvoiceCounter, 0);
+    const debtNext = Math.max(debtDay === today ? debtCounter + 1 : 1, debtMax + 1);
+    if (debtNext > (debtDay === today ? debtCounter + 1 : 1)) {
+      setNumber(KEYS.debtInvoiceCounter, debtNext);
+      setString(KEYS.debtInvoiceDay, today);
+      logDiag('sale', `تقدّم عداد ديون اليوم خلف صِلة حتى #${debtNext}`);
+    }
+    // Receipt series.
+    const receiptDay = getString(KEYS.paymentReceiptDay, '');
+    const receiptCounter = getNumber(KEYS.paymentReceiptCounter, 0);
+    const receiptNext = Math.max(
+      receiptDay === today ? receiptCounter + 1 : 1,
+      receiptMax + 1,
+    );
+    if (receiptNext > (receiptDay === today ? receiptCounter + 1 : 1)) {
+      setNumber(KEYS.paymentReceiptCounter, receiptNext);
+      setString(KEYS.paymentReceiptDay, today);
+      logDiag('sila', `تقدّم عداد إيصالات اليوم خلف صِلة حتى #${receiptNext}`);
+    }
+    return {debt: debtMax, receipts: receiptMax};
   },
 };
