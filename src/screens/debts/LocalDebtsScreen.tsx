@@ -7,9 +7,10 @@
  * customers screen. The ID number is the cross-system dedupe key:
  * creating an account already on صِلة is refused with guidance, and
  * a linked account's صِلة QR sales redirect HERE (one truth per
- * person). The migration path (ترحيل إلى صِلة) re-registers a linked
- * customer's outstanding balance as a fresh INV-D debt through the
- * normal queue.
+ * person). v17 (round-23 #8): scanning the person's صِلة QR links
+ * AND auto-migrates in one shot — the outstanding balance becomes
+ * ONE fresh INV-D debt (proper UUID key), the prepaid credit is
+ * recognized as a settlement, and the local account is deleted.
  *
  * Overlays are INLINE absolute views — NEVER RN Modals (this ROM
  * blacks Modals after the native scanner closes; the same lesson as
@@ -92,7 +93,8 @@ export function LocalDebtsScreen() {
   const [payOpen, setPayOpen] = useState(false);
   const [payAmount, setPayAmount] = useState('');
   const [payBusy, setPayBusy] = useState(false);
-  const [migrateBusy, setMigrateBusy] = useState(false);
+  /** v17 (round-23 #8): the link+scan flow's busy flag. */
+  const [linkBusy, setLinkBusy] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -218,10 +220,21 @@ export function LocalDebtsScreen() {
     }
   }, [detail, payAmount, payBusy, refreshDetail, toast]);
 
-  /** Link this local account to a صِلة account by scanning the
-   *  person's صِلة QR (their card / offline code). */
+  /** v17 (round-23 #8): link + AUTO-migrate — ONE scan, ONE flow.
+   *  Scanning the person's صِلة QR (their card / offline code) now:
+   *    1. resolves the صِلة cid,
+   *    2. refreshes the server balances when online (so the prepaid
+   *       credit is fresh),
+   *    3. shows the EXACT migration plan (outstanding / credit
+   *       coverage / net debt / account deletion),
+   *    4. on confirm: links, queues the balance as ONE صِلة debt
+   *       (proper UUID key — the round-22 path bounced with
+   *       VALIDATION_ERROR and never migrated anything), marks the
+   *       local debts migrated, and DELETES the local account —
+   *       the person now lives on the صِلة side only.
+   */
   const linkSilaByScan = useCallback(async () => {
-    if (detail == null) {
+    if (detail == null || linkBusy) {
       return;
     }
     try {
@@ -243,77 +256,124 @@ export function LocalDebtsScreen() {
         );
         return;
       }
-      await LocalDebtsRepo.linkSila(detail.customer.id, cid);
-      await refreshDetail(detail.customer.id);
-      toast('رُبط الحساب بحساب صِلة — يمكن ترحيل الديون الآن', 'success');
+      setLinkBusy(true);
+      // Best-effort freshness: when online, pull the latest balances
+      // first — the prepaid credit decides the settlement split.
+      try {
+        await SilaSync.refreshBalances();
+      } catch {
+        // Offline — the cached credit (or zero) is used; the server
+        // applies the REAL credit on upload and the synced row is
+        // reconciled with credit_consumed_minor.
+      }
+      const silaCustomer = await SilaRepo.findCustomer(cid);
+      const creditMinor = silaCustomer?.credit_minor ?? 0;
+      const outstanding = detail.outstandingMinor;
+      const covered = Math.max(0, Math.min(creditMinor, outstanding));
+      const net = Math.max(0, outstanding - covered);
+      const customerId = detail.customer.id;
+      const customerPhone = detail.customer.phone;
+      const customerName = detail.customer.name;
+
+      const planLines =
+        outstanding <= 0
+          ? 'لا رصيد قائم على الحساب — سيُربط ويُحذف من الدفتر المحلي فوراً.'
+          : `الرصيد القائم: ${formatMoney(outstanding / 100)} ₪\n` +
+            (covered > 0
+              ? `رصيد الزبون المسبق في صِلة: ${formatMoney(
+                  creditMinor / 100,
+                )} ₪ — يغطّي ${formatMoney(
+                  covered / 100,
+                )} ₪ (يُعامل كسداد في المتجر)\n` +
+                `الدين الفعلي المُرحَّل إلى صِلة: ${formatMoney(net / 100)} ₪\n`
+              : 'لا رصيد مسبق للزبون في صِلة — يُرحَّل كامل الرصيد ديناً\n') +
+            'سيُحذف حساب الدفتر المحلي بعد الربط — أعمال الزبون القادمة تسجَّل عبر صِلة مباشرة.';
+
+      Alert.alert(
+        'ربط الحساب وترحيل الديون إلى صِلة',
+        `${planLines}\n${
+          silaCustomer?.name != null
+            ? `حساب صِلة: ${silaCustomer.name}\n`
+            : ''
+        }يُرفع الرصيد عبر طابور المزامنة (يحتاج إنترنت) ويظهر لدى الزبون في صِلة كدين (شراء بالدين) — لا كدفعة.`,
+        [
+          {text: 'تراجع', style: 'cancel'},
+          {
+            text: 'ربط وترحيل',
+            onPress: async () => {
+              try {
+                const result = await LocalDebtsRepo.linkAndMigrateToSila(
+                  customerId,
+                  cid,
+                  () => InvoiceService.reserveDebtNumberForRenumber(),
+                  async input => {
+                    await SilaRepo.enqueue({
+                      idempotencyKey: input.idempotencyKey,
+                      customerId: input.customerId,
+                      customerName: input.customerName,
+                      customerPhoneLast4: customerPhone
+                        ? customerPhone.replace(/\D/g, '').slice(-4)
+                        : null,
+                      customerCard: null,
+                      offlineQr: null,
+                      amountMinor: input.amountMinor,
+                      posInvoiceRef: input.posInvoiceRef,
+                      description: input.description,
+                      scannedAt: new Date().toISOString(),
+                      creditCoveredMinor: input.creditCoveredMinor,
+                    });
+                  },
+                  creditMinor,
+                );
+                setDetail(null);
+                await reload();
+                void SilaSync.syncNow();
+                if (!result.migrated) {
+                  toast(
+                    `رُبط ${customerName} بصِلة — لا رصيد قائم، وحُذف حسابه من الدفتر`,
+                    'success',
+                    5000,
+                  );
+                } else if (result.creditCoveredMinor > 0) {
+                  toast(
+                    `رُحّل رصيد ${customerName} إلى صِلة: ${formatMoney(
+                      result.outstandingMinor / 100,
+                    )} — غطّى الرصيد المسبق ${formatMoney(
+                      result.creditCoveredMinor / 100,
+                    )} (سداد في المتجر) والباقي ${formatMoney(
+                      result.netMinor / 100,
+                    )} دين. حُذف الحساب المحلي`,
+                    'success',
+                    6500,
+                  );
+                } else {
+                  toast(
+                    `رُحّل رصيد ${customerName} (${formatMoney(
+                      result.outstandingMinor / 100,
+                    )}) إلى صِلة وحُذف الحساب المحلي`,
+                    'success',
+                    5000,
+                  );
+                }
+              } catch (error) {
+                Alert.alert(
+                  'فشل الربط والترحيل',
+                  error instanceof Error ? error.message : 'خطأ غير متوقع',
+                );
+              }
+            },
+          },
+        ],
+      );
     } catch (error) {
       Alert.alert(
         'فشل الربط',
         error instanceof Error ? error.message : 'خطأ غير متوقع',
       );
+    } finally {
+      setLinkBusy(false);
     }
-  }, [detail, refreshDetail, toast]);
-
-  /** Migrate the LINKED customer's outstanding balance into صِلة
-   *  (one fresh INV-D debt via the normal queue — collision-proof
-   *  after the round-22 #1 renumber fix). */
-  const migrateToSila = useCallback(async () => {
-    if (detail == null || migrateBusy) {
-      return;
-    }
-    const outstanding = detail.outstandingMinor / 100;
-    Alert.alert(
-      'ترحيل الديون إلى صِلة',
-      `سيُسجَّل الرصيد القائم (${formatMoney(outstanding)}) على «${detail.customer.name}» في تطبيق صِلة برقم دين جديد، وتُعلَّم ديونه المحلية كمُرحّلة (تبقى ظاهرة هنا للسجل). المتطلبان: الحساب مرتبط بحساب صِلة، والجهاز متصل بالإنترنت للمزامنة.`,
-      [
-        {text: 'تراجع', style: 'cancel'},
-        {
-          text: 'ترحيل الآن',
-          onPress: async () => {
-            setMigrateBusy(true);
-            try {
-              const customerId = detail.customer.id;
-              const customerPhone = detail.customer.phone;
-              const queued = await LocalDebtsRepo.migrateOutstandingToSila(
-                customerId,
-                () => InvoiceService.reserveDebtNumberForRenumber(),
-                async input => {
-                  await SilaRepo.enqueue({
-                    idempotencyKey: input.idempotencyKey,
-                    customerId: input.customerId,
-                    customerName: input.customerName,
-                    customerPhoneLast4: customerPhone
-                      ? customerPhone.replace(/\D/g, '').slice(-4)
-                      : null,
-                    customerCard: null,
-                    offlineQr: null,
-                    amountMinor: input.amountMinor,
-                    posInvoiceRef: input.posInvoiceRef,
-                    description: input.description,
-                    scannedAt: new Date().toISOString(),
-                  });
-                },
-              );
-              await refreshDetail(customerId);
-              if (queued > 0) {
-                void SilaSync.syncNow();
-                toast('أُرحّل الرصيد إلى طابور صِلة — سيُزامن تلقائياً', 'success');
-              } else {
-                toast('لا رصيد قائم للترحيل', 'info');
-              }
-            } catch (error) {
-              Alert.alert(
-                'فشل الترحيل',
-                error instanceof Error ? error.message : 'خطأ غير متوقع',
-              );
-            } finally {
-              setMigrateBusy(false);
-            }
-          },
-        },
-      ],
-    );
-  }, [detail, migrateBusy, refreshDetail, toast]);
+  }, [detail, linkBusy, reload, toast]);
 
   const totals = useMemo(() => {
     const outstanding = balances.reduce(
@@ -580,20 +640,26 @@ export function LocalDebtsScreen() {
               <View style={{flex: 1}}>
                 {detail.customer.sila_customer_id == null ? (
                   <AppButton
-                    title="ربط بحساب صِلة"
+                    title="ربط وترحيل إلى صِلة"
                     icon="qrFrame"
                     small
                     variant="secondary"
+                    loading={linkBusy}
                     onPress={() => void linkSilaByScan()}
                   />
                 ) : (
+                  // v17 (round-23 #8): unreachable in the new flow —
+                  // linking deletes the account — kept purely as a
+                  // healing path for accounts linked by v16 that
+                  // never migrated (their balance still migrates
+                  // through the same one-shot flow after a re-scan).
                   <AppButton
-                    title="ترحيل إلى صِلة"
+                    title="إعادة مسح رمز صِلة للترحيل"
                     icon="link"
                     small
                     variant="secondary"
-                    loading={migrateBusy}
-                    onPress={() => void migrateToSila()}
+                    loading={linkBusy}
+                    onPress={() => void linkSilaByScan()}
                   />
                 )}
               </View>

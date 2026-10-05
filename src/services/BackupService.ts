@@ -149,6 +149,9 @@ interface BackupFile {
     pos_invoice_ref: string;
     description: string | null;
     scanned_at: string;
+    /** v17 (round-23 #3): prepaid-credit coverage — older backups
+     *  restore as 0 (auto-derived again after the next sync). */
+    credit_covered_minor?: number;
     state: 'pending' | 'syncing' | 'synced' | 'failed';
     reference_code: string | null;
     transaction_id: string | null;
@@ -168,6 +171,8 @@ interface BackupFile {
     phone_last4: string | null;
     id_number: string | null;
     outstanding_minor: number;
+    /** v17 (round-23 #3): the prepaid credit cache. */
+    credit_minor?: number;
     pos_outstanding_minor?: number;
     app_outstanding_minor?: number;
     other_minor?: number;
@@ -293,12 +298,13 @@ export const BackupService = {
       db.execute(
         `SELECT idempotency_key, customer_id, customer_name, customer_phone_last4,
                 customer_card, offline_qr, amount_minor, currency, pos_invoice_ref,
-                description, scanned_at, state, reference_code, transaction_id,
+                description, scanned_at, credit_covered_minor, state, reference_code, transaction_id,
                 outstanding_after, synced_at, error_code, error_message, retry_count, created_at
          FROM sila_debt_queue`,
       ),
       db.execute(
         `SELECT customer_id, name, phone_last4, id_number, outstanding_minor,
+                credit_minor,
                 pos_outstanding_minor, app_outstanding_minor, other_minor,
                 pos_purchases_minor, app_purchases_minor,
                 last_payment_at, last_payment_amount_minor, last_synced_at
@@ -463,6 +469,7 @@ export const BackupService = {
         pos_invoice_ref: String(row.pos_invoice_ref ?? ''),
         description: row.description == null ? null : String(row.description),
         scanned_at: String(row.scanned_at ?? ''),
+        credit_covered_minor: Number(row.credit_covered_minor ?? 0),
         state: (row.state ?? 'pending') as 'pending',
         reference_code:
           row.reference_code == null ? null : String(row.reference_code),
@@ -483,6 +490,7 @@ export const BackupService = {
         phone_last4: row.phone_last4 == null ? null : String(row.phone_last4),
         id_number: row.id_number == null ? null : String(row.id_number),
         outstanding_minor: Number(row.outstanding_minor ?? 0),
+        credit_minor: Number(row.credit_minor ?? 0),
         pos_outstanding_minor: Number(row.pos_outstanding_minor ?? 0),
         app_outstanding_minor: Number(row.app_outstanding_minor ?? 0),
         other_minor: Number(row.other_minor ?? 0),
@@ -989,9 +997,9 @@ export const BackupService = {
           `INSERT INTO sila_debt_queue
             (idempotency_key, customer_id, customer_name, customer_phone_last4,
              customer_card, offline_qr, amount_minor, currency, pos_invoice_ref,
-             description, scanned_at, state, reference_code, transaction_id,
+             description, scanned_at, credit_covered_minor, state, reference_code, transaction_id,
              outstanding_after, synced_at, error_code, error_message, retry_count, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             debt.idempotency_key,
             debt.customer_id ?? null,
@@ -1004,6 +1012,7 @@ export const BackupService = {
             debt.pos_invoice_ref,
             debt.description ?? null,
             debt.scanned_at || nowLocal(),
+            Number(debt.credit_covered_minor ?? 0),
             debt.state === 'synced' || debt.state === 'failed'
               ? debt.state
               : 'pending',
@@ -1025,16 +1034,18 @@ export const BackupService = {
         await tx.execute(
           `INSERT INTO sila_customers
             (customer_id, name, phone_last4, id_number, outstanding_minor,
+             credit_minor,
              pos_outstanding_minor, app_outstanding_minor, other_minor,
              pos_purchases_minor, app_purchases_minor,
              last_payment_at, last_payment_amount_minor, last_synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             customer.customer_id,
             customer.name,
             customer.phone_last4 ?? null,
             customer.id_number ?? null,
             Number(customer.outstanding_minor ?? 0),
+            Number(customer.credit_minor ?? 0),
             Number(customer.pos_outstanding_minor ?? 0),
             Number(customer.app_outstanding_minor ?? 0),
             Number(customer.other_minor ?? 0),

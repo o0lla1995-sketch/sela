@@ -227,6 +227,11 @@ export function PosScreen() {
     /** v16 (round-22 #4): the LOCAL debt-book account when the sale
      *  is charged on the store's own customer (دفتر المتجر). */
     localCustomerId?: number;
+    /** v17 (round-23 #3): the customer's PREPAID credit in صِلة
+     *  (cached from the server feed) — when > 0 the store knows the
+     *  invoice is covered by that much (the server consumes the
+     *  credit on upload; the books mark the covered part PAID). */
+    creditMinor?: number;
   } | null>(null);
   /** v11: true while the customer-QR camera window is open. */
   const [debtBusy, setDebtBusy] = useState(false);
@@ -1335,6 +1340,10 @@ export function PosScreen() {
         if (await redirectLinkedLocalCustomer(payload.cid, payload.name)) {
           return;
         }
+        // v17 (round-23 #3): the customer's prepaid credit from the
+        // cached server feed — decides how much of this invoice is
+        // actually PAID (مسددة) before the confirm sheet opens.
+        const cardCredit = await SilaRepo.findCustomer(payload.cid);
         setDebtConfirm({
           customerId: payload.cid,
           customerName: payload.name,
@@ -1345,6 +1354,7 @@ export function PosScreen() {
           offlineQr: null,
           amountMinor: Math.round(totals.total * 100),
           amountSource: 'card',
+          creditMinor: cardCredit?.credit_minor ?? 0,
         });
       } else if (payload.kind === 'offline') {
         if (expired) {
@@ -1372,6 +1382,7 @@ export function PosScreen() {
           offlineQr: payload.raw,
           amountMinor: payload.amountMinor,
           amountSource: 'offline',
+          creditMinor: cached?.credit_minor ?? 0,
         });
       } else if (payload.kind === 'online') {
         Alert.alert(
@@ -1449,6 +1460,10 @@ export function PosScreen() {
         offlineQr: null,
         amountMinor: Math.round(totals.total * 100),
         amountSource: 'picker',
+        // v17 (round-23 #3): the picked customer's prepaid credit —
+        // the picker row already shows it, the confirm sheet now
+        // acts on it.
+        creditMinor: customer.credit_minor ?? 0,
       });
     },
     [totals.total],
@@ -1510,6 +1525,24 @@ export function PosScreen() {
    *  tap in the SAME frame as the first (before `busy` re-renders)
    *  must not open a second atomic transaction. */
   const debtCommittingRef = useRef(false);
+
+  /** v17 (round-23 #3): how much of a صِلة debt the customer's
+   *  PREPAID credit covers — min(invoice amount, cached credit).
+   *  Only صِلة sources carry credit; the local book has none. */
+  const debtCreditCovered = useCallback(
+    (confirm: {
+      amountSource: 'card' | 'offline' | 'picker' | 'local';
+      amountMinor: number;
+      creditMinor?: number;
+    }): number => {
+      if (confirm.amountSource === 'local') {
+        return 0;
+      }
+      const credit = Math.max(0, confirm.creditMinor ?? 0);
+      return Math.min(Math.max(0, confirm.amountMinor), credit);
+    },
+    [],
+  );
 
   /** v15 (round-21 #6): a signed offline QR whose amount differs
    *  from the invoice total (either way — less OR more) makes the
@@ -1587,24 +1620,51 @@ export function PosScreen() {
                 customerCard: debtConfirm.customerCard,
                 offlineQr: debtConfirm.offlineQr,
                 amountMinor: debtConfirm.amountMinor,
+                // v17 (round-23 #3): the prepaid-credit part — the
+                // FULL amount still uploads (the server consumes the
+                // credit itself), but the store's books count the
+                // covered part as PAID, not debt.
+                creditCoveredMinor: debtCreditCovered(debtConfirm),
               },
             }),
       });
       clear();
       setDiscountText('');
+      // v17 (round-23 #3): keep the covered/remainder numbers for the
+      // final toast BEFORE clearing the sheet state.
+      const saleCovered = debtCreditCovered(debtConfirm);
+      const saleTotal = debtConfirm.amountMinor;
+      const saleName = debtConfirm.customerName;
+      const saleSource = debtConfirm.amountSource;
+      const saleCid = debtConfirm.customerId;
       setDebtConfirm(null);
       void refreshCatalog();
       void useSilaStore.getState().refreshCounts();
       // Opportunistic sync — quietly drains the queue when online
       // (صِلة sales only; local-book sales never upload).
-      if (debtConfirm.amountSource !== 'local') {
+      if (saleSource !== 'local') {
         void SilaSync.syncNow();
+        // The cached credit drops by the covered part immediately —
+        // the NEXT sale of this customer sees the reduced balance
+        // (the server's exact figure lands with the next refresh).
+        if (saleCovered > 0 && saleCid != null) {
+          void SilaRepo.consumeCachedCredit(saleCid, saleCovered);
+        }
       }
       toast(
-        debtConfirm.amountSource === 'local'
-          ? `تم تسجيل الدين على ${debtConfirm.customerName} في دفتر المتجر`
-          : `تم تسجيل الدين على ${debtConfirm.customerName} — سيُزامن مع صِلة تلقائياً`,
+        saleSource === 'local'
+          ? `تم تسجيل الدين على ${saleName} في دفتر المتجر`
+          : saleCovered >= saleTotal && saleTotal > 0
+          ? `فاتورة ${saleName} مسددة بالكامل من الرصيد المسبق (${formatMoney(
+              saleTotal / 100,
+            )})`
+          : saleCovered > 0
+          ? `دين ${saleName}: غطّى الرصيد المسبق ${formatMoney(
+              saleCovered / 100,
+            )} والباقي ${formatMoney((saleTotal - saleCovered) / 100)} دين`
+          : `تم تسجيل الدين على ${saleName} — سيُزامن مع صِلة تلقائياً`,
         'success',
+        saleCovered > 0 ? 5000 : undefined,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1899,7 +1959,21 @@ export function PosScreen() {
           <View
             style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
             {lines.length === 0 ? (
-              <View style={styles.cartEmptyRow}>
+              // v17 (round-23 #4): tappable with a SPOKEN hint — the
+              // empty-cart strip NEVER opens the product scanner by
+              // itself; a press just reminds the merchant where the
+              // products come from (grid tap / the scan button up
+              // top — his explicit choice, never an auto-launch).
+              <TouchableOpacity
+                style={styles.cartEmptyRow}
+                activeOpacity={0.75}
+                onPress={() =>
+                  toast(
+                    'السلة فارغة — المس منتجاً من الشبكة بالأعلى، أو استخدم زر المسح بجانب البحث',
+                    'info',
+                    3500,
+                  )
+                }>
                 <Icon name="cart" size={18} color={c.textFaint} />
                 <Text style={styles.cartEmptyText}>
                   السلة فارغة — المس منتجاً من الشبكة أو امسحه
@@ -1912,7 +1986,7 @@ export function PosScreen() {
                     ? ' (لا توجد بصمات بصرية محفوظة بعد — البيع باللمس متاح)'
                     : ''}
                 </Text>
-              </View>
+              </TouchableOpacity>
             ) : (
               <>
                 {/* Compact header: expand toggle + title + live count +
@@ -2402,6 +2476,11 @@ export function PosScreen() {
                               customer.outstanding_minor / 100
                             ).toFixed(2)} ₪`
                           : ' · بلا دين'}
+                        {customer.credit_minor > 0
+                          ? ` · رصيد مسبق ${(
+                              customer.credit_minor / 100
+                            ).toFixed(2)} ₪`
+                          : ''}
                       </Text>
                     </View>
                     <Icon name="chevronLeft" size={16} color={c.textFaint} />
@@ -2551,9 +2630,60 @@ export function PosScreen() {
 
             {/* Amount */}
             <View style={styles.debtAmountRow}>
-              <Text style={styles.debtAmountLabel}>قيمة الدين</Text>
+              <Text style={styles.debtAmountLabel}>قيمة الفاتورة</Text>
               <MoneyText value={(debtConfirm?.amountMinor ?? 0) / 100} big />
             </View>
+
+            {/* v17 (round-23 #3): prepaid-credit split — the store
+                RECOGNIZES the deduction: covered part = مسددة from
+                the customer's existing balance, only the remainder
+                is real debt. The sheet spells it out before the
+                merchant confirms. */}
+            {(() => {
+              const confirm = debtConfirm;
+              if (confirm == null || confirm.amountSource === 'local') {
+                return null;
+              }
+              const covered = debtCreditCovered(confirm);
+              if (covered <= 0) {
+                // Still worth telling the merchant there is no
+                // prepaid balance to absorb this invoice.
+                return null;
+              }
+              const net = Math.max(0, confirm.amountMinor - covered);
+              return (
+                <View style={styles.debtCreditBox}>
+                  <View style={styles.debtCreditRow}>
+                    <Icon name="wallet" size={15} color={c.success} />
+                    <Text style={[styles.debtCreditText, {color: c.success}]}>
+                      رصيد مسبق في صِلة: {formatMoney((confirm.creditMinor ?? 0) / 100)}
+                    </Text>
+                  </View>
+                  <View style={styles.debtCreditRow}>
+                    <Icon name="check" size={14} color={c.success} />
+                    <Text style={styles.debtCreditText}>
+                      مسدَّد من الرصيد: {formatMoney(covered / 100)}
+                    </Text>
+                  </View>
+                  <View style={styles.debtCreditRow}>
+                    <Icon name="book" size={14} color={net > 0 ? c.warning : c.success} />
+                    <Text
+                      style={[
+                        styles.debtCreditText,
+                        {color: net > 0 ? c.warning : c.success},
+                      ]}>
+                      {net > 0
+                        ? `دين فعلي بعد التغطية: ${formatMoney(net / 100)}`
+                        : 'الفاتورة مسددة بالكامل من الرصيد المسبق'}
+                    </Text>
+                  </View>
+                  <Text style={styles.debtCreditNote}>
+                    يُخصم الرصيد المسبق تلقائياً عند رفع الفاتورة لصِلة —
+                    والمتجر يعامل الجزء المغطى كسداد في حساباته.
+                  </Text>
+                </View>
+              );
+            })()}
 
             {/* v15 (round-21 #6): an offline signed code whose amount
                 ≠ the invoice total BLOCKS the debt — the merchant must
@@ -2762,7 +2892,14 @@ function WeightSheet({
             ) : null}
           </View>
 
-          {/* Keypad + quick weights side by side — compact, fixed. */}
+          {/* Keypad + quick actions side by side — compact, fixed.
+              v17 (round-23 #7): the SIDE PANEL now shows THE
+              PRODUCT'S OWN units (الوحدات المضافة للمنتج) whenever it
+              has any — each chip is the unit's name, its weight and
+              its price, one tap adds it. The generic quick weights
+              (وقية/نصف/كيلو) only appear when the product has NO
+              units of its own, so nothing generic ever overrides
+              what the merchant actually configured. */}
           <View style={styles.weightPadRow}>
             <View style={styles.keypad}>
               {KEYPAD_KEYS.map((row, rowIndex) => (
@@ -2782,51 +2919,56 @@ function WeightSheet({
                 </View>
               ))}
             </View>
-            {/* Regional quick weights — وقية / نصف كغ / كيلو… */}
             <View style={styles.weightQuickColumn}>
-              {QUICK_WEIGHTS.map(entry => (
-                <TouchableOpacity
-                  key={entry.kg}
-                  style={styles.weightQuickChip}
-                  onPress={() => {
-                    onConfirm(product, entry.kg, null);
-                    setWeightText('');
-                  }}
-                  activeOpacity={0.75}>
-                  <Text style={styles.weightQuickValue}>
-                    {formatQty(entry.kg)}
-                  </Text>
-                  <Text style={styles.weightQuickName}>{entry.label}</Text>
-                </TouchableOpacity>
-              ))}
+              {unitRows != null && unitRows.length > 0 ? (
+                <>
+                  <Text style={styles.weightQuickLabel}>وحدات المنتج</Text>
+                  {unitRows.map(row => {
+                    const price = unitPriceFor(product, row, pricingMode);
+                    return (
+                      <TouchableOpacity
+                        key={row.id}
+                        style={styles.weightQuickChip}
+                        onPress={() => {
+                          onConfirm(product, 1, row);
+                          setWeightText('');
+                        }}
+                        activeOpacity={0.75}>
+                        <Text
+                          style={styles.weightQuickValue}
+                          numberOfLines={1}>
+                          {row.unitName}
+                        </Text>
+                        <Text style={styles.weightQuickName} numberOfLines={1}>
+                          {formatQty(row.conversion)} {WEIGHT_UNIT_NAME} ·{' '}
+                          {formatMoney(price)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </>
+              ) : (
+                <>
+                  <Text style={styles.weightQuickLabel}>أوزان سريعة</Text>
+                  {QUICK_WEIGHTS.map(entry => (
+                    <TouchableOpacity
+                      key={entry.kg}
+                      style={styles.weightQuickChip}
+                      onPress={() => {
+                        onConfirm(product, entry.kg, null);
+                        setWeightText('');
+                      }}
+                      activeOpacity={0.75}>
+                      <Text style={styles.weightQuickValue}>
+                        {formatQty(entry.kg)}
+                      </Text>
+                      <Text style={styles.weightQuickName}>{entry.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </>
+              )}
             </View>
           </View>
-
-          {/* The product's own sellable sub-units (وقية = 0.25 كغ). */}
-          {unitRows != null && unitRows.length > 0 ? (
-            <View style={styles.weightUnitsWrap}>
-              <Text style={styles.weightQuickLabel}>وحدات المنتج:</Text>
-              {unitRows.map(row => {
-                const price = unitPriceFor(product, row, pricingMode);
-                return (
-                  <TouchableOpacity
-                    key={row.id}
-                    style={styles.weightUnitRow}
-                    onPress={() => {
-                      onConfirm(product, 1, row);
-                      setWeightText('');
-                    }}
-                    activeOpacity={0.75}>
-                    <Text style={styles.weightUnitName}>{row.unitName}</Text>
-                    <Text style={styles.weightUnitMeta}>
-                      {formatQty(row.conversion)} {WEIGHT_UNIT_NAME} ·{' '}
-                      {formatMoney(price)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          ) : null}
         </ScrollView>
 
         <View style={styles.weightActionRow}>
@@ -3494,6 +3636,33 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
       lineHeight: 19,
     },
+    // v17 (round-23 #3): the prepaid-credit split box.
+    debtCreditBox: {
+      backgroundColor: c.successSoft,
+      borderWidth: 1,
+      borderColor: c.success,
+      borderRadius: radius.sm,
+      padding: spacing.md,
+      gap: 6,
+    },
+    debtCreditRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    debtCreditText: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    debtCreditNote: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 16,
+      marginTop: 2,
+    },
     debtHintRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -3697,6 +3866,7 @@ const useStyles = makeStyles(c =>
       color: c.text,
       fontFamily: fonts.black,
       fontSize: typography.caption,
+      maxWidth: 96,
       fontVariant: ['tabular-nums'],
     },
     weightQuickName: {
@@ -3710,32 +3880,7 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.micro + 1,
     },
-    weightUnitsWrap: {
-      gap: spacing.xs,
-    },
-    weightUnitRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
-      borderColor: c.border,
-      borderRadius: radius.md,
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.sm + 2,
-      marginBottom: spacing.xs,
-    },
-    weightUnitName: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.caption,
-    },
-    weightUnitMeta: {
-      color: c.textDim,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-      fontVariant: ['tabular-nums'],
-    },
+
     weightActionRow: {
       flexDirection: 'row',
       gap: spacing.sm,

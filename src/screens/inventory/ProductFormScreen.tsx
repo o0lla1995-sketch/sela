@@ -91,6 +91,13 @@ interface UnitRowDraft {
   retail: string;
   wholesale: string;
   barcode: string;
+  /** v17 (round-23 #5): price AUTO-FILL tracking — a field the
+   *  merchant typed himself (this session) is never overwritten by
+   *  the auto-derivation; everything else follows the base prices
+   *  (سعر الوحدة = السعر الأساسي × معامل التحويل) live. Clearing a
+   *  field returns it to auto mode. */
+  retailManual?: boolean;
+  wholesaleManual?: boolean;
 }
 
 function unitRowToDraft(row: ProductUnit): UnitRowDraft {
@@ -100,7 +107,19 @@ function unitRowToDraft(row: ProductUnit): UnitRowDraft {
     retail: row.retail_price != null ? String(row.retail_price) : '',
     wholesale: row.wholesale_price != null ? String(row.wholesale_price) : '',
     barcode: row.barcode ?? '',
+    // Saved prices start as AUTO — the round-23 complaint was
+    // exactly that editing the base price left stale unit prices
+    // behind («عدم تحديث أسعار الوحدات تلقائياً في صفحة المنتج»).
+    retailManual: false,
+    wholesaleManual: false,
   };
+}
+
+/** v17 (round-23 #5): the derived unit price — base × conversion,
+ *  rounded to 2 decimals (a sane shelf price). */
+function derivedUnitPrice(base: number, conversion: number): string {
+  const value = Math.round(base * conversion * 100) / 100;
+  return value > 0 ? String(value) : '';
 }
 
 export function ProductFormScreen() {
@@ -474,7 +493,15 @@ export function ProductFormScreen() {
   // ── Unit rows ─────────────────────────────────────────────────
   const addUnitRow = useCallback(() => {
     const used = new Set(unitRows.map(row => row.unit_id));
-    const free = units.find(unit => !used.has(unit.id));
+    // v17 (round-23 #6): the first FREE unit OF THE RIGHT KIND — a
+    // weight product must never start with a كرتونة row (and vice
+    // versa); before this the picker filtered by kind but the blank
+    // row itself didn't, inviting mismatched conversions.
+    const kindMatch = (unit: {kind: string}) =>
+      saleMode === 'weight' ? unit.kind === 'weight' : unit.kind === 'piece';
+    const free =
+      units.find(unit => !used.has(unit.id) && kindMatch(unit)) ??
+      units.find(unit => !used.has(unit.id));
     if (free == null) {
       toast('كل الوحدات مستخدمة — أضف وحدات جديدة من شاشة الوحدات', 'info');
       return;
@@ -489,7 +516,7 @@ export function ProductFormScreen() {
         barcode: '',
       },
     ]);
-  }, [unitRows, units, toast]);
+  }, [unitRows, units, toast, saleMode]);
 
   const updateUnitRow = useCallback(
     (index: number, patch: Partial<UnitRowDraft>) => {
@@ -503,6 +530,57 @@ export function ProductFormScreen() {
   const removeUnitRow = useCallback((index: number) => {
     setUnitRows(prev => prev.filter((_, i) => i !== index));
   }, []);
+
+  /** v17 (round-23 #5): LIVE price derivation — whenever the BASE
+   *  prices (سعر القطعة/الكيلو مفرقاً وجملةً) or a row's conversion
+   *  change, every unit row whose price field the merchant hasn't
+   *  typed himself re-derives instantly (base × conversion). This is
+   *  the requested «تحديث أسعار الوحدات تلقائياً في صفحة المنتج» —
+   *  a stale unit price after editing the kilo/piece price is a bug
+   *  of the past. */
+  useEffect(() => {
+    const baseRetail = parseNumber(retailPrice);
+    const baseWholesale = wholesalePrice.trim()
+      ? parseNumber(wholesalePrice)
+      : baseRetail;
+    const retailOk = !Number.isNaN(baseRetail) && baseRetail > 0;
+    const wholesaleOk =
+      !Number.isNaN(baseWholesale) && baseWholesale > 0;
+    if (!retailOk && !wholesaleOk) {
+      return;
+    }
+    setUnitRows(prev => {
+      let changed = false;
+      const next = prev.map(row => {
+        const conv = parseNumber(row.conversion);
+        const convOk = !Number.isNaN(conv) && conv > 0;
+        const patch: UnitRowDraft = {...row};
+        if (convOk && retailOk && !row.retailManual) {
+          const derived = derivedUnitPrice(baseRetail, conv);
+          if (derived !== row.retail) {
+            patch.retail = derived;
+            changed = true;
+          }
+        }
+        if (convOk && wholesaleOk && !row.wholesaleManual) {
+          const derived = derivedUnitPrice(baseWholesale, conv);
+          if (derived !== row.wholesale) {
+            patch.wholesale = derived;
+            changed = true;
+          }
+        }
+        return patch;
+      });
+      return changed ? next : prev;
+    });
+    // A stable dependency key: the conversions + manual flags of the
+    // rows (not the price strings themselves, or we'd loop).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    retailPrice,
+    wholesalePrice,
+    unitRows.map(r => `${r.unit_id}:${r.conversion}`).join('|'),
+  ]);
 
   /** v9.1 (round-14 #4): scan a UNIT's barcode straight from the
    *  camera into that unit row (a pre-packaged وقية pack, a whole
@@ -536,37 +614,81 @@ export function ProductFormScreen() {
    *  (وقية، نصف كغ…) if missing and adds a ready row with its kg
    *  amount, so every weight product gets correct fractional
    *  conversions without manual math. */
+  const presetBusyRef = useRef(false);
   const addWeightPackage = useCallback(
     async (preset: {name: string; kg: number}) => {
-      const existing = unitRows.find(
-        row => unitNameById.get(row.unit_id) === preset.name,
-      );
-      if (existing != null) {
-        toast(`وحدة ${preset.name} مضافة بالفعل`, 'info');
+      // v17 (round-23 #6): double-tap guard — the getOrCreate below
+      // is async, and two rapid taps both passed the duplicate
+      // check BEFORE either row landed (the exact «تكرار الوحدة»
+      // bug). One preset add at a time, plus a SECOND dedupe check
+      // after the await by BOTH name AND unit id.
+      if (presetBusyRef.current) {
         return;
       }
+      presetBusyRef.current = true;
       try {
+        let presetUnitId = -1;
+        const duplicateOf = (rows: UnitRowDraft[]) =>
+          rows.find(
+            row =>
+              row.unit_id === presetUnitId ||
+              unitNameById.get(row.unit_id) === preset.name,
+          );
+        const existing = duplicateOf(unitRows);
+        if (existing != null) {
+          toast(`وحدة ${preset.name} مضافة بالفعل`, 'info');
+          return;
+        }
         // v9.2 (round-15 #3): weight packages are WEIGHT-kind units.
         const unitId = await UnitRepo.getOrCreate(
           preset.name,
           preset.name,
           'weight',
         );
-        // The units list may not contain it yet — refresh + add row.
+        presetUnitId = unitId;
+        // The units list may not contain it yet — refresh first.
         const unitList = await UnitRepo.list();
         setUnits(unitList);
-        setUnitRows(prev => [
-          ...prev,
-          {
-            unit_id: unitId,
-            conversion: String(preset.kg),
-            retail: '',
-            wholesale: '',
-            barcode: '',
-          },
-        ]);
+        // Post-await dedupe: a row for this unit may have landed
+        // while the await was in flight.
+        setUnitRows(prev => {
+          if (duplicateOf(prev) != null) {
+            toast(`وحدة ${preset.name} مضافة بالفعل`, 'info');
+            return prev;
+          }
+          // v17 (round-23 #5): the row arrives WITH its prices
+          // derived from the kilo price (retail + wholesale when
+          // present) — «إضافة الأسعار عند إضافة وحدة جاهزة». The
+          // derivation effect keeps them fresh afterwards.
+          const baseRetail = parseNumber(retailPrice);
+          const baseWholesale = wholesalePrice.trim()
+            ? parseNumber(wholesalePrice)
+            : baseRetail;
+          const retail =
+            !Number.isNaN(baseRetail) && baseRetail > 0
+              ? derivedUnitPrice(baseRetail, preset.kg)
+              : '';
+          const wholesale =
+            !Number.isNaN(baseWholesale) && baseWholesale > 0
+              ? derivedUnitPrice(baseWholesale, preset.kg)
+              : '';
+          return [
+            ...prev,
+            {
+              unit_id: unitId,
+              conversion: String(preset.kg),
+              retail,
+              wholesale,
+              barcode: '',
+            },
+          ];
+        });
         toast(
-          `أُضيفت وحدة ${preset.name} = ${preset.kg} ${WEIGHT_UNIT_NAME}`,
+          `أُضيفت وحدة ${preset.name} = ${preset.kg} ${WEIGHT_UNIT_NAME}${
+            retailPrice.trim().length > 0
+              ? ' — والأسعار من سعر الكيلو تلقائياً'
+              : ''
+          }`,
           'success',
         );
       } catch (error) {
@@ -574,9 +696,11 @@ export function ProductFormScreen() {
           error instanceof Error ? error.message : 'فشل إضافة الوحدة',
           'error',
         );
+      } finally {
+        presetBusyRef.current = false;
       }
     },
-    [unitRows, unitNameById, toast],
+    [unitRows, unitNameById, toast, retailPrice, wholesalePrice],
   );
 
   // ── Stock entry in units (international standard) ────────────
@@ -1847,43 +1971,13 @@ export function ProductFormScreen() {
                         }
                         value={row.conversion}
                         onChangeText={text => {
-                          // v16 (round-22 #3): typing the conversion
-                          // AUTO-FILLS the unit's prices from the
-                          // product's base prices (per piece / per
-                          // kg) the moment it becomes valid — the
-                          // requested "عند إضافة وحدة للبيع أيضا يتم
-                          // تعبئة الحقول المناسبة بشكل تلقائي". Only
-                          // fields the merchant hasn't typed himself.
-                          const conv = parseNumber(text);
-                          const baseRetail = parseNumber(retailPrice);
-                          const baseWholesale = wholesalePrice.trim()
-                            ? parseNumber(wholesalePrice)
-                            : baseRetail;
-                          const patch: Partial<UnitRowDraft> = {
-                            conversion: text,
-                          };
-                          if (
-                            !Number.isNaN(conv) &&
-                            conv > 0 &&
-                            !Number.isNaN(baseRetail) &&
-                            baseRetail > 0
-                          ) {
-                            if (row.retail.trim().length === 0) {
-                              patch.retail = String(
-                                Math.round(baseRetail * conv * 100) / 100,
-                              );
-                            }
-                            if (
-                              row.wholesale.trim().length === 0 &&
-                              !Number.isNaN(baseWholesale) &&
-                              baseWholesale > 0
-                            ) {
-                              patch.wholesale = String(
-                                Math.round(baseWholesale * conv * 100) / 100,
-                              );
-                            }
-                          }
-                          updateUnitRow(index, patch);
+                          // v17 (round-23 #5): the conversion ONLY
+                          // updates itself here — the live derivation
+                          // effect (above) fills/updates the unit's
+                          // prices from the base prices the moment
+                          // the conversion becomes valid, and keeps
+                          // them fresh on every base-price edit.
+                          updateUnitRow(index, {conversion: text});
                         }}
                         keyboardType="numeric"
                         placeholder={saleMode === 'weight' ? '0.25' : '24'}
@@ -1902,7 +1996,13 @@ export function ProductFormScreen() {
                         label="مفرق الوحدة (₪)"
                         value={row.retail}
                         onChangeText={text =>
-                          updateUnitRow(index, {retail: text})
+                          updateUnitRow(index, {
+                            retail: text,
+                            // v17 (round-23 #5): a typed price is
+                            // MANUAL (the derivation never touches
+                            // it again); clearing it returns to auto.
+                            retailManual: text.trim().length > 0,
+                          })
                         }
                         keyboardType="numeric"
                         placeholder="تلقائي"
@@ -1923,7 +2023,10 @@ export function ProductFormScreen() {
                         label="جملة الوحدة (₪)"
                         value={row.wholesale}
                         onChangeText={text =>
-                          updateUnitRow(index, {wholesale: text})
+                          updateUnitRow(index, {
+                            wholesale: text,
+                            wholesaleManual: text.trim().length > 0,
+                          })
                         }
                         keyboardType="numeric"
                         placeholder="تلقائي"

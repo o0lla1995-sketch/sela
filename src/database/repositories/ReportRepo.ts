@@ -17,8 +17,15 @@ import type {
  *  count + totals from the sales table itself (INV-D-… rows), so
  *  restored backups count too (round-21 #2). */
 export interface DebtSalesSummary {
+  /** All credit invoices (INV-D + INV-L). */
   count: number;
   amount: number;
+  /** v17 (round-23 #2): the صِلة series (INV-D-…). */
+  silaCount: number;
+  silaAmount: number;
+  /** v17 (round-23 #2): the store-local book series (INV-L-…). */
+  localCount: number;
+  localAmount: number;
 }
 
 function rangeBounds(range: DateRange): [string, string] {
@@ -175,26 +182,52 @@ export const ReportRepo = {
     return points;
   },
 
-  /** v15 (round-21 #4): credit invoices (INV-D-…) in the range. */
+  /** v15 (round-21 #4) → v17 (round-23 #2): credit invoices in the
+   *  range, SPLIT BY SERIES — INV-D (صِلة debts) and INV-L (دفتر
+   *  المتجر). The store's accounting shows BOTH books; before v17
+   *  the local-book debt sales were invisible in the reports
+   *  («لا تظهر الديون المحلية بشكل صحيح في لوحة التقارير»). */
   async debtSalesSummary(range: DateRange): Promise<DebtSalesSummary> {
     const [start, end] = rangeBounds(range);
     try {
       const result = await getDb().execute(
         `SELECT
-           COUNT(*) AS cnt,
-           COALESCE(SUM(total_amount), 0) AS amount
+           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-D-%' THEN 1 ELSE 0 END), 0) AS sila_cnt,
+           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-D-%' THEN total_amount ELSE 0 END), 0) AS sila_amount,
+           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN 1 ELSE 0 END), 0) AS local_cnt,
+           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN total_amount ELSE 0 END), 0) AS local_amount
          FROM sales
          WHERE created_at >= ? AND created_at <= ?
-           AND invoice_number LIKE 'INV-D-%'`,
+           AND (invoice_number LIKE 'INV-D-%' OR invoice_number LIKE 'INV-L-%')`,
         [start, end],
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
-        cnt?: number | null;
-        amount?: number | null;
+        sila_cnt?: number | null;
+        sila_amount?: number | null;
+        local_cnt?: number | null;
+        local_amount?: number | null;
       };
-      return {count: Number(row.cnt ?? 0), amount: Number(row.amount ?? 0)};
+      const silaCount = Number(row.sila_cnt ?? 0);
+      const localCount = Number(row.local_cnt ?? 0);
+      const silaAmount = Number(row.sila_amount ?? 0);
+      const localAmount = Number(row.local_amount ?? 0);
+      return {
+        count: silaCount + localCount,
+        amount: silaAmount + localAmount,
+        silaCount,
+        silaAmount,
+        localCount,
+        localAmount,
+      };
     } catch {
-      return {count: 0, amount: 0};
+      return {
+        count: 0,
+        amount: 0,
+        silaCount: 0,
+        silaAmount: 0,
+        localCount: 0,
+        localAmount: 0,
+      };
     }
   },
 

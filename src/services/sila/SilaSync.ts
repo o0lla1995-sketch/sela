@@ -219,6 +219,10 @@ async function syncCustomersCycle(): Promise<void> {
       name: row.customer_name,
       phoneLast4: row.customer_phone_last4 ?? null,
       outstandingMinor: row.outstanding_minor,
+      // v17 (round-23 #3): the prepaid credit straight from the
+      // server feed — the number that tells the store a debt
+      // sale is actually covered (مسددة) by existing balance.
+      creditMinor: row.credit_minor ?? 0,
       // v15 (§2.4): the origin split — absent on a pre-0069 server,
       // where 0 keeps the legacy behaviour intact.
       posOutstandingMinor: row.pos_outstanding_minor ?? 0,
@@ -477,6 +481,14 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
               referenceCode: result.reference_code ?? '',
               transactionId: result.transaction_id ?? '',
               outstandingAfter: result.outstanding_minor ?? 0,
+              // v17 (round-23 #3): the server's EXACT consumed credit
+              //  (0067 answers credit_consumed_minor) replaces the
+              //  local estimate the moment the row syncs — the
+              //  books then match صِلة to the last agora.
+              creditCovered:
+                result.credit_consumed_minor != null
+                  ? result.credit_consumed_minor
+                  : null,
             });
             syncedThisCycle += 1;
             // Cache the customer name/balance for the balances screen.

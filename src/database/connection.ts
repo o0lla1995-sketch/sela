@@ -149,6 +149,7 @@ const DDL_STATEMENTS: string[] = [
     phone_last4 TEXT,
     id_number TEXT,
     outstanding_minor INTEGER NOT NULL DEFAULT 0,
+    credit_minor INTEGER NOT NULL DEFAULT 0,
     last_synced_at TEXT
   )`,
   // ── v15 (round-21 #3 — SILA_POS_DEBT_SEPARATION §3.1) ────────
@@ -597,6 +598,48 @@ async function applyMigrations(database: DB): Promise<void> {
     );
     logDiag('db', 'ترحيل v9: دفتر ديون المتجر المحلي (زبائن + ديون + سدادّات)');
     version = 9;
+  }
+
+  if (version < 10) {
+    // v17 (round-23 #3/#8): the prepaid-credit awareness —
+    // sila_customers.credit_minor caches the customer's PREPAID
+    // balance from the server feed (the pos_get_customers row), so
+    // the store can recognize at SALE time that a debt invoice is
+    // actually COVERED by existing credit (the server consumes it
+    // automatically on upload — 0067 — but the store's own books
+    // never knew). sila_debt_queue.credit_covered_minor records how
+    // much of each debt the credit absorbed (locally estimated at
+    // sale/migration time, reconciled to the server's exact
+    // credit_consumed_minor once the row syncs).
+    const creditCols: [string, string, string][] = [
+      [
+        'sila_customers',
+        'credit_minor',
+        'INTEGER NOT NULL DEFAULT 0',
+      ],
+      [
+        'sila_debt_queue',
+        'credit_covered_minor',
+        'INTEGER NOT NULL DEFAULT 0',
+      ],
+    ];
+    for (const [table, column, ddl] of creditCols) {
+      const check = await database.execute(
+        `SELECT COUNT(*) AS cnt FROM pragma_table_info('${table}') WHERE name = ?`,
+        [column],
+      );
+      const has = (check.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+      if (!has) {
+        await database.execute(
+          `ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`,
+        );
+      }
+    }
+    logDiag(
+      'db',
+      'ترحيل v10: وعي الرصيد المسبق (credit_minor + credit_covered_minor)',
+    );
+    version = 10;
   }
 
   if (version !== storedVersion) {

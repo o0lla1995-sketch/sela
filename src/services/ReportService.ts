@@ -4,6 +4,7 @@
  * (اليوم، الأمس، آخر 7 أيام، هذا الشهر، مخصص).
  */
 import {ReportRepo} from '../database/repositories/ReportRepo';
+import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {SilaRepo} from '../services/sila/SilaRepo';
 import {localDateShift, localMonthStart, localToday} from '../core/format';
 import type {
@@ -22,16 +23,36 @@ export interface ReportBundle {
   topByProfit: TopProduct[];
   daily: DailyPoint[];
   hourly: HourlyPoint[];
-  /** v15 (round-21 #4): the debts & repayments accounting section. */
+  /** v15 (round-21 #4) → v17 (round-23 #2): the debts & repayments
+   *  accounting section — now split by BOOK (صِلة vs دفتر المتجر)
+   *  with the prepaid-credit settlements, so the dashboard mirrors
+   *  exactly what the merchant owes and is owed. */
   debts: {
-    /** Credit invoices (INV-D-…) issued in the range — count + total. */
+    /** Credit invoices issued in the range — صِلة (INV-D) split from
+     *  the store-local book (INV-L) + combined totals. */
     salesCount: number;
     salesAmount: number;
-    /** Repayments collected at the cashier in the range. */
+    silaSalesCount: number;
+    silaSalesAmount: number;
+    localSalesCount: number;
+    localSalesAmount: number;
+    /** Repayments collected in the range — صِلة uploads split from
+     *  the local book receipts. */
     paymentsCount: number;
     paymentsAmount: number;
+    silaPaymentsCount: number;
+    silaPaymentsAmount: number;
+    localPaymentsCount: number;
+    localPaymentsAmount: number;
+    /** v17 (round-23 #3): prepaid credit absorbed by debt invoices
+     *  in the range (sale coverage + migration settlements) — money
+     *  the store treats as received. */
+    creditCoveredMinor: number;
     /** Snapshot: STORE-origin outstanding per the صِلة cache. */
     storeOutstandingMinor: number;
+    /** Snapshot: the local book's outstanding (دفتر المتجر). */
+    localOutstandingMinor: number;
+    localDebtorsCount: number;
     /** Snapshot: Sila-app-origin outstanding (informational only). */
     appOutstandingMinor: number;
     debtorsCount: number;
@@ -70,16 +91,31 @@ export const ReportService = {
     custom?: DateRange,
   ): Promise<ReportBundle> {
     const range = rangeFor(key, custom);
-    const [summary, topByRevenue, daily, hourly, debtSales, payments, silaTotals] =
-      await Promise.all([
-        ReportRepo.summary(range),
-        ReportRepo.topProducts(range, 10),
-        ReportRepo.dailySeries(range),
-        ReportRepo.hourlySeries(range),
-        ReportRepo.debtSalesSummary(range),
-        SilaRepo.paymentsInRange(range.from, range.to),
-        SilaRepo.customersOutstandingTotal(),
-      ]);
+    const [
+      summary,
+      topByRevenue,
+      daily,
+      hourly,
+      debtSales,
+      payments,
+      silaTotals,
+      localPayments,
+      creditCovered,
+      localBook,
+    ] = await Promise.all([
+      ReportRepo.summary(range),
+      ReportRepo.topProducts(range, 10),
+      ReportRepo.dailySeries(range),
+      ReportRepo.hourlySeries(range),
+      ReportRepo.debtSalesSummary(range),
+      SilaRepo.paymentsInRange(range.from, range.to),
+      SilaRepo.customersOutstandingTotal(),
+      // v17 (round-23 #2): the LOCAL book finally joins the reports.
+      LocalDebtsRepo.paymentsInRange(range.from, range.to),
+      // v17 (round-23 #3): prepaid-credit settlements in the range.
+      SilaRepo.creditCoveredInRange(range.from, range.to),
+      LocalDebtsRepo.totals(),
+    ]);
 
     const topByProfit = [...topByRevenue]
       .sort((a, b) => b.profit - a.profit)
@@ -95,9 +131,20 @@ export const ReportService = {
       debts: {
         salesCount: debtSales.count,
         salesAmount: debtSales.amount,
-        paymentsCount: payments.count,
-        paymentsAmount: payments.minor / 100,
+        silaSalesCount: debtSales.silaCount,
+        silaSalesAmount: debtSales.silaAmount,
+        localSalesCount: debtSales.localCount,
+        localSalesAmount: debtSales.localAmount,
+        paymentsCount: payments.count + localPayments.count,
+        paymentsAmount: (payments.minor + localPayments.minor) / 100,
+        silaPaymentsCount: payments.count,
+        silaPaymentsAmount: payments.minor / 100,
+        localPaymentsCount: localPayments.count,
+        localPaymentsAmount: localPayments.minor / 100,
+        creditCoveredMinor: creditCovered,
         storeOutstandingMinor: silaTotals.posTotalMinor,
+        localOutstandingMinor: localBook.outstandingMinor,
+        localDebtorsCount: localBook.debtorsCount,
         appOutstandingMinor: silaTotals.appTotalMinor,
         debtorsCount: silaTotals.debtorsCount,
         paired: silaTotals.lastSyncedAt != null,

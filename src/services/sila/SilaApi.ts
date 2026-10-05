@@ -311,6 +311,11 @@ export interface SilaDebtRecordResult {
   amount_minor?: number;
   added_to_outstanding_minor?: number;
   outstanding_minor?: number;
+  /** v17 (round-23 #3 — 0067 §5): how much prepaid credit the server
+   *  consumed for this debt (min(amount, credit_balance)). The store
+   *  treats it as received at sale time — the invoice is PAID by
+   *  that much, not new debt. */
+  credit_consumed_minor?: number;
   idempotent_replay?: boolean;
   recorded_at?: string;
   /** v15 (§2.5): DUPLICATE_INVOICE_REF answers carry the existing

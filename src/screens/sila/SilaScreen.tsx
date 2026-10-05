@@ -595,6 +595,13 @@ export function SilaScreen() {
                           row.created_at.replace('T', ' ').slice(0, 19),
                         )}
                       </Text>
+                      {row.credit_covered_minor > 0 ? (
+                        <Text style={styles.queueCreditNote}>
+                          غطّى الرصيد المسبق{' '}
+                          {formatMoney(row.credit_covered_minor / 100)} —
+                          الفاتورة مسددة بهذا المقدار
+                        </Text>
+                      ) : null}
                     </View>
                     {stateBadge(row.state)}
                   </View>
@@ -1114,6 +1121,12 @@ const useStyles = makeStyles(c =>
       color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.small,
+    },
+    queueCreditNote: {
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: 11,
+      marginTop: 2,
     },
     queueInvoice: {
       color: c.textDim,

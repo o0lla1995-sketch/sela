@@ -377,6 +377,12 @@ export interface SilaDebtRow {
   reference_code: string | null;
   transaction_id: string | null;
   outstanding_after: number | null;
+  /** v17 (round-23 #3): how much of this debt the customer's
+   *  PREPAID credit absorbed — estimated at sale time from the
+   *  cached balance, reconciled to the server's exact
+   *  credit_consumed_minor after the row syncs. amount_minor −
+   *  credit_covered_minor = the NET new debt this invoice added. */
+  credit_covered_minor: number;
   synced_at: string | null;
   error_code: string | null;
   error_message: string | null;
@@ -390,6 +396,10 @@ export interface SilaCustomer {
   name: string;
   phone_last4: string | null;
   id_number: string | null;
+  /** v17 (round-23 #3): الرصيد المسبق المدفوع مقدماً في صِلة — يغطّي
+   *  فواتير الدين تلقائياً (يستهلكه الخادم عند رفع الدين)، فالمتجر
+   *  يعرف وقت البيع أن الفاتورة مسددة كلياً أو جزئياً. */
+  credit_minor: number;
   /** الرصيد الرسمي الكلي كما يقوله خادم صِلة (POS + تطبيق + تعديلات). */
   outstanding_minor: number;
   /** v15 (§2.4): جزء الرصيد الذي نشأ من فواتير هذا المتجر (FIFO). */

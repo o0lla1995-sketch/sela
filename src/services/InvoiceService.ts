@@ -240,6 +240,10 @@ export interface CompleteSaleOptions {
     /** The DEBT amount in minor units — from the signed offline QR
      *  when present, otherwise the invoice total (§4 rules). */
     amountMinor: number;
+    /** v17 (round-23 #3): the prepaid-credit part the server is
+     *  expected to absorb (min(amount, cached credit)) — the store
+     *  books the invoice as PAID by this much. */
+    creditCoveredMinor?: number;
   };
   /** v16 (round-22 #4): when set the sale is a STORE-LOCAL credit
    *  sale (دفتر المتجر) — the debt lands ONLY in local_debts (INV-L
@@ -292,6 +296,7 @@ export const InvoiceService = {
                   customerCard: options.debt.customerCard,
                   offlineQr: options.debt.offlineQr,
                   amountMinor: options.debt.amountMinor,
+                  creditCoveredMinor: options.debt.creditCoveredMinor ?? 0,
                   description: `بيع بالدين — فاتورة ${invoiceNumber}`,
                   scannedAt: new Date().toISOString(),
                 },
@@ -365,6 +370,8 @@ export const InvoiceService = {
                   customerName: options.debt.customerName,
                   customerPhoneLast4: options.debt.customerPhoneLast4,
                   referenceCode: null,
+                  mode: 'sila',
+                  creditCoveredMinor: options.debt.creditCoveredMinor ?? 0,
                 },
                 options.receiptSettings,
               )
@@ -377,6 +384,7 @@ export const InvoiceService = {
                   customerName: options.localDebt.customerName,
                   customerPhoneLast4: options.localDebt.customerPhoneLast4,
                   referenceCode: null,
+                  mode: 'local',
                 },
                 options.receiptSettings,
               )
@@ -400,12 +408,17 @@ export const InvoiceService = {
     return result;
   },
 
-  /** Rebuilds a printable job for an already-saved invoice. */
+  /** Rebuilds a printable job for an already-saved invoice.
+   *  v17 (round-23 #1): DEBT invoices (INV-D صِلة / INV-L دفتر
+   *  المتجر) reprint with the DEBT template — the customer block is
+   *  the whole point of a debt receipt, and it used to vanish on
+   *  every reprint from the invoice center (the normal template has
+   *  no customer line). */
   async reprintInvoice(
     saleId: number,
     receiptSettings: ReceiptSettings,
   ): Promise<void> {
-    const sale = await SaleRepo.listRecent(200);
+    const sale = await SaleRepo.listRecent(500);
     const record = sale.find(entry => entry.id === saleId);
     if (!record) {
       throw new Error('الفاتورة غير موجودة');
@@ -418,6 +431,50 @@ export const InvoiceService = {
         names.set(item.product_id, product?.name ?? `#${item.product_id}`);
       }
     }
+
+    // ── v17 (round-23 #1): debt-invoice reprints keep the debt look ──
+    const ref = record.invoice_number;
+    if (ref.startsWith('INV-D-')) {
+      // صِلة debt — the queue row carries the creditor + the
+      // official POS-… reference once synced.
+      const debt = await SilaRepo.byInvoiceRef(ref);
+      const job = buildDebtReceiptJob(
+        {
+          sale: record,
+          items,
+          productNameById: names,
+          customerName: debt?.customer_name ?? 'زبون صِلة',
+          customerPhoneLast4: debt?.customer_phone_last4 ?? null,
+          referenceCode: debt?.reference_code ?? null,
+          mode: 'sila',
+          creditCoveredMinor: debt?.credit_covered_minor ?? 0,
+        },
+        receiptSettings,
+      );
+      await ThermalPrinterService.printJob(job);
+      return;
+    }
+    if (ref.startsWith('INV-L-')) {
+      // دفتر المتجر debt — the local book carries the creditor.
+      const local = await LocalDebtsRepo.creditorByInvoiceRef(ref);
+      const job = buildDebtReceiptJob(
+        {
+          sale: record,
+          items,
+          productNameById: names,
+          customerName: local?.name ?? 'زبون الدفتر',
+          customerPhoneLast4: local?.phone
+            ? local.phone.replace(/\D/g, '').slice(-4)
+            : null,
+          referenceCode: null,
+          mode: 'local',
+        },
+        receiptSettings,
+      );
+      await ThermalPrinterService.printJob(job);
+      return;
+    }
+
     const job = buildReceiptJob(
       {sale: record, items, productNameById: names},
       receiptSettings,

@@ -188,78 +188,147 @@ export function ReportsScreen() {
               </View>
             </View>
 
-            {/* ── v15 (round-21 #4): debts & repayments accounting ── */}
+            {/* ── v17 (round-23 #2): debts & repayments accounting —
+                restructured for clarity: every figure says WHICH book
+                it belongs to (صِلة / دفتر المتجر), the local book is
+                finally visible, and the prepaid-credit settlements
+                count as received money. ── */}
             <Card>
               <SectionTitle
                 title="الديون والسداد — محاسبة متجرك"
-                hint="ديون فواتيرك منفصلة عن ديون تطبيق صِلة · السداد ليس إيراداً"
+                hint="كل رقم مُقسَّم: صِلة (INV-D) · دفتر المتجر (INV-L) · السداد ليس إيراداً"
               />
+
+              {/* ── 1) Debt invoices in the range ── */}
+              <Text style={styles.debtSectionTitle}>فواتير الدين بالفترة</Text>
               <View style={styles.debtGrid}>
                 <View style={styles.debtCell}>
-                  <Text style={styles.debtLabel}>فواتير دين بالفترة</Text>
+                  <Text style={styles.debtLabel}>ديون صِلة (INV-D)</Text>
+                  <Text style={[styles.debtValue, {color: c.warning}]}>
+                    {formatMoney(bundle.debts.silaSalesAmount)}
+                  </Text>
+                  <Text style={styles.debtMeta}>
+                    {bundle.debts.silaSalesCount} فاتورة
+                  </Text>
+                </View>
+                <View style={styles.debtCell}>
+                  <Text style={styles.debtLabel}>دفتر المتجر (INV-L)</Text>
+                  <Text style={[styles.debtValue, {color: c.warning}]}>
+                    {formatMoney(bundle.debts.localSalesAmount)}
+                  </Text>
+                  <Text style={styles.debtMeta}>
+                    {bundle.debts.localSalesCount} فاتورة
+                  </Text>
+                </View>
+                <View style={[styles.debtCell, styles.debtCellWide]}>
+                  <Text style={styles.debtLabel}>إجمالي فواتير الدين</Text>
                   <Text style={[styles.debtValue, {color: c.warning}]}>
                     {formatMoney(bundle.debts.salesAmount)}
                   </Text>
                   <Text style={styles.debtMeta}>
-                    {bundle.debts.salesCount} فاتورة دين (INV-D)
+                    {bundle.debts.salesCount} فاتورة دين بالفترة
                   </Text>
                 </View>
+              </View>
+
+              {/* ── 2) Repayments + settlements received ── */}
+              <Text style={styles.debtSectionTitle}>السدادّات المستلمة</Text>
+              <View style={styles.debtGrid}>
                 <View style={styles.debtCell}>
-                  <Text style={styles.debtLabel}>سدادّات مستلمة</Text>
+                  <Text style={styles.debtLabel}>سدادّات صِلة</Text>
                   <Text style={[styles.debtValue, {color: c.success}]}>
-                    {formatMoney(bundle.debts.paymentsAmount)}
+                    {formatMoney(bundle.debts.silaPaymentsAmount)}
                   </Text>
                   <Text style={styles.debtMeta}>
-                    {bundle.debts.paymentsCount} إيصال سداد
+                    {bundle.debts.silaPaymentsCount} إيصال
                   </Text>
                 </View>
                 <View style={styles.debtCell}>
-                  <Text style={styles.debtLabel}>النقد الفعلي بالفترة</Text>
-                  <Text style={[styles.debtValue, {color: c.accent}]}>
-                    {formatMoney(
-                      bundle.summary.revenue -
-                        bundle.debts.salesAmount +
-                        bundle.debts.paymentsAmount,
-                    )}{' '}
-                    ₪
+                  <Text style={styles.debtLabel}>سدادّات دفتر المتجر</Text>
+                  <Text style={[styles.debtValue, {color: c.success}]}>
+                    {formatMoney(bundle.debts.localPaymentsAmount)}
                   </Text>
                   <Text style={styles.debtMeta}>
-                    المبيعات − ديون الفترة + السدادّات
+                    {bundle.debts.localPaymentsCount} إيصال
+                  </Text>
+                </View>
+                {bundle.debts.creditCoveredMinor > 0 ? (
+                  <View style={[styles.debtCell, styles.debtCellWide]}>
+                    <Text style={styles.debtLabel}>
+                      تسويات الرصيد المسبق (صِلة)
+                    </Text>
+                    <Text style={[styles.debtValue, {color: c.success}]}>
+                      {formatMoney(bundle.debts.creditCoveredMinor / 100)}
+                    </Text>
+                    <Text style={styles.debtMeta}>
+                      فواتير سددها رصيد الزبون المسبق — تُحسب مقبوضة
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+
+              {/* ── 3) Actual cash ── */}
+              <Text style={styles.debtSectionTitle}>النقد الفعلي بالفترة</Text>
+              <View style={styles.cashBox}>
+                <Text style={[styles.cashValue, {color: c.accent}]}>
+                  {formatMoney(
+                    bundle.summary.revenue -
+                      bundle.debts.salesAmount +
+                      bundle.debts.paymentsAmount +
+                      bundle.debts.creditCoveredMinor / 100,
+                  )}{' '}
+                  ₪
+                </Text>
+                <Text style={styles.debtMeta}>
+                  المبيعات − فواتير الدين + السدادّات + تسويات الرصيد المسبق
+                </Text>
+              </View>
+
+              {/* ── 4) Outstanding snapshot ── */}
+              <Text style={styles.debtSectionTitle}>الدين القائم الآن</Text>
+              <View style={styles.debtGrid}>
+                {bundle.debts.paired ? (
+                  <View style={styles.debtCell}>
+                    <Text style={styles.debtLabel}>ديون متجرك عبر صِلة</Text>
+                    <Text style={[styles.debtValue, {color: c.danger}]}>
+                      {formatMoney(bundle.debts.storeOutstandingMinor / 100)} ₪
+                    </Text>
+                    <Text style={styles.debtMeta}>
+                      {bundle.debts.debtorsCount} مدين — رصيد صِلة
+                    </Text>
+                  </View>
+                ) : null}
+                <View style={styles.debtCell}>
+                  <Text style={styles.debtLabel}>دفتر المتجر المحلي</Text>
+                  <Text style={[styles.debtValue, {color: c.danger}]}>
+                    {formatMoney(bundle.debts.localOutstandingMinor / 100)} ₪
+                  </Text>
+                  <Text style={styles.debtMeta}>
+                    {bundle.debts.localDebtorsCount} مدين — دفتر المتجر
                   </Text>
                 </View>
                 {bundle.debts.paired ? (
-                  <>
-                    <View style={styles.debtCell}>
-                      <Text style={styles.debtLabel}>
-                        ديون فواتير متجري القائمة
-                      </Text>
-                      <Text style={[styles.debtValue, {color: c.danger}]}>
-                        {formatMoney(bundle.debts.storeOutstandingMinor / 100)}{' '}
-                        ₪
-                      </Text>
-                      <Text style={styles.debtMeta}>
-                        {bundle.debts.debtorsCount} مدين — رصيد من صِلة
-                      </Text>
-                    </View>
-                    <View style={styles.debtCell}>
-                      <Text style={styles.debtLabel}>
-                        ديون عبر تطبيق صِلة (للمعلومية)
-                      </Text>
-                      <Text style={[styles.debtValue, {color: c.info}]}>
-                        {formatMoney(bundle.debts.appOutstandingMinor / 100)}
-                      </Text>
-                      <Text style={styles.debtMeta}>
-                        ليست من مبيعات متجرك — لا تدخل أرباحك
-                      </Text>
-                    </View>
-                  </>
+                  <View style={[styles.debtCell, styles.debtCellWide]}>
+                    <Text style={styles.debtLabel}>
+                      عبر تطبيق صِلة (للمعلومية فقط)
+                    </Text>
+                    <Text style={[styles.debtValue, {color: c.info}]}>
+                      {formatMoney(bundle.debts.appOutstandingMinor / 100)}
+                    </Text>
+                    <Text style={styles.debtMeta}>
+                      ليست من مبيعات متجرك — لا تدخل أرباحك
+                    </Text>
+                  </View>
                 ) : null}
               </View>
+
               <Text style={styles.chartHint}>
                 إيراد متجرك في الأعلى يشمل فواتير الدين لأنها مبيعات خرجت من
                 مخزونك؛ «النقد الفعلي» يطرحها ويضيف ما استُلِم فعلاً من
-                السدادّات. ديون تطبيق صِلة لم تمر بفاتورتك ولا بمخزونك — تبقى
-                للمطابقة فقط.
+                السدادّات وتسويات الرصيد المسبق. فاتورة الدين التي يغطّيها رصيد
+                الزبون المسبق في صِلة تُعامل مسدَّدة بمقدار ما غطّاه الرصيد.
+                ديون تطبيق صِلة لم تمر بفاتورتك ولا بمخزونك — تبقى للمطابقة
+                فقط.
               </Text>
             </Card>
 
@@ -500,11 +569,39 @@ const useStyles = makeStyles(c =>
       gap: spacing.sm,
       marginBottom: spacing.sm,
     },
-    // v15 (round-21 #4): debts & repayments accounting grid.
+    // v15 (round-21 #4) → v17 (round-23 #2): debts & repayments
+    // accounting grid + section titles + the wide cash box.
+    debtSectionTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      marginTop: spacing.md,
+      marginBottom: spacing.xs,
+      borderRightWidth: 3,
+      borderRightColor: c.accent,
+      paddingRight: spacing.sm,
+    },
     debtGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+    },
+    debtCellWide: {
+      width: '100%',
+    },
+    cashBox: {
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.md,
+      alignItems: 'center',
+      gap: 3,
+    },
+    cashValue: {
+      fontFamily: fonts.black,
+      fontSize: typography.title,
+      fontVariant: ['tabular-nums'],
     },
     debtCell: {
     flexGrow: 1,

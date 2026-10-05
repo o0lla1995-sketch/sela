@@ -36,6 +36,11 @@ export interface CreateSaleInput {
     amountMinor: number;
     description: string;
     scannedAt: string;
+    /** v17 (round-23 #3): the prepaid-credit part of amountMinor
+     *  (min(amount, cached credit)) — the store books the invoice as
+     *  PAID by this much; the FULL amount still uploads and the
+     *  server consumes the credit itself (0067). */
+    creditCoveredMinor?: number;
   };
   /** v16 (round-22 #4): when present the sale is a STORE-LOCAL
    *  credit sale (دفتر المتجر) — the debt lands in local_debts
@@ -161,8 +166,8 @@ export const SaleRepo = {
           `INSERT INTO sila_debt_queue (
             idempotency_key, customer_id, customer_name, customer_phone_last4,
             customer_card, offline_qr, amount_minor, currency, pos_invoice_ref,
-            description, scanned_at, state
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ILS', ?, ?, ?, 'pending')`,
+            description, scanned_at, credit_covered_minor, state
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ILS', ?, ?, ?, ?, 'pending')`,
           [
             input.debtRow.idempotencyKey,
             input.debtRow.customerId,
@@ -174,6 +179,13 @@ export const SaleRepo = {
             input.invoiceNumber,
             input.debtRow.description,
             input.debtRow.scannedAt,
+            Math.max(
+              0,
+              Math.min(
+                input.debtRow.creditCoveredMinor ?? 0,
+                input.debtRow.amountMinor,
+              ),
+            ),
           ],
         );
       }

@@ -42,6 +42,7 @@ function rowToDebt(row: Record<string, unknown>): SilaDebtRow {
     transaction_id: (row.transaction_id as string) ?? null,
     outstanding_after:
       row.outstanding_after == null ? null : Number(row.outstanding_after),
+    credit_covered_minor: Number(row.credit_covered_minor ?? 0),
     synced_at: (row.synced_at as string) ?? null,
     error_code: (row.error_code as string) ?? null,
     error_message: (row.error_message as string) ?? null,
@@ -56,6 +57,7 @@ function rowToCustomer(row: Record<string, unknown>): SilaCustomer {
     name: String(row.name ?? ''),
     phone_last4: (row.phone_last4 as string) ?? null,
     id_number: (row.id_number as string) ?? null,
+    credit_minor: Number(row.credit_minor ?? 0),
     outstanding_minor: Number(row.outstanding_minor ?? 0),
     pos_outstanding_minor: Number(row.pos_outstanding_minor ?? 0),
     app_outstanding_minor: Number(row.app_outstanding_minor ?? 0),
@@ -107,6 +109,12 @@ export interface EnqueueDebtInput {
   posInvoiceRef: string;
   description: string;
   scannedAt: string;
+  /** v17 (round-23 #3): the part of amountMinor the customer's
+   *  prepaid credit is expected to absorb (min(amount, cached
+   *  credit)). The FULL amount still uploads — the server consumes
+   *  the credit itself — but the store's books already know the
+   *  invoice is partially/fully PAID, not pure debt. */
+  creditCoveredMinor?: number;
 }
 
 export interface EnqueuePaymentInput {
@@ -129,8 +137,8 @@ export const SilaRepo = {
       `INSERT INTO sila_debt_queue (
         idempotency_key, customer_id, customer_name, customer_phone_last4,
         customer_card, offline_qr, amount_minor, currency, pos_invoice_ref,
-        description, scanned_at, state
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ILS', ?, ?, ?, 'pending')`,
+        description, scanned_at, credit_covered_minor, state
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ILS', ?, ?, ?, ?, 'pending')`,
       [
         input.idempotencyKey,
         input.customerId,
@@ -142,6 +150,7 @@ export const SilaRepo = {
         input.posInvoiceRef,
         input.description,
         input.scannedAt,
+        Math.max(0, Math.min(input.creditCoveredMinor ?? 0, input.amountMinor)),
       ],
     );
     const row = await db.execute(
@@ -188,18 +197,25 @@ export const SilaRepo = {
       referenceCode: string;
       transactionId: string;
       outstandingAfter: number;
+      /** v17 (round-23 #3): the server's EXACT credit_consumed_minor
+       *  for this debt (when it answers one) — reconciles the local
+       *  estimate so the books match صِلة to the agora. */
+      creditCovered?: number | null;
     },
   ): Promise<void> {
     await getDb().execute(
       `UPDATE sila_debt_queue
        SET state = 'synced', reference_code = ?, transaction_id = ?,
-           outstanding_after = ?, synced_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+           outstanding_after = ?,
+           credit_covered_minor = COALESCE(?, credit_covered_minor),
+           synced_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
            error_code = NULL, error_message = NULL
        WHERE local_id = ?`,
       [
         patch.referenceCode,
         patch.transactionId,
         patch.outstandingAfter,
+        patch.creditCovered ?? null,
         localId,
       ],
     );
@@ -844,6 +860,10 @@ export const SilaRepo = {
       name: string;
       phoneLast4: string | null;
       outstandingMinor: number;
+      /** v17 (round-23 #3): the server-known prepaid credit. Pass
+       *  null to PRESERVE the cached value (partial updates after a
+       *  debt sync don't carry it). */
+      creditMinor?: number | null;
       posOutstandingMinor?: number;
       appOutstandingMinor?: number;
       otherMinor?: number;
@@ -859,40 +879,81 @@ export const SilaRepo = {
     }
     const db = getDb();
     for (const row of rows) {
-      await db.execute(
-        `INSERT INTO sila_customers (
-           customer_id, name, phone_last4, outstanding_minor,
-           pos_outstanding_minor, app_outstanding_minor, other_minor,
-           pos_purchases_minor, app_purchases_minor,
-           last_payment_at, last_payment_amount_minor, last_synced_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(customer_id) DO UPDATE SET
-           name = excluded.name,
-           phone_last4 = excluded.phone_last4,
-           outstanding_minor = excluded.outstanding_minor,
-           pos_outstanding_minor = excluded.pos_outstanding_minor,
-           app_outstanding_minor = excluded.app_outstanding_minor,
-           other_minor = excluded.other_minor,
-           pos_purchases_minor = excluded.pos_purchases_minor,
-           app_purchases_minor = excluded.app_purchases_minor,
-           last_payment_at = excluded.last_payment_at,
-           last_payment_amount_minor = excluded.last_payment_amount_minor,
-           last_synced_at = excluded.last_synced_at`,
-        [
-          row.customerId,
-          row.name,
-          row.phoneLast4,
-          row.outstandingMinor,
-          row.posOutstandingMinor ?? 0,
-          row.appOutstandingMinor ?? 0,
-          row.otherMinor ?? 0,
-          row.posPurchasesMinor ?? 0,
-          row.appPurchasesMinor ?? 0,
-          row.lastPaymentAt ?? null,
-          row.lastPaymentAmountMinor ?? null,
-          syncedAt,
-        ],
-      );
+      // v17 (round-23 #3): creditMinor == null means "this update
+      // doesn't know the credit" (a post-debt-sync upsert) — two SQL
+      // variants so a NOT NULL column never needs a NULL sentinel:
+      // the null variant simply doesn't touch credit_minor.
+      const knowsCredit = row.creditMinor != null;
+      const sql = knowsCredit
+        ? `INSERT INTO sila_customers (
+             customer_id, name, phone_last4, outstanding_minor,
+             credit_minor,
+             pos_outstanding_minor, app_outstanding_minor, other_minor,
+             pos_purchases_minor, app_purchases_minor,
+             last_payment_at, last_payment_amount_minor, last_synced_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(customer_id) DO UPDATE SET
+             name = excluded.name,
+             phone_last4 = excluded.phone_last4,
+             outstanding_minor = excluded.outstanding_minor,
+             credit_minor = excluded.credit_minor,
+             pos_outstanding_minor = excluded.pos_outstanding_minor,
+             app_outstanding_minor = excluded.app_outstanding_minor,
+             other_minor = excluded.other_minor,
+             pos_purchases_minor = excluded.pos_purchases_minor,
+             app_purchases_minor = excluded.app_purchases_minor,
+             last_payment_at = excluded.last_payment_at,
+             last_payment_amount_minor = excluded.last_payment_amount_minor,
+             last_synced_at = excluded.last_synced_at`
+        : `INSERT INTO sila_customers (
+             customer_id, name, phone_last4, outstanding_minor,
+             pos_outstanding_minor, app_outstanding_minor, other_minor,
+             pos_purchases_minor, app_purchases_minor,
+             last_payment_at, last_payment_amount_minor, last_synced_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(customer_id) DO UPDATE SET
+             name = excluded.name,
+             phone_last4 = excluded.phone_last4,
+             outstanding_minor = excluded.outstanding_minor,
+             pos_outstanding_minor = excluded.pos_outstanding_minor,
+             app_outstanding_minor = excluded.app_outstanding_minor,
+             other_minor = excluded.other_minor,
+             pos_purchases_minor = excluded.pos_purchases_minor,
+             app_purchases_minor = excluded.app_purchases_minor,
+             last_payment_at = excluded.last_payment_at,
+             last_payment_amount_minor = excluded.last_payment_amount_minor,
+             last_synced_at = excluded.last_synced_at`;
+      const args = knowsCredit
+        ? [
+            row.customerId,
+            row.name,
+            row.phoneLast4,
+            row.outstandingMinor,
+            Math.max(0, Math.round(row.creditMinor ?? 0)),
+            row.posOutstandingMinor ?? 0,
+            row.appOutstandingMinor ?? 0,
+            row.otherMinor ?? 0,
+            row.posPurchasesMinor ?? 0,
+            row.appPurchasesMinor ?? 0,
+            row.lastPaymentAt ?? null,
+            row.lastPaymentAmountMinor ?? null,
+            syncedAt,
+          ]
+        : [
+            row.customerId,
+            row.name,
+            row.phoneLast4,
+            row.outstandingMinor,
+            row.posOutstandingMinor ?? 0,
+            row.appOutstandingMinor ?? 0,
+            row.otherMinor ?? 0,
+            row.posPurchasesMinor ?? 0,
+            row.appPurchasesMinor ?? 0,
+            row.lastPaymentAt ?? null,
+            row.lastPaymentAmountMinor ?? null,
+            syncedAt,
+          ];
+      await db.execute(sql, args);
     }
   },
 
@@ -926,6 +987,57 @@ export const SilaRepo = {
         : null;
     } catch {
       return null;
+    }
+  },
+
+  /** v17 (round-23 #3): local-only cache touch after a credit-covered
+   *  debt sale — the prepaid balance the cache shows must drop by
+   *  the covered part immediately, so the NEXT sale of the same
+   *  customer sees the reduced credit (the server's own consumption
+   *  arrives with the next balances refresh and corrects any drift). */
+  async consumeCachedCredit(
+    customerId: string,
+    coveredMinor: number,
+  ): Promise<void> {
+    if (!customerId || coveredMinor <= 0) {
+      return;
+    }
+    try {
+      await getDb().execute(
+        `UPDATE sila_customers
+           SET credit_minor = MAX(0, credit_minor - ?)
+         WHERE customer_id = ?`,
+        [Math.round(coveredMinor), customerId],
+      );
+    } catch (error) {
+      logDiag(
+        'sila',
+        `تعذر خصم الرصيد المسبق من الذاكرة: ${toMessage(error)}`,
+        'warn',
+      );
+    }
+  },
+
+  /** v17 (round-23 #2): Σ credit_covered_minor of debt rows created in
+   *  the range — the money prepaid credit absorbed (treated as
+   *  received at sale/migration time in the store's cash math). */
+  async creditCoveredInRange(
+    from: string,
+    to: string,
+  ): Promise<number> {
+    try {
+      const result = await getDb().execute(
+        `SELECT COALESCE(SUM(credit_covered_minor), 0) AS minor
+         FROM sila_debt_queue
+         WHERE created_at >= ? AND created_at <= ?`,
+        [`${from} 00:00:00`, `${to} 23:59:59`],
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        minor?: number | null;
+      };
+      return Number(row.minor ?? 0);
+    } catch {
+      return 0;
     }
   },
 };

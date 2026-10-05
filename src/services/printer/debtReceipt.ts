@@ -16,13 +16,15 @@ import type {ReceiptSettings} from './receipt';
 const LABELS = {
   invoice: 'Invoice',
   date: 'Date',
-  debtTitle: 'DEBT - SILA',
+  debtTitleSila: 'DEBT - SILA',
+  debtTitleLocal: 'DEBT - STORE BOOK',
   subtotal: 'Subtotal',
   discount: 'Discount',
   total: 'TOTAL',
   customer: 'Customer',
   reference: 'SILA Ref',
-  pending: 'SILA: pending sync',
+  creditCovered: 'Prepaid credit',
+  netDebt: 'Net debt',
   thanks: 'Thank You!',
 } as const;
 
@@ -36,6 +38,15 @@ export interface DebtReceiptData {
   customerPhoneLast4?: string | null;
   /** Official POS-… code — present after a successful sync. */
   referenceCode?: string | null;
+  /** v17 (round-23 #1): which book owns this debt — drives the
+   *  title + footer wording (the local book's receipt must NOT say
+   *  «سيُسجَّل في صِلة»). Defaults to 'sila' (the original template). */
+  mode?: 'sila' | 'local';
+  /** v17 (round-23 #3): the part of the total the customer's
+   *  PREPAID credit in صِلة absorbed — printed as its own line so
+   *  the merchant sees the invoice is (partially) PAID, with the
+   *  NET debt spelled out. */
+  creditCoveredMinor?: number;
 }
 
 export function buildDebtReceiptJob(
@@ -69,7 +80,9 @@ export function buildDebtReceiptJob(
     .bold(true)
     .size(1, 1)
     .align(1)
-    .textLine(LABELS.debtTitle)
+    .textLine(
+      data.mode === 'local' ? LABELS.debtTitleLocal : LABELS.debtTitleSila,
+    )
     .size(0, 0)
     .bold(false)
     .align(2)
@@ -108,9 +121,37 @@ export function buildDebtReceiptJob(
     .size(0, 0)
     .bold(false);
 
-  // ── SILA footer: official reference or the pending note ──
+  // ── v17 (round-23 #3): prepaid-credit coverage — the merchant
+  //    sees the invoice is (partly) PAID by existing balance, with
+  //    the NET debt spelled out («مراعاة أن هذه الفاتورة مسددة»).
+  const coveredMinor = Math.max(
+    0,
+    Math.min(
+      Math.round(data.creditCoveredMinor ?? 0),
+      Math.round(data.sale.total_amount * 100),
+    ),
+  );
+  if (coveredMinor > 0) {
+    const netMinor = Math.round(data.sale.total_amount * 100) - coveredMinor;
+    b.align(2)
+      .twoColumns(LABELS.creditCovered, coveredMinor / 100, width)
+      .bold(true)
+      .twoColumns(LABELS.netDebt, netMinor / 100, width)
+      .bold(false)
+      .align(1);
+    if (netMinor === 0) {
+      b.textLine('الفاتورة مسددة بالكامل من الرصيد المسبق');
+    }
+  }
+
+  // ── Footer: the book that holds the debt (round-23 #1 — the
+  //    local book's receipt must not mention صِلة syncing). ──
   b.separator(width).align(1);
-  if (data.referenceCode) {
+  if (data.mode === 'local') {
+    b.textLine('دين مسجّل في دفتر المتجر').textLine(
+      'يُسدَّد عند الكاشير — دون تطبيق صِلة',
+    );
+  } else if (data.referenceCode) {
     b.bold(true)
       .textLine(`${LABELS.reference}: ${data.referenceCode}`)
       .bold(false)

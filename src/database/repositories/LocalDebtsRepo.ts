@@ -28,6 +28,7 @@ import {
   setString,
   KEYS,
 } from '../../storage/storage';
+import {uuidV4} from '../../services/sila/qr';
 import type {
   LocalCustomer,
   LocalCustomerBalance,
@@ -443,6 +444,56 @@ export const LocalDebtsRepo = {
     }
   },
 
+  /** v17 (round-23 #1): the creditor behind an INV-L invoice —
+   *  feeds the debt receipt on reprints and the invoice-center
+   *  detail card (local-book debts have no صِلة queue row). */
+  async creditorByInvoiceRef(
+    invoiceRef: string,
+  ): Promise<{name: string; phone: string | null} | null> {
+    try {
+      const result = await getDb().execute(
+        `SELECT lc.name AS name, lc.phone AS phone
+         FROM local_debts d
+         JOIN local_customers lc ON lc.id = d.local_customer_id
+         WHERE d.invoice_ref = ?
+         LIMIT 1`,
+        [invoiceRef],
+      );
+      const row = result.rows?._array?.[0] as
+        | {name?: string; phone?: string | null}
+        | undefined;
+      if (row?.name == null) {
+        return null;
+      }
+      return {name: String(row.name), phone: row.phone ?? null};
+    } catch {
+      return null;
+    }
+  },
+
+  /** v17 (round-23 #2): local repayments collected in a range —
+   *  the reports' «سدادّات دفتر المتجر» figure. */
+  async paymentsInRange(
+    from: string,
+    to: string,
+  ): Promise<{count: number; minor: number}> {
+    try {
+      const result = await getDb().execute(
+        `SELECT COUNT(*) AS cnt, COALESCE(SUM(amount_minor), 0) AS minor
+         FROM local_payments
+         WHERE created_at >= ? AND created_at <= ?`,
+        [`${from} 00:00:00`, `${to} 23:59:59`],
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        cnt?: number | null;
+        minor?: number | null;
+      };
+      return {count: Number(row.cnt ?? 0), minor: Number(row.minor ?? 0)};
+    } catch {
+      return {count: 0, minor: 0};
+    }
+  },
+
   // ── totals (dashboard + reports) ──────────────────────────────
 
   /** Store-wide local book totals. */
@@ -498,15 +549,31 @@ export const LocalDebtsRepo = {
   },
 
   /**
-   * The migration path (round-22 #4): re-registers a LINKED
-   * customer's outstanding LOCAL debts into the صِلة queue — each
-   * takes a FRESH INV-D number (collision-proof) and uploads as a
-   * normal debt sale upload. The local rows are marked migrated so
-   * they never count twice.
-   * Returns the number of debts queued for migration.
+   * v17 (round-23 #8): link + AUTO-migrate + settle + delete — ONE
+   * action, the merchant's exact requested flow:
+   *
+   *   «عند ربط حساب زبون محلي بتطبيق صِلة» the outstanding balance
+   *   migrates AUTOMATICALLY (no second button), the customer's
+   *   prepaid credit in صِلة (when it exists) is recognized as a
+   *   settlement (كسداد في المتجر — the server consumes it on
+   *   upload, 0067), and the LOCAL account is DELETED afterwards —
+   *   the person now lives on the صِلة side only (their QR sales go
+   *   straight to صِلة, the redirect guard disappears with the
+   *   account).
+   *
+   * The old manual path had two fatal bugs: its idempotency key
+   * (`REF-timestamp`) was NOT a UUID v4, so the server's zod bounced
+   * every migration with VALIDATION_ERROR (debts never reached صِلة
+   * — «لا يتم ترحيل الديون تلقائياً»), and it never looked at the
+   * customer's prepaid credit at all. Now: proper uuidV4 key, the
+   * FULL outstanding uploads as ONE purchase (the server consumes
+   * the credit itself and shows it as «شراء بالدين» — never a
+   * payment), and credit_covered_minor carries the settled part for
+   * the store's books.
    */
-  async migrateOutstandingToSila(
+  async linkAndMigrateToSila(
     customerId: number,
+    silaCustomerId: string,
     reserveDebtRef: () => Promise<string>,
     enqueue: (input: {
       idempotencyKey: string;
@@ -515,17 +582,24 @@ export const LocalDebtsRepo = {
       amountMinor: number;
       posInvoiceRef: string;
       description: string;
+      creditCoveredMinor: number;
     }) => Promise<void>,
-  ): Promise<number> {
+    cachedCreditMinor: number,
+  ): Promise<{
+    migrated: boolean;
+    outstandingMinor: number;
+    creditCoveredMinor: number;
+    netMinor: number;
+  }> {
     const customer = await this.byId(customerId);
     if (customer == null) {
       throw new Error('حساب الزبون غير موجود');
     }
-    if (customer.sila_customer_id == null) {
-      throw new Error(
-        'اربط الحساب بحساب صِلة أولاً (امسح رمز الزبون من ملفه)',
-      );
-    }
+    // 1. Link FIRST (even a zero-balance account becomes linked —
+    //    then it's simply deleted below; nothing to migrate).
+    await this.linkSila(customerId, silaCustomerId);
+
+    // 2. The NET outstanding of the local book.
     const debts = await this.listDebts(customerId);
     const outstanding = debts.reduce(
       (sum, debt) => sum + (debt.migrated === 0 ? debt.amount_minor : 0),
@@ -535,36 +609,70 @@ export const LocalDebtsRepo = {
       (sum, payment) => sum + payment.amount_minor,
       0,
     );
-    if (outstanding - paid <= 0) {
-      return 0;
-    }
-    // One queue row for the NET outstanding (a single صِلة debt) —
-    // simplest correct migration; per-debt granularity stays in the
-    // local book for the merchant's own audit.
     const net = Math.round(outstanding - paid);
+    if (net <= 0) {
+      // Nothing to carry over — the person moves to صِلة with a
+      // clean slate; the local account is deleted.
+      await this.deleteCustomer(customerId);
+      logDiag(
+        'localDebts',
+        `رُبط ${customer.name} بصِلة — لا رصيد قائم، حُذف الحساب المحلي`,
+      );
+      return {
+        migrated: false,
+        outstandingMinor: 0,
+        creditCoveredMinor: 0,
+        netMinor: 0,
+      };
+    }
+
+    // 3. The prepaid credit the صِلة side carries for this person —
+    //    it settles part (or all) of the migrated balance AT THE
+    //    SERVER on upload; for the store's books it's a payment
+    //    received (the money was prepaid earlier).
+    const creditCovered = Math.max(0, Math.min(cachedCreditMinor, net));
+
+    // 4. ONE queue row for the FULL net outstanding — a single
+    //    صِلة purchase (the server consumes the credit itself and
+    //    adds only net − credit to the outstanding). Proper UUID
+    //    idempotency key — the round-22 bug bounced every migration.
     const freshRef = await reserveDebtRef();
     await enqueue({
-      idempotencyKey: `${freshRef}-${Date.now()}`,
-      customerId: customer.sila_customer_id,
+      idempotencyKey: uuidV4(),
+      customerId: silaCustomerId,
       customerName: customer.name,
       amountMinor: net,
       posInvoiceRef: freshRef,
       description: `ترحيل ديون الدفتر المحلي — ${customer.name} (هوية ${customer.id_number})`,
+      creditCoveredMinor: creditCovered,
     });
-    // Mark every unmigrated debt as migrated under this ref.
+
+    // 5. Every unmigrated debt is now صِلة's truth.
     await getDb().execute(
       `UPDATE local_debts
        SET migrated = 1, migrated_ref = ?
        WHERE local_customer_id = ? AND migrated = 0`,
       [freshRef, customerId],
     );
-    // And bank the received payments against the migration (a single
-    // note row via description — the صِلة side already carries the
-    // net figure; local payments stay visible in the local history).
+
+    // 6. Delete the LOCAL account (user's explicit round-23 request)
+    //    — the person is a صِلة customer now; their QR sales flow to
+    //    صِلة directly (bySilaCustomerId finds nothing → no redirect).
+    await this.deleteCustomer(customerId);
+
     logDiag(
       'localDebts',
-      `رُحّل رصيد ${customer.name} إلى صِلة: ${net} وحدة صغرى عبر ${freshRef}`,
+      `رُحّل رصيد ${customer.name} إلى صِلة: ${net} وحدة صغرى عبر ${freshRef}` +
+        (creditCovered > 0
+          ? ` (غطّى الرصيد المسبق ${creditCovered})`
+          : '') +
+        ' — حُذف الحساب المحلي',
     );
-    return 1;
+    return {
+      migrated: true,
+      outstandingMinor: net,
+      creditCoveredMinor: creditCovered,
+      netMinor: net - creditCovered,
+    };
   },
 };

@@ -41,6 +41,7 @@ import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {InvoiceService} from '../../services/InvoiceService';
 import {SilaRepo} from '../../services/sila/SilaRepo';
+import {LocalDebtsRepo} from '../../database/repositories/LocalDebtsRepo';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {usePrinterStore} from '../../stores/printerStore';
 import {useToastStore} from '../../stores/toastStore';
@@ -193,7 +194,8 @@ export function InvoicesScreen() {
                     was somehow lost; queue membership (older INV-
                     format debts) keeps working as before. */}
                 {debtRefs.has(row.invoice_number) ||
-                row.invoice_number.startsWith('INV-D-') ? (
+                row.invoice_number.startsWith('INV-D-') ||
+                row.invoice_number.startsWith('INV-L-') ? (
                   <View style={styles.debtChip}>
                     <Icon name="qrFrame" size={11} color={c.warning} />
                     <Text style={styles.debtChipText}>دين</Text>
@@ -246,6 +248,14 @@ export function InvoiceDetailScreen() {
   // creditor's identity + the debt operation number, shown and
   // copyable right in the invoice details.
   const [debt, setDebt] = useState<SilaDebtRow | null>(null);
+  // v17 (round-23 #1): the LOCAL-book creditor behind an INV-L
+  // invoice — same identity card, different book (the local ledger
+  // has no صِلة queue row, so without this the debt invoice showed
+  // NO customer at all).
+  const [localCreditor, setLocalCreditor] = useState<{
+    name: string;
+    phone: string | null;
+  } | null>(null);
 
   const copyText = useCallback(
     (label: string, value: string) => {
@@ -270,6 +280,14 @@ export function InvoiceDetailScreen() {
         const debtRow = record
           ? await SilaRepo.byInvoiceRef(record.invoice_number)
           : null;
+        // v17 (round-23 #1): local-book debts (INV-L) carry their
+        // creditor in the store's own ledger.
+        const localRow =
+          record != null && record.invoice_number.startsWith('INV-L-')
+            ? await LocalDebtsRepo.creditorByInvoiceRef(
+                record.invoice_number,
+              )
+            : null;
         const nameMap = new Map<number, string>();
         for (const item of lines) {
           if (!nameMap.has(item.product_id)) {
@@ -285,6 +303,7 @@ export function InvoiceDetailScreen() {
           setItems(lines);
           setNames(nameMap);
           setDebt(debtRow);
+          setLocalCreditor(localRow);
         }
       } catch (error) {
         toast(
@@ -527,6 +546,66 @@ export function InvoiceDetailScreen() {
                 </Text>
               </View>
             ) : null}
+          </Card>
+        ) : null}
+
+        {/* ── v17 (round-23 #1): the LOCAL-book creditor card — INV-L
+          debt invoices finally show WHO owes them (the customer name
+          the merchant asked for on the receipt and in the details). ── */}
+        {localCreditor != null ? (
+          <Card style={styles.creditorCard}>
+            <View style={styles.creditorHeadRow}>
+              <View style={styles.creditorIcon}>
+                <Icon name="book" size={20} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.creditorTitle}>
+                  بيانات الدائن — دفتر المتجر
+                </Text>
+                <Text style={styles.creditorSub}>
+                  دين مسجّل محلياً في دفتر متجرك (لا يُرفع إلى صِلة)
+                </Text>
+              </View>
+              <Badge label="دين محلي" tone="warning" />
+            </View>
+            <View style={styles.creditorRows}>
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>اسم الدائن</Text>
+                <Text style={styles.creditorValue} numberOfLines={1}>
+                  {localCreditor.name}
+                </Text>
+              </View>
+              {localCreditor.phone ? (
+                <View style={styles.creditorRow}>
+                  <Text style={styles.creditorLabel}>هاتف الدائن</Text>
+                  <Text style={styles.creditorValue}>
+                    {localCreditor.phone}
+                  </Text>
+                </View>
+              ) : null}
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>قيمة الدين</Text>
+                <Text style={[styles.creditorValue, {color: c.accent}]}>
+                  {sale != null ? sale.total_amount.toFixed(2) : '—'} ₪
+                </Text>
+              </View>
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>رقم فاتورة الدين</Text>
+                <TouchableOpacity
+                  style={styles.copyRow}
+                  onPress={() =>
+                    sale != null
+                      ? copyText('رقم فاتورة الدين', sale.invoice_number)
+                      : undefined
+                  }
+                  activeOpacity={0.7}>
+                  <Text style={styles.creditorMono} numberOfLines={1}>
+                    {sale?.invoice_number ?? ''}
+                  </Text>
+                  <Icon name="clipboard" size={15} color={c.accent} />
+                </TouchableOpacity>
+              </View>
+            </View>
           </Card>
         ) : null}
 
