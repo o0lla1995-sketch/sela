@@ -213,6 +213,40 @@ async function syncCustomersCycle(): Promise<void> {
     updatedSince.length > 0 ? updatedSince : null,
   );
   const stamp = nowIso();
+  // v18 (round-24 #1): RECONCILE BEFORE THE CACHE OVERWRITE — the
+  // stock engine compares the server's collected-on-store-debts
+  // (pos_purchases − pos_outstanding) against the local books
+  // (cashier uploads + prepaid-credit coverage + already-recorded
+  // app collections), anchored at each customer's baseline. The
+  // positive gap = money the customer paid THROUGH THE SILA APP on
+  // this store's debts — recorded as an incoming collection so the
+  // debt never «vanishes» silently («فإن الدين يختفي ولا يسجل
+  // سدادات مستلمة من صلة» — fixed). Isolated: a reconciliation
+  // failure must never poison the balances refresh (the pass is
+  // idempotent — the next cycle re-covers the same gap).
+  const newCustomerOffsets = new Map<string, number>();
+  try {
+    const recordedMinor = await SilaRepo.reconcileAppCollections(
+      rows.map(row => ({
+        customerId: row.customer_id,
+        name: row.customer_name,
+        posPurchasesMinor: row.pos_purchases_minor ?? 0,
+        posOutstandingMinor: row.pos_outstanding_minor ?? 0,
+      })),
+      newCustomerOffsets,
+    );
+    if (recordedMinor > 0) {
+      notificationsStore.push(
+        'sila_collection',
+        'تحصيل جديد عبر تطبيق صِلة',
+        `استلمت صِلة ${(recordedMinor / 100).toFixed(2)} ₪ من ديون متجرك — سُجّلت في الخزينة والتقارير`,
+        {system: true},
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logDiag('sila', `مطابقة تحصيلات صِلة تأجلت: ${message}`, 'warn');
+  }
   await SilaRepo.upsertCustomers(
     rows.map(row => ({
       customerId: row.customer_id,
@@ -232,6 +266,10 @@ async function syncCustomersCycle(): Promise<void> {
       appPurchasesMinor: row.app_purchases_minor ?? 0,
       lastPaymentAt: row.last_payment_at ?? null,
       lastPaymentAmountMinor: row.last_payment_amount_minor ?? null,
+      // v18: the write-once baseline anchor — only set for customers
+      // the cache has never seen (the map misses existing ones, so
+      // their anchor is preserved by the upsert's COALESCE).
+      reconcileOffsetMinor: newCustomerOffsets.get(row.customer_id),
     })),
     stamp,
   );
@@ -499,18 +537,20 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
             // customers refresh → empty list + zero treasury).
             if (result.customer_name && row.customer_id) {
               try {
-                await SilaRepo.upsertCustomers(
-                  [
-                    {
-                      customerId: row.customer_id,
-                      name: result.customer_name,
-                      phoneLast4:
-                        result.customer_phone_last4 ??
-                        row.customer_phone_last4 ??
-                        null,
-                      outstandingMinor: result.outstanding_minor ?? 0,
-                    },
-                  ],
+                // v18: UPDATE-ONLY touch (the v17 upsert here created
+                // rows, zeroing the origin split until the next full
+                // refresh AND defeating the reconciliation baseline's
+                // «seen in a full refresh» marker).
+                await SilaRepo.touchCustomerAfterSync(
+                  {
+                    customerId: row.customer_id,
+                    name: result.customer_name,
+                    phoneLast4:
+                      result.customer_phone_last4 ??
+                      row.customer_phone_last4 ??
+                      null,
+                    outstandingMinor: result.outstanding_minor ?? 0,
+                  },
                   nowIso(),
                 );
               } catch (error) {

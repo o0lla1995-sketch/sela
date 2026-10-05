@@ -1,10 +1,20 @@
 /**
- * HomeScreen — لوحة المتجر (design.md §9.1).
- * Today's KPIs, stock alerts strip, quick actions and the latest
- * invoices — everything a shop owner glances at between customers.
+ * HomeScreen — لوحة المتجر (design.md §9.1, redesigned v18).
+ * ─────────────────────────────────────────────────────────────────
+ * v18 (round-24 #2): rebuilt around what the merchant actually asks
+ * himself every morning — «ماذا بعت؟ كم ربحت؟ كم في الخزينة؟ كم
+ * عليّ من دين؟» — following the global POS dashboard pattern
+ * (Square / Loyverse / ShopKeep): a hero «اليوم» block (net sales,
+ * profit, receipts, average ticket) then ONE «الخزينة والديون» card
+ * with net figures and a short breakdown. Sila-specific numbers
+ * appear ONLY while the device is actually paired (round-24 #3 —
+ * stats are never held hostage to the linking); the local debt book
+ * works standalone, and money صِلة collected on the store's behalf
+ * (round-24 #1) is part of the treasury, not a vanishing debt.
  */
 import React, {useCallback, useEffect, useState} from 'react';
 import {
+  Image,
   ScrollView,
   StyleSheet,
   Text,
@@ -22,7 +32,11 @@ import {
   StatCard,
 } from '../components/ui';
 import {Icon, IconChip, type IconName} from '../components/Icon';
-import {ReportService, type ReportBundle} from '../services/ReportService';
+import {
+  ReportService,
+  type ReportBundle,
+  type TreasurySnapshot,
+} from '../services/ReportService';
 import {StockAlertsService} from '../services/StockAlertsService';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
@@ -43,7 +57,6 @@ import {
 import {formatMoney, formatQty, relativeTime} from '../core/format';
 import {APP_NAME, APP_VERSION_LABEL, BASE_UNIT_NAME} from '../core/config';
 import {baseUnitLabelOf} from '../core/types';
-import {Image} from 'react-native';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 
 const QUICK_ACTIONS: {
@@ -57,16 +70,15 @@ const QUICK_ACTIONS: {
     | 'Reports'
     | 'Stocktake'
     | 'Invoices'
-    | 'Sila';
+    | 'Sila'
+    | 'LocalDebts';
   accent?: boolean;
 }[] = [
   {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
   {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
-  {key: 'stocktake', label: 'الجرد', icon: 'clipboard', target: 'Stocktake'},
   {key: 'invoices', label: 'الفواتير', icon: 'inbox', target: 'Invoices'},
-  // v12 (round-18 #5): direct access to the SILA debt log from the
-  // dashboard — previously buried behind Settings ← صِلة.
-  {key: 'sila', label: 'سجل الديون', icon: 'qrFrame', target: 'Sila'},
+  {key: 'debts', label: 'الديون', icon: 'book', target: 'LocalDebts'},
+  {key: 'stocktake', label: 'الجرد', icon: 'clipboard', target: 'Stocktake'},
   {key: 'reports', label: 'التقارير', icon: 'chart', target: 'Reports'},
 ];
 
@@ -81,6 +93,8 @@ export function HomeScreen() {
   const silaPending = useSilaStore(state => state.pending);
   const toast = useToastStore(state => state.show);
 
+  const paired = silaPairing != null;
+
   const [bundle, setBundle] = useState<ReportBundle | null>(null);
   const [recentSales, setRecentSales] = useState<
     {
@@ -90,70 +104,55 @@ export function HomeScreen() {
       created_at: string;
     }[]
   >([]);
-  // v12 (round-18 #4): the debts & treasury report on the dashboard.
-  // v13 (round-19 #1): the outstanding figure now comes from the
-  // SERVER-synced صِلة customers cache (Σ outstanding_minor — shrinks
-  // when customers repay through the صِلة app), plus the local rows
-  // still awaiting upload so nothing is understated while offline.
-  const [debtTotals, setDebtTotals] = useState<{
-    allMinor: number;
-    allCount: number;
-    pendingMinor: number;
-    pendingCount: number;
+  // v18 (round-24 #2): ONE treasury snapshot replaces the old wall
+  // of debt counters — net cash with its sources.
+  const [treasury, setTreasury] = useState<TreasurySnapshot | null>(null);
+  const [localBook, setLocalBook] = useState<{
+    outstandingMinor: number;
+    debtorsCount: number;
   } | null>(null);
-  const [serverBalances, setServerBalances] = useState<{
-    totalMinor: number;
-    posTotalMinor: number;
-    appTotalMinor: number;
+  // Sila figures — meaningful only while paired.
+  const [silaDebt, setSilaDebt] = useState<{
+    outstandingMinor: number;
     debtorsCount: number;
     lastSyncedAt: string | null;
   } | null>(null);
-  const [treasuryRevenue, setTreasuryRevenue] = useState<number | null>(null);
-  // v15 (round-21 #3): repayments actually collected at the cashier.
-  const [paymentsReceived, setPaymentsReceived] = useState<{
-    allMinor: number;
-    todayMinor: number;
-  } | null>(null);
-  // v16 (round-22 #4): the STORE-LOCAL debt book totals — the main
-  // «الدين الإجمالي» card merges them with the صِلة store-origin
-  // part; the Sila-APP part stays informational (للمعلومية).
-  const [localBook, setLocalBook] = useState<{
-    outstandingMinor: number;
-    debtsMinor: number;
-    paymentsMinor: number;
-    customersCount: number;
-    debtorsCount: number;
+  const [pendingDebts, setPendingDebts] = useState<{
+    count: number;
+    minor: number;
   } | null>(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [
-        todayBundle,
-        latest,
-        silaTotals,
-        balances,
-        allRevenue,
-        paymentTotals,
-        localTotals,
-      ] = await Promise.all([
-        ReportService.loadBundle('today'),
-        SaleRepo.listRecent(3),
-        SilaRepo.totals(),
-        SilaRepo.customersOutstandingTotal(),
-        SaleRepo.allTimeRevenue(),
-        SilaRepo.paymentsTotals(),
-        LocalDebtsRepo.totals(),
-      ]);
+      const [todayBundle, latest, treasurySnapshot, localTotals] =
+        await Promise.all([
+          ReportService.loadBundle('today'),
+          SaleRepo.listRecent(3),
+          ReportService.treasurySnapshot(),
+          LocalDebtsRepo.totals(),
+        ]);
       setBundle(todayBundle);
       setRecentSales(latest);
-      setDebtTotals(silaTotals);
-      setServerBalances(balances);
-      setTreasuryRevenue(allRevenue);
-      setPaymentsReceived({
-        allMinor: paymentTotals.allMinor,
-        todayMinor: paymentTotals.todayMinor,
+      setTreasury(treasurySnapshot);
+      setLocalBook({
+        outstandingMinor: localTotals.outstandingMinor,
+        debtorsCount: localTotals.debtorsCount,
       });
-      setLocalBook(localTotals);
+      // Sila-side figures — refreshed live, read only when paired.
+      const [silaTotals, queueTotals] = await Promise.all([
+        SilaRepo.customersOutstandingTotal(),
+        SilaRepo.totals(),
+      ]);
+      setSilaDebt({
+        outstandingMinor: silaTotals.posTotalMinor + queueTotals.pendingMinor,
+        debtorsCount:
+          silaTotals.debtorsCount + (queueTotals.pendingCount > 0 ? 1 : 0),
+        lastSyncedAt: silaTotals.lastSyncedAt,
+      });
+      setPendingDebts({
+        count: queueTotals.pendingCount,
+        minor: queueTotals.pendingMinor,
+      });
     } catch {
       // Dashboard is informational — previous data stays shown.
     }
@@ -163,10 +162,9 @@ export function HomeScreen() {
     const unsubscribe = navigation.addListener('focus', () => {
       void loadData();
       void StockAlertsService.evaluate();
-      // v13 (round-19 #1): refresh the صِلة balances the moment the
-      // merchant lands on the dashboard — «الديون القائمة» و«الرصيد
-      // بعد السداد» now mirror the debts screen (repayments included)
-      // instead of summing local debt rows that never shrink.
+      // v18: the balances refresh also runs the Sila-app collections
+      // reconciliation (round-24 #1) — money the app collected on the
+      // store's behalf lands in the books the moment we're online.
       void SilaSync.refreshBalances().then(() => {
         void loadData();
       });
@@ -176,8 +174,7 @@ export function HomeScreen() {
 
   const alerts = StockAlertsService.activeAlerts(8);
 
-  /** v12 (round-18 #1): one-tap manual sync straight from the
-   *  dashboard's pending-debts strip — zero friction, real feedback. */
+  /** One-tap manual sync straight from the pending strip. */
   const runSyncFromHome = useCallback(() => {
     void SilaSync.syncNow().then(outcome => {
       toast(
@@ -188,41 +185,30 @@ export function HomeScreen() {
     });
   }, [toast, loadData]);
 
-  // v15 (round-21 #3 — SILA_POS_DEBT_SEPARATION §3.4):
-  // «الديون القائمة» = STORE-origin debts ONLY — the pos part the
-  // صِلة server attributes to this store's invoices (Σ
-  // pos_outstanding_minor) + this device's not-yet-uploaded debt
-  // rows (store-origin by definition). App-origin debts used to be
-  // mixed in — the «تداخل» that inflated the number.
-  const storeOutstandingShekels =
-    ((serverBalances?.posTotalMinor ?? 0) + (debtTotals?.pendingMinor ?? 0)) /
-    100;
-  // Informational: debts born inside the Sila app — NOT this store's
-  // sales; never enters the treasury or P&L (§3.4 forbidden list).
-  const appDebtsShekels = (serverBalances?.appTotalMinor ?? 0) / 100;
-  // Treasury = cash sales (revenue MINUS credit invoices — goods
-  // that left on credit brought no cash) PLUS repayments actually
-  // collected at the cashier. A repayment is an asset swap
-  // (دين → كاش), never revenue (§3.4) — the old formula (revenue −
-  // outstanding) double-counted and shrank on every repayment.
-  const creditSalesShekels = (debtTotals?.allMinor ?? 0) / 100;
-  const collectedShekels = (paymentsReceived?.allMinor ?? 0) / 100;
-  // v16 (round-22 #4): local-book figures — outstanding, collected
-  // repayments, and the credit-sales total (goods that left with no
-  // cash; they ARE in revenue — same asset-swap discipline §3.4).
+  // ── The four net numbers (round-24 #2) ──────────────────────────
+  const cashTotal = treasury?.cashTotal ?? 0;
   const localOutstandingShekels = (localBook?.outstandingMinor ?? 0) / 100;
-  const localCollectedShekels = (localBook?.paymentsMinor ?? 0) / 100;
-  const localDebtsShekels = (localBook?.debtsMinor ?? 0) / 100;
-  const treasuryCash =
-    (treasuryRevenue ?? 0) -
-    creditSalesShekels -
-    localDebtsShekels +
-    collectedShekels +
-    localCollectedShekels;
-  const debtorsCount =
-    (serverBalances?.debtorsCount ?? 0) +
-    ((debtTotals?.pendingCount ?? 0) > 0 ? 1 : 0) +
-    (localBook?.debtorsCount ?? 0);
+  const silaOutstandingShekels = paired
+    ? (silaDebt?.outstandingMinor ?? 0) / 100
+    : 0;
+  const debtTotal = localOutstandingShekels + silaOutstandingShekels;
+  const debtorsTotal =
+    (localBook?.debtorsCount ?? 0) + (paired ? silaDebt?.debtorsCount ?? 0 : 0);
+  // Treasury breakdown (all-time sources of the cash number).
+  const salesCash =
+    (treasury?.revenueAllTime ?? 0) - (treasury?.creditSalesAllTime ?? 0);
+  const collectionsTotal =
+    (treasury?.localCollectionsAllTime ?? 0) +
+    (treasury?.cashierCollectionsAllTime ?? 0) +
+    (treasury?.appCollectionsAllTime ?? 0) +
+    (treasury?.prepaidCoveredAllTime ?? 0);
+  const viaSilaShekels =
+    (treasury?.cashierCollectionsAllTime ?? 0) +
+    (treasury?.appCollectionsAllTime ?? 0) +
+    (treasury?.prepaidCoveredAllTime ?? 0);
+  const invoicesCount = bundle?.summary.invoicesCount ?? 0;
+  const avgTicket =
+    invoicesCount > 0 ? (bundle?.summary.revenue ?? 0) / invoicesCount : 0;
 
   return (
     <View style={styles.screen}>
@@ -256,9 +242,6 @@ export function HomeScreen() {
                 {products.length} منتج · البيع الافتراضي{' '}
                 {settings.defaultPricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}
               </Text>
-              {/* v12 (round-18 #5): the version badge moved out of the
-                store card — the footer at the bottom of the dashboard
-                already carries the version label. */}
             </View>
             <Badge
               label={
@@ -273,8 +256,8 @@ export function HomeScreen() {
           </View>
         </Card>
 
-        {/* ── Today KPIs ─────────────────────────────────────── */}
-        <SectionTitle title="ملخص اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
+        {/* ── ملخص اليوم — the hero block (net figures first) ── */}
+        <SectionTitle title="اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
         <View style={styles.statsGrid}>
           <View style={styles.statsRow}>
             <StatCard
@@ -295,180 +278,171 @@ export function HomeScreen() {
           <View style={styles.statsRow}>
             <StatCard
               label="عدد الفواتير"
-              value={String(bundle?.summary.invoicesCount ?? 0)}
+              value={String(invoicesCount)}
               icon="inbox"
             />
             <StatCard
-              label="القطع المبيعة"
-              value={String(bundle?.summary.itemsCount ?? 0)}
-              icon="box"
+              label="متوسط الفاتورة"
+              value={formatMoney(avgTicket)}
+              icon="tag"
             />
           </View>
         </View>
 
-        {/* ── v12 (round-18 #4): debts & treasury report ──── */}
+        {/* ── الخزينة والديون — ONE clean card, never gated ──── */}
         <SectionTitle
-          title="الديون والخزينة"
-          hint="ديون دفترك المحلي + ديون صِلة — منفصلة لا تختلط"
+          title="الخزينة والديون"
+          hint="النقد الفعلي لديك + الديون المستحقة لك"
           action={
-            <View style={{flexDirection: 'row', gap: spacing.md}}>
-              <TouchableOpacity
-                onPress={() => navigation.navigate('LocalDebts' as never)}>
-                <Text style={styles.seeAll}>دفتر المتجر</Text>
-              </TouchableOpacity>
-              {silaPairing != null ? (
-                <TouchableOpacity
-                  onPress={() => navigation.navigate('Sila' as never)}>
-                  <Text style={styles.seeAll}>سجل صِلة</Text>
-                </TouchableOpacity>
-              ) : undefined}
-            </View>
+            <TouchableOpacity
+              onPress={() => navigation.navigate('LocalDebts' as never)}>
+              <Text style={styles.seeAll}>دفتر الديون</Text>
+            </TouchableOpacity>
           }
         />
-        {silaPairing == null ? (
-          <>
+        <Card style={styles.moneyCard}>
+          <View style={styles.moneyRow}>
+            <View style={styles.moneyCell}>
+              <Text style={styles.moneyLabel}>النقد بالخزينة</Text>
+              <Text
+                style={[
+                  styles.moneyValue,
+                  {color: cashTotal >= 0 ? c.success : c.danger},
+                ]}>
+                {formatMoney(cashTotal)}
+              </Text>
+              <Text style={styles.moneyMeta}>مبيعات نقدية + تحصيلات ديون</Text>
+            </View>
+            <View style={styles.moneyDivider} />
+            <View style={styles.moneyCell}>
+              <Text style={styles.moneyLabel}>الدين القائم لك</Text>
+              <Text
+                style={[
+                  styles.moneyValue,
+                  {color: debtTotal > 0 ? c.danger : c.success},
+                ]}>
+                {formatMoney(debtTotal)}
+              </Text>
+              <Text style={styles.moneyMeta}>
+                {debtTotal > 0
+                  ? `${debtorsTotal} زبون مدين لك`
+                  : 'لا ديون قائمة'}
+              </Text>
+            </View>
+          </View>
+
+          {/* The short breakdown — sources of the two numbers above. */}
+          <View style={styles.breakdownBox}>
+            <View style={styles.breakdownRow}>
+              <Text style={styles.breakdownLabel}>مبيعات نقدية (كامل السجل)</Text>
+              <Text style={[styles.breakdownValue, {color: c.text}]}>
+                {formatMoney(salesCash)}
+              </Text>
+            </View>
+            <View style={styles.breakdownRow}>
+              <Text style={styles.breakdownLabel}>تحصيلات ديون مستلمة</Text>
+              <Text style={[styles.breakdownValue, {color: c.success}]}>
+                {formatMoney(collectionsTotal)}
+              </Text>
+            </View>
+            {paired ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  منها عبر تطبيق صِلة (تحصيل + رصيد مسبق)
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.info}]}>
+                  {formatMoney(viaSilaShekels)}
+                </Text>
+              </View>
+            ) : null}
+            <View style={styles.breakdownDivider} />
+            <View style={styles.breakdownRow}>
+              <Text style={styles.breakdownLabel}>من الدين: دفتر المتجر</Text>
+              <Text style={[styles.breakdownValue, {color: c.warning}]}>
+                {formatMoney(localOutstandingShekels)}
+              </Text>
+            </View>
+            {paired ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  من الدين: فواتير عبر صِلة
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.warning}]}>
+                  {formatMoney(silaOutstandingShekels)}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+
+          {paired ? (
+            <>
+              {(pendingDebts?.count ?? 0) > 0 || silaPending > 0 ? (
+                <TouchableOpacity
+                  style={styles.silaPendingRow}
+                  onPress={runSyncFromHome}
+                  activeOpacity={0.8}>
+                  <Icon name="refresh" size={15} color={c.warning} />
+                  <Text style={[styles.silaPendingText, {color: c.warning}]}>
+                    {pendingDebts?.count ?? silaPending} عملية بانتظار مزامنة
+                    صِلة — اضغط للمزامنة الآن
+                  </Text>
+                  <Icon name="chevronLeft" size={14} color={c.warning} />
+                </TouchableOpacity>
+              ) : null}
+              {silaDebt?.lastSyncedAt != null ? (
+                <Text style={styles.balancesStamp}>
+                  أرصدة صِلة محدّثة · {relativeTime(silaDebt.lastSyncedAt)}
+                </Text>
+              ) : null}
+            </>
+          ) : (
             <TouchableOpacity
-              style={styles.silaCtaCard}
+              style={styles.silaLinkRow}
               onPress={() => navigation.navigate('Sila' as never)}
               activeOpacity={0.8}>
-              <View style={styles.silaCtaIcon}>
-                <Icon name="qrFrame" size={20} color={c.accent} />
-              </View>
-              <View style={{flex: 1}}>
-                <Text style={styles.silaCtaTitle}>فعّل البيع بالدين — صِلة</Text>
-                <Text style={styles.silaCtaText}>
-                  اربط حساب التاجر لتسجيل فواتير الدين ومتابعتها هنا
-                </Text>
-              </View>
-              <Icon name="chevronLeft" size={16} color={c.textFaint} />
-            </TouchableOpacity>
-            {/* v16 (round-22 #4): the LOCAL debt book works WITHOUT
-                صِلة — accounts by ID number, debts & repayments in
-                the store's own books. */}
-            <TouchableOpacity
-              style={[styles.silaCtaCard, {marginTop: spacing.md}]}
-              onPress={() => navigation.navigate('LocalDebts' as never)}
-              activeOpacity={0.8}>
-              <View style={styles.silaCtaIcon}>
-                <Icon name="book" size={20} color={c.accent} />
-              </View>
-              <View style={{flex: 1}}>
-                <Text style={styles.silaCtaTitle}>دفتر ديون المتجر</Text>
-                <Text style={styles.silaCtaText}>
-                  حسابات دين محلية بالهوية والاسم والجوال — بدون تطبيق صِلة
-                </Text>
-              </View>
-              <Icon name="chevronLeft" size={16} color={c.textFaint} />
-            </TouchableOpacity>
-            {localBook != null && localBook.outstandingMinor !== 0 ? (
-              <View style={styles.statsRow}>
-                <StatCard
-                  label={`ديون الدفتر المحلي · ${localBook.debtorsCount} مدين`}
-                  value={formatMoney(localBook.outstandingMinor / 100)}
-                  tone="danger"
-                  icon="book"
-                />
-                <StatCard
-                  label="النقد بالخزينة"
-                  value={formatMoney(treasuryCash)}
-                  tone={treasuryCash >= 0 ? 'success' : 'danger'}
-                  icon="wallet"
-                />
-              </View>
-            ) : null}
-          </>
-        ) : (
-          <>
-            <View style={styles.statsRow}>
-              {/* v16 (round-22 #4): the MAIN card is the TOTAL debt —
-                  the local debt book + the صِلة store-origin part —
-                  exactly as requested: «في الديون يظهر الدين
-                  الإجمالي». */}
-              <StatCard
-                label={`الدين الإجمالي القائم · ${debtorsCount} مدين`}
-                value={formatMoney(
-                  storeOutstandingShekels + localOutstandingShekels,
-                )}
-                tone={storeOutstandingShekels + localOutstandingShekels > 0 ? 'danger' : 'success'}
-                icon="book"
-              />
-              <StatCard
-                label="النقد بالخزينة"
-                value={formatMoney(treasuryCash)}
-                tone={treasuryCash >= 0 ? 'success' : 'danger'}
-                icon="wallet"
-              />
-            </View>
-            {/* v15 (§3.3/§3.4) + v16 (round-22 #4): the split strip —
-                the total splits into the local book, the صِلة
-                store-origin part, and the Sila-APP part which is
-                informational only and NEVER enters the treasury
-                («ديون تطبيق صلة للمعلومية فقط — ديون مستخدم صلة
-                المرتبطة بالمتجر»). */}
-            <View style={styles.splitStrip}>
-              <View style={styles.splitStripCell}>
-                <Text style={styles.splitStripLabel}>منها دفتر المتجر</Text>
-                <Text style={[styles.splitStripValue, {color: c.warning}]}>
-                  {formatMoney(localOutstandingShekels)}
-                </Text>
-              </View>
-              <View style={styles.splitStripDivider} />
-              <View style={styles.splitStripCell}>
-                <Text style={styles.splitStripLabel}>منها فواتير متجري (صِلة)</Text>
-                <Text style={[styles.splitStripValue, {color: c.accent}]}>
-                  {formatMoney(storeOutstandingShekels)}
-                </Text>
-              </View>
-              <View style={styles.splitStripDivider} />
-              <View style={styles.splitStripCell}>
-                <Text style={styles.splitStripLabel}>
-                  ديون تطبيق صِلة (للمعلومية)
-                </Text>
-                <Text style={[styles.splitStripValue, {color: c.info}]}>
-                  {formatMoney(appDebtsShekels)}
-                </Text>
-              </View>
-            </View>
-            <View style={styles.splitStrip}>
-              <View style={styles.splitStripCell}>
-                <Text style={styles.splitStripLabel}>
-                  سدادّات مستلمة (صِلة)
-                </Text>
-                <Text style={[styles.splitStripValue, {color: c.success}]}>
-                  {formatMoney(collectedShekels)}
-                </Text>
-              </View>
-              <View style={styles.splitStripDivider} />
-              <View style={styles.splitStripCell}>
-                <Text style={styles.splitStripLabel}>
-                  سدادّات مستلمة (دفتر المتجر)
-                </Text>
-                <Text style={[styles.splitStripValue, {color: c.success}]}>
-                  {formatMoney(localCollectedShekels)}
-                </Text>
-              </View>
-            </View>
-            {serverBalances?.lastSyncedAt != null ? (
-              <Text style={styles.balancesStamp}>
-                محدّث من صِلة · {relativeTime(serverBalances.lastSyncedAt)} ·
-                ديون متجري منفصلة عن ديون التطبيق
+              <Icon name="qrFrame" size={14} color={c.textDim} />
+              <Text style={styles.silaLinkText}>
+                مربوط بالتطبيق؟ اربط صِلة لمزامنة الديون والتحصيلات سحابياً
               </Text>
-            ) : null}
-            {silaPending > 0 || (debtTotals?.pendingCount ?? 0) > 0 ? (
-              <TouchableOpacity
-                style={styles.silaPendingRow}
-                onPress={runSyncFromHome}
-                activeOpacity={0.8}>
-                <Icon name="refresh" size={15} color={c.warning} />
-                <Text style={[styles.silaPendingText, {color: c.warning}]}>
-                  {debtTotals?.pendingCount ?? silaPending} دين بانتظار مزامنة
-                  صِلة — اضغط للمزامنة الآن
-                </Text>
-                <Icon name="chevronLeft" size={14} color={c.warning} />
-              </TouchableOpacity>
-            ) : null}
-          </>
-        )}
+              <Icon name="chevronLeft" size={13} color={c.textFaint} />
+            </TouchableOpacity>
+          )}
+        </Card>
+
+        {/* ── Quick actions ──────────────────────────────────── */}
+        <SectionTitle title="إجراءات سريعة" />
+        <View style={styles.quickGrid}>
+          {QUICK_ACTIONS.map(action => (
+            <TouchableOpacity
+              key={action.key}
+              style={[
+                styles.quickCard,
+                action.accent
+                  ? {backgroundColor: c.accent, borderColor: c.accent}
+                  : null,
+              ]}
+              onPress={() =>
+                navigation.navigate(
+                  action.target as never,
+                  action.target === 'ProductForm' ? {} : undefined,
+                )
+              }
+              activeOpacity={0.8}>
+              <Icon
+                name={action.icon}
+                size={26}
+                color={action.accent ? c.onAccent : c.accent}
+              />
+              <Text
+                style={[
+                  styles.quickLabel,
+                  action.accent ? {color: c.onAccent} : null,
+                ]}>
+                {action.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
         {/* ── Stock alerts ───────────────────────────────────── */}
         {alerts.length > 0 ? (
@@ -526,41 +500,6 @@ export function HomeScreen() {
             </View>
           </>
         ) : null}
-
-        {/* ── Quick actions ──────────────────────────────────── */}
-        <SectionTitle title="إجراءات سريعة" />
-        <View style={styles.quickGrid}>
-          {QUICK_ACTIONS.map(action => (
-            <TouchableOpacity
-              key={action.key}
-              style={[
-                styles.quickCard,
-                action.accent
-                  ? {backgroundColor: c.accent, borderColor: c.accent}
-                  : null,
-              ]}
-              onPress={() =>
-                navigation.navigate(
-                  action.target as never,
-                  action.target === 'ProductForm' ? {} : undefined,
-                )
-              }
-              activeOpacity={0.8}>
-              <Icon
-                name={action.icon}
-                size={26}
-                color={action.accent ? c.onAccent : c.accent}
-              />
-              <Text
-                style={[
-                  styles.quickLabel,
-                  action.accent ? {color: c.onAccent} : null,
-                ]}>
-                {action.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
 
         {/* ── Recent invoices ────────────────────────────────── */}
         <SectionTitle
@@ -661,35 +600,73 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
-    // v12 (round-18 #4): debts & treasury section styles.
-    silaCtaCard: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      backgroundColor: c.surface,
-      borderWidth: 1,
-      borderColor: c.accentSoft,
-      borderRadius: radius.lg,
-      padding: spacing.md,
-    },
-    silaCtaIcon: {
-      width: 42,
-      height: 42,
-      borderRadius: 12,
-      backgroundColor: c.accentSoft,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    silaCtaTitle: {
-      color: c.text,
+    seeAll: {
+      color: c.accent,
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
-    silaCtaText: {
+    statsGrid: {
+      gap: spacing.md,
+    },
+    statsRow: {
+      flexDirection: 'row',
+      gap: spacing.md,
+    },
+    // ── v18 (round-24 #2): the الخزينة والديون card ─────────────
+    moneyCard: {gap: spacing.md},
+    moneyRow: {flexDirection: 'row', alignItems: 'stretch'},
+    moneyCell: {flex: 1, alignItems: 'center', gap: 3},
+    moneyDivider: {
+      width: 1,
+      backgroundColor: c.borderSoft,
+      marginVertical: 2,
+    },
+    moneyLabel: {
       color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    moneyValue: {
+      fontFamily: fonts.black,
+      fontSize: typography.title + 2,
+      fontVariant: ['tabular-nums'],
+    },
+    moneyMeta: {
+      color: c.textFaint,
       fontFamily: fonts.regular,
       fontSize: typography.micro + 1,
-      marginTop: 1,
+      textAlign: 'center',
+    },
+    breakdownBox: {
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.md,
+      gap: 6,
+    },
+    breakdownRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    breakdownLabel: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 2,
+      flex: 1,
+      textAlign: 'left',
+    },
+    breakdownValue: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    breakdownDivider: {
+      height: 1,
+      backgroundColor: c.borderSoft,
+      marginVertical: 2,
     },
     silaPendingRow: {
       flexDirection: 'row',
@@ -708,25 +685,27 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 2,
       textAlign: 'left',
     },
-    // v13 (round-19 #1): "when was this synced from صِلة" caption.
+    // v18 (round-24 #3): a SUBTLE one-line hint — never a wall that
+    // pushes the merchant's own numbers away.
+    silaLinkRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      justifyContent: 'center',
+      paddingVertical: 6,
+    },
+    silaLinkText: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      flex: 0,
+    },
     balancesStamp: {
       color: c.textFaint,
       fontFamily: fonts.regular,
       fontSize: typography.micro + 1,
       textAlign: 'center',
       marginTop: -2,
-    },
-    seeAll: {
-      color: c.accent,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-    },
-    statsGrid: {
-      gap: spacing.md,
-    },
-    statsRow: {
-      flexDirection: 'row',
-      gap: spacing.md,
     },
     alertsCol: {
       gap: spacing.sm,
@@ -771,8 +750,8 @@ const useStyles = makeStyles(c =>
       gap: spacing.sm,
     },
     quickCard: {
-      width: '48.3%',
-      minHeight: 92,
+      width: '31.6%',
+      minHeight: 88,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.borderSoft,
@@ -780,7 +759,7 @@ const useStyles = makeStyles(c =>
       alignItems: 'flex-start',
       justifyContent: 'center',
       gap: spacing.sm,
-      paddingHorizontal: spacing.lg,
+      paddingHorizontal: spacing.md,
     },
     quickLabel: {
       color: c.text,
@@ -826,39 +805,6 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
       textAlign: 'center',
       marginTop: spacing.md,
-    },
-    // v15 (round-21 #3): store/app debt split strip on the dashboard.
-    splitStrip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: c.surface,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      paddingVertical: spacing.sm,
-      paddingHorizontal: spacing.md,
-      gap: spacing.sm,
-    },
-    splitStripCell: {
-      flex: 1,
-      alignItems: 'center',
-      gap: 2,
-    },
-    splitStripDivider: {
-      width: 1,
-      alignSelf: 'stretch',
-      backgroundColor: c.borderSoft,
-    },
-    splitStripLabel: {
-      color: c.textDim,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro,
-      textAlign: 'center',
-    },
-    splitStripValue: {
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-      fontVariant: ['tabular-nums'],
     },
   }),
 );

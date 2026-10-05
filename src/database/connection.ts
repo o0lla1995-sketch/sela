@@ -150,6 +150,11 @@ const DDL_STATEMENTS: string[] = [
     id_number TEXT,
     outstanding_minor INTEGER NOT NULL DEFAULT 0,
     credit_minor INTEGER NOT NULL DEFAULT 0,
+    /** v18: baseline anchor for the collections reconciliation —
+     *  the historical stock gap frozen at this store's FIRST full
+     *  sight of the customer (0 on upgrades where the books already
+     *  cover the server history). Write-once; never updated after. */
+    reconcile_offset_minor INTEGER NOT NULL DEFAULT 0,
     last_synced_at TEXT
   )`,
   // ── v15 (round-21 #3 — SILA_POS_DEBT_SEPARATION §3.1) ────────
@@ -217,6 +222,22 @@ const DDL_STATEMENTS: string[] = [
   )`,
   'CREATE INDEX IF NOT EXISTS idx_local_debts_cust ON local_debts(local_customer_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_local_pays_cust ON local_payments(local_customer_id, created_at DESC)',
+  // ── v18 (round-24 #1): money صِلة collected on the store's behalf —
+  // every time a customer repays their STORE debt through the Sila
+  // app (not at the cashier), the reconciliation engine records it
+  // here so the debt shrinking is always paired with a visible
+  // «تحصيل وارد من صِلة» entry. Nothing disappears from the books
+  // anymore — the treasury and reports both read this ledger.
+  `CREATE TABLE IF NOT EXISTS sila_app_collections (
+    local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id TEXT NOT NULL,
+    customer_name TEXT,
+    amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+    pos_purchases_minor INTEGER,
+    pos_outstanding_minor INTEGER,
+    detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_sila_acct_cust ON sila_app_collections(customer_id, detected_at DESC)',
 ];
 
 const DEFAULT_CATEGORIES: string[] = [
@@ -642,6 +663,52 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 10;
   }
 
+  if (version < 11) {
+    // v18 (round-24 #1): the Sila-app collections ledger — the
+    // reconciliation engine writes one row per detected «تحصيل عبر
+    // تطبيق صِلة» (customer repaid their STORE debt through the
+    // Sila app). Before v18 those repayments simply vanished: the
+    // server balance dropped, the store's books never saw the money
+    // (the exact complaint «فإن الدين يختفي ولا يسجل سدادات مستلمة
+    // من صلة»). Fresh DDL above covers new installs; this heals old
+    // ones. The stock reconciliation repopulates history on the
+    // first sync after this update — no data was ever lost
+    // server-side, it just was never mirrored locally.
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS sila_app_collections (
+        local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id TEXT NOT NULL,
+        customer_name TEXT,
+        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+        pos_purchases_minor INTEGER,
+        pos_outstanding_minor INTEGER,
+        detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sila_acct_cust ON sila_app_collections(customer_id, detected_at DESC)',
+    );
+    // v18: the reconciliation baseline anchor on the customers cache
+    // (old installs get 0 = «the books already cover the history» —
+    // exactly the upgrade path that must RECOVER the gap, never
+    // baseline it away).
+    const offsetCheck = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sila_customers') WHERE name = 'reconcile_offset_minor'",
+    );
+    const hasOffset =
+      (offsetCheck.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasOffset) {
+      await database.execute(
+        'ALTER TABLE sila_customers ADD COLUMN reconcile_offset_minor INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    logDiag(
+      'db',
+      'ترحيل v11: سجل تحصيلات تطبيق صِلة (مطابقة الديون المسددة خارج الكاشير)',
+    );
+    version = 11;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -722,11 +789,12 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM sila_customers');
   await database.execute('DELETE FROM sila_debt_queue');
   await database.execute('DELETE FROM sila_payment_queue');
+  await database.execute('DELETE FROM sila_app_collections');
   await database.execute('DELETE FROM local_payments');
   await database.execute('DELETE FROM local_debts');
   await database.execute('DELETE FROM local_customers');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue','local_customers','local_debts','local_payments')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

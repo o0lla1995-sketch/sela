@@ -63,6 +63,14 @@ function kindMeta(kind: NotificationKind, c: Palette) {
       color: c.success,
       label: 'سداد صِلة',
     },
+    // v18 (round-24 #1): money صِلة collected on the store's behalf —
+    // a positive event the merchant must SEE (not a vanishing debt).
+    sila_collection: {
+      icon: 'wallet',
+      bg: c.successSoft,
+      color: c.success,
+      label: 'تحصيل عبر صِلة',
+    },
   };
   return map[kind] ?? map.info;
 }

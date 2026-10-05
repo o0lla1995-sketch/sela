@@ -180,6 +180,10 @@ interface BackupFile {
     app_purchases_minor?: number;
     last_payment_at?: string | null;
     last_payment_amount_minor?: number | null;
+    /** v18 (round-24 #1): the reconciliation baseline anchor —
+     *  restored with the row so the collections engine never
+     *  re-detects pre-anchor history after a restore. */
+    reconcile_offset_minor?: number;
     last_synced_at: string | null;
   }[];
   /** v15 (round-21 #3): the repayments queue — one row per RCP
@@ -234,6 +238,17 @@ interface BackupFile {
     note: string | null;
     created_at: string;
   }[];
+  /** v18 (round-24 #1): money صِلة collected on the store's behalf
+   *  (customer repaid through the Sila app) — restoring this ledger
+   *  keeps the treasury and reports whole; without it every restored
+   *  install would re-detect the same collections as NEW money on
+   *  the next sync (double count). */
+  sila_app_collections?: {
+    customer_id: string;
+    customer_name: string | null;
+    amount_minor: number;
+    detected_at: string;
+  }[];
   /** v8.3: embedded product image files (base64 JPEG) — keyed by
    *  `name`, referenced by the products' original image paths. */
   images?: {name: string; data: string}[];
@@ -271,6 +286,7 @@ export const BackupService = {
       localCustomers,
       localDebts,
       localPayments,
+      appCollections,
     ] = await Promise.all([
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
@@ -307,7 +323,8 @@ export const BackupService = {
                 credit_minor,
                 pos_outstanding_minor, app_outstanding_minor, other_minor,
                 pos_purchases_minor, app_purchases_minor,
-                last_payment_at, last_payment_amount_minor, last_synced_at
+                last_payment_at, last_payment_amount_minor,
+                reconcile_offset_minor, last_synced_at
          FROM sila_customers`,
       ),
       db.execute(
@@ -332,6 +349,10 @@ export const BackupService = {
         `SELECT local_customer_id, receipt_ref, amount_minor, method, note,
                 created_at
          FROM local_payments`,
+      ).catch(() => ({rows: {_array: []}})),
+      db.execute(
+        `SELECT customer_id, customer_name, amount_minor, detected_at
+         FROM sila_app_collections`,
       ).catch(() => ({rows: {_array: []}})),
     ]);
 
@@ -502,6 +523,7 @@ export const BackupService = {
           row.last_payment_amount_minor == null
             ? null
             : Number(row.last_payment_amount_minor),
+        reconcile_offset_minor: Number(row.reconcile_offset_minor ?? 0),
         last_synced_at:
           row.last_synced_at == null ? null : String(row.last_synced_at),
       })),
@@ -565,6 +587,13 @@ export const BackupService = {
         method: String(row.method ?? 'cash'),
         note: row.note == null ? null : String(row.note),
         created_at: String(row.created_at ?? ''),
+      })),
+      // v18 (round-24 #1): the Sila-app collections ledger.
+      sila_app_collections: rowsOf(appCollections).map(row => ({
+        customer_id: String(row.customer_id ?? ''),
+        customer_name: row.customer_name == null ? null : String(row.customer_name),
+        amount_minor: Number(row.amount_minor ?? 0),
+        detected_at: String(row.detected_at ?? ''),
       })),
       images,
       settings: getSettings(),
@@ -1037,8 +1066,9 @@ export const BackupService = {
              credit_minor,
              pos_outstanding_minor, app_outstanding_minor, other_minor,
              pos_purchases_minor, app_purchases_minor,
-             last_payment_at, last_payment_amount_minor, last_synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             last_payment_at, last_payment_amount_minor,
+             reconcile_offset_minor, last_synced_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             customer.customer_id,
             customer.name,
@@ -1055,6 +1085,9 @@ export const BackupService = {
             customer.last_payment_amount_minor == null
               ? null
               : Number(customer.last_payment_amount_minor),
+            // v18: the baseline anchor rides with the row (older
+            // backups restore as 0 = the books cover the history).
+            Number(customer.reconcile_offset_minor ?? 0),
             customer.last_synced_at ?? null,
           ],
         );
@@ -1182,6 +1215,45 @@ export const BackupService = {
         } catch {
           // Duplicate ref — first copy wins.
         }
+      }
+
+      // v18 (round-24 #1): the Sila-app collections ledger — restored
+      // verbatim. CRITICAL for the reconciliation engine: without
+      // these rows the next sync would re-detect the same historical
+      // collections as NEW money (the stock method subtracts what's
+      // already recorded; an empty ledger = full re-detection =
+      // double-counted treasury).
+      let appCollectionsRestored = 0;
+      await tx.execute('DELETE FROM sila_app_collections');
+      await tx.execute(
+        "DELETE FROM sqlite_sequence WHERE name = 'sila_app_collections'",
+      );
+      for (const collection of doc.sila_app_collections ?? []) {
+        if (!collection.customer_id || !(collection.amount_minor > 0)) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO sila_app_collections
+              (customer_id, customer_name, amount_minor, detected_at)
+             VALUES (?, ?, ?, ?)`,
+            [
+              collection.customer_id,
+              collection.customer_name ?? null,
+              Number(collection.amount_minor ?? 0),
+              collection.detected_at || nowLocal(),
+            ],
+          );
+          appCollectionsRestored += 1;
+        } catch {
+          // Malformed row — skip quietly.
+        }
+      }
+      if (appCollectionsRestored > 0) {
+        logDiag(
+          'backup',
+          `استُعيد ${appCollectionsRestored} تحصيل عبر تطبيق صِلة`,
+        );
       }
       logDiag(
         'backup',

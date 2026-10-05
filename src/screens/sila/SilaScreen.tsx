@@ -82,6 +82,18 @@ export function SilaScreen() {
   const [queue, setQueue] = useState<SilaDebtRow[]>([]);
   const [customers, setCustomers] = useState<SilaCustomer[]>([]);
   const [payments, setPayments] = useState<SilaPaymentRow[]>([]);
+  // v18 (round-24 #1): the Sila-app collections ledger — money the
+  // app collected on the store's behalf (customer repaid through
+  // the app, detected by the reconciliation engine on each sync).
+  const [appCollections, setAppCollections] = useState<
+    {
+      local_id: number;
+      customer_id: string;
+      customer_name: string | null;
+      amount_minor: number;
+      detected_at: string;
+    }[]
+  >([]);
   const [syncingNow, setSyncingNow] = useState(false);
   // v15 (round-21 #3): the repayment sheet — inline absolute overlay
   // (NEVER a Modal: this ROM blacks RN Modals after the native
@@ -92,14 +104,17 @@ export function SilaScreen() {
 
   const reload = useCallback(async () => {
     try {
-      const [rows, list, payRows] = await Promise.all([
+      const [rows, list, payRows, collections] = await Promise.all([
         SilaRepo.recent(50),
         SilaRepo.listCustomers(),
         SilaRepo.recentPayments(30),
+        // v18 (round-24 #1): the app-collections ledger (newest 20).
+        SilaRepo.recentAppCollections(20),
       ]);
       setQueue(rows);
       setCustomers(list);
       setPayments(payRows);
+      setAppCollections(collections);
       await refreshCounts();
     } catch {
       // Fresh installs before the first migration tick — quiet.
@@ -834,6 +849,46 @@ export function SilaScreen() {
                 </Card>
               ))
             )}
+
+            {/* v18 (round-24 #1): the Sila-app collections ledger — the
+                money the app collected on the store's behalf. Before
+                v18 these repayments made the debt «disappear» with no
+                record anywhere; now every detection is a visible row
+                and part of the treasury. */}
+            <SectionTitle
+              title="تحصيلات عبر تطبيق صِلة"
+              hint="سددها الزبون من التطبيق على ديون فواتير متجرك — تُكتشف عند المزامنة"
+            />
+            {appCollections.length === 0 ? (
+              <Card style={styles.emptyCard}>
+                <Text style={styles.emptyText}>
+                  لا توجد تحصيلات بعد — عندما يسدد زبون دينه من تطبيق صِلة
+                  ستظهر هنا وتُحسب في الخزينة تلقائياً.
+                </Text>
+              </Card>
+            ) : (
+              appCollections.map(row => (
+                <Card key={`coll-${row.local_id}`} style={styles.queueCard}>
+                  <View style={styles.queueRow}>
+                    <View style={styles.queueRowIcon}>
+                      <Icon name="wallet" size={15} color={c.success} />
+                    </View>
+                    <View style={{flex: 1}}>
+                      <Text style={styles.queueCustomer} numberOfLines={1}>
+                        {row.customer_name ?? 'زبون صِلة'}
+                      </Text>
+                      <Text style={styles.queueInvoice}>
+                        {formatMoney(row.amount_minor / 100)} ·{' '}
+                        {formatDateTime(
+                          row.detected_at.replace('T', ' ').slice(0, 19),
+                        )}
+                      </Text>
+                    </View>
+                    <Badge label="استُلم عبر صِلة" tone="success" />
+                  </View>
+                </Card>
+              ))
+            )}
           </>
         )}
 
@@ -1116,6 +1171,15 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
+    },
+    // v18 (round-24 #1): the little wallet chip on app-collection rows.
+    queueRowIcon: {
+      width: 32,
+      height: 32,
+      borderRadius: 10,
+      backgroundColor: c.successSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     queueCustomer: {
       color: c.text,

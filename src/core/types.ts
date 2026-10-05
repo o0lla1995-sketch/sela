@@ -283,7 +283,11 @@ export type NotificationKind =
   | 'sila_debt'
   /** v15 (round-21 #3): a repayment upload failed permanently
    *  (NO_DEBT_RELATIONSHIP…). */
-  | 'sila_payment';
+  | 'sila_payment'
+  /** v18 (round-24 #1): صِلة collected money on the store's behalf
+   *  (customer repaid through the Sila app) — the books now show it
+   *  as an incoming collection instead of a vanishing debt. */
+  | 'sila_collection';
 
 export interface AppNotification {
   /** Stable id (timestamp-based). */
