@@ -242,6 +242,28 @@ export const SilaRepo = {
     return row ? rowToDebt(row as Record<string, unknown>) : null;
   },
 
+  /** All invoice numbers that carry a SILA debt — used to badge the
+   *  invoices center rows (one query, no per-row lookups). */
+  async allDebtInvoiceRefs(): Promise<Set<string>> {
+    try {
+      const result = await getDb().execute(
+        'SELECT pos_invoice_ref FROM sila_debt_queue',
+      );
+      const refs = new Set<string>();
+      for (const row of result.rows?._array ?? []) {
+        const ref = String(
+          (row as {pos_invoice_ref?: string}).pos_invoice_ref ?? '',
+        );
+        if (ref.length > 0) {
+          refs.add(ref);
+        }
+      }
+      return refs;
+    } catch {
+      return new Set();
+    }
+  },
+
   // ── customers cache (§7) ───────────────────────────────────────
 
   async upsertCustomers(

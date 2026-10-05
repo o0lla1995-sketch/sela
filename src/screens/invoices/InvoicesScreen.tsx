@@ -21,7 +21,11 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import {useFocusEffect, useNavigation, useRoute} from '@react-navigation/native';
+import {
+  useFocusEffect,
+  useNavigation,
+  useRoute,
+} from '@react-navigation/native';
 import {
   AppButton,
   AppHeader,
@@ -35,6 +39,7 @@ import {Icon} from '../../components/Icon';
 import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {InvoiceService} from '../../services/InvoiceService';
+import {SilaRepo} from '../../services/sila/SilaRepo';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {usePrinterStore} from '../../stores/printerStore';
 import {useToastStore} from '../../stores/toastStore';
@@ -65,6 +70,9 @@ export function InvoicesScreen() {
   const [reachedEnd, setReachedEnd] = useState(false);
   // Tracks the current list length for paging without stale closures.
   const [loadedCount, setLoadedCount] = useState(0);
+  // v11 (SILA): invoice numbers carrying a SILA debt — one query,
+  // refreshed on focus so fresh debt sales badge immediately.
+  const [debtRefs, setDebtRefs] = useState<Set<string>>(new Set());
 
   const load = useCallback(
     async (query: string, replace: boolean) => {
@@ -106,7 +114,8 @@ export function InvoicesScreen() {
       // Reload fresh whenever the screen gains focus (a new sale may
       // have just completed) — WITH the active query.
       void loadRef.current(searchRef.current, true);
-      // eslint-disable-next-line react-hooks/exhaustive-deps
+      // v11 (SILA): refresh the debt-invoice badge set with it.
+      void SilaRepo.allDebtInvoiceRefs().then(setDebtRefs);
     }, []),
   );
 
@@ -178,6 +187,12 @@ export function InvoicesScreen() {
                     {formatDateTime(row.created_at)} · {row.itemsCount} صنف
                   </Text>
                 </View>
+                {debtRefs.has(row.invoice_number) ? (
+                  <View style={styles.debtChip}>
+                    <Icon name="qrFrame" size={11} color={c.warning} />
+                    <Text style={styles.debtChipText}>دين</Text>
+                  </View>
+                ) : null}
                 <Badge
                   label={row.payment_type === 'WHOLESALE' ? 'جملة' : 'مفرق'}
                   tone={row.payment_type === 'WHOLESALE' ? 'info' : 'neutral'}
@@ -376,8 +391,7 @@ export function InvoiceDetailScreen() {
                     : ''}
                 </Text>
                 <Text style={styles.itemMeta}>
-                  {formatQty(item.quantity)} × {formatMoney(item.unit_price)}{' '}
-                  ={' '}
+                  {formatQty(item.quantity)} × {formatMoney(item.unit_price)} ={' '}
                   <Text style={styles.itemTotalText}>
                     {formatMoney(item.total_line_price)}
                   </Text>
@@ -454,6 +468,21 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.black,
       fontSize: typography.caption,
       fontVariant: ['tabular-nums'],
+    },
+    // v11 (SILA): the small debt marker on SILA-deferred invoices.
+    debtChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      backgroundColor: c.warningSoft,
+      borderRadius: 6,
+      paddingHorizontal: 6,
+      paddingVertical: 3,
+    },
+    debtChipText: {
+      color: c.warning,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
     },
     endHint: {
       color: c.textFaint,
