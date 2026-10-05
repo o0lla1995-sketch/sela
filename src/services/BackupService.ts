@@ -38,7 +38,7 @@ import {InvoiceService} from './InvoiceService';
 import {logDiag} from '../core/diagnostics';
 import type {AppSettings} from '../stores/settingsStore';
 
-const BACKUP_VERSION = 2;
+const BACKUP_VERSION = 3;
 const JSON_MIME = 'application/json';
 
 export interface BackupSummary {
@@ -49,6 +49,9 @@ export interface BackupSummary {
   embeddings: number;
   sales: number;
   createdAt: string;
+  /** v15 (round-21 #2): rows a legacy backup carried with duplicate
+   *  keys — skipped instead of failing the whole restore. */
+  skippedSales?: number;
 }
 
 interface BackupFile {
@@ -155,14 +158,45 @@ interface BackupFile {
     retry_count: number;
     created_at: string;
   }[];
-  /** v11 (SILA): cached customers balances. */
+  /** v11 (SILA): cached customers balances.
+   *  v15 (round-21 #3): + the origin-split fields (§2.4) — older
+   *  backups without them restore as 0 (legacy mixing tolerant). */
   sila_customers?: {
     customer_id: string;
     name: string;
     phone_last4: string | null;
     id_number: string | null;
     outstanding_minor: number;
+    pos_outstanding_minor?: number;
+    app_outstanding_minor?: number;
+    other_minor?: number;
+    pos_purchases_minor?: number;
+    app_purchases_minor?: number;
+    last_payment_at?: string | null;
+    last_payment_amount_minor?: number | null;
     last_synced_at: string | null;
+  }[];
+  /** v15 (round-21 #3): the repayments queue — one row per RCP
+   *  receipt, same restore rules as the debts (§3.1). */
+  sila_payments?: {
+    idempotency_key: string;
+    customer_id: string | null;
+    customer_name: string | null;
+    customer_phone_last4: string | null;
+    amount_minor: number;
+    payment_method: string;
+    pos_receipt_ref: string;
+    description: string | null;
+    paid_at: string;
+    state: 'pending' | 'syncing' | 'synced' | 'failed';
+    reference_code: string | null;
+    transaction_id: string | null;
+    outstanding_after: number | null;
+    synced_at: string | null;
+    error_code: string | null;
+    error_message: string | null;
+    retry_count: number;
+    created_at: string;
   }[];
   /** v8.3: embedded product image files (base64 JPEG) — keyed by
    *  `name`, referenced by the products' original image paths. */
@@ -197,6 +231,7 @@ export const BackupService = {
       stocktakeItems,
       silaDebts,
       silaCustomers,
+      silaPayments,
     ] = await Promise.all([
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
@@ -229,9 +264,20 @@ export const BackupService = {
          FROM sila_debt_queue`,
       ),
       db.execute(
-        `SELECT customer_id, name, phone_last4, id_number, outstanding_minor, last_synced_at
+        `SELECT customer_id, name, phone_last4, id_number, outstanding_minor,
+                pos_outstanding_minor, app_outstanding_minor, other_minor,
+                pos_purchases_minor, app_purchases_minor,
+                last_payment_at, last_payment_amount_minor, last_synced_at
          FROM sila_customers`,
       ),
+      db.execute(
+        `SELECT idempotency_key, customer_id, customer_name, customer_phone_last4,
+                amount_minor, payment_method, pos_receipt_ref, description,
+                paid_at, state, reference_code, transaction_id,
+                outstanding_after, synced_at, error_code, error_message,
+                retry_count, created_at
+         FROM sila_payment_queue`,
+      ).catch(() => ({rows: {_array: []}})),
     ]);
 
     // v8.3 (round-12 #3): embed every product image as base64 so a
@@ -388,8 +434,47 @@ export const BackupService = {
         phone_last4: row.phone_last4 == null ? null : String(row.phone_last4),
         id_number: row.id_number == null ? null : String(row.id_number),
         outstanding_minor: Number(row.outstanding_minor ?? 0),
+        pos_outstanding_minor: Number(row.pos_outstanding_minor ?? 0),
+        app_outstanding_minor: Number(row.app_outstanding_minor ?? 0),
+        other_minor: Number(row.other_minor ?? 0),
+        pos_purchases_minor: Number(row.pos_purchases_minor ?? 0),
+        app_purchases_minor: Number(row.app_purchases_minor ?? 0),
+        last_payment_at:
+          row.last_payment_at == null ? null : String(row.last_payment_at),
+        last_payment_amount_minor:
+          row.last_payment_amount_minor == null
+            ? null
+            : Number(row.last_payment_amount_minor),
         last_synced_at:
           row.last_synced_at == null ? null : String(row.last_synced_at),
+      })),
+      sila_payments: rowsOf(silaPayments).map(row => ({
+        idempotency_key: String(row.idempotency_key ?? ''),
+        customer_id: row.customer_id == null ? null : String(row.customer_id),
+        customer_name:
+          row.customer_name == null ? null : String(row.customer_name),
+        customer_phone_last4:
+          row.customer_phone_last4 == null
+            ? null
+            : String(row.customer_phone_last4),
+        amount_minor: Number(row.amount_minor ?? 0),
+        payment_method: String(row.payment_method ?? 'cash'),
+        pos_receipt_ref: String(row.pos_receipt_ref ?? ''),
+        description: row.description == null ? null : String(row.description),
+        paid_at: String(row.paid_at ?? ''),
+        state: (row.state ?? 'pending') as 'pending',
+        reference_code:
+          row.reference_code == null ? null : String(row.reference_code),
+        transaction_id:
+          row.transaction_id == null ? null : String(row.transaction_id),
+        outstanding_after:
+          row.outstanding_after == null ? null : Number(row.outstanding_after),
+        synced_at: row.synced_at == null ? null : String(row.synced_at),
+        error_code: row.error_code == null ? null : String(row.error_code),
+        error_message:
+          row.error_message == null ? null : String(row.error_message),
+        retry_count: Number(row.retry_count ?? 0),
+        created_at: String(row.created_at ?? ''),
       })),
       images,
       settings: getSettings(),
@@ -508,6 +593,63 @@ export const BackupService = {
         }
       }
     }
+
+    // v15 (round-21 #2): SANITIZE before the transaction. A backup
+    // carrying duplicate invoice numbers / debt refs (the historical
+    // numbering bugs of rounds 16–20) used to hit a UNIQUE constraint
+    // and roll the WHOLE restore back — «رفعت النسخة الاحتياطية
+    // والفواتير لم تُحسب». Duplicates are re-suffixed instead, and
+    // the debt/payment queues drop second copies of the same
+    // idempotency key or invoice/receipt ref (§4.3: the صِلة server
+    // rejects duplicates by design — the first copy wins).
+    const seenInvoiceNumbers = new Set<string>();
+    for (const sale of doc.sales ?? []) {
+      const raw = String(sale.invoice_number ?? '').trim();
+      if (raw.length === 0) {
+        continue; // the insert generates an R- fallback number
+      }
+      if (seenInvoiceNumbers.has(raw)) {
+        let suffix = 2;
+        while (seenInvoiceNumbers.has(`${raw}-R${suffix}`)) {
+          suffix += 1;
+        }
+        sale.invoice_number = `${raw}-R${suffix}`;
+        seenInvoiceNumbers.add(sale.invoice_number);
+      } else {
+        seenInvoiceNumbers.add(raw);
+        sale.invoice_number = raw;
+      }
+    }
+    const seenDebtKeys = new Set<string>();
+    const seenDebtRefs = new Set<string>();
+    const cleanDebts = (doc.sila_debts ?? []).filter(debt => {
+      const key = String(debt.idempotency_key ?? '');
+      const ref = String(debt.pos_invoice_ref ?? '');
+      if (!key || !ref) {
+        return false;
+      }
+      if (seenDebtKeys.has(key) || seenDebtRefs.has(ref)) {
+        return false;
+      }
+      seenDebtKeys.add(key);
+      seenDebtRefs.add(ref);
+      return true;
+    });
+    const seenPayKeys = new Set<string>();
+    const seenPayRefs = new Set<string>();
+    const cleanPayments = (doc.sila_payments ?? []).filter(payment => {
+      const key = String(payment.idempotency_key ?? '');
+      const ref = String(payment.pos_receipt_ref ?? '');
+      if (!key || !ref) {
+        return false;
+      }
+      if (seenPayKeys.has(key) || seenPayRefs.has(ref)) {
+        return false;
+      }
+      seenPayKeys.add(key);
+      seenPayRefs.add(ref);
+      return true;
+    });
 
     // op-sqlite transactions resolve with void — counts are captured
     // through this mutable summary object instead.
@@ -664,27 +806,34 @@ export const BackupService = {
         );
       }
 
-      // Sales history.
+      // Sales history — v15: a single bad row is SKIPPED (counted as
+      // skipped) instead of killing the whole restore transaction.
       const saleMap = new Map<number, number>();
       let sales = 0;
+      let skippedSales = 0;
       for (const sale of doc.sales ?? []) {
-        const inserted = await tx.execute(
-          `INSERT INTO sales
-            (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [
-            sale.invoice_number || `R-${Date.now()}-${sales}`,
-            Number(sale.total_amount ?? 0),
-            Number(sale.total_cost ?? 0),
-            Number(sale.total_profit ?? 0),
-            Number(sale.discount ?? 0),
-            sale.payment_type ?? null,
-            sale.created_at || nowLocal(),
-          ],
-        );
-        saleMap.set(Number(sale.id), Number(inserted.insertId));
-        sales += 1;
+        try {
+          const inserted = await tx.execute(
+            `INSERT INTO sales
+              (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              sale.invoice_number || `R-${Date.now()}-${sales}`,
+              Number(sale.total_amount ?? 0),
+              Number(sale.total_cost ?? 0),
+              Number(sale.total_profit ?? 0),
+              Number(sale.discount ?? 0),
+              sale.payment_type ?? null,
+              sale.created_at || nowLocal(),
+            ],
+          );
+          saleMap.set(Number(sale.id), Number(inserted.insertId));
+          sales += 1;
+        } catch {
+          skippedSales += 1;
+        }
       }
+      summary.skippedSales = skippedSales;
 
       for (const item of doc.sale_items ?? []) {
         const newSaleId = saleMap.get(Number(item.sale_id));
@@ -749,13 +898,11 @@ export const BackupService = {
       // 'syncing' rows from a crash recover to pending (§8).
       await tx.execute('DELETE FROM sila_debt_queue');
       await tx.execute('DELETE FROM sila_customers');
+      await tx.execute('DELETE FROM sila_payment_queue');
       await tx.execute(
-        "DELETE FROM sqlite_sequence WHERE name IN ('sila_debt_queue')",
+        "DELETE FROM sqlite_sequence WHERE name IN ('sila_debt_queue','sila_payment_queue')",
       );
-      for (const debt of doc.sila_debts ?? []) {
-        if (!debt.idempotency_key || !debt.pos_invoice_ref) {
-          continue;
-        }
+      for (const debt of cleanDebts) {
         await tx.execute(
           `INSERT INTO sila_debt_queue
             (idempotency_key, customer_id, customer_name, customer_phone_last4,
@@ -795,17 +942,69 @@ export const BackupService = {
         }
         await tx.execute(
           `INSERT INTO sila_customers
-            (customer_id, name, phone_last4, id_number, outstanding_minor, last_synced_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+            (customer_id, name, phone_last4, id_number, outstanding_minor,
+             pos_outstanding_minor, app_outstanding_minor, other_minor,
+             pos_purchases_minor, app_purchases_minor,
+             last_payment_at, last_payment_amount_minor, last_synced_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             customer.customer_id,
             customer.name,
             customer.phone_last4 ?? null,
             customer.id_number ?? null,
             Number(customer.outstanding_minor ?? 0),
+            Number(customer.pos_outstanding_minor ?? 0),
+            Number(customer.app_outstanding_minor ?? 0),
+            Number(customer.other_minor ?? 0),
+            Number(customer.pos_purchases_minor ?? 0),
+            Number(customer.app_purchases_minor ?? 0),
+            customer.last_payment_at ?? null,
+            customer.last_payment_amount_minor == null
+              ? null
+              : Number(customer.last_payment_amount_minor),
             customer.last_synced_at ?? null,
           ],
         );
+      }
+
+      // v15 (round-21 #3): the repayments queue — restored verbatim by
+      // idempotency key / receipt ref (server dedupes replays §2.5).
+      for (const payment of cleanPayments) {
+        try {
+          await tx.execute(
+            `INSERT INTO sila_payment_queue
+              (idempotency_key, customer_id, customer_name, customer_phone_last4,
+               amount_minor, payment_method, pos_receipt_ref, description,
+               paid_at, state, reference_code, transaction_id,
+               outstanding_after, synced_at, error_code, error_message,
+               retry_count, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              payment.idempotency_key,
+              payment.customer_id ?? null,
+              payment.customer_name ?? null,
+              payment.customer_phone_last4 ?? null,
+              Number(payment.amount_minor ?? 0),
+              payment.payment_method || 'cash',
+              payment.pos_receipt_ref,
+              payment.description ?? null,
+              payment.paid_at || nowLocal(),
+              payment.state === 'synced' || payment.state === 'failed'
+                ? payment.state
+                : 'pending',
+              payment.reference_code ?? null,
+              payment.transaction_id ?? null,
+              payment.outstanding_after ?? null,
+              payment.synced_at ?? null,
+              payment.error_code ?? null,
+              payment.error_message ?? null,
+              Number(payment.retry_count ?? 0),
+              payment.created_at || nowLocal(),
+            ],
+          );
+        } catch {
+          // A duplicate that slipped the sanitizer — first copy wins.
+        }
       }
 
       // Counters land on the outer summary object (TS-friendly).
@@ -848,6 +1047,16 @@ export const BackupService = {
       embeddings: doc.embeddings?.length ?? 0,
       sales: doc.sales?.length ?? 0,
       createdAt: doc.createdAt ?? '',
+    };
+  },
+
+  /** v15 (round-21 #2): sila counters for the confirm dialog — debts
+   *  and repayments inside the backup are part of the store's
+   *  accounting and must be VISIBLE before restoring. */
+  silaCounts(doc: BackupFile): {debts: number; payments: number} {
+    return {
+      debts: doc.sila_debts?.length ?? 0,
+      payments: doc.sila_payments?.length ?? 0,
     };
   },
 

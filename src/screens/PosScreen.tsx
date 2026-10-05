@@ -50,6 +50,7 @@ import {UnitRepo} from '../database/repositories/UnitRepo';
 import {SilaRepo} from '../services/sila/SilaRepo';
 import {SilaSync} from '../services/sila/SilaSync';
 import {parseSilaQr} from '../services/sila/qr';
+import type {SilaCustomer} from '../core/types';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {
   cameraPermissionMessage,
@@ -221,10 +222,16 @@ export function PosScreen() {
     customerCard: string | null;
     offlineQr: string | null;
     amountMinor: number;
-    amountSource: 'card' | 'offline';
+    amountSource: 'card' | 'offline' | 'picker';
   } | null>(null);
   /** v11: true while the customer-QR camera window is open. */
   const [debtBusy, setDebtBusy] = useState(false);
+  /** v15 (round-21 #5): the debt chooser — scan the customer's QR or
+   *  pick a known صِلة customer straight from the cached list. */
+  const [debtChooser, setDebtChooser] = useState(false);
+  const [customerPicker, setCustomerPicker] = useState(false);
+  const [pickerCustomers, setPickerCustomers] = useState<SilaCustomer[]>([]);
+  const [pickerQuery, setPickerQuery] = useState('');
 
   const scannerMode: ScannerMode = settings.scannerMode;
   const barcodeActive = scannerMode === 'barcode' || scannerMode === 'both';
@@ -1195,11 +1202,45 @@ export function PosScreen() {
     ],
   );
 
-  /** v11 (SILA §9.2): بيع بالدين — opens the camera, scans the
-   *  customer's SILA QR (identity card or signed offline code),
-   *  parses it OFFLINE and shows the confirmation sheet. The sale
-   *  itself is only committed when the merchant confirms. */
-  const startDebtSale = useCallback(async () => {
+  /** v11 (SILA §9.2): بيع بالدين — v15 (round-21 #5) opens a
+   *  CHOOSER first: scan the customer's SILA QR (identity card or
+   *  signed offline code) OR pick a known صِلة customer from the
+   *  cached list and charge the debt directly on them. */
+  const startDebtSale = useCallback(() => {
+    if (lines.length === 0) {
+      toast('السلة فارغة — أضف منتجات أولاً', 'error');
+      return;
+    }
+    if (busy || debtBusy) {
+      return;
+    }
+    if (!silaPaired) {
+      Alert.alert(
+        'البيع بالدين عبر صِلة',
+        'لتفعيل البيع بالدين، اربط حساب التاجر في تطبيق صِلة أولاً — العملية تستغرق أقل من دقيقة.',
+        [
+          {text: 'لاحقاً', style: 'cancel'},
+          {
+            text: 'ربط الآن',
+            onPress: () => navigation.navigate('Sila' as never),
+          },
+        ],
+      );
+      return;
+    }
+    setDebtChooser(true);
+  }, [
+    lines.length,
+    busy,
+    debtBusy,
+    silaPaired,
+    toast,
+    navigation,
+  ]);
+
+  /** v15 (round-21 #5): the SCAN path — the QR flow exactly as
+   *  before, now entered from the chooser sheet. */
+  const scanDebtQr = useCallback(async () => {
     if (lines.length === 0) {
       toast('السلة فارغة — أضف منتجات أولاً', 'error');
       return;
@@ -1307,10 +1348,62 @@ export function PosScreen() {
     navigation,
   ]);
 
+  /** v15 (round-21 #5): the PICK path — cached صِلة customers with a
+   *  live search box. Selecting one opens the SAME confirmation
+   *  sheet, with the debt amount = the invoice total (no signed QR
+   *  involved; the upload identifies the customer by cid §2.2). */
+  const openCustomerPicker = useCallback(async () => {
+    setDebtChooser(false);
+    try {
+      const list = await SilaRepo.listCustomers();
+      if (list.length === 0) {
+        toast(
+          'لا يوجد زبائن صِلة محفوظون بعد — أمسح رمز الزبون أو زامن صِلة أولاً',
+          'info',
+          4500,
+        );
+        return;
+      }
+      setPickerQuery('');
+      setPickerCustomers(list);
+      setCustomerPicker(true);
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'تعذر تحميل زبائن صِلة',
+        'error',
+      );
+    }
+  }, [toast]);
+
+  const pickDebtCustomer = useCallback(
+    (customer: SilaCustomer) => {
+      setCustomerPicker(false);
+      setDebtConfirm({
+        customerId: customer.customer_id,
+        customerName: customer.name,
+        customerPhoneLast4: customer.phone_last4,
+        customerCard: null,
+        offlineQr: null,
+        amountMinor: Math.round(totals.total * 100),
+        amountSource: 'picker',
+      });
+    },
+    [totals.total],
+  );
+
   /** v14 (round-20 #2): synchronous double-tap guard — a second
    *  tap in the SAME frame as the first (before `busy` re-renders)
    *  must not open a second atomic transaction. */
   const debtCommittingRef = useRef(false);
+
+  /** v15 (round-21 #6): a signed offline QR whose amount differs
+   *  from the invoice total (either way — less OR more) makes the
+   *  debt UNCONFIRMABLE. Card/picker sources carry the invoice
+   *  total by construction, so only the offline path can trip. */
+  const debtAmountMismatch =
+    debtConfirm != null &&
+    debtConfirm.amountSource === 'offline' &&
+    Math.abs(debtConfirm.amountMinor - Math.round(totals.total * 100)) > 0;
 
   /** v11 (SILA §9.2): the confirm step — ONE atomic transaction (v14
    *  round-20 #2): invoice + items + stock decrements + the debt
@@ -1325,6 +1418,18 @@ export function PosScreen() {
       return;
     }
     if (debtCommittingRef.current) {
+      return;
+    }
+    // v15 (round-21 #6): the QR amount must EQUAL the invoice total.
+    if (
+      debtConfirm.amountSource === 'offline' &&
+      Math.abs(debtConfirm.amountMinor - Math.round(totals.total * 100)) > 0
+    ) {
+      toast(
+        `مبلغ الرمز ${formatMoney(debtConfirm.amountMinor / 100)} ₪ يختلف عن قيمة الفاتورة ${formatMoney(totals.total)} ₪ — لا يُسجَّل الدين`,
+        'error',
+        5000,
+      );
       return;
     }
     debtCommittingRef.current = true;
@@ -1389,6 +1494,7 @@ export function PosScreen() {
     pricingMode,
     printerStatus,
     settings,
+    totals.total,
     clear,
     refreshCatalog,
     toast,
@@ -1992,6 +2098,139 @@ export function PosScreen() {
         onConfirm={confirmWeight}
       />
 
+      {/* ── v15 (round-21 #5): debt chooser — scan the QR or pick a
+          known صِلة customer. INLINE absolute overlay (ROM lesson). */}
+      {debtChooser ? (
+        <View style={styles.debtOverlay}>
+          <TouchableOpacity
+            style={styles.debtOverlayDim}
+            activeOpacity={1}
+            onPress={() => setDebtChooser(false)}
+          />
+          <BackHandlerCloser
+            active={debtChooser}
+            onClose={() => setDebtChooser(false)}
+          />
+          <View style={styles.debtModalSheet}>
+            <View style={styles.unitModalHandle} />
+            <Text style={styles.debtModalTitle}>بيع بالدين — صِلة</Text>
+            <Text style={styles.chooserHint}>
+              اختر كيفية تحديد الزبون المدين
+            </Text>
+            <TouchableOpacity
+              style={styles.chooserBtn}
+              onPress={() => {
+                setDebtChooser(false);
+                void scanDebtQr();
+              }}
+              activeOpacity={0.85}>
+              <View style={styles.chooserIcon}>
+                <Icon name="qrFrame" size={22} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.chooserTitle}>مسح رمز الزبون</Text>
+                <Text style={styles.chooserText}>
+                  بطاقة الزبون من تطبيق صِلة أو رمز موقّع بمبلغ الفاتورة
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={16} color={c.textFaint} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.chooserBtn}
+              onPress={() => void openCustomerPicker()}
+              activeOpacity={0.85}>
+              <View style={styles.chooserIcon}>
+                <Icon name="list" size={22} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.chooserTitle}>اختيار من الزبائن</Text>
+                <Text style={styles.chooserText}>
+                  زبائن صِلة المعروفون لدى متجرك — دين مباشر بقيمة الفاتورة
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={16} color={c.textFaint} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
+
+      {/* ── v15 (round-21 #5): the customers picker — live search over
+          the cached صِلة customers with their current balance. ──── */}
+      {customerPicker ? (
+        <View style={styles.debtOverlay}>
+          <TouchableOpacity
+            style={styles.debtOverlayDim}
+            activeOpacity={1}
+            onPress={() => setCustomerPicker(false)}
+          />
+          <BackHandlerCloser
+            active={customerPicker}
+            onClose={() => setCustomerPicker(false)}
+          />
+          <View style={styles.pickerSheet}>
+            <View style={styles.unitModalHandle} />
+            <Text style={styles.debtModalTitle}>اختيار الزبون المدين</Text>
+            <TextInput
+              style={styles.pickerSearch}
+              value={pickerQuery}
+              onChangeText={setPickerQuery}
+              placeholder="ابحث بالاسم أو الهاتف…"
+              placeholderTextColor={c.textFaint}
+            />
+            <ScrollView
+              style={styles.pickerList}
+              contentContainerStyle={styles.pickerListContent}
+              keyboardShouldPersistTaps="handled">
+              {pickerCustomers
+                .filter(customer => {
+                  const q = pickerQuery.trim();
+                  if (q.length === 0) {
+                    return true;
+                  }
+                  return (
+                    customer.name.includes(q) ||
+                    (customer.phone_last4 ?? '').includes(q)
+                  );
+                })
+                .map(customer => (
+                  <TouchableOpacity
+                    key={customer.customer_id}
+                    style={styles.pickerRow}
+                    onPress={() => pickDebtCustomer(customer)}
+                    activeOpacity={0.85}>
+                    <View style={styles.pickerAvatar}>
+                      <Text style={styles.pickerInitial}>
+                        {customer.name.trim().charAt(0) || 'ز'}
+                      </Text>
+                    </View>
+                    <View style={{flex: 1}}>
+                      <Text style={styles.pickerName} numberOfLines={1}>
+                        {customer.name}
+                      </Text>
+                      <Text style={styles.pickerMeta}>
+                        {customer.phone_last4
+                          ? `هاتف: ****${customer.phone_last4}`
+                          : 'زبون صِلة'}
+                        {customer.outstanding_minor > 0
+                          ? ` · دين قائم ${(
+                              customer.outstanding_minor / 100
+                            ).toFixed(2)} ₪`
+                          : ' · بلا دين'}
+                      </Text>
+                    </View>
+                    <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                  </TouchableOpacity>
+                ))}
+            </ScrollView>
+            <AppButton
+              title="إلغاء"
+              variant="secondary"
+              onPress={() => setCustomerPicker(false)}
+            />
+          </View>
+        </View>
+      ) : null}
+
       {/* ── v11 (SILA §9.2): debt confirmation sheet — the customer
           QR was scanned and parsed offline; one look (name / amount /
           mode) and one tap commits the sale + debt queue row.
@@ -2028,6 +2267,8 @@ export function PosScreen() {
                     ? `هاتف: ****${debtConfirm.customerPhoneLast4}`
                     : debtConfirm?.amountSource === 'offline'
                     ? 'رمز موقّع من الزبون — المبلغ من الرمز'
+                    : debtConfirm?.amountSource === 'picker'
+                    ? 'زبون مختار من قائمة صِلة — المبلغ من الفاتورة'
                     : 'بطاقة زبون صِلة — المبلغ من الفاتورة'}
                 </Text>
               </View>
@@ -2039,16 +2280,19 @@ export function PosScreen() {
               <MoneyText value={(debtConfirm?.amountMinor ?? 0) / 100} big />
             </View>
 
-            {/* Amount mismatch warning (offline signed code ≠ cart) */}
-            {debtConfirm?.amountSource === 'offline' &&
-            Math.abs(debtConfirm.amountMinor - Math.round(totals.total * 100)) >
-              0 ? (
+            {/* v15 (round-21 #6): an offline signed code whose amount
+                ≠ the invoice total BLOCKS the debt — the merchant must
+                ask for a QR matching the invoice (or adjust the cart).
+                The old behaviour only warned and recorded the QR's
+                amount, silently corrupting the debt statistics. */}
+            {debtAmountMismatch ? (
               <View style={styles.debtWarnBox}>
                 <Icon name="alert" size={15} color={c.danger} />
                 <Text style={styles.debtWarnText}>
-                  مبلغ الرمز ({formatMoney(debtConfirm.amountMinor / 100)})
-                  يختلف عن فاتورة السلة ({formatMoney(totals.total)}) — الدين
-                  يُسجَّل بمبلغ الرمز الموقّع من الزبون.
+                  مبلغ الرمز ({formatMoney((debtConfirm?.amountMinor ?? 0) / 100)})
+                  ₪ يختلف عن قيمة فاتورة البيع ({formatMoney(totals.total)} ₪)
+                  — لا يمكن تسجيل الدين. اطلب من الزبون رمزاً بمبلغ الفاتورة
+                  نفسه أو عدّل السلة.
                 </Text>
               </View>
             ) : null}
@@ -2074,7 +2318,8 @@ export function PosScreen() {
               </Text>
             </View>
 
-            {/* Actions */}
+            {/* Actions — v15: تأكيد الدين is DISABLED while the
+                signed QR amount ≠ the invoice total (round-21 #6). */}
             <View style={styles.debtActions}>
               <AppButton
                 title="إلغاء"
@@ -2088,6 +2333,7 @@ export function PosScreen() {
                 icon="check"
                 onPress={() => void confirmDebtSale()}
                 loading={busy}
+                disabled={debtAmountMismatch}
                 style={{flex: 1.6}}
               />
             </View>
@@ -3239,5 +3485,105 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
       marginTop: 1,
     },
+    // v15 (round-21 #5): debt chooser + customers picker sheets.
+  chooserHint: {
+    color: c.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.small,
+    textAlign: 'center',
+    marginBottom: spacing.xs,
+  },
+  chooserBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: c.surfaceHi,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: spacing.md,
+  },
+  chooserIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: c.accentSofter,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chooserTitle: {
+    color: c.text,
+    fontFamily: fonts.bold,
+    fontSize: typography.body,
+  },
+  chooserText: {
+    color: c.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    lineHeight: 17,
+    marginTop: 1,
+  },
+  pickerSheet: {
+    backgroundColor: c.surface,
+    borderTopLeftRadius: radius.lg + 4,
+    borderTopRightRadius: radius.lg + 4,
+    padding: spacing.lg,
+    gap: spacing.sm,
+    paddingBottom: spacing.lg,
+    maxHeight: '82%',
+  },
+  pickerSearch: {
+    backgroundColor: c.surfaceHi,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.border,
+    color: c.text,
+    fontFamily: fonts.bold,
+    fontSize: typography.body,
+    textAlign: 'right',
+    paddingVertical: spacing.sm + 2,
+    paddingHorizontal: spacing.md,
+  },
+  pickerList: {
+    flexGrow: 0,
+  },
+  pickerListContent: {
+    gap: spacing.xs,
+    paddingBottom: spacing.sm,
+  },
+  pickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: c.surfaceHi,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: spacing.sm + 2,
+  },
+  pickerAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: c.accentSofter,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerInitial: {
+    color: c.accent,
+    fontFamily: fonts.black,
+    fontSize: typography.body,
+  },
+  pickerName: {
+    color: c.text,
+    fontFamily: fonts.bold,
+    fontSize: typography.caption + 1,
+  },
+  pickerMeta: {
+    color: c.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    marginTop: 1,
+  },
   }),
 );

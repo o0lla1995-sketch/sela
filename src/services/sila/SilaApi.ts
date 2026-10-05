@@ -50,6 +50,10 @@ const PERMANENT_CODES = new Set([
   'INVOICE_REF_REQUIRED',
   'IDEMPOTENCY_KEY_REQUIRED',
   'DUPLICATE_INVOICE_REF',
+  // v15 (round-21 #3 — §2.5): payments-endpoint codes.
+  'DUPLICATE_RECEIPT_REF',
+  'RECEIPT_REF_REQUIRED',
+  'NO_DEBT_RELATIONSHIP',
   'RELATIONSHIP_NOT_ACTIVE',
   'VALIDATION_ERROR',
   'INVALID_JSON',
@@ -114,6 +118,18 @@ export function silaErrorAdvice(code: string): string {
       return 'المبلغ غير مقبول — راجع الفاتورة';
     case 'DUPLICATE_INVOICE_REF':
       return 'هذه الفاتورة مسجلة ديناً مسبقاً — لا يمكن تكرارها';
+    case 'DUPLICATE_RECEIPT_REF':
+      return 'إيصال السداد مسجل مسبقاً في صِلة — لن يتكرر';
+    case 'RECEIPT_REF_REQUIRED':
+      return 'رقم إيصال السداد مفقود — راجع العملية';
+    case 'NO_DEBT_RELATIONSHIP':
+      return 'لا توجد علاقة دين بين هذا الزبون والمتجر في صِلة — تحقق من هوية الزبون';
+    case 'DUPLICATE_RECEIPT_REF':
+      return 'إيصال السداد مسجل مسبقاً في صِلة — لن يتكرر';
+    case 'RECEIPT_REF_REQUIRED':
+      return 'رقم إيصال السداد مفقود — راجع العملية';
+    case 'NO_DEBT_RELATIONSHIP':
+      return 'لا توجد علاقة دين بين هذا الزبون والمتجر في صِلة — تحقق من هوية الزبون';
     case 'INVOICE_REF_REQUIRED':
     case 'IDEMPOTENCY_KEY_REQUIRED':
     case 'VALIDATION_ERROR':
@@ -297,6 +313,9 @@ export interface SilaDebtRecordResult {
   outstanding_minor?: number;
   idempotent_replay?: boolean;
   recorded_at?: string;
+  /** v15 (§2.5): DUPLICATE_INVOICE_REF answers carry the existing
+   *  reference so the row can be marked synced with it. */
+  existing_reference_code?: string;
 }
 
 export async function silaSendDebtBatch(
@@ -349,6 +368,19 @@ export interface SilaCustomerServerRow {
   credit_minor: number;
   status: string;
   last_transaction_at: string | null;
+  /** v15 (round-21 #3 — 0069 origin split §2.4): present once the
+   *  server migration is live; absent → 0 (backwards compatible).
+   *  pos_* = debts born from THIS store's invoices, app_* = debts
+   *  born inside the Sila app — the split that ends the
+   *  double-counting («تداخل عمليات الدين بالمتجر وتطبيق صِلة»). */
+  pos_outstanding_minor?: number;
+  app_outstanding_minor?: number;
+  other_minor?: number;
+  pos_purchases_minor?: number;
+  app_purchases_minor?: number;
+  last_payment_at?: string | null;
+  last_payment_amount_minor?: number | null;
+  last_payment_method?: string | null;
 }
 
 export async function silaFetchCustomers(
@@ -385,4 +417,83 @@ export async function silaFetchCustomers(
   };
   logDiag('sila', `تم جلب ${body.customers?.length ?? 0} زبون من صِلة`);
   return body.customers ?? [];
+}
+
+// ── v15 (round-21 #3): POST /api/pos/payments (§2.3 — migration 0069) ──
+// The repayment upload path that was missing entirely: cashier-received
+// payments (cash/card at the counter) now reach Sila with a unique
+// pos_receipt_ref + ONE idempotency key per receipt, so balances stop
+// diverging («الإحصائيات غير صحيحة بعد السداد») and the customer gets
+// notified by Sila exactly as if they paid in the app.
+
+export interface SilaPaymentRecordInput {
+  /** §2.3 identity paths — absent paths are OMITTED entirely
+   *  (same zod discipline as debt records). */
+  customer_id?: string;
+  customer_card?: string;
+  customer_id_number?: string;
+  amount_minor: string;
+  payment_method: string;
+  pos_receipt_ref: string;
+  description: string;
+  paid_at: string;
+  idempotency_key: string;
+}
+
+export interface SilaPaymentRecordResult {
+  ok: boolean;
+  idempotency_key: string;
+  error?: string;
+  message?: string;
+  transaction_id?: string;
+  reference_code?: string;
+  pos_receipt_ref?: string;
+  customer_name?: string;
+  amount_minor?: number;
+  outstanding_minor?: number;
+  idempotent_replay?: boolean;
+  paid_at?: string;
+  /** §2.5: DUPLICATE_RECEIPT_REF answers carry the existing
+   *  reference so the row can be marked synced with it. */
+  existing_reference_code?: string;
+}
+
+export async function silaSendPaymentBatch(
+  pairing: SilaPairing,
+  records: SilaPaymentRecordInput[],
+  posVersion: string,
+): Promise<SilaPaymentRecordResult[]> {
+  const {baseUrl, token} = endpointOf(pairing);
+  let response: Response;
+  try {
+    response = await silaFetch(
+      `${baseUrl}/api/pos/payments`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? {Authorization: `Bearer ${token}`} : {}),
+        },
+        body: JSON.stringify({
+          records,
+          client_meta: {pos_version: posVersion},
+        }),
+      },
+      CALL_TIMEOUT_MS,
+    );
+  } catch (error) {
+    const aborted = error instanceof Error && error.name === 'AbortError';
+    throw new SilaApiError(
+      0,
+      'NETWORK',
+      aborted ? 'انتهت مهلة رفع السداد' : 'انقطع الاتصال أثناء رفع السداد',
+    );
+  }
+  if (!response.ok) {
+    throw await toApiError(response);
+  }
+  const body = (await response.json()) as {
+    results?: SilaPaymentRecordResult[];
+  };
+  return body.results ?? [];
 }

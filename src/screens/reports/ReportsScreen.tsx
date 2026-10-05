@@ -23,6 +23,7 @@ import {useToastStore} from '../../stores/toastStore';
 import {
   fonts,
   makeStyles,
+  radius,
   spacing,
   typography,
   useThemeColors,
@@ -38,6 +39,8 @@ const RANGE_OPTIONS: {value: ReportRangeKey; label: string}[] = [
   {value: 'yesterday', label: 'أمس'},
   {value: 'last7', label: '7 أيام'},
   {value: 'thisMonth', label: 'الشهر'},
+  // v15 (round-21 #2): the whole history — restored backups count.
+  {value: 'all', label: 'الكل'},
 ];
 
 export function ReportsScreen() {
@@ -184,6 +187,81 @@ export function ReportsScreen() {
                 />
               </View>
             </View>
+
+            {/* ── v15 (round-21 #4): debts & repayments accounting ── */}
+            <Card>
+              <SectionTitle
+                title="الديون والسداد — محاسبة متجرك"
+                hint="ديون فواتيرك منفصلة عن ديون تطبيق صِلة · السداد ليس إيراداً"
+              />
+              <View style={styles.debtGrid}>
+                <View style={styles.debtCell}>
+                  <Text style={styles.debtLabel}>فواتير دين بالفترة</Text>
+                  <Text style={[styles.debtValue, {color: c.warning}]}>
+                    {formatMoney(bundle.debts.salesAmount)} ₪
+                  </Text>
+                  <Text style={styles.debtMeta}>
+                    {bundle.debts.salesCount} فاتورة دين (INV-D)
+                  </Text>
+                </View>
+                <View style={styles.debtCell}>
+                  <Text style={styles.debtLabel}>سدادّات مستلمة</Text>
+                  <Text style={[styles.debtValue, {color: c.success}]}>
+                    {formatMoney(bundle.debts.paymentsAmount)} ₪
+                  </Text>
+                  <Text style={styles.debtMeta}>
+                    {bundle.debts.paymentsCount} إيصال سداد
+                  </Text>
+                </View>
+                <View style={styles.debtCell}>
+                  <Text style={styles.debtLabel}>النقد الفعلي بالفترة</Text>
+                  <Text style={[styles.debtValue, {color: c.accent}]}>
+                    {formatMoney(
+                      bundle.summary.revenue -
+                        bundle.debts.salesAmount +
+                        bundle.debts.paymentsAmount,
+                    )}{' '}
+                    ₪
+                  </Text>
+                  <Text style={styles.debtMeta}>
+                    المبيعات − ديون الفترة + السدادّات
+                  </Text>
+                </View>
+                {bundle.debts.paired ? (
+                  <>
+                    <View style={styles.debtCell}>
+                      <Text style={styles.debtLabel}>
+                        ديون فواتير متجري القائمة
+                      </Text>
+                      <Text style={[styles.debtValue, {color: c.danger}]}>
+                        {formatMoney(bundle.debts.storeOutstandingMinor / 100)}{' '}
+                        ₪
+                      </Text>
+                      <Text style={styles.debtMeta}>
+                        {bundle.debts.debtorsCount} مدين — رصيد من صِلة
+                      </Text>
+                    </View>
+                    <View style={styles.debtCell}>
+                      <Text style={styles.debtLabel}>
+                        ديون عبر تطبيق صِلة (للمعلومية)
+                      </Text>
+                      <Text style={[styles.debtValue, {color: c.info}]}>
+                        {formatMoney(bundle.debts.appOutstandingMinor / 100)} ₪
+                      </Text>
+                      <Text style={styles.debtMeta}>
+                        ليست من مبيعات متجرك — لا تدخل أرباحك
+                      </Text>
+                    </View>
+                  </>
+                ) : null}
+              </View>
+              <Text style={styles.chartHint}>
+                إيراد متجرك في الأعلى يشمل فواتير الدين لأنها مبيعات خرجت من
+                مخزونك؛ «النقد الفعلي» يطرحها ويضيف ما استُلِم فعلاً من
+                السدادّات. ديون تطبيق صِلة لم تمر بفاتورتك ولا بمخزونك — تبقى
+                للمطابقة فقط.
+              </Text>
+            </Card>
 
             {/* ── Daily sales chart ────────────────────────────── */}
             <Card>
@@ -421,6 +499,37 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       gap: spacing.sm,
       marginBottom: spacing.sm,
+    },
+    // v15 (round-21 #4): debts & repayments accounting grid.
+    debtGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    },
+    debtCell: {
+    flexGrow: 1,
+    width: '48%',
+    backgroundColor: c.surfaceHi,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: spacing.sm + 2,
+    gap: 2,
+    },
+    debtLabel: {
+    color: c.textDim,
+    fontFamily: fonts.bold,
+    fontSize: typography.micro + 1,
+    },
+    debtValue: {
+    fontFamily: fonts.black,
+    fontSize: typography.body,
+    fontVariant: ['tabular-nums'],
+    },
+    debtMeta: {
+    color: c.textFaint,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro,
     },
   }),
 );

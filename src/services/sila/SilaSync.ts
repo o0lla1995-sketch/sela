@@ -42,10 +42,12 @@ import {SilaRepo} from './SilaRepo';
 import {
   silaHealth,
   silaSendDebtBatch,
+  silaSendPaymentBatch,
   silaFetchCustomers,
   SilaApiError,
   silaErrorAdvice,
   type SilaDebtRecordInput,
+  type SilaPaymentRecordInput,
 } from './SilaApi';
 import {APP_VERSION} from '../../core/config';
 
@@ -64,6 +66,11 @@ export interface SilaSyncOutcome {
   synced: number;
   pending: number;
   failed: number;
+  /** v15 (round-21 #3): repayments uploaded this cycle + the
+   *  payments still waiting (the debts-only counters above stay
+   *  untouched for the debt badge). */
+  paymentsSynced: number;
+  paymentsPending: number;
   message: string;
 }
 
@@ -167,6 +174,31 @@ function buildDebtRecord(row: {
   return record;
 }
 
+/** v15 (round-21 #3 — §3.2-أ): builds a §2.3 payment record with
+ *  ONLY the identity paths the queue row actually carries. */
+function buildPaymentRecord(row: {
+  customer_id: string | null;
+  amount_minor: number;
+  payment_method: string;
+  pos_receipt_ref: string;
+  description: string | null;
+  paid_at: string;
+  idempotency_key: string;
+}): SilaPaymentRecordInput {
+  const record: SilaPaymentRecordInput = {
+    amount_minor: String(row.amount_minor),
+    payment_method: row.payment_method || 'cash',
+    pos_receipt_ref: row.pos_receipt_ref,
+    description: row.description ?? 'سداد نقدي عند الكاشير',
+    paid_at: row.paid_at,
+    idempotency_key: row.idempotency_key,
+  };
+  if (row.customer_id != null && row.customer_id.length > 0) {
+    record.customer_id = row.customer_id;
+  }
+  return record;
+}
+
 async function syncCustomersCycle(): Promise<void> {
   const store = useSilaStore.getState();
   const pairing = store.pairing;
@@ -185,6 +217,15 @@ async function syncCustomersCycle(): Promise<void> {
       name: row.customer_name,
       phoneLast4: row.customer_phone_last4 ?? null,
       outstandingMinor: row.outstanding_minor,
+      // v15 (§2.4): the origin split — absent on a pre-0069 server,
+      // where 0 keeps the legacy behaviour intact.
+      posOutstandingMinor: row.pos_outstanding_minor ?? 0,
+      appOutstandingMinor: row.app_outstanding_minor ?? 0,
+      otherMinor: row.other_minor ?? 0,
+      posPurchasesMinor: row.pos_purchases_minor ?? 0,
+      appPurchasesMinor: row.app_purchases_minor ?? 0,
+      lastPaymentAt: row.last_payment_at ?? null,
+      lastPaymentAmountMinor: row.last_payment_amount_minor ?? null,
     })),
     stamp,
   );
@@ -225,16 +266,21 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
       synced: 0,
       pending: 0,
       failed: 0,
+      paymentsSynced: 0,
+      paymentsPending: 0,
       message: 'الجهاز غير مرتبط بصِلة — اربط حساب التاجر أولاً',
     };
   }
   if (running) {
     const counts = await SilaRepo.counts();
+    const paymentCountsNow = await SilaRepo.paymentCounts();
     return {
       state: 'syncing',
       synced: 0,
       pending: counts.pending,
       failed: counts.failed,
+      paymentsSynced: 0,
+      paymentsPending: paymentCountsNow.pending,
       message: 'المزامنة جارية الآن — انتظر لحظات',
     };
   }
@@ -244,11 +290,14 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
       1,
       Math.round((nextAttemptAt - Date.now()) / 60000),
     );
+    const paymentCountsWait = await SilaRepo.paymentCounts();
     return {
       state: 'syncing',
       synced: 0,
       pending: counts.pending,
       failed: counts.failed,
+      paymentsSynced: 0,
+      paymentsPending: paymentCountsWait.pending,
       message: `انتظار قبل المحاولة التالية (${minutes} دقيقة) — زامن الآن لتجاوز الانتظار`,
     };
   }
@@ -265,12 +314,17 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
           'no_internet',
           'لا يوجد اتصال بصِلة الآن — الطابور محفوظ وسيُزامن تلقائياً عند توفر الإنترنت',
         );
-      const counts = await SilaRepo.counts();
+      const [counts, paymentCountsOffline] = await Promise.all([
+        SilaRepo.counts(),
+        SilaRepo.paymentCounts(),
+      ]);
       return {
         state: 'no_internet',
         synced: 0,
         pending: counts.pending,
         failed: counts.failed,
+        paymentsSynced: 0,
+        paymentsPending: paymentCountsOffline.pending,
         message: 'تعذر الوصول إلى صِلة — تحقق من الإنترنت وحاول مجدداً',
       };
     }
@@ -278,10 +332,13 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
     // Recover rows stuck in 'syncing' from a crash mid-batch (§8).
     await SilaRepo.recoverStuck();
 
-    const counts = await SilaRepo.counts();
+    const [counts, paymentCounts] = await Promise.all([
+      SilaRepo.counts(),
+      SilaRepo.paymentCounts(),
+    ]);
     await useSilaStore.getState().refreshCounts();
 
-    if (counts.pending === 0) {
+    if (counts.pending === 0 && paymentCounts.pending === 0) {
       // Step 1 — light customers cache refresh. v12: isolated —
       // a failure here must NEVER poison the debt sync state
       // (v11 showed "no internet" forever because of this).
@@ -291,24 +348,26 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
         const message = error instanceof Error ? error.message : String(error);
         logDiag('sila', `تحديث أرصدة الزبائن فشل: ${message}`, 'warn');
       }
-      useSilaStore
-        .getState()
-        .setSyncState('idle', 'كل الديون مسجلة في صِلة', nowIso());
+      const idleText =
+        counts.failed > 0 || paymentCounts.failed > 0
+          ? `لا توجد عمليات بانتظار المزامنة — و${counts.failed + paymentCounts.failed} عملية فاشلة بحاجة لمراجعة`
+          : 'كل الديون والسدادّات مسجلة في صِلة';
+      useSilaStore.getState().setSyncState('idle', idleText, nowIso());
       return {
         state: 'idle',
         synced: 0,
         pending: 0,
         failed: counts.failed,
-        message:
-          counts.failed > 0
-            ? `لا توجد ديون بانتظار المزامنة — و${counts.failed} دين فاشل بحاجة لمراجعة`
-            : 'كل الديون مسجلة في صِلة',
+        paymentsSynced: 0,
+        paymentsPending: 0,
+        message: idleText,
       };
     }
 
     useSilaStore.getState().setSyncState('syncing');
 
     let syncedThisCycle = 0;
+    let paymentsSyncedThisCycle = 0;
     let deviceInvalid = false;
     let transientFailure = false;
 
@@ -361,6 +420,20 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
             }
           } else {
             const code = result.error ?? 'UNKNOWN';
+            // v15 (§2.5): DUPLICATE_INVOICE_REF = this invoice is
+            // ALREADY recorded in صِلة → the row is effectively synced
+            // (bind the reference the server repeated, if any). The
+            // old behaviour parked these as failed forever.
+            if (code === 'DUPLICATE_INVOICE_REF') {
+              await SilaRepo.markSynced(row.local_id, {
+                referenceCode:
+                  result.existing_reference_code ?? result.reference_code ?? '',
+                transactionId: result.transaction_id ?? '',
+                outstandingAfter: result.outstanding_minor ?? 0,
+              });
+              syncedThisCycle += 1;
+              continue;
+            }
             const error = new SilaApiError(200, code, result.message ?? '');
             if (error.errorClass === 'transient') {
               await SilaRepo.markRetry(row.local_id);
@@ -426,11 +499,114 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
       }
     }
 
+    // ── v15 (round-21 #3 — §3.2-أ): PHASE 2 — upload repayments ──
+    // The cashier payments queue (POST /api/pos/payments, §2.3).
+    // Same Store & Forward discipline as the debts: ≤100 rows per
+    // batch, one immutable idempotency key per receipt, transient
+    // failures return to pending, DUPLICATE_RECEIPT_REF counts as
+    // synced (the receipt already lives in صِلة — §2.5).
+    await SilaRepo.recoverStuckPayments();
+    for (let batch = 0; batch < MAX_BATCHES_PER_CYCLE; batch += 1) {
+      const pendingPayments = await SilaRepo.pendingPaymentBatch(100);
+      if (pendingPayments.length === 0) {
+        break;
+      }
+      await SilaRepo.markPaymentSyncing(
+        pendingPayments.map(row => row.local_id),
+      );
+      const paymentRecords = pendingPayments.map(row =>
+        buildPaymentRecord(row),
+      );
+      try {
+        const results = await silaSendPaymentBatch(
+          pairing,
+          paymentRecords,
+          APP_VERSION,
+        );
+        const byKey = new Map(
+          results.map(result => [result.idempotency_key, result]),
+        );
+        for (const row of pendingPayments) {
+          const result = byKey.get(row.idempotency_key);
+          if (result == null) {
+            await SilaRepo.markPaymentRetry(row.local_id);
+            transientFailure = true;
+            continue;
+          }
+          if (result.ok || result.idempotent_replay === true) {
+            await SilaRepo.markPaymentSynced(row.local_id, {
+              referenceCode: result.reference_code ?? '',
+              transactionId: result.transaction_id ?? '',
+              outstandingAfter: result.outstanding_minor ?? 0,
+            });
+            paymentsSyncedThisCycle += 1;
+          } else {
+            const code = result.error ?? 'UNKNOWN';
+            if (code === 'DUPLICATE_RECEIPT_REF') {
+              // §2.5: already recorded — treat as synced.
+              await SilaRepo.markPaymentSynced(row.local_id, {
+                referenceCode:
+                  result.existing_reference_code ??
+                  result.reference_code ??
+                  '',
+                transactionId: result.transaction_id ?? '',
+                outstandingAfter: result.outstanding_minor ?? 0,
+              });
+              paymentsSyncedThisCycle += 1;
+              continue;
+            }
+            const error = new SilaApiError(200, code, result.message ?? '');
+            if (error.errorClass === 'transient') {
+              await SilaRepo.markPaymentRetry(row.local_id);
+              transientFailure = true;
+            } else if (error.errorClass === 'device') {
+              await SilaRepo.requeuePayment(row.local_id);
+              deviceInvalid = true;
+            } else {
+              await SilaRepo.markPaymentFailed(
+                row.local_id,
+                code,
+                silaErrorAdvice(code),
+              );
+              notificationsStore.push(
+                'sila_payment',
+                `سداد فاشل: ${row.pos_receipt_ref}`,
+                `${row.customer_name ?? 'زبون'} — ${silaErrorAdvice(code)}`,
+                {system: true},
+              );
+            }
+          }
+        }
+      } catch (error) {
+        if (error instanceof SilaApiError) {
+          if (error.errorClass === 'device') {
+            for (const row of pendingPayments) {
+              await SilaRepo.requeuePayment(row.local_id);
+            }
+            deviceInvalid = true;
+            break;
+          }
+          for (const row of pendingPayments) {
+            await SilaRepo.markPaymentRetry(row.local_id);
+          }
+          transientFailure = true;
+          break;
+        }
+        for (const row of pendingPayments) {
+          await SilaRepo.markPaymentRetry(row.local_id);
+        }
+        transientFailure = true;
+        break;
+      }
+    }
+
     // v13 (round-19 #1): light customers refresh on EVERY healthy
     // cycle — previously it only ran when the queue was empty, so
     // while debts were still pending (or right after they synced)
     // the Home report kept stale balances that ignored repayments
     // made through the صِلة app. Isolated — never poisons state.
+    // v15: runs AFTER uploading payments so the balances reflect
+    // what was just pushed (§3.2-ج: ارفع أولاً ثم اسحب).
     if (!deviceInvalid && !transientFailure) {
       try {
         await syncCustomersCycle();
@@ -452,37 +628,61 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
           'ربط هذا الجهاز بصِلة منتهٍ أو ملغى — أعد الربط من إعدادات صِلة',
         );
       stopLoop();
-      const after = await SilaRepo.counts();
+      const [after, paymentAfter] = await Promise.all([
+        SilaRepo.counts(),
+        SilaRepo.paymentCounts(),
+      ]);
       return {
         state: 'device_invalid',
         synced: syncedThisCycle,
         pending: after.pending,
         failed: after.failed,
+        paymentsSynced: paymentsSyncedThisCycle,
+        paymentsPending: paymentAfter.pending,
         message: 'ربط هذا الجهاز بصِلة منتهٍ أو ملغى — أعد الربط برمز جديد',
       };
     }
 
     if (transientFailure) {
       noteTransientBackoff();
-    } else if (syncedThisCycle > 0) {
+    } else if (syncedThisCycle > 0 || paymentsSyncedThisCycle > 0) {
       resetBackoff();
     }
 
-    const after = await SilaRepo.counts();
+    const [after, paymentAfter] = await Promise.all([
+      SilaRepo.counts(),
+      SilaRepo.paymentCounts(),
+    ]);
+    const parts: string[] = [];
+    if (syncedThisCycle > 0) {
+      parts.push(`سُجّل ${syncedThisCycle} دين في صِلة`);
+    }
+    if (paymentsSyncedThisCycle > 0) {
+      parts.push(`رُفع ${paymentsSyncedThisCycle} سداد`);
+    }
+    const stillWaiting = after.pending + paymentAfter.pending;
     const message =
-      after.pending > 0
-        ? `زُامن ${syncedThisCycle} دين — بقي ${after.pending} بانتظار المزامنة`
-        : syncedThisCycle > 0
-        ? `تمت المزامنة — سُجّل ${syncedThisCycle} دين في صِلة`
-        : 'كل الديون مسجلة في صِلة';
+      parts.length > 0
+        ? stillWaiting > 0
+          ? `${parts.join(' · ')} — بقي ${stillWaiting} بانتظار المزامنة`
+          : parts.join(' · ')
+        : stillWaiting > 0
+        ? `بقي ${stillWaiting} عملية بانتظار المزامنة`
+        : 'كل الديون والسدادّات مسجلة في صِلة';
     useSilaStore
       .getState()
-      .setSyncState(after.pending > 0 ? 'syncing' : 'idle', message, nowIso());
+      .setSyncState(
+        stillWaiting > 0 ? 'syncing' : 'idle',
+        message,
+        nowIso(),
+      );
     return {
-      state: after.pending > 0 ? 'syncing' : 'idle',
+      state: stillWaiting > 0 ? 'syncing' : 'idle',
       synced: syncedThisCycle,
       pending: after.pending,
       failed: after.failed,
+      paymentsSynced: paymentsSyncedThisCycle,
+      paymentsPending: paymentAfter.pending,
       message,
     };
   } catch (error) {
@@ -501,11 +701,14 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
       }
     }
     useSilaStore.getState().setSyncState(state, text);
+    const paymentCountsErr = await SilaRepo.paymentCounts();
     return {
       state,
       synced: 0,
       pending: counts.pending,
       failed: counts.failed,
+      paymentsSynced: 0,
+      paymentsPending: paymentCountsErr.pending,
       message: text,
     };
   } finally {

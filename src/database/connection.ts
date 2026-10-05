@@ -151,7 +151,35 @@ const DDL_STATEMENTS: string[] = [
     outstanding_minor INTEGER NOT NULL DEFAULT 0,
     last_synced_at TEXT
   )`,
+  // ── v15 (round-21 #3 — SILA_POS_DEBT_SEPARATION §3.1) ────────
+  // The repayments queue: cashier-received payments uploaded to
+  // /api/pos/payments with ONE idempotency key per receipt — the
+  // missing upload path that made balances diverge (سداد عند
+  // الكاشير لم يكن يُرفع أبداً لصِلة).
+  `CREATE TABLE IF NOT EXISTS sila_payment_queue (
+    local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    customer_id TEXT,
+    customer_name TEXT,
+    customer_phone_last4 TEXT,
+    amount_minor INTEGER NOT NULL,
+    payment_method TEXT NOT NULL DEFAULT 'cash',
+    pos_receipt_ref TEXT NOT NULL UNIQUE,
+    description TEXT,
+    paid_at TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+      CHECK (state IN ('pending','syncing','synced','failed')),
+    reference_code TEXT,
+    transaction_id TEXT,
+    outstanding_after INTEGER,
+    synced_at TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
   'CREATE INDEX IF NOT EXISTS idx_sila_dq_state ON sila_debt_queue(state, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_sila_pq_state ON sila_payment_queue(state, created_at)',
 ];
 
 const DEFAULT_CATEGORIES: string[] = [
@@ -424,6 +452,66 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 7;
   }
 
+  if (version < 8) {
+    // v15 (round-21 #3 — SILA_POS_DEBT_SEPARATION §3.1/§2.4):
+    // origin-split balances per customer so store debts and Sila-app
+    // debts never mix again, plus the payments queue table.
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS sila_payment_queue (
+        local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        customer_id TEXT,
+        customer_name TEXT,
+        customer_phone_last4 TEXT,
+        amount_minor INTEGER NOT NULL,
+        payment_method TEXT NOT NULL DEFAULT 'cash',
+        pos_receipt_ref TEXT NOT NULL UNIQUE,
+        description TEXT,
+        paid_at TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (state IN ('pending','syncing','synced','failed')),
+        reference_code TEXT,
+        transaction_id TEXT,
+        outstanding_after INTEGER,
+        synced_at TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sila_pq_state ON sila_payment_queue(state, created_at)',
+    );
+    // sila_customers split columns (§2.4 FIFO-origin fields).
+    const splitCols: [string, string][] = [
+      ['pos_outstanding_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['app_outstanding_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['other_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['pos_purchases_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['app_purchases_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['last_payment_at', 'TEXT'],
+      ['last_payment_amount_minor', 'INTEGER'],
+    ];
+    for (const [column, ddl] of splitCols) {
+      const check = await database.execute(
+        "SELECT COUNT(*) AS cnt FROM pragma_table_info('sila_customers') WHERE name = ?",
+        [column],
+      );
+      const has = (check.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+      if (!has) {
+        await database.execute(
+          `ALTER TABLE sila_customers ADD COLUMN ${column} ${ddl}`,
+        );
+      }
+    }
+    logDiag(
+      'db',
+      'ترحيل v8: فصل أصول الديون (متجر/تطبيق) + طابور سدادّات صِلة',
+    );
+    version = 8;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -503,8 +591,9 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM units');
   await database.execute('DELETE FROM sila_customers');
   await database.execute('DELETE FROM sila_debt_queue');
+  await database.execute('DELETE FROM sila_payment_queue');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

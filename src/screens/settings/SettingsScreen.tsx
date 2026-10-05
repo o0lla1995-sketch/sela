@@ -205,10 +205,11 @@ export function SettingsScreen() {
     try {
       const doc = await BackupService.pickAndParseBackup();
       const summary = BackupService.summarize(doc);
+      const sila = BackupService.silaCounts(doc);
       setBusyRestore(false);
       Alert.alert(
         'استرجاع النسخة الاحتياطية',
-        `هذا الملف يحتوي:\n${summary.products} منتج · ${summary.categories} تصنيف · ${summary.units} وحدة\n${summary.embeddings} بصمة بصرية · ${summary.sales} فاتورة\n\nسيتم استبدال كل البيانات الحالية بمحتويات النسخة. هل تريد المتابعة؟`,
+        `هذا الملف يحتوي:\n${summary.products} منتج · ${summary.categories} تصنيف · ${summary.units} وحدة\n${summary.embeddings} بصمة بصرية · ${summary.sales} فاتورة\n${sila.debts} دين صِلة · ${sila.payments} إيصال سداد\n\nسيتم استبدال كل البيانات الحالية بمحتويات النسخة — الفواتير والديون والسدادّات تدخل إحصائيات المتجر كاملة. هل تريد المتابعة؟`,
         [
           {text: 'إلغاء', style: 'cancel'},
           {
@@ -219,10 +220,22 @@ export function SettingsScreen() {
               try {
                 const result = await BackupService.restoreBackup(doc);
                 await refreshCatalog();
+                // v15 (round-21 #2): the sila badges + counters must
+                // reflect the RESTORED queues immediately — the debt
+                // chip and the debts screen read these counters.
+                try {
+                  await useSilaStore.getState().refreshCounts();
+                } catch {
+                  // Store unavailable — next app start refreshes.
+                }
                 toast(
-                  `تم الاسترجاع بنجاح — ${result.products} منتج و${result.embeddings} بصمة و${result.sales} فاتورة`,
+                  `تم الاسترجاع — ${result.products} منتج و${result.sales} فاتورة${
+                    result.skippedSales
+                      ? ` (تخطي ${result.skippedSales} فاتورة مكررة)`
+                      : ''
+                  } و${sila.debts} دين و${sila.payments} سداد`,
                   'success',
-                  6000,
+                  7000,
                 );
               } catch (error) {
                 toast(

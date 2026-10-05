@@ -102,26 +102,44 @@ export function HomeScreen() {
   } | null>(null);
   const [serverBalances, setServerBalances] = useState<{
     totalMinor: number;
+    posTotalMinor: number;
+    appTotalMinor: number;
     debtorsCount: number;
     lastSyncedAt: string | null;
   } | null>(null);
   const [treasuryRevenue, setTreasuryRevenue] = useState<number | null>(null);
+  // v15 (round-21 #3): repayments actually collected at the cashier.
+  const [paymentsReceived, setPaymentsReceived] = useState<{
+    allMinor: number;
+    todayMinor: number;
+  } | null>(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [todayBundle, latest, silaTotals, balances, allRevenue] =
-        await Promise.all([
-          ReportService.loadBundle('today'),
-          SaleRepo.listRecent(3),
-          SilaRepo.totals(),
-          SilaRepo.customersOutstandingTotal(),
-          SaleRepo.allTimeRevenue(),
-        ]);
+      const [
+        todayBundle,
+        latest,
+        silaTotals,
+        balances,
+        allRevenue,
+        paymentTotals,
+      ] = await Promise.all([
+        ReportService.loadBundle('today'),
+        SaleRepo.listRecent(3),
+        SilaRepo.totals(),
+        SilaRepo.customersOutstandingTotal(),
+        SaleRepo.allTimeRevenue(),
+        SilaRepo.paymentsTotals(),
+      ]);
       setBundle(todayBundle);
       setRecentSales(latest);
       setDebtTotals(silaTotals);
       setServerBalances(balances);
       setTreasuryRevenue(allRevenue);
+      setPaymentsReceived({
+        allMinor: paymentTotals.allMinor,
+        todayMinor: paymentTotals.todayMinor,
+      });
     } catch {
       // Dashboard is informational — previous data stays shown.
     }
@@ -148,16 +166,35 @@ export function HomeScreen() {
    *  dashboard's pending-debts strip — zero friction, real feedback. */
   const runSyncFromHome = useCallback(() => {
     void SilaSync.syncNow().then(outcome => {
-      toast(outcome.message, outcome.pending === 0 ? 'success' : 'info');
+      toast(
+        outcome.message,
+        outcome.pending + outcome.paymentsPending === 0 ? 'success' : 'info',
+      );
       void loadData();
     });
   }, [toast, loadData]);
 
-  // v13 (round-19 #1): صِلة-server outstanding (post-repayment) +
-  // local rows the server doesn't know about yet = the real figure.
-  const outstandingShekels =
-    ((serverBalances?.totalMinor ?? 0) + (debtTotals?.pendingMinor ?? 0)) / 100;
-  const treasuryCash = (treasuryRevenue ?? 0) - outstandingShekels;
+  // v15 (round-21 #3 — SILA_POS_DEBT_SEPARATION §3.4):
+  // «الديون القائمة» = STORE-origin debts ONLY — the pos part the
+  // صِلة server attributes to this store's invoices (Σ
+  // pos_outstanding_minor) + this device's not-yet-uploaded debt
+  // rows (store-origin by definition). App-origin debts used to be
+  // mixed in — the «تداخل» that inflated the number.
+  const storeOutstandingShekels =
+    ((serverBalances?.posTotalMinor ?? 0) + (debtTotals?.pendingMinor ?? 0)) /
+    100;
+  // Informational: debts born inside the Sila app — NOT this store's
+  // sales; never enters the treasury or P&L (§3.4 forbidden list).
+  const appDebtsShekels = (serverBalances?.appTotalMinor ?? 0) / 100;
+  // Treasury = cash sales (revenue MINUS credit invoices — goods
+  // that left on credit brought no cash) PLUS repayments actually
+  // collected at the cashier. A repayment is an asset swap
+  // (دين → كاش), never revenue (§3.4) — the old formula (revenue −
+  // outstanding) double-counted and shrank on every repayment.
+  const creditSalesShekels = (debtTotals?.allMinor ?? 0) / 100;
+  const collectedShekels = (paymentsReceived?.allMinor ?? 0) / 100;
+  const treasuryCash =
+    (treasuryRevenue ?? 0) - creditSalesShekels + collectedShekels;
   const debtorsCount =
     (serverBalances?.debtorsCount ?? 0) +
     ((debtTotals?.pendingCount ?? 0) > 0 ? 1 : 0);
@@ -277,21 +314,41 @@ export function HomeScreen() {
           <>
             <View style={styles.statsRow}>
               <StatCard
-                label={`الديون القائمة · ${debtorsCount} مدين`}
-                value={formatMoney(outstandingShekels)}
+                label={`ديون فواتير متجري · ${debtorsCount} مدين`}
+                value={formatMoney(storeOutstandingShekels)}
                 tone="danger"
                 icon="qrFrame"
               />
               <StatCard
-                label="الرصيد بعد السداد"
+                label="النقد بالخزينة"
                 value={formatMoney(treasuryCash)}
                 tone={treasuryCash >= 0 ? 'success' : 'danger'}
                 icon="wallet"
               />
             </View>
+            {/* v15 (§3.3/§3.4): the split strip — Sila-app debts are
+                informational only and NEVER enter the treasury. */}
+            <View style={styles.splitStrip}>
+              <View style={styles.splitStripCell}>
+                <Text style={styles.splitStripLabel}>
+                  ديون تطبيق صِلة (للمعلومية)
+                </Text>
+                <Text style={[styles.splitStripValue, {color: c.info}]}>
+                  {formatMoney(appDebtsShekels)} ₪
+                </Text>
+              </View>
+              <View style={styles.splitStripDivider} />
+              <View style={styles.splitStripCell}>
+                <Text style={styles.splitStripLabel}>سدادّات مستلمة</Text>
+                <Text style={[styles.splitStripValue, {color: c.success}]}>
+                  {formatMoney(collectedShekels)} ₪
+                </Text>
+              </View>
+            </View>
             {serverBalances?.lastSyncedAt != null ? (
               <Text style={styles.balancesStamp}>
-                محدّث من صِلة · {relativeTime(serverBalances.lastSyncedAt)}
+                محدّث من صِلة · {relativeTime(serverBalances.lastSyncedAt)} ·
+                ديون متجري منفصلة عن ديون التطبيق
               </Text>
             ) : null}
             {silaPending > 0 || (debtTotals?.pendingCount ?? 0) > 0 ? (
@@ -666,6 +723,39 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
       textAlign: 'center',
       marginTop: spacing.md,
+    },
+    // v15 (round-21 #3): store/app debt split strip on the dashboard.
+    splitStrip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: c.surface,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.md,
+      gap: spacing.sm,
+    },
+    splitStripCell: {
+      flex: 1,
+      alignItems: 'center',
+      gap: 2,
+    },
+    splitStripDivider: {
+      width: 1,
+      alignSelf: 'stretch',
+      backgroundColor: c.borderSoft,
+    },
+    splitStripLabel: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      textAlign: 'center',
+    },
+    splitStripValue: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
     },
   }),
 );

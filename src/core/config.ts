@@ -204,7 +204,7 @@ export const CURRENCY = '₪';
 export const DB_NAME = 'sela.db';
 
 /** Schema version — bump + add a migration branch when changing DDL. */
-export const DB_SCHEMA_VERSION = 5;
+export const DB_SCHEMA_VERSION = 8;
 
 /** App display name (Latin, per merchant request) used everywhere. */
 export const APP_NAME = 'sela';
@@ -215,9 +215,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '14.0.0';
+export const APP_VERSION = '15.0.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 20;
+export const APP_BUILD_CODE = 21;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

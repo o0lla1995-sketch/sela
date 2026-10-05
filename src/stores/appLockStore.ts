@@ -6,6 +6,17 @@
  *  • 4-digit PIN — stored ONLY as a salted SHA-512 hash in MMKV
  *    (tweetnacl.hash), never the plain digits.
  *
+ * v15 (round-21 #1) — THE PIN-SETUP FIX: tweetnacl's PRNG is never
+ * seeded inside React Native — Metro resolves require('crypto') to
+ * an EMPTY stub through tweetnacl's package.json `browser` field
+ * and Hermes has no Web Crypto, so the library kept its default
+ * `randombytes = () => { throw new Error('no PRNG') }`. Every
+ * setPin() call died at randomSalt() BEFORE writing the hash —
+ * «مشكلة في إعداد رمز pin». Salts are now derived from a
+ * persisted rolling-entropy combiner hashed with nacl.hash
+ * (pure-JS SHA-512 — always available); nacl.setPRNG is also
+ * seeded defensively so no other nacl call can ever throw.
+ *
  * `locked` starts true on every cold start when any method is
  * enabled; AppLockGate renders the lock overlay above the whole app
  * until unlock() fires. The lock intentionally does NOT re-engage on
@@ -24,6 +35,36 @@ const K = {
   pinSalt: 'applock_pin_salt_v1',
   biometric: 'applock_biometric_v1',
 };
+
+/** v15: persisted rolling seed for salt generation. */
+const SALT_SEED_KEY = 'applock_salt_entropy_v1';
+/** v15: monotonic counter so even identical clocks differ. */
+let saltCounter = 0;
+
+/**
+ * v15 (round-21 #1): seed tweetnacl's PRNG defensively — the salt no
+ * longer uses nacl.randomBytes (the throwing path), and nothing else
+ * in the app calls it today, but any future call must never throw.
+ */
+function seedNaclPrng(): void {
+  try {
+    let state =
+      (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) || 0x9e3779b9;
+    nacl.setPRNG(x => {
+      for (let i = 0; i < x.length; i += 1) {
+        // xorshift32 — deterministic per-call seeding above mixes
+        // time + Math.random, ample for non-crypto generic use.
+        state ^= state << 13;
+        state ^= state >>> 17;
+        state ^= state << 5;
+        x[i] = state & 0xff;
+      }
+    });
+  } catch {
+    // Defensive only — nothing depends on it.
+  }
+}
+seedNaclPrng();
 
 /** ASCII-safe byte view (salt + PIN are hex/digits only). */
 function toBytes(text: string): Uint8Array {
@@ -48,7 +89,27 @@ export function hashPin(pin: string, salt: string): string {
 }
 
 function randomSalt(): string {
-  return toHex(nacl.randomBytes(16));
+  // v15 (round-21 #1): see header — nacl.randomBytes THROWS in RN.
+  // A persisted rolling seed is re-hashed with fresh time/random
+  // entropy on every use; two consecutive salts never share visible
+  // structure. For a locally-stored 4-digit PIN salt this is ample —
+  // the hash itself stays on this device.
+  saltCounter += 1;
+  const seed = getString(SALT_SEED_KEY, '');
+  const rotation = toHex(
+    nacl.hash(toBytes(`${seed}:${Date.now()}:${Math.random()}`)),
+  );
+  setString(SALT_SEED_KEY, rotation);
+  const material = [
+    seed,
+    rotation,
+    Date.now(),
+    performance.now(),
+    Math.random(),
+    Math.random(),
+    saltCounter,
+  ].join(':');
+  return toHex(nacl.hash(toBytes(material))).slice(0, 32);
 }
 
 interface AppLockState {

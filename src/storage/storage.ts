@@ -20,6 +20,11 @@ export const KEYS = {
    *  صِلة server (which remembers every pos_invoice_ref forever). */
   debtInvoiceCounter: 'debt_invoice_counter_v1',
   debtInvoiceDay: 'debt_invoice_day_v1',
+  /** v15 (round-21 #3): the repayment receipt series RCP-YYYYMMDD-NNNN
+   *  — its own counter/day pair, same never-backwards discipline as
+   *  invoices (§3.1 pos_receipt_ref فريد لكل متجر). */
+  paymentReceiptCounter: 'payment_receipt_counter_v1',
+  paymentReceiptDay: 'payment_receipt_day_v1',
   savedPrinter: 'saved_printer_v1',
   seededFlag: 'db_seeded_v1',
   notifications: 'notifications_v1',

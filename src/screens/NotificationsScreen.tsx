@@ -57,6 +57,12 @@ function kindMeta(kind: NotificationKind, c: Palette) {
       color: c.warning,
       label: 'دين صِلة',
     },
+    sila_payment: {
+      icon: 'wallet',
+      bg: c.successSoft,
+      color: c.success,
+      label: 'سداد صِلة',
+    },
   };
   return map[kind] ?? map.info;
 }

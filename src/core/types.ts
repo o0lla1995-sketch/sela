@@ -206,6 +206,9 @@ export type ReportRangeKey =
   | 'yesterday'
   | 'last7'
   | 'thisMonth'
+  // v15 (round-21 #2): the WHOLE history — restored-backup invoices
+  // and old sales are part of the store's accounting too.
+  | 'all'
   | 'custom';
 
 export interface DateRange {
@@ -277,7 +280,10 @@ export type NotificationKind =
   | 'stocktake'
   /** v11: a SILA debt record failed permanently and needs the
    *  merchant's attention (expired code, duplicate invoice…). */
-  | 'sila_debt';
+  | 'sila_debt'
+  /** v15 (round-21 #3): a repayment upload failed permanently
+   *  (NO_DEBT_RELATIONSHIP…). */
+  | 'sila_payment';
 
 export interface AppNotification {
   /** Stable id (timestamp-based). */
@@ -384,8 +390,43 @@ export interface SilaCustomer {
   name: string;
   phone_last4: string | null;
   id_number: string | null;
+  /** الرصيد الرسمي الكلي كما يقوله خادم صِلة (POS + تطبيق + تعديلات). */
   outstanding_minor: number;
+  /** v15 (§2.4): جزء الرصيد الذي نشأ من فواتير هذا المتجر (FIFO). */
+  pos_outstanding_minor: number;
+  /** v15: جزء الرصيد الذي نشأ من تطبيق صِلة (FIFO). */
+  app_outstanding_minor: number;
+  /** v15: تعديلات يدوية/فروقات من لوحة التاجر. */
+  other_minor: number;
+  pos_purchases_minor: number;
+  app_purchases_minor: number;
+  last_payment_at: string | null;
+  last_payment_amount_minor: number | null;
   last_synced_at: string | null;
+}
+
+/** v15 (round-21 #3): a cashier-received repayment queued for upload
+ *  to /api/pos/payments — one idempotency key per receipt (§3.1). */
+export interface SilaPaymentRow {
+  local_id: number;
+  idempotency_key: string;
+  customer_id: string | null;
+  customer_name: string | null;
+  customer_phone_last4: string | null;
+  amount_minor: number;
+  payment_method: string;
+  pos_receipt_ref: string;
+  description: string | null;
+  paid_at: string;
+  state: 'pending' | 'syncing' | 'synced' | 'failed';
+  reference_code: string | null;
+  transaction_id: string | null;
+  outstanding_after: number | null;
+  synced_at: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  retry_count: number;
+  created_at: string;
 }
 
 /** Derives the stock state for a product given the global default threshold. */

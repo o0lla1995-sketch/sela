@@ -49,9 +49,10 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {formatDate, formatDateTime, relativeTime} from '../../core/format';
+import {formatDate, formatDateTime, formatMoney, relativeTime} from '../../core/format';
 import {APP_VERSION} from '../../core/config';
-import type {SilaDebtRow, SilaCustomer} from '../../core/types';
+import type {SilaDebtRow, SilaCustomer, SilaPaymentRow} from '../../core/types';
+import {uuidV4} from '../../services/sila/qr';
 
 export function SilaScreen() {
   const c = useThemeColors();
@@ -78,16 +79,25 @@ export function SilaScreen() {
   const [codeText, setCodeText] = useState('');
   const [queue, setQueue] = useState<SilaDebtRow[]>([]);
   const [customers, setCustomers] = useState<SilaCustomer[]>([]);
+  const [payments, setPayments] = useState<SilaPaymentRow[]>([]);
   const [syncingNow, setSyncingNow] = useState(false);
+  // v15 (round-21 #3): the repayment sheet — inline absolute overlay
+  // (NEVER a Modal: this ROM blacks RN Modals after the native
+  // scanner closes — the same lesson as the POS debt sheet).
+  const [paySheet, setPaySheet] = useState<SilaCustomer | null>(null);
+  const [payAmountText, setPayAmountText] = useState('');
+  const [payBusy, setPayBusy] = useState(false);
 
   const reload = useCallback(async () => {
     try {
-      const [rows, list] = await Promise.all([
+      const [rows, list, payRows] = await Promise.all([
         SilaRepo.recent(50),
         SilaRepo.listCustomers(),
+        SilaRepo.recentPayments(30),
       ]);
       setQueue(rows);
       setCustomers(list);
+      setPayments(payRows);
       await refreshCounts();
     } catch {
       // Fresh installs before the first migration tick — quiet.
@@ -201,7 +211,8 @@ export function SilaScreen() {
       await reload();
       toast(
         outcome.message,
-        outcome.pending === 0 && outcome.state !== 'no_internet'
+        outcome.pending + outcome.paymentsPending === 0 &&
+          outcome.state !== 'no_internet'
           ? 'success'
           : 'info',
       );
@@ -244,6 +255,76 @@ export function SilaScreen() {
     [settings, toast],
   );
 
+  // ── v15 (round-21 #3): repayments (§2.3 — the missing upload path) ──
+
+  const openPaySheet = useCallback((customer: SilaCustomer) => {
+    setPayAmountText('');
+    setPaySheet(customer);
+  }, []);
+
+  const confirmPayment = useCallback(async () => {
+    const customer = paySheet;
+    if (customer == null || payBusy) {
+      return;
+    }
+    const amount = Number(payAmountText.replace(',', '.'));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast('أدخل مبلغ سداد صحيحاً أكبر من صفر', 'error');
+      return;
+    }
+    const amountMinor = Math.round(amount * 100);
+    if (amountMinor > customer.outstanding_minor) {
+      toast(
+        `المبلغ أكبر من الدين القائم (${formatMoney(
+          customer.outstanding_minor / 100,
+        )} ₪) — لا يُستلم عبر صِلة أكثر من المستحق`,
+        'error',
+      );
+      return;
+    }
+    setPayBusy(true);
+    try {
+      const receiptRef = await SilaRepo.reserveReceiptRef();
+      await SilaRepo.enqueuePayment({
+        idempotencyKey: uuidV4(),
+        customerId: customer.customer_id,
+        customerName: customer.name,
+        customerPhoneLast4: customer.phone_last4,
+        amountMinor,
+        paymentMethod: 'cash',
+        posReceiptRef: receiptRef,
+        description: `سداد نقدي — ${customer.name}`,
+        paidAt: new Date().toISOString(),
+      });
+      setPaySheet(null);
+      setPayAmountText('');
+      await reload();
+      toast(
+        `سُجّل سداد ${formatMoney(amount)} ₪ من ${customer.name} — إيصال ${receiptRef} سيُرفع لصِلة`,
+        'success',
+        5000,
+      );
+      // Opportunistic upload right away.
+      void SilaSync.syncNow().then(() => reload());
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'تعذر تسجيل السداد',
+        'error',
+      );
+    } finally {
+      setPayBusy(false);
+    }
+  }, [payBusy, payAmountText, paySheet, reload, toast]);
+
+  const requeuePaymentRow = useCallback(
+    async (row: SilaPaymentRow) => {
+      await SilaRepo.requeuePayment(row.local_id);
+      await reload();
+      toast(`أُعيد إيصال ${row.pos_receipt_ref} إلى طابور المزامنة`, 'info');
+    },
+    [reload, toast],
+  );
+
   // ── Render helpers ─────────────────────────────────────────────
 
   const stateBadge = (state: SilaDebtRow['state']) => {
@@ -257,6 +338,19 @@ export function SilaScreen() {
       return <Badge label="قيد المزامنة" tone="warning" />;
     }
     return <Badge label="بانتظار المزامنة" tone="neutral" />;
+  };
+
+  const paymentStateBadge = (state: SilaPaymentRow['state']) => {
+    if (state === 'synced') {
+      return <Badge label="مرفوع لصِلة" tone="success" />;
+    }
+    if (state === 'failed') {
+      return <Badge label="فاشل" tone="danger" />;
+    }
+    if (state === 'syncing') {
+      return <Badge label="قيد الرفع" tone="warning" />;
+    }
+    return <Badge label="بانتظار الرفع" tone="neutral" />;
   };
 
   const syncStatusLine = () => {
@@ -517,8 +611,11 @@ export function SilaScreen() {
               ))
             )}
 
-            {/* Customers balances (§9.3) */}
-            <SectionTitle title="أرصدة الزبائن لدى متجرك" />
+            {/* Customers balances (§9.3) — v15: origin split (§3.3) */}
+            <SectionTitle
+              title="أرصدة الزبائن لدى متجرك"
+              hint="رصيد كل زبون بأصل كل جزء — فواتير متجرك منفصلة عن تطبيق صِلة"
+            />
             {customers.length === 0 ? (
               <Card style={styles.emptyCard}>
                 <Text style={styles.emptyText}>
@@ -554,16 +651,239 @@ export function SilaScreen() {
                             ? {color: c.danger}
                             : {color: c.success},
                         ]}>
-                        {(customer.outstanding_minor / 100).toFixed(2)} ₪
+                        {formatMoney(customer.outstanding_minor / 100)} ₪
                       </Text>
                       <Text style={styles.customerBalanceLabel}>دين قائم</Text>
                     </View>
                   </View>
+
+                  {/* v15 (§3.3): the origin split — mandatory display */}
+                  {customer.outstanding_minor > 0 ? (
+                    <View style={styles.splitBox}>
+                      <View style={styles.splitRow}>
+                        <Text style={styles.splitLabel}>
+                          منها فواتير متجري
+                        </Text>
+                        <Text
+                          style={[
+                            styles.splitValue,
+                            {color: c.accent},
+                          ]}>
+                          {formatMoney(
+                            customer.pos_outstanding_minor / 100,
+                          )}{' '}
+                          ₪
+                        </Text>
+                      </View>
+                      <View style={styles.splitRow}>
+                        <Text style={styles.splitLabel}>منها من تطبيق صِلة</Text>
+                        <Text
+                          style={[
+                            styles.splitValue,
+                            {color: c.info},
+                          ]}>
+                          {formatMoney(
+                            customer.app_outstanding_minor / 100,
+                          )}{' '}
+                          ₪
+                        </Text>
+                      </View>
+                      {customer.other_minor !== 0 ? (
+                        <View style={styles.splitRow}>
+                          <Text style={styles.splitLabel}>تعديلات يدوية</Text>
+                          <Text
+                            style={[
+                              styles.splitValue,
+                              {color: c.warning},
+                            ]}>
+                            {formatMoney(customer.other_minor / 100)} ₪
+                          </Text>
+                        </View>
+                      ) : null}
+                      {customer.last_payment_at ? (
+                        <Text style={styles.splitNote}>
+                          آخر سداد:{' '}
+                          {formatDateTime(
+                            customer.last_payment_at
+                              .replace('T', ' ')
+                              .slice(0, 19),
+                          )}
+                          {customer.last_payment_amount_minor != null
+                            ? ` — ${formatMoney(
+                                customer.last_payment_amount_minor / 100,
+                              )} ₪`
+                            : ''}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
+
+                  {/* v15 (§2.3): record a cashier repayment */}
+                  {customer.outstanding_minor > 0 ? (
+                    <AppButton
+                      title="تسجيل سداد نقدي"
+                      icon="wallet"
+                      small
+                      variant="secondary"
+                      onPress={() => openPaySheet(customer)}
+                    />
+                  ) : (
+                    <View style={styles.settledRow}>
+                      <Icon
+                        name="checkCircle"
+                        size={14}
+                        color={c.success}
+                      />
+                      <Text style={styles.settledText}>
+                        لا دين قائم على هذا الزبون
+                      </Text>
+                    </View>
+                  )}
+                </Card>
+              ))
+            )}
+
+            {/* v15 (round-21 #3): repayments log */}
+            <SectionTitle
+              title="سجل السدادّات"
+              hint="كل سداد استُلم عند الكاشير ويُرفع لصِلة تلقائياً"
+            />
+            {payments.length === 0 ? (
+              <Card style={styles.emptyCard}>
+                <Text style={styles.emptyText}>
+                  لا توجد سدادّات بعد — عند استلام مبلغ من زبون مدين اضغط
+                  «تسجيل سداد نقدي» في بطاقته.
+                </Text>
+              </Card>
+            ) : (
+              payments.map(row => (
+                <Card key={`pay-${row.local_id}`} style={styles.queueCard}>
+                  <View style={styles.queueRow}>
+                    <View style={{flex: 1}}>
+                      <Text style={styles.queueCustomer} numberOfLines={1}>
+                        {row.customer_name ?? 'زبون صِلة'}
+                      </Text>
+                      <Text style={styles.queueInvoice}>
+                        {row.pos_receipt_ref} ·{' '}
+                        {formatMoney(row.amount_minor / 100)} ₪ ·{' '}
+                        {formatDateTime(
+                          row.created_at.replace('T', ' ').slice(0, 19),
+                        )}
+                      </Text>
+                    </View>
+                    {paymentStateBadge(row.state)}
+                  </View>
+                  {row.state === 'synced' && row.reference_code ? (
+                    <Text style={styles.queueRef}>
+                      رقم العملية في صِلة: {row.reference_code}
+                    </Text>
+                  ) : null}
+                  {row.state === 'failed' && row.error_message ? (
+                    <View style={styles.queueErrorBox}>
+                      <Icon name="alert" size={13} color={c.danger} />
+                      <Text style={styles.queueErrorText}>
+                        {row.error_message}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {row.state === 'failed' ? (
+                    <View style={styles.queueActionsRow}>
+                      <AppButton
+                        title="إعادة المحاولة"
+                        icon="refresh"
+                        small
+                        variant="secondary"
+                        onPress={() => void requeuePaymentRow(row)}
+                        style={{flex: 1}}
+                      />
+                    </View>
+                  ) : null}
                 </Card>
               ))
             )}
           </>
         )}
+
+        {/* v15 (round-21 #3): repayment sheet — INLINE absolute overlay
+            (NEVER a Modal on this ROM). Amount in ₪ + quick-fill the
+            full outstanding; confirm enqueues RCP receipt + uploads. */}
+        {paySheet != null ? (
+          <View style={styles.payOverlay}>
+            <TouchableOpacity
+              style={styles.payOverlayDim}
+              activeOpacity={1}
+              onPress={() => setPaySheet(null)}
+            />
+            <View style={styles.paySheet}>
+              <View style={styles.payHandle} />
+              <Text style={styles.payTitle}>تسجيل سداد نقدي</Text>
+              <View style={styles.payCustomerRow}>
+                <Icon name="wallet" size={20} color={c.accent} />
+                <View style={{flex: 1}}>
+                  <Text style={styles.payCustomerName} numberOfLines={1}>
+                    {paySheet.name}
+                  </Text>
+                  <Text style={styles.payCustomerMeta}>
+                    الدين القائم:{' '}
+                    {formatMoney(paySheet.outstanding_minor / 100)} ₪
+                    {paySheet.app_outstanding_minor > 0
+                      ? ` (منها ${formatMoney(
+                          paySheet.app_outstanding_minor / 100,
+                        )} ₪ عبر تطبيق صِلة)`
+                      : ''}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.payLabel}>المبلغ المستلم (₪)</Text>
+              <TextInput
+                style={styles.payInput}
+                value={payAmountText}
+                onChangeText={setPayAmountText}
+                placeholder="0.00"
+                placeholderTextColor={c.textFaint}
+                keyboardType="decimal-pad"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                style={styles.payQuickBtn}
+                onPress={() =>
+                  setPayAmountText(
+                    (paySheet.outstanding_minor / 100)
+                      .toFixed(2)
+                      .replace(/\.00$/, ''),
+                  )
+                }
+                activeOpacity={0.8}>
+                <Text style={styles.payQuickText}>
+                  السداد الكامل ({formatMoney(paySheet.outstanding_minor / 100)}{' '}
+                  ₪)
+                </Text>
+              </TouchableOpacity>
+              <Text style={styles.payHint}>
+                السداد يطفئ أقدم دين أولاً (FIFO) بنفس قاعدة صِلة — سواء نشأ
+                الدين من فواتير متجرك أو من التطبيق. يُرفع السداد لصِلة بإيصال
+                فريد وساعة الإنترنت.
+              </Text>
+              <View style={styles.payActions}>
+                <AppButton
+                  title="إلغاء"
+                  variant="secondary"
+                  onPress={() => setPaySheet(null)}
+                  style={{flex: 1}}
+                />
+                <AppButton
+                  title="تأكيد السداد"
+                  variant="success"
+                  icon="check"
+                  loading={payBusy}
+                  onPress={() => void confirmPayment()}
+                  style={{flex: 1.6}}
+                />
+              </View>
+            </View>
+          </View>
+        ) : null}
       </ScrollView>
     </Screen>
   );
@@ -837,5 +1157,142 @@ const useStyles = makeStyles(c =>
       lineHeight: 20,
       textAlign: 'center',
     },
+    // ── v15 (round-21 #3): origin split + repayment sheet ──
+  splitBox: {
+    backgroundColor: c.surfaceHi,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: spacing.sm + 2,
+    gap: 3,
+    marginTop: spacing.sm,
+  },
+  splitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  splitLabel: {
+    color: c.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+  },
+  splitValue: {
+    fontFamily: fonts.bold,
+    fontSize: typography.micro + 1,
+    fontVariant: ['tabular-nums'],
+  },
+  splitNote: {
+    color: c.textFaint,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro,
+    marginTop: 2,
+  },
+  settledRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: spacing.xs,
+  },
+  settledText: {
+    color: c.success,
+    fontFamily: fonts.bold,
+    fontSize: typography.micro + 1,
+  },
+  payOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'flex-end',
+    zIndex: 60,
+    elevation: 60,
+  },
+  payOverlayDim: {
+    flex: 1,
+    backgroundColor: c.overlay,
+  },
+  paySheet: {
+    backgroundColor: c.surface,
+    borderTopLeftRadius: radius.lg + 4,
+    borderTopRightRadius: radius.lg + 4,
+    padding: spacing.lg,
+    gap: spacing.sm,
+    paddingBottom: spacing.xxl,
+  },
+  payHandle: {
+    alignSelf: 'center',
+    width: 44,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: c.border,
+    marginBottom: spacing.xs,
+  },
+  payTitle: {
+    color: c.text,
+    fontFamily: fonts.black,
+    fontSize: typography.heading,
+    textAlign: 'center',
+    marginBottom: spacing.xs,
+  },
+  payCustomerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: c.accentSofter,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: c.border,
+  },
+  payCustomerName: {
+    color: c.text,
+    fontFamily: fonts.bold,
+    fontSize: typography.body,
+  },
+  payCustomerMeta: {
+    color: c.textDim,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    marginTop: 1,
+  },
+  payLabel: {
+    color: c.textDim,
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+  },
+  payInput: {
+    backgroundColor: c.surfaceHi,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.border,
+    color: c.text,
+    fontFamily: fonts.black,
+    fontSize: typography.heading,
+    textAlign: 'center',
+    paddingVertical: spacing.md,
+  },
+  payQuickBtn: {
+    alignItems: 'center',
+    paddingVertical: spacing.xs,
+  },
+  payQuickText: {
+    color: c.accent,
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+  },
+  payHint: {
+    color: c.textFaint,
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    lineHeight: 17,
+    textAlign: 'center',
+  },
+  payActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
   }),
 );

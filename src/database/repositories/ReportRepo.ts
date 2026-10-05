@@ -13,6 +13,14 @@ import type {
   TopProduct,
 } from '../../core/types';
 
+/** v15 (round-21 #4): credit invoices of the DEBT series in a range —
+ *  count + totals from the sales table itself (INV-D-… rows), so
+ *  restored backups count too (round-21 #2). */
+export interface DebtSalesSummary {
+  count: number;
+  amount: number;
+}
+
 function rangeBounds(range: DateRange): [string, string] {
   return [`${range.from} 00:00:00`, `${range.to} 23:59:59`];
 }
@@ -165,6 +173,29 @@ export const ReportRepo = {
       points.push(byHour.get(hour) ?? {hour, revenue: 0, orders: 0});
     }
     return points;
+  },
+
+  /** v15 (round-21 #4): credit invoices (INV-D-…) in the range. */
+  async debtSalesSummary(range: DateRange): Promise<DebtSalesSummary> {
+    const [start, end] = rangeBounds(range);
+    try {
+      const result = await getDb().execute(
+        `SELECT
+           COUNT(*) AS cnt,
+           COALESCE(SUM(total_amount), 0) AS amount
+         FROM sales
+         WHERE created_at >= ? AND created_at <= ?
+           AND invoice_number LIKE 'INV-D-%'`,
+        [start, end],
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        cnt?: number | null;
+        amount?: number | null;
+      };
+      return {count: Number(row.cnt ?? 0), amount: Number(row.amount ?? 0)};
+    } catch {
+      return {count: 0, amount: 0};
+    }
   },
 
   /** Detailed sale rows used by the CSV / XLS exporters. */
