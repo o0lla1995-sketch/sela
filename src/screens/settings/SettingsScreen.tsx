@@ -40,6 +40,7 @@ import {useToastStore} from '../../stores/toastStore';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useNotificationsStore} from '../../stores/notificationsStore';
 import {useSilaStore} from '../../stores/silaStore';
+import {SilaSync} from '../../services/sila/SilaSync';
 import {
   SelaNotificationsNative,
   SelaImagePickerNative,
@@ -156,6 +157,28 @@ export function SettingsScreen() {
 
   const [busyExport, setBusyExport] = useState(false);
   const [busyRestore, setBusyRestore] = useState(false);
+  // v12 (round-18 #1): manual SILA sync straight from settings.
+  const [silaSyncing, setSilaSyncing] = useState(false);
+
+  const syncSilaNow = useCallback(async () => {
+    if (silaSyncing) {
+      return;
+    }
+    setSilaSyncing(true);
+    try {
+      const outcome = await SilaSync.syncNow();
+      toast(
+        outcome.message,
+        outcome.pending === 0 && outcome.state !== 'no_internet'
+          ? 'success'
+          : 'info',
+      );
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'فشلت المزامنة', 'error');
+    } finally {
+      setSilaSyncing(false);
+    }
+  }, [silaSyncing, toast]);
 
   const backupData = useCallback(async () => {
     setBusyExport(true);
@@ -570,6 +593,19 @@ export function SettingsScreen() {
             }
             onPress={() => navigation.navigate('Sila' as never)}
           />
+          {/* v12 (round-18 #1): the manual sync lives right HERE in the
+            settings card — the merchant asked for it from الإعدادات, and
+            the result is spoken through a toast, never silent again. */}
+          {silaPaired ? (
+            <AppButton
+              title="زامن الديون الآن"
+              icon="refresh"
+              variant="secondary"
+              small
+              loading={silaSyncing}
+              onPress={() => void syncSilaNow()}
+            />
+          ) : null}
         </Card>
 
         {/* ── Data tools ─────────────────────────────────────── */}

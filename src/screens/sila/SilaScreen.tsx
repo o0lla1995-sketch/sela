@@ -195,12 +195,22 @@ export function SilaScreen() {
     }
     setSyncingNow(true);
     try {
-      await SilaSync.syncNow();
+      // v12 (round-18 #1): the outcome is spoken — manual sync is
+      // never silent again.
+      const outcome = await SilaSync.syncNow();
       await reload();
+      toast(
+        outcome.message,
+        outcome.pending === 0 && outcome.state !== 'no_internet'
+          ? 'success'
+          : 'info',
+      );
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'فشلت المزامنة', 'error');
     } finally {
       setSyncingNow(false);
     }
-  }, [reload, syncingNow]);
+  }, [reload, syncingNow, toast]);
 
   const requeueRow = useCallback(
     async (row: SilaDebtRow) => {

@@ -264,6 +264,88 @@ export const SilaRepo = {
     }
   },
 
+  /** v12 (round-18 #4): aggregates for the Home debts report —
+   *  total outstanding debt (every state: the goods left the store
+   *  on credit regardless of sync state), the unsynced portion,
+   *  and today's debt so the treasury number can exclude it. */
+  async totals(): Promise<{
+    allMinor: number;
+    allCount: number;
+    pendingMinor: number;
+    pendingCount: number;
+    todayMinor: number;
+  }> {
+    try {
+      const result = await getDb().execute(
+        `SELECT
+           COALESCE(SUM(amount_minor), 0) AS all_minor,
+           COUNT(*) AS all_count,
+           COALESCE(SUM(CASE WHEN state IN ('pending','syncing') THEN amount_minor ELSE 0 END), 0) AS pending_minor,
+           SUM(CASE WHEN state IN ('pending','syncing') THEN 1 ELSE 0 END) AS pending_count,
+           COALESCE(SUM(CASE WHEN date(created_at, 'localtime') = date('now', 'localtime') THEN amount_minor ELSE 0 END), 0) AS today_minor
+         FROM sila_debt_queue`,
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        all_minor?: number | null;
+        all_count?: number | null;
+        pending_minor?: number | null;
+        pending_count?: number | null;
+        today_minor?: number | null;
+      };
+      return {
+        allMinor: Number(row.all_minor ?? 0),
+        allCount: Number(row.all_count ?? 0),
+        pendingMinor: Number(row.pending_minor ?? 0),
+        pendingCount: Number(row.pending_count ?? 0),
+        todayMinor: Number(row.today_minor ?? 0),
+      };
+    } catch (error) {
+      logDiag('sila', `تعذر جمع ملخص الديون: ${toMessage(error)}`, 'warn');
+      return {
+        allMinor: 0,
+        allCount: 0,
+        pendingMinor: 0,
+        pendingCount: 0,
+        todayMinor: 0,
+      };
+    }
+  },
+
+  /** v12 (round-18 #1): one-time repair — v11 sent explicit nulls in
+   *  debt records so the server answered VALIDATION_ERROR and rows
+   *  bounced pending↔retry forever. With the null-free builder this
+   *  error cannot recur, so any row still sitting in 'failed' with
+   *  that code is requeued and will sync on the next cycle. */
+  async requeueFailedValidation(): Promise<number> {
+    try {
+      const result = await getDb().execute(
+        `SELECT local_id FROM sila_debt_queue
+         WHERE state = 'failed' AND error_code = 'VALIDATION_ERROR'`,
+      );
+      const ids = (result.rows?._array ?? []).map(row =>
+        Number((row as {local_id?: number}).local_id ?? 0),
+      );
+      for (const id of ids) {
+        await getDb().execute(
+          `UPDATE sila_debt_queue
+           SET state = 'pending', error_code = NULL, error_message = NULL,
+               retry_count = 0
+           WHERE local_id = ?`,
+          [id],
+        );
+      }
+      if (ids.length > 0) {
+        logDiag(
+          'sila',
+          `أُعيدت ${ids.length} دين فاشل (خطأ تحقق قديم) إلى طابور المزامنة`,
+        );
+      }
+      return ids.length;
+    } catch {
+      return 0;
+    }
+  },
+
   // ── customers cache (§7) ───────────────────────────────────────
 
   async upsertCustomers(

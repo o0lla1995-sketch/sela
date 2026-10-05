@@ -74,8 +74,19 @@ export function classifySilaError(
   if (PERMANENT_CODES.has(code)) {
     return 'permanent';
   }
-  // 429 / 5xx / timeouts / network → retry later.
+  // 429 / 5xx / timeouts / network / leaked PG codes → retry later.
   return 'transient';
+}
+
+/** v12 (round-18 #1): the live API sometimes swaps the two error
+ * fields — the `error` slot carries a raw PostgreSQL ERRCODE
+ * ("42501", "22023"…) while the real SILA code sits in `message`
+ * ("DEVICE_INVALID", "PAIRING_CODE_INVALID"). This predicate
+ * recognises real SILA codes so toApiError can recover the swap. */
+const SILA_CODE_RE = /^[A-Z][A-Z0-9_]{3,39}$/;
+
+function looksLikeSilaCode(value: unknown): value is string {
+  return typeof value === 'string' && SILA_CODE_RE.test(value);
 }
 
 /** Arabic, merchant-readable explanation for a permanent error. */
@@ -114,6 +125,8 @@ export function silaErrorAdvice(code: string): string {
       return 'ربط هذا الجهاز ملغى أو منتهٍ — أعد الربط برمز جديد من تطبيق صِلة';
     case 'UNAUTHENTICATED':
       return 'الجهاز غير مرتبط بصِلة — أعد الربط من الإعدادات';
+    case 'PAIRING_CODE_INVALID':
+      return 'رمز الربط غير صحيح أو منتهٍ — ولّد رمزاً جديداً من تطبيق صِلة وأعد المحاولة';
     case 'IDEMPOTENT_MISMATCH':
       return 'تضارب تقني في مفتاح العملية — تواصل مع الدعم';
     default:
@@ -121,7 +134,7 @@ export function silaErrorAdvice(code: string): string {
   }
 }
 
-const HEALTH_TIMEOUT_MS = 7000;
+const HEALTH_TIMEOUT_MS = 12000;
 const CALL_TIMEOUT_MS = 20000;
 
 interface SilaEndpoint {
@@ -155,7 +168,11 @@ async function silaFetch(
   }
 }
 
-/** Parses the JSON error body {error, message?} into SilaApiError. */
+/** Parses the JSON error body {error, message?} into SilaApiError.
+ *  v12 (round-18 #1): field-swap tolerant — when `error` is NOT a
+ *  real SILA code (e.g. a leaked Postgres ERRCODE like "42501")
+ *  but `message` IS one ("DEVICE_INVALID"), the real code is used
+ *  so §11 classification stays correct. */
 async function toApiError(response: Response): Promise<SilaApiError> {
   let code = `HTTP_${response.status}`;
   let message = `فشل الاتصال بخادم صِلة (${response.status})`;
@@ -168,6 +185,10 @@ async function toApiError(response: Response): Promise<SilaApiError> {
       }
       if (typeof obj.message === 'string' && obj.message.length > 0) {
         message = obj.message;
+      }
+      // Recover the swapped shape: error="42501" + message="DEVICE_INVALID".
+      if (!looksLikeSilaCode(code) && looksLikeSilaCode(message)) {
+        code = message;
       }
     }
   } catch {
@@ -245,10 +266,14 @@ export async function silaPair(
 // ── §6.2 debt-records batch ──────────────────────────────────────
 
 export interface SilaDebtRecordInput {
-  customer_card?: string | null;
-  offline_qr?: string | null;
-  customer_id?: string | null;
-  customer_id_number?: string | null;
+  /** §6.2 identity paths — v12 (round-18 #1): absent paths are
+   *  OMITTED entirely. The server's zod schema rejects explicit
+   *  nulls (VALIDATION_ERROR), which silently killed every debt
+   *  sync in v11. Only include what the scanned code provided. */
+  customer_card?: string;
+  offline_qr?: string;
+  customer_id?: string;
+  customer_id_number?: string;
   amount_minor: string;
   currency: string;
   pos_invoice_ref: string;

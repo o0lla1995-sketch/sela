@@ -2818,6 +2818,9 @@ const useStyles = makeStyles(c =>
     },
     // v11 (SILA): the compact debt chip — icon-first so the checkout
     // row stays light (round-17: "استخدم معه رموز").
+    // v12 (round-18 #2): overflow visible — Android Views clip at
+    // their bounds by default, which was cutting the pending-count
+    // notification badge at the corner. The badge must render fully.
     debtBtn: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -2829,6 +2832,9 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.surfaceHi,
       borderWidth: 1,
       borderColor: c.border,
+      overflow: 'visible',
+      zIndex: 10,
+      elevation: 0,
     },
     debtBtnPaired: {
       backgroundColor: c.accentSofter,
@@ -2849,12 +2855,18 @@ const useStyles = makeStyles(c =>
       alignItems: 'center',
       justifyContent: 'center',
       paddingHorizontal: 4,
+      // A crisp outline so the badge reads clearly against any
+      // neighbouring element it overlaps (round-18 #2).
+      borderWidth: 1.5,
+      borderColor: c.surfaceHi,
+      zIndex: 11,
     },
     debtBadgeText: {
       color: '#fff',
       fontFamily: fonts.bold,
       fontSize: 10,
       lineHeight: 13,
+      fontVariant: ['tabular-nums'],
     },
     // v11 (SILA): debt confirmation sheet — INLINE absolute overlay
     // (post-scanner sheets must not be RN Modals on this ROM).

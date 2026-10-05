@@ -15,6 +15,7 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
+  Clipboard,
   ScrollView,
   StyleSheet,
   Text,
@@ -52,7 +53,7 @@ import {
   useThemeColors,
 } from '../../core/theme';
 import {formatDateTime, formatMoney, formatQty} from '../../core/format';
-import type {SaleItemRecord, SaleRecord} from '../../core/types';
+import type {SaleItemRecord, SaleRecord, SilaDebtRow} from '../../core/types';
 
 const PAGE_SIZE = 30;
 
@@ -236,6 +237,21 @@ export function InvoiceDetailScreen() {
   const [names, setNames] = useState<Map<number, string>>(new Map());
   const [loading, setLoading] = useState(true);
   const [reprinting, setReprinting] = useState(false);
+  // v12 (round-18 #3): the SILA debt row behind this invoice — the
+  // creditor's identity + the debt operation number, shown and
+  // copyable right in the invoice details.
+  const [debt, setDebt] = useState<SilaDebtRow | null>(null);
+
+  const copyText = useCallback(
+    (label: string, value: string) => {
+      if (value.length === 0) {
+        return;
+      }
+      Clipboard.setString(value);
+      toast(`نُسخ ${label}: ${value}`, 'success');
+    },
+    [toast],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -246,6 +262,9 @@ export function InvoiceDetailScreen() {
       try {
         const record = await SaleRepo.getById(saleId);
         const lines = await SaleRepo.getItemsForSale(saleId);
+        const debtRow = record
+          ? await SilaRepo.byInvoiceRef(record.invoice_number)
+          : null;
         const nameMap = new Map<number, string>();
         for (const item of lines) {
           if (!nameMap.has(item.product_id)) {
@@ -260,6 +279,7 @@ export function InvoiceDetailScreen() {
           setSale(record);
           setItems(lines);
           setNames(nameMap);
+          setDebt(debtRow);
         }
       } catch (error) {
         toast(
@@ -372,6 +392,138 @@ export function InvoiceDetailScreen() {
             />
           </View>
         </Card>
+
+        {/* ── v12 (round-18 #3): SILA creditor card — the debt holder's
+          identity + the debt operation number, copyable for support
+          and reconciliation. ── */}
+        {debt != null ? (
+          <Card style={styles.creditorCard}>
+            <View style={styles.creditorHeadRow}>
+              <View style={styles.creditorIcon}>
+                <Icon name="qrFrame" size={20} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.creditorTitle}>
+                  بيانات الدائن — دين صِلة
+                </Text>
+                <Text style={styles.creditorSub}>
+                  سُجّلت هذه الفاتورة ديناً عبر منظومة صِلة
+                </Text>
+              </View>
+              <Badge
+                label={
+                  debt.state === 'synced'
+                    ? 'مسجّل في صِلة'
+                    : debt.state === 'failed'
+                    ? 'فاشل'
+                    : debt.state === 'syncing'
+                    ? 'قيد المزامنة'
+                    : 'بانتظار المزامنة'
+                }
+                tone={
+                  debt.state === 'synced'
+                    ? 'success'
+                    : debt.state === 'failed'
+                    ? 'danger'
+                    : 'warning'
+                }
+              />
+            </View>
+
+            <View style={styles.creditorRows}>
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>اسم الدائن</Text>
+                <Text style={styles.creditorValue} numberOfLines={1}>
+                  {debt.customer_name ?? 'زبون صِلة'}
+                </Text>
+              </View>
+              {debt.customer_phone_last4 ? (
+                <View style={styles.creditorRow}>
+                  <Text style={styles.creditorLabel}>هاتف الدائن</Text>
+                  <Text style={styles.creditorValue}>
+                    ****{debt.customer_phone_last4}
+                  </Text>
+                </View>
+              ) : null}
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>قيمة الدين</Text>
+                <Text style={[styles.creditorValue, {color: c.accent}]}>
+                  {(debt.amount_minor / 100).toFixed(2)} ₪
+                </Text>
+              </View>
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>رقم فاتورة الدين</Text>
+                <TouchableOpacity
+                  style={styles.copyRow}
+                  onPress={() =>
+                    copyText('رقم فاتورة الدين', debt.pos_invoice_ref)
+                  }
+                  activeOpacity={0.7}>
+                  <Text style={styles.creditorMono} numberOfLines={1}>
+                    {debt.pos_invoice_ref}
+                  </Text>
+                  <Icon name="clipboard" size={15} color={c.accent} />
+                </TouchableOpacity>
+              </View>
+              {debt.state === 'synced' && debt.reference_code ? (
+                <View style={styles.creditorRow}>
+                  <Text style={styles.creditorLabel}>رقم عملية الدين</Text>
+                  <TouchableOpacity
+                    style={styles.copyRow}
+                    onPress={() =>
+                      copyText('رقم عملية الدين', debt.reference_code ?? '')
+                    }
+                    activeOpacity={0.7}>
+                    <Text
+                      style={[styles.creditorMono, {color: c.success}]}
+                      numberOfLines={1}>
+                      {debt.reference_code}
+                    </Text>
+                    <Icon name="clipboard" size={15} color={c.success} />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+              {debt.state === 'synced' && debt.transaction_id ? (
+                <View style={styles.creditorRow}>
+                  <Text style={styles.creditorLabel}>
+                    معرّف العملية في صِلة
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.copyRow}
+                    onPress={() =>
+                      copyText('معرّف العملية', debt.transaction_id ?? '')
+                    }
+                    activeOpacity={0.7}>
+                    <Text style={styles.creditorMonoDim} numberOfLines={1}>
+                      {debt.transaction_id}
+                    </Text>
+                    <Icon name="clipboard" size={15} color={c.textDim} />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+            </View>
+
+            {debt.state !== 'synced' ? (
+              <View style={styles.creditorNoteBox}>
+                <Icon
+                  name={debt.state === 'failed' ? 'alert' : 'clock'}
+                  size={14}
+                  color={debt.state === 'failed' ? c.danger : c.warning}
+                />
+                <Text
+                  style={[
+                    styles.creditorNoteText,
+                    {color: debt.state === 'failed' ? c.danger : c.warning},
+                  ]}>
+                  {debt.state === 'failed'
+                    ? debt.error_message ??
+                      'فشل تسجيل الدين في صِلة — أعد المحاولة من سجل الديون'
+                    : 'سيُسجّل الدين في منظومة صِلة تلقائياً عند توفر الإنترنت'}
+                </Text>
+              </View>
+            ) : null}
+          </Card>
+        ) : null}
 
         {/* ── Items ── */}
         <Text style={styles.sectionLabel}>أصناف الفاتورة ({items.length})</Text>
@@ -499,6 +651,102 @@ const useStyles = makeStyles(c =>
       paddingBottom: spacing.xxl,
     },
     detailHeadCard: {padding: spacing.md},
+    // v12 (round-18 #3): SILA creditor card.
+    creditorCard: {
+      padding: spacing.md,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+    },
+    creditorHeadRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+    },
+    creditorIcon: {
+      width: 44,
+      height: 44,
+      borderRadius: 13,
+      backgroundColor: c.accentSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    creditorTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    creditorSub: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+    },
+    creditorRows: {
+      marginTop: spacing.sm,
+      gap: 7,
+    },
+    creditorRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: spacing.sm,
+      minHeight: 34,
+    },
+    creditorLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      flexShrink: 0,
+    },
+    creditorValue: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      textAlign: 'left',
+      flex: 1,
+    },
+    creditorMono: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+      flex: 1,
+      textAlign: 'left',
+    },
+    creditorMonoDim: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      fontVariant: ['tabular-nums'],
+      flex: 1,
+      textAlign: 'left',
+    },
+    copyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 6,
+      flex: 1,
+    },
+    creditorNoteBox: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      marginTop: spacing.sm + 2,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 8,
+    },
+    creditorNoteText: {
+      flex: 1,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'left',
+    },
     detailHeadRow: {
       flexDirection: 'row',
       alignItems: 'center',

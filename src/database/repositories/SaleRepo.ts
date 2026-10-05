@@ -149,6 +149,22 @@ export const SaleRepo = {
     return rows.map(rowToSale);
   },
 
+  /** v12 (round-18 #4): all-time collected revenue — the Home
+   *  «الخزينة» number (total sales minus SILA debts = real cash). */
+  async allTimeRevenue(): Promise<number> {
+    try {
+      const result = await getDb().execute(
+        'SELECT COALESCE(SUM(total_amount), 0) AS revenue FROM sales',
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        revenue?: number | null;
+      };
+      return Number(row.revenue ?? 0);
+    } catch {
+      return 0;
+    }
+  },
+
   async getItemsForSale(saleId: number): Promise<SaleItemRecord[]> {
     const result = await getDb().execute(
       'SELECT * FROM sale_items WHERE sale_id = ? ORDER BY id ASC',
@@ -161,9 +177,11 @@ export const SaleRepo = {
   /** v9.1 (round-14 #5): a paged invoice with its line count — the
    *  Invoices screen loads page after page as the merchant scrolls
    *  back through history. */
-  async listPagePaged(
-    options: {limit: number; offset: number; search?: string},
-  ): Promise<(SaleRecord & {itemsCount: number})[]> {
+  async listPagePaged(options: {
+    limit: number;
+    offset: number;
+    search?: string;
+  }): Promise<(SaleRecord & {itemsCount: number})[]> {
     const search = options.search?.trim() ?? '';
     const rowsResult = search
       ? await getDb().execute(
@@ -190,10 +208,9 @@ export const SaleRepo = {
 
   /** v9.1: one invoice by id (the detail screen). */
   async getById(saleId: number): Promise<SaleRecord | null> {
-    const result = await getDb().execute(
-      'SELECT * FROM sales WHERE id = ?',
-      [saleId],
-    );
+    const result = await getDb().execute('SELECT * FROM sales WHERE id = ?', [
+      saleId,
+    ]);
     const row = result.rows?._array?.[0];
     return row ? rowToSale(row) : null;
   },

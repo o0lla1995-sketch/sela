@@ -27,6 +27,10 @@ import {StockAlertsService} from '../services/StockAlertsService';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
+import {useSilaStore} from '../stores/silaStore';
+import {SilaRepo} from '../services/sila/SilaRepo';
+import {SilaSync} from '../services/sila/SilaSync';
+import {useToastStore} from '../stores/toastStore';
 import {
   fonts,
   makeStyles,
@@ -45,13 +49,23 @@ const QUICK_ACTIONS: {
   key: string;
   label: string;
   icon: IconName;
-  target: 'Pos' | 'ProductForm' | 'PrinterSettings' | 'Reports' | 'Stocktake' | 'Invoices';
+  target:
+    | 'Pos'
+    | 'ProductForm'
+    | 'PrinterSettings'
+    | 'Reports'
+    | 'Stocktake'
+    | 'Invoices'
+    | 'Sila';
   accent?: boolean;
 }[] = [
   {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
   {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
   {key: 'stocktake', label: 'الجرد', icon: 'clipboard', target: 'Stocktake'},
   {key: 'invoices', label: 'الفواتير', icon: 'inbox', target: 'Invoices'},
+  // v12 (round-18 #5): direct access to the SILA debt log from the
+  // dashboard — previously buried behind Settings ← صِلة.
+  {key: 'sila', label: 'سجل الديون', icon: 'qrFrame', target: 'Sila'},
   {key: 'reports', label: 'التقارير', icon: 'chart', target: 'Reports'},
 ];
 
@@ -62,6 +76,9 @@ export function HomeScreen() {
   const settings = useSettingsStore(state => state.settings);
   const printerStatus = usePrinterStore(state => state.status);
   const products = useCatalogStore(state => state.products);
+  const silaPairing = useSilaStore(state => state.pairing);
+  const silaPending = useSilaStore(state => state.pending);
+  const toast = useToastStore(state => state.show);
 
   const [bundle, setBundle] = useState<ReportBundle | null>(null);
   const [recentSales, setRecentSales] = useState<
@@ -72,15 +89,27 @@ export function HomeScreen() {
       created_at: string;
     }[]
   >([]);
+  // v12 (round-18 #4): the debts & treasury report on the dashboard.
+  const [debtTotals, setDebtTotals] = useState<{
+    allMinor: number;
+    allCount: number;
+    pendingMinor: number;
+    pendingCount: number;
+  } | null>(null);
+  const [treasuryRevenue, setTreasuryRevenue] = useState<number | null>(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [todayBundle, latest] = await Promise.all([
+      const [todayBundle, latest, silaTotals, allRevenue] = await Promise.all([
         ReportService.loadBundle('today'),
         SaleRepo.listRecent(3),
+        SilaRepo.totals(),
+        SaleRepo.allTimeRevenue(),
       ]);
       setBundle(todayBundle);
       setRecentSales(latest);
+      setDebtTotals(silaTotals);
+      setTreasuryRevenue(allRevenue);
     } catch {
       // Dashboard is informational — previous data stays shown.
     }
@@ -95,6 +124,18 @@ export function HomeScreen() {
   }, [navigation, loadData]);
 
   const alerts = StockAlertsService.activeAlerts(8);
+
+  /** v12 (round-18 #1): one-tap manual sync straight from the
+   *  dashboard's pending-debts strip — zero friction, real feedback. */
+  const runSyncFromHome = useCallback(() => {
+    void SilaSync.syncNow().then(outcome => {
+      toast(outcome.message, outcome.pending === 0 ? 'success' : 'info');
+      void loadData();
+    });
+  }, [toast, loadData]);
+
+  const debtTotalShekels = (debtTotals?.allMinor ?? 0) / 100;
+  const treasuryCash = (treasuryRevenue ?? 0) - debtTotalShekels;
 
   return (
     <View style={styles.screen}>
@@ -128,13 +169,9 @@ export function HomeScreen() {
                 {products.length} منتج · البيع الافتراضي{' '}
                 {settings.defaultPricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}
               </Text>
-              {/* Distinctive version badge — always visible on the dashboard */}
-              <View style={styles.versionBadge}>
-                <View style={styles.versionDot} />
-                <Text style={styles.versionBadgeText}>
-                  الإصدار {APP_VERSION_LABEL}
-                </Text>
-              </View>
+              {/* v12 (round-18 #5): the version badge moved out of the
+                store card — the footer at the bottom of the dashboard
+                already carries the version label. */}
             </View>
             <Badge
               label={
@@ -162,7 +199,9 @@ export function HomeScreen() {
             <StatCard
               label="صافي الربح"
               value={formatMoney(bundle?.summary.netProfit ?? 0)}
-              tone={(bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'}
+              tone={
+                (bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'
+              }
               icon="chart"
             />
           </View>
@@ -179,6 +218,67 @@ export function HomeScreen() {
             />
           </View>
         </View>
+
+        {/* ── v12 (round-18 #4): debts & treasury report ──── */}
+        <SectionTitle
+          title="الديون والخزينة"
+          hint="إجمالي ديون صِلة القائمة والنقد المحصّل"
+          action={
+            silaPairing != null ? (
+              <TouchableOpacity
+                onPress={() => navigation.navigate('Sila' as never)}>
+                <Text style={styles.seeAll}>سجل الديون</Text>
+              </TouchableOpacity>
+            ) : undefined
+          }
+        />
+        {silaPairing == null ? (
+          <TouchableOpacity
+            style={styles.silaCtaCard}
+            onPress={() => navigation.navigate('Sila' as never)}
+            activeOpacity={0.8}>
+            <View style={styles.silaCtaIcon}>
+              <Icon name="qrFrame" size={20} color={c.accent} />
+            </View>
+            <View style={{flex: 1}}>
+              <Text style={styles.silaCtaTitle}>فعّل البيع بالدين — صِلة</Text>
+              <Text style={styles.silaCtaText}>
+                اربط حساب التاجر لتسجيل فواتير الدين ومتابعتها هنا
+              </Text>
+            </View>
+            <Icon name="chevronLeft" size={16} color={c.textFaint} />
+          </TouchableOpacity>
+        ) : (
+          <>
+            <View style={styles.statsRow}>
+              <StatCard
+                label={`الديون القائمة · ${debtTotals?.allCount ?? 0} فاتورة`}
+                value={formatMoney(debtTotalShekels)}
+                tone="danger"
+                icon="qrFrame"
+              />
+              <StatCard
+                label="الخزينة النقدية (بعد الديون)"
+                value={formatMoney(treasuryCash)}
+                tone={treasuryCash >= 0 ? 'success' : 'danger'}
+                icon="wallet"
+              />
+            </View>
+            {silaPending > 0 || (debtTotals?.pendingCount ?? 0) > 0 ? (
+              <TouchableOpacity
+                style={styles.silaPendingRow}
+                onPress={runSyncFromHome}
+                activeOpacity={0.8}>
+                <Icon name="refresh" size={15} color={c.warning} />
+                <Text style={[styles.silaPendingText, {color: c.warning}]}>
+                  {debtTotals?.pendingCount ?? silaPending} دين بانتظار مزامنة
+                  صِلة — اضغط للمزامنة الآن
+                </Text>
+                <Icon name="chevronLeft" size={14} color={c.warning} />
+              </TouchableOpacity>
+            ) : null}
+          </>
+        )}
 
         {/* ── Stock alerts ───────────────────────────────────── */}
         {alerts.length > 0 ? (
@@ -222,17 +322,15 @@ export function HomeScreen() {
                     <Text style={styles.alertQty}>
                       {state === 'out'
                         ? 'نفد المخزون'
-                        : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(
+                        : `${formatQty(
+                            product.stock_quantity,
+                          )} ${baseUnitLabelOf(
                             product,
                             BASE_UNIT_NAME,
                           )} متبقية`}
                     </Text>
                   </View>
-                  <Icon
-                    name="chevronLeft"
-                    size={16}
-                    color={c.textFaint}
-                  />
+                  <Icon name="chevronLeft" size={16} color={c.textFaint} />
                 </TouchableOpacity>
               ))}
             </View>
@@ -373,28 +471,57 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
-    versionBadge: {
+    // v12 (round-18 #4): debts & treasury section styles.
+    silaCtaCard: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 5,
-      alignSelf: 'flex-start',
+      gap: spacing.md,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      borderRadius: radius.lg,
+      padding: spacing.md,
+    },
+    silaCtaIcon: {
+      width: 42,
+      height: 42,
+      borderRadius: 12,
       backgroundColor: c.accentSoft,
-      borderRadius: radius.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 2,
-      marginTop: 6,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
-    versionDot: {
-      width: 6,
-      height: 6,
-      borderRadius: 3,
-      backgroundColor: c.accent,
+    silaCtaTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
-    versionBadgeText: {
+    silaCtaText: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+    },
+    silaPendingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.warning,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+    },
+    silaPendingText: {
+      flex: 1,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 2,
+      textAlign: 'left',
+    },
+    seeAll: {
       color: c.accent,
       fontFamily: fonts.bold,
-      fontSize: typography.micro + 1,
-      fontVariant: ['tabular-nums'],
+      fontSize: typography.small,
     },
     statsGrid: {
       gap: spacing.md,
@@ -402,11 +529,6 @@ const useStyles = makeStyles(c =>
     statsRow: {
       flexDirection: 'row',
       gap: spacing.md,
-    },
-    seeAll: {
-      color: c.accent,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
     },
     alertsCol: {
       gap: spacing.sm,
