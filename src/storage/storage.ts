@@ -31,12 +31,17 @@ export const KEYS = {
   /** v10 (round-16 #4): generation of the embeddings currently in
    *  the database — wiped once when the bundled model changes. */
   embeddingModelVersion: 'embedding_model_version_v1',
+  /** v11 (SILA §6.1/§7): merchant pairing blob (pos_token, device,
+   *  merchant name, expiry, api base, last sync). */
+  silaPairing: 'sila_pairing_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {
   try {
     const raw = storage.getString(key);
-    if (raw == null) return fallback;
+    if (raw == null) {
+      return fallback;
+    }
     return JSON.parse(raw) as T;
   } catch (error) {
     logDiag('storage', `فشل قراءة ${key}: ${String(error)}`, 'warn');
@@ -83,5 +88,14 @@ export function setString(key: string, value: string): void {
     storage.set(key, value);
   } catch (error) {
     logDiag('storage', `فشل حفظ نص ${key}: ${String(error)}`, 'warn');
+  }
+}
+
+/** Removes a key entirely (v11 — SILA unpair). */
+export function deleteKey(key: string): void {
+  try {
+    storage.delete(key);
+  } catch (error) {
+    logDiag('storage', `فشل حذف ${key}: ${String(error)}`, 'warn');
   }
 }

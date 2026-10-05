@@ -28,6 +28,7 @@ import {
   View,
 } from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {useNavigation} from '@react-navigation/native';
 import {
   AppButton,
   Badge,
@@ -42,20 +43,28 @@ import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
 import {useToastStore} from '../stores/toastStore';
+import {useSilaStore} from '../stores/silaStore';
 import {InvoiceService} from '../services/InvoiceService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
+import {SilaRepo} from '../services/sila/SilaRepo';
+import {SilaSync} from '../services/sila/SilaSync';
+import {parseSilaQr} from '../services/sila/qr';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {
   cameraPermissionMessage,
   ensureCameraPermission,
   notifyScanResult,
   openAppSettings,
+  scanBarcode,
   scanBarcodeContinuous,
   scanBothContinuous,
   scanVisualContinuous,
 } from '../services/vision/scanFlow';
-import {PlatformUtilsNative, requirePlatformUtils} from '../native/nativeBridge';
+import {
+  PlatformUtilsNative,
+  requirePlatformUtils,
+} from '../native/nativeBridge';
 import {
   BASE_UNIT_NAME,
   QUICK_WEIGHTS,
@@ -134,6 +143,7 @@ export function PosScreen() {
   const c = useThemeColors();
   const styles = useStyles();
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
 
   const lines = useCartStore(state => state.lines);
   const pricingMode = useCartStore(state => state.pricingMode);
@@ -155,6 +165,10 @@ export function PosScreen() {
   const settings = useSettingsStore(state => state.settings);
   const printerStatus = usePrinterStore(state => state.status);
   const toast = useToastStore(state => state.show);
+  // v11 (SILA): pairing drives the debt button's readiness + the
+  // pending-debts badge right on the checkout row.
+  const silaPaired = useSilaStore(state => state.pairing != null);
+  const silaPending = useSilaStore(state => state.pending);
 
   const [search, setSearch] = useState('');
   /** v9 (round-13 #3): true while the search box holds KEYBOARD
@@ -197,6 +211,20 @@ export function PosScreen() {
   const [visionMatches, setVisionMatches] = useState<
     {product: Product; score: number}[] | null
   >(null);
+  /** v11 (SILA §9.2): the debt confirmation sheet — populated after a
+   *  successful customer-QR scan; confirming creates the sale + the
+   *  debt_queue row atomically. null = sheet closed. */
+  const [debtConfirm, setDebtConfirm] = useState<{
+    customerId: string | null;
+    customerName: string;
+    customerPhoneLast4: string | null;
+    customerCard: string | null;
+    offlineQr: string | null;
+    amountMinor: number;
+    amountSource: 'card' | 'offline';
+  } | null>(null);
+  /** v11: true while the customer-QR camera window is open. */
+  const [debtBusy, setDebtBusy] = useState(false);
 
   const scannerMode: ScannerMode = settings.scannerMode;
   const barcodeActive = scannerMode === 'barcode' || scannerMode === 'both';
@@ -285,11 +313,7 @@ export function PosScreen() {
         beep();
         const unitPrice =
           unit != null
-            ? unitPriceFor(
-                product,
-                unit,
-                useCartStore.getState().pricingMode,
-              )
+            ? unitPriceFor(product, unit, useCartStore.getState().pricingMode)
             : product.retail_price;
         const effectiveMode = useCartStore.getState().pricingMode;
         const basePrice =
@@ -330,19 +354,15 @@ export function PosScreen() {
   const guardCameraPermission = useCallback(async (): Promise<boolean> => {
     const permission = await ensureCameraPermission();
     if (permission !== 'granted') {
-      Alert.alert(
-        'إذن الكاميرا مطلوب',
-        cameraPermissionMessage(permission),
-        [
-          {text: 'إغلاق', style: 'cancel'},
-          {
-            text: 'فتح الإعدادات',
-            onPress: () => {
-              void openAppSettings();
-            },
+      Alert.alert('إذن الكاميرا مطلوب', cameraPermissionMessage(permission), [
+        {text: 'إغلاق', style: 'cancel'},
+        {
+          text: 'فتح الإعدادات',
+          onPress: () => {
+            void openAppSettings();
           },
-        ],
-      );
+        },
+      ]);
       return false;
     }
     return true;
@@ -388,10 +408,7 @@ export function PosScreen() {
           useCartStore
             .getState()
             .lines.filter(line => line.productId === productId)
-            .reduce(
-              (sum, line) => sum + line.quantity * line.conversion,
-              0,
-            );
+            .reduce((sum, line) => sum + line.quantity * line.conversion, 0);
 
         /**
          * Adds one CONFIRMED detection (or queues its weight pad),
@@ -417,9 +434,7 @@ export function PosScreen() {
               product.id,
               (session.counts.get(product.id) ?? 0) + 1,
             );
-            if (
-              !session.weightQueue.some(entry => entry.id === product.id)
-            ) {
+            if (!session.weightQueue.some(entry => entry.id === product.id)) {
               session.weightQueue.push(product);
             }
             return {
@@ -457,7 +472,7 @@ export function PosScreen() {
                     ? ` · ${formatMoney(price * added)}`
                     : ''
                 }${added < units ? ` — ${blockedReason}` : ''}`
-              : (blockedReason ?? `نفدت كمية ${product.name}`);
+              : blockedReason ?? `نفدت كمية ${product.name}`;
           return {part, ok: added > 0, added};
         };
 
@@ -543,14 +558,10 @@ export function PosScreen() {
               : 'لم يتم التعرف — اقترب أكثر واملأ الإطار بالمنتج ثم أعد التصوير',
           );
           for (const candidate of selection.ambiguous.slice(0, 3)) {
-            const product = allProducts.find(
-              p => p.id === candidate.productId,
-            );
+            const product = allProducts.find(p => p.id === candidate.productId);
             if (
               product != null &&
-              !session.ambiguous.some(
-                entry => entry.product.id === product.id,
-              )
+              !session.ambiguous.some(entry => entry.product.id === product.id)
             ) {
               session.ambiguous.push({product, score: candidate.score});
             }
@@ -559,9 +570,7 @@ export function PosScreen() {
             const product = allProducts.find(p => p.id === fit.productId);
             if (
               product != null &&
-              !session.ambiguous.some(
-                entry => entry.product.id === product.id,
-              )
+              !session.ambiguous.some(entry => entry.product.id === product.id)
             ) {
               session.ambiguous.push({product, score: fit.score});
             }
@@ -637,9 +646,7 @@ export function PosScreen() {
         );
       }
       if (session.ambiguous.length > 0) {
-        const sorted = [...session.ambiguous].sort(
-          (a, b) => b.score - a.score,
-        );
+        const sorted = [...session.ambiguous].sort((a, b) => b.score - a.score);
         setVisionMatches(sorted.slice(0, 4));
       }
     },
@@ -739,7 +746,11 @@ export function PosScreen() {
         openWeightPad(product);
         return;
       }
-      const result = addProduct(product, useCartStore.getState().pricingMode, null);
+      const result = addProduct(
+        product,
+        useCartStore.getState().pricingMode,
+        null,
+      );
       if (result.added) {
         beep();
       } else if (result.reason) {
@@ -770,10 +781,7 @@ export function PosScreen() {
             const inCart = useCartStore
               .getState()
               .lines.filter(line => line.productId === product.id)
-              .reduce(
-                (sum, line) => sum + line.quantity * line.conversion,
-                0,
-              );
+              .reduce((sum, line) => sum + line.quantity * line.conversion, 0);
             if (product.stock_quantity - inCart <= 0) {
               return {
                 status: 'error',
@@ -825,11 +833,7 @@ export function PosScreen() {
                 status: 'added',
                 name: `${unitProduct.name} (${unitHit.productUnit.unitName})`,
                 product: unitProduct,
-                unitPrice: unitPriceFor(
-                  unitProduct,
-                  unitHit.productUnit,
-                  mode,
-                ),
+                unitPrice: unitPriceFor(unitProduct, unitHit.productUnit, mode),
               };
             }
             return {
@@ -845,9 +849,7 @@ export function PosScreen() {
         return {
           status: 'error',
           reason:
-            error instanceof Error
-              ? error.message
-              : 'فشل البحث عن الباركود',
+            error instanceof Error ? error.message : 'فشل البحث عن الباركود',
         };
       }
     },
@@ -1062,10 +1064,7 @@ export function PosScreen() {
         },
       );
     } catch (error) {
-      toast(
-        error instanceof Error ? error.message : 'فشل جلسة المسح',
-        'error',
-      );
+      toast(error instanceof Error ? error.message : 'فشل جلسة المسح', 'error');
     } finally {
       // Let the LAST in-flight barcode lookup AND photo finish before
       // settling (both results must count).
@@ -1144,11 +1143,10 @@ export function PosScreen() {
         return;
       }
       if (withPrint && printerStatus !== 'connected') {
-        toast(
-          'لا توجد طابعة متصلة — أكمل البيع بدون طباعة أو أوصل الطابعة أولاً',
-          'error',
-        );
-        return;
+        // v11 (round-17): the dual-mode sell button only passes true
+        // when the printer is live — kept as a safety net for any
+        // other caller: print silently skipped, sale still proceeds.
+        withPrint = false;
       }
       setBusy(true);
       Keyboard.dismiss();
@@ -1196,6 +1194,188 @@ export function PosScreen() {
       toast,
     ],
   );
+
+  /** v11 (SILA §9.2): بيع بالدين — opens the camera, scans the
+   *  customer's SILA QR (identity card or signed offline code),
+   *  parses it OFFLINE and shows the confirmation sheet. The sale
+   *  itself is only committed when the merchant confirms. */
+  const startDebtSale = useCallback(async () => {
+    if (lines.length === 0) {
+      toast('السلة فارغة — أضف منتجات أولاً', 'error');
+      return;
+    }
+    if (busy || debtBusy) {
+      return;
+    }
+    if (!silaPaired) {
+      Alert.alert(
+        'البيع بالدين عبر صِلة',
+        'لتفعيل البيع بالدين، اربط حساب التاجر في تطبيق صِلة أولاً — العملية تستغرق أقل من دقيقة.',
+        [
+          {text: 'لاحقاً', style: 'cancel'},
+          {
+            text: 'ربط الآن',
+            onPress: () => navigation.navigate('Sila' as never),
+          },
+        ],
+      );
+      return;
+    }
+    setDebtBusy(true);
+    try {
+      const code = await scanBarcode();
+      if (code == null) {
+        // Merchant closed the scanner — nothing happened.
+        return;
+      }
+      const {payload, expired} = parseSilaQr(code);
+      if (payload.kind === 'card') {
+        if (!payload.cid || !payload.name) {
+          toast(
+            'بطاقة غير مكتملة — اطلب من الزبون فتح «بطاقتي» من جديد',
+            'error',
+          );
+          return;
+        }
+        if (expired) {
+          toast(
+            'انتهت صلاحية بطاقة الزبون — اطلب منه فتح «بطاقتي» من جديد',
+            'error',
+          );
+          return;
+        }
+        setDebtConfirm({
+          customerId: payload.cid,
+          customerName: payload.name,
+          customerPhoneLast4: payload.phone
+            ? payload.phone.replace(/\D/g, '').slice(-4)
+            : null,
+          customerCard: payload.raw,
+          offlineQr: null,
+          amountMinor: Math.round(totals.total * 100),
+          amountSource: 'card',
+        });
+      } else if (payload.kind === 'offline') {
+        if (expired) {
+          toast('انتهت صلاحية رمز الزبون — اطلب منه توليد رمز جديد', 'error');
+          return;
+        }
+        if (payload.amountMinor <= 0) {
+          toast('الرمز لا يحمل مبلغاً صالحاً — اطلب رمزاً جديداً', 'error');
+          return;
+        }
+        // Offline codes carry cid + amount only — the display name
+        // comes from the local customers cache when known.
+        const cached = payload.cid
+          ? await SilaRepo.findCustomer(payload.cid)
+          : null;
+        setDebtConfirm({
+          customerId: payload.cid || null,
+          customerName: cached?.name ?? 'زبون صِلة (رمز موقّع)',
+          customerPhoneLast4: cached?.phone_last4 ?? null,
+          customerCard: null,
+          offlineQr: payload.raw,
+          amountMinor: payload.amountMinor,
+          amountSource: 'offline',
+        });
+      } else if (payload.kind === 'online') {
+        Alert.alert(
+          'رمز جلسة أونلاين',
+          'هذا الرمز يعمل فقط مع اتصال بالإنترنت — اطلب من الزبون بطاقته («بطاقتي») أو رمز «دون اتصال» بمبلغ الفاتورة.',
+          [{text: 'حسناً'}],
+        );
+      } else if (payload.kind === 'pair') {
+        toast('هذا رمز ربط تاجر — يُستخدم من إعدادات صِلة وليس للبيع', 'info');
+      } else {
+        toast('رمز غير معروف — تأكد أنه رمز تطبيق صِلة', 'error');
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل مسح رمز الزبون',
+        'error',
+      );
+    } finally {
+      setDebtBusy(false);
+    }
+  }, [
+    lines.length,
+    busy,
+    debtBusy,
+    silaPaired,
+    totals.total,
+    toast,
+    navigation,
+  ]);
+
+  /** v11 (SILA §9.2): the confirm step — one atomic action: the
+   *  sale is created, the debt row enters the queue with ONE
+   *  idempotency key, and the debt receipt prints automatically
+   *  when a printer is live. */
+  const confirmDebtSale = useCallback(async () => {
+    if (debtConfirm == null) {
+      return;
+    }
+    if (lines.length === 0) {
+      setDebtConfirm(null);
+      return;
+    }
+    setBusy(true);
+    Keyboard.dismiss();
+    try {
+      await InvoiceService.completeSale({
+        lines,
+        discount,
+        paymentType: pricingMode,
+        print: printerStatus === 'connected',
+        receiptSettings: {
+          storeName: settings.storeName,
+          storePhone: settings.storePhone,
+          footerMessage: settings.footerMessage,
+          storeLogoPath: settings.storeLogoPath,
+          paperWidth: settings.paperWidth,
+          codepage: settings.codepage,
+          showProfit: settings.showProfitOnReceipt,
+        },
+        onPrintError: message =>
+          toast(`تم تسجيل الدين لكن الطباعة فشلت: ${message}`, 'error'),
+        productNames: new Map(lines.map(line => [line.productId, line.name])),
+        debt: {
+          customerId: debtConfirm.customerId,
+          customerName: debtConfirm.customerName,
+          customerPhoneLast4: debtConfirm.customerPhoneLast4,
+          customerCard: debtConfirm.customerCard,
+          offlineQr: debtConfirm.offlineQr,
+          amountMinor: debtConfirm.amountMinor,
+        },
+      });
+      clear();
+      setDiscountText('');
+      setDebtConfirm(null);
+      void refreshCatalog();
+      void useSilaStore.getState().refreshCounts();
+      // Opportunistic sync — quietly drains the queue when online.
+      void SilaSync.syncNow();
+      toast(
+        `تم تسجيل الدين على ${debtConfirm.customerName} — سيُزامن مع صِلة تلقائياً`,
+        'success',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast(message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    debtConfirm,
+    lines,
+    discount,
+    pricingMode,
+    printerStatus,
+    settings,
+    clear,
+    refreshCatalog,
+    toast,
+  ]);
 
   /** v8: scan entry — dispatches to the right NATIVE engine.
    *  barcode/visual modes open their engine directly; v9.2 (round-15
@@ -1394,11 +1574,7 @@ export function PosScreen() {
                       )}
                       {weighted ? (
                         <View style={styles.weightBadge}>
-                          <Icon
-                            name="scale"
-                            size={9}
-                            color={c.onAccent}
-                          />
+                          <Icon name="scale" size={9} color={c.onAccent} />
                         </View>
                       ) : null}
                       <Text style={styles.tileName} numberOfLines={1}>
@@ -1425,10 +1601,9 @@ export function PosScreen() {
                         <Text style={styles.tileStock}>
                           {stockState === 'out'
                             ? 'نفد'
-                            : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(
-                                product,
-                                BASE_UNIT_NAME,
-                              )}`}
+                            : `${formatQty(
+                                product.stock_quantity,
+                              )} ${baseUnitLabelOf(product, BASE_UNIT_NAME)}`}
                         </Text>
                         {product.barcode ? (
                           <Icon name="barcode" size={11} color={c.textFaint} />
@@ -1465,216 +1640,245 @@ export function PosScreen() {
             </TouchableOpacity>
           )
         ) : (
-        <View
-          style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
-          {lines.length === 0 ? (
-            <View style={styles.cartEmptyRow}>
-              <Icon name="cart" size={18} color={c.textFaint} />
-              <Text style={styles.cartEmptyText}>
-                السلة فارغة — المس منتجاً من الشبكة أو امسحه
-                {barcodeActive ? ' بالباركود' : ''}
-                {barcodeActive && visualActive ? ' أو ' : ''}
-                {visualActive ? 'بالكاميرا' : ''}
-                {embeddingsCount === 0 && products.length > 0 && !barcodeActive
-                  ? ' (لا توجد بصمات بصرية محفوظة بعد — البيع باللمس متاح)'
-                  : ''}
-              </Text>
-            </View>
-          ) : (
-            <>
-              {/* Compact header: expand toggle + title + live count +
+          <View
+            style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
+            {lines.length === 0 ? (
+              <View style={styles.cartEmptyRow}>
+                <Icon name="cart" size={18} color={c.textFaint} />
+                <Text style={styles.cartEmptyText}>
+                  السلة فارغة — المس منتجاً من الشبكة أو امسحه
+                  {barcodeActive ? ' بالباركود' : ''}
+                  {barcodeActive && visualActive ? ' أو ' : ''}
+                  {visualActive ? 'بالكاميرا' : ''}
+                  {embeddingsCount === 0 &&
+                  products.length > 0 &&
+                  !barcodeActive
+                    ? ' (لا توجد بصمات بصرية محفوظة بعد — البيع باللمس متاح)'
+                    : ''}
+                </Text>
+              </View>
+            ) : (
+              <>
+                {/* Compact header: expand toggle + title + live count +
                   EMPTY button (round-8). v8.2 (round-11 #3): تكبير
                   grows the cart to the full screen, تصغير folds it
                   back — reviewing a long sale is now comfortable. */}
-              <View style={styles.cartHeaderRow}>
-                <TouchableOpacity
-                  style={styles.expandBtn}
-                  onPress={toggleCartExpanded}
-                  activeOpacity={0.75}
-                  hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
-                  <View
-                    style={{
-                      transform: [{rotate: cartExpanded ? '0deg' : '180deg'}],
-                    }}>
-                    <Icon name="chevronDown" size={13} color={c.accent} />
+                <View style={styles.cartHeaderRow}>
+                  <TouchableOpacity
+                    style={styles.expandBtn}
+                    onPress={toggleCartExpanded}
+                    activeOpacity={0.75}
+                    hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
+                    <View
+                      style={{
+                        transform: [{rotate: cartExpanded ? '0deg' : '180deg'}],
+                      }}>
+                      <Icon name="chevronDown" size={13} color={c.accent} />
+                    </View>
+                    <Text style={styles.expandBtnText}>
+                      {cartExpanded ? 'تصغير' : 'تكبير'}
+                    </Text>
+                  </TouchableOpacity>
+                  <View style={styles.cartHeaderTitle}>
+                    <Icon name="cart" size={14} color={c.accent} />
+                    <Text style={styles.cartHeaderText}>سلة البيع</Text>
+                    <Badge label={String(totals.itemsCount)} tone="neutral" />
                   </View>
-                  <Text style={styles.expandBtnText}>
-                    {cartExpanded ? 'تصغير' : 'تكبير'}
-                  </Text>
-                </TouchableOpacity>
-                <View style={styles.cartHeaderTitle}>
-                  <Icon name="cart" size={14} color={c.accent} />
-                  <Text style={styles.cartHeaderText}>سلة البيع</Text>
-                  <Badge label={String(totals.itemsCount)} tone="neutral" />
+                  <TouchableOpacity
+                    style={styles.clearCartBtn}
+                    onPress={confirmClearCart}
+                    hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                    activeOpacity={0.75}>
+                    <Icon name="trash" size={14} color={c.danger} />
+                    <Text style={styles.clearCartText}>تفريغ</Text>
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity
-                  style={styles.clearCartBtn}
-                  onPress={confirmClearCart}
-                  hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
-                  activeOpacity={0.75}>
-                  <Icon name="trash" size={14} color={c.danger} />
-                  <Text style={styles.clearCartText}>تفريغ</Text>
-                </TouchableOpacity>
-              </View>
-              <View
-                style={
-                  cartExpanded
-                    ? styles.cartLinesWrapExpanded
-                    : styles.cartLinesWrap
-                }>
-                <ScrollView
-                  style={{flex: 1}}
-                  showsVerticalScrollIndicator={false}>
-                  {lines.map(line => (
-                    <View key={line.key} style={styles.cartLine}>
-                      <View style={styles.cartLineInfo}>
-                        <Text style={styles.cartLineName} numberOfLines={1}>
-                          {line.name}
-                        </Text>
-                        {/* Round-9: ONE meta row — price×qty and the unit
+                <View
+                  style={
+                    cartExpanded
+                      ? styles.cartLinesWrapExpanded
+                      : styles.cartLinesWrap
+                  }>
+                  <ScrollView
+                    style={{flex: 1}}
+                    showsVerticalScrollIndicator={false}>
+                    {lines.map(line => (
+                      <View key={line.key} style={styles.cartLine}>
+                        <View style={styles.cartLineInfo}>
+                          <Text style={styles.cartLineName} numberOfLines={1}>
+                            {line.name}
+                          </Text>
+                          {/* Round-9: ONE meta row — price×qty and the unit
                             chip inline together, so each line is two
                             rows tall max and nothing overflows. */}
-                        <View style={styles.cartLineMetaRow}>
-                          <Text style={styles.cartLineMeta} numberOfLines={1}>
-                            {formatMoney(line.unitPrice)} ×{' '}
-                            {formatQty(line.quantity)} ={' '}
-                            {formatMoney(line.unitPrice * line.quantity)}
-                          </Text>
-                          <TouchableOpacity
-                            style={styles.unitChip}
-                            onPress={() => openUnitPicker(line)}
-                            activeOpacity={0.8}>
-                            <Icon name="scale" size={10} color={c.accent} />
-                            <Text style={styles.unitChipText} numberOfLines={1}>
-                              {line.unitName}
-                              {line.conversion !== 1
-                                ? ` (${formatQty(line.conversion)})`
-                                : ''}
+                          <View style={styles.cartLineMetaRow}>
+                            <Text style={styles.cartLineMeta} numberOfLines={1}>
+                              {formatMoney(line.unitPrice)} ×{' '}
+                              {formatQty(line.quantity)} ={' '}
+                              {formatMoney(line.unitPrice * line.quantity)}
                             </Text>
-                            <Icon
-                              name="chevronDown"
-                              size={10}
-                              color={c.accent}
-                            />
-                          </TouchableOpacity>
+                            <TouchableOpacity
+                              style={styles.unitChip}
+                              onPress={() => openUnitPicker(line)}
+                              activeOpacity={0.8}>
+                              <Icon name="scale" size={10} color={c.accent} />
+                              <Text
+                                style={styles.unitChipText}
+                                numberOfLines={1}>
+                                {line.unitName}
+                                {line.conversion !== 1
+                                  ? ` (${formatQty(line.conversion)})`
+                                  : ''}
+                              </Text>
+                              <Icon
+                                name="chevronDown"
+                                size={10}
+                                color={c.accent}
+                              />
+                            </TouchableOpacity>
+                          </View>
                         </View>
+                        <Stepper
+                          compact
+                          value={line.quantity}
+                          onIncrement={() => {
+                            const result = increment(line.key);
+                            if (!result.ok && result.reason) {
+                              toast(result.reason, 'error');
+                            }
+                          }}
+                          onDecrement={() => {
+                            decrement(line.key);
+                          }}
+                          decrementDanger
+                        />
+                        <TouchableOpacity
+                          onPress={() => removeLine(line.key)}
+                          style={styles.removeBtn}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                          <Icon name="trash" size={13} color={c.danger} />
+                        </TouchableOpacity>
                       </View>
-                      <Stepper
-                        compact
-                        value={line.quantity}
-                        onIncrement={() => {
-                          const result = increment(line.key);
-                          if (!result.ok && result.reason) {
-                            toast(result.reason, 'error');
-                          }
-                        }}
-                        onDecrement={() => {
-                          decrement(line.key);
-                        }}
-                        decrementDanger
-                      />
-                      <TouchableOpacity
-                        onPress={() => removeLine(line.key)}
-                        style={styles.removeBtn}
-                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-                        <Icon name="trash" size={13} color={c.danger} />
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                </ScrollView>
-              </View>
-
-              {/* Discount row */}
-              <View style={styles.discountRow}>
-                <Text style={styles.discountLabel}>خصم (₪)</Text>
-                <TextInput
-                  style={styles.discountInput}
-                  value={discountText}
-                  onChangeText={text => {
-                    setDiscountText(text);
-                    const value = parseNumber(text);
-                    setDiscount(Number.isNaN(value) ? 0 : Math.max(0, value));
-                  }}
-                  keyboardType="numeric"
-                  placeholder="0"
-                  placeholderTextColor={c.textFaint}
-                />
-                <TouchableOpacity
-                  style={styles.quickChip}
-                  onPress={() => {
-                    const next = totals.subtotal * 0.05;
-                    setDiscount(next);
-                    setDiscountText(next.toFixed(2));
-                  }}>
-                  <Text style={styles.quickChipText}>5%</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.quickChip}
-                  onPress={() => {
-                    const next = totals.subtotal * 0.1;
-                    setDiscount(next);
-                    setDiscountText(next.toFixed(2));
-                  }}>
-                  <Text style={styles.quickChipText}>10%</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.quickChip, styles.quickChipGhost]}
-                  onPress={() => {
-                    setDiscount(0);
-                    setDiscountText('');
-                  }}>
-                  <Text style={[styles.quickChipText, {color: c.textDim}]}>
-                    إلغاء
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Totals + checkout */}
-              <View style={styles.totalsRow}>
-                <View>
-                  <Text style={styles.totalLabel}>
-                    الإجمالي · {formatQty(totals.itemsCount, 2)} وحدة (
-                    {formatQty(totals.baseItemsCount, 2)}{' '}
-                    {lines.some(line => line.byWeight)
-                      ? lines.some(line => !line.byWeight)
-                        ? 'وحدة أساس'
-                        : WEIGHT_UNIT_NAME
-                      : BASE_UNIT_NAME}
-                    )
-                  </Text>
-                  {totals.safeDiscount > 0 ? (
-                    <Text style={styles.discountValue}>
-                      خصم {formatMoney(totals.safeDiscount)}
-                    </Text>
-                  ) : null}
+                    ))}
+                  </ScrollView>
                 </View>
-                <MoneyText value={totals.total} big />
-              </View>
 
-              <View style={styles.checkoutRow}>
-                <AppButton
-                  title={
-                    printerStatus === 'connected'
-                      ? 'بيع وطباعة'
-                      : 'بيع وطباعة (بدون طابعة)'
-                  }
-                  icon="printer"
-                  onPress={() => completeSale(true)}
-                  loading={busy}
-                  style={{flex: 1.4}}
-                />
-                <AppButton
-                  title="بيع فقط"
-                  variant="secondary"
-                  icon="check"
-                  onPress={() => completeSale(false)}
-                  loading={busy}
-                  style={{flex: 1}}
-                />
-              </View>
-            </>
-          )}
-        </View>
+                {/* Discount row */}
+                <View style={styles.discountRow}>
+                  <Text style={styles.discountLabel}>خصم (₪)</Text>
+                  <TextInput
+                    style={styles.discountInput}
+                    value={discountText}
+                    onChangeText={text => {
+                      setDiscountText(text);
+                      const value = parseNumber(text);
+                      setDiscount(Number.isNaN(value) ? 0 : Math.max(0, value));
+                    }}
+                    keyboardType="numeric"
+                    placeholder="0"
+                    placeholderTextColor={c.textFaint}
+                  />
+                  <TouchableOpacity
+                    style={styles.quickChip}
+                    onPress={() => {
+                      const next = totals.subtotal * 0.05;
+                      setDiscount(next);
+                      setDiscountText(next.toFixed(2));
+                    }}>
+                    <Text style={styles.quickChipText}>5%</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.quickChip}
+                    onPress={() => {
+                      const next = totals.subtotal * 0.1;
+                      setDiscount(next);
+                      setDiscountText(next.toFixed(2));
+                    }}>
+                    <Text style={styles.quickChipText}>10%</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.quickChip, styles.quickChipGhost]}
+                    onPress={() => {
+                      setDiscount(0);
+                      setDiscountText('');
+                    }}>
+                    <Text style={[styles.quickChipText, {color: c.textDim}]}>
+                      إلغاء
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Totals + checkout */}
+                <View style={styles.totalsRow}>
+                  <View>
+                    <Text style={styles.totalLabel}>
+                      الإجمالي · {formatQty(totals.itemsCount, 2)} وحدة (
+                      {formatQty(totals.baseItemsCount, 2)}{' '}
+                      {lines.some(line => line.byWeight)
+                        ? lines.some(line => !line.byWeight)
+                          ? 'وحدة أساس'
+                          : WEIGHT_UNIT_NAME
+                        : BASE_UNIT_NAME}
+                      )
+                    </Text>
+                    {totals.safeDiscount > 0 ? (
+                      <Text style={styles.discountValue}>
+                        خصم {formatMoney(totals.safeDiscount)}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <MoneyText value={totals.total} big />
+                </View>
+
+                <View style={styles.checkoutRow}>
+                  {/* v11 (round-17 #1): ONE dual-mode sell button — the
+                    printer icon appears ONLY when a printer is live,
+                    and then the sale prints automatically; with no
+                    printer it is a plain fast sale. */}
+                  <AppButton
+                    title="بيع"
+                    icon={printerStatus === 'connected' ? 'printer' : 'check'}
+                    onPress={() => completeSale(printerStatus === 'connected')}
+                    loading={busy}
+                    style={{flex: 1.5}}
+                  />
+                  {/* v11 (round-17 #2): البيع بالدين عبر صِلة — opens the
+                    camera to scan the customer's QR. A compact icon
+                    chip keeps the checkout row light; the pending
+                    badge shows unsynced debts at a glance. */}
+                  <TouchableOpacity
+                    style={[
+                      styles.debtBtn,
+                      silaPaired && styles.debtBtnPaired,
+                      (busy || debtBusy) && {opacity: 0.5},
+                    ]}
+                    onPress={() => void startDebtSale()}
+                    disabled={busy || debtBusy}
+                    activeOpacity={0.8}>
+                    <Icon
+                      name={silaPaired ? 'qrFrame' : 'lock'}
+                      size={16}
+                      color={silaPaired ? c.accent : c.textDim}
+                    />
+                    <Text
+                      style={[
+                        styles.debtBtnText,
+                        {color: silaPaired ? c.accent : c.textDim},
+                      ]}>
+                      دين
+                    </Text>
+                    {silaPaired && silaPending > 0 ? (
+                      <View style={styles.debtBadge}>
+                        <Text style={styles.debtBadgeText}>
+                          {silaPending > 99 ? '+99' : silaPending}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </View>
         )}
       </View>
 
@@ -1770,6 +1974,105 @@ export function PosScreen() {
         onClose={closeWeightSheet}
         onConfirm={confirmWeight}
       />
+
+      {/* ── v11 (SILA §9.2): debt confirmation sheet — the customer
+          QR was scanned and parsed offline; one look (name / amount /
+          mode) and one tap commits the sale + debt queue row. */}
+      <Modal
+        visible={debtConfirm != null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setDebtConfirm(null)}>
+        <View style={styles.debtModalOverlay}>
+          <TouchableOpacity
+            style={{flex: 1}}
+            activeOpacity={1}
+            onPress={() => setDebtConfirm(null)}
+          />
+          <View style={styles.debtModalSheet}>
+            <View style={styles.unitModalHandle} />
+            <Text style={styles.debtModalTitle}>بيع بالدين — صِلة</Text>
+
+            {/* Customer block */}
+            <View style={styles.debtCustomerCard}>
+              <View style={styles.debtCustomerIcon}>
+                <Icon name="qrFrame" size={22} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.debtCustomerName} numberOfLines={1}>
+                  {debtConfirm?.customerName ?? ''}
+                </Text>
+                <Text style={styles.debtCustomerMeta}>
+                  {debtConfirm?.customerPhoneLast4
+                    ? `هاتف: ****${debtConfirm.customerPhoneLast4}`
+                    : debtConfirm?.amountSource === 'offline'
+                    ? 'رمز موقّع من الزبون — المبلغ من الرمز'
+                    : 'بطاقة زبون صِلة — المبلغ من الفاتورة'}
+                </Text>
+              </View>
+            </View>
+
+            {/* Amount */}
+            <View style={styles.debtAmountRow}>
+              <Text style={styles.debtAmountLabel}>قيمة الدين</Text>
+              <MoneyText value={(debtConfirm?.amountMinor ?? 0) / 100} big />
+            </View>
+
+            {/* Amount mismatch warning (offline signed code ≠ cart) */}
+            {debtConfirm?.amountSource === 'offline' &&
+            Math.abs(debtConfirm.amountMinor - Math.round(totals.total * 100)) >
+              0 ? (
+              <View style={styles.debtWarnBox}>
+                <Icon name="alert" size={15} color={c.danger} />
+                <Text style={styles.debtWarnText}>
+                  مبلغ الرمز ({formatMoney(debtConfirm.amountMinor / 100)})
+                  يختلف عن فاتورة السلة ({formatMoney(totals.total)}) — الدين
+                  يُسجَّل بمبلغ الرمز الموقّع من الزبون.
+                </Text>
+              </View>
+            ) : null}
+
+            {/* Printer hint */}
+            <View style={styles.debtHintRow}>
+              <Icon
+                name={printerStatus === 'connected' ? 'printer' : 'clock'}
+                size={14}
+                color={c.textDim}
+              />
+              <Text style={styles.debtHintText}>
+                {printerStatus === 'connected'
+                  ? 'سيُطبع إيصال الدين تلقائياً بعد التأكيد'
+                  : 'لا توجد طابعة متصلة — سيُحفظ الدين بدون طباعة'}
+              </Text>
+            </View>
+            <View style={styles.debtHintRow}>
+              <Icon name="refresh" size={14} color={c.textDim} />
+              <Text style={styles.debtHintText}>
+                يُسجَّل الدين الآن محلياً ويُزامن مع صِلة تلقائياً عند توفر
+                الإنترنت
+              </Text>
+            </View>
+
+            {/* Actions */}
+            <View style={styles.debtActions}>
+              <AppButton
+                title="إلغاء"
+                variant="secondary"
+                onPress={() => setDebtConfirm(null)}
+                style={{flex: 1}}
+              />
+              <AppButton
+                title="تأكيد الدين"
+                variant="success"
+                icon="check"
+                onPress={() => void confirmDebtSale()}
+                loading={busy}
+                style={{flex: 1.6}}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1803,11 +2106,7 @@ function WeightSheet({
   unitRows: ProductUnit[] | null;
   pricingMode: 'RETAIL' | 'WHOLESALE';
   onClose: () => void;
-  onConfirm: (
-    product: Product,
-    kg: number,
-    unit: ProductUnit | null,
-  ) => void;
+  onConfirm: (product: Product, kg: number, unit: ProductUnit | null) => void;
 }) {
   const c = useThemeColors();
   const styles = useStyles();
@@ -2512,6 +2811,141 @@ const useStyles = makeStyles(c =>
     checkoutRow: {
       flexDirection: 'row',
       gap: spacing.sm,
+    },
+    // v11 (SILA): the compact debt chip — icon-first so the checkout
+    // row stays light (round-17: "استخدم معه رموز").
+    debtBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      minHeight: 50,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    debtBtnPaired: {
+      backgroundColor: c.accentSofter,
+      borderColor: c.accent,
+    },
+    debtBtnText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    debtBadge: {
+      position: 'absolute',
+      top: -6,
+      end: -4,
+      minWidth: 18,
+      height: 18,
+      borderRadius: 9,
+      backgroundColor: c.danger,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 4,
+    },
+    debtBadgeText: {
+      color: '#fff',
+      fontFamily: fonts.bold,
+      fontSize: 10,
+      lineHeight: 13,
+    },
+    // v11 (SILA): debt confirmation sheet.
+    debtModalOverlay: {
+      flex: 1,
+      backgroundColor: c.overlay,
+      justifyContent: 'flex-end',
+    },
+    debtModalSheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      gap: spacing.sm,
+      paddingBottom: spacing.xxl,
+    },
+    debtModalTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+      textAlign: 'center',
+      marginBottom: spacing.xs,
+    },
+    debtCustomerCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.accentSofter,
+      borderRadius: radius.md,
+      padding: spacing.md,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    debtCustomerIcon: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: c.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    debtCustomerName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    debtCustomerMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      marginTop: 2,
+    },
+    debtAmountRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.xs,
+    },
+    debtAmountLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    debtWarnBox: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: spacing.sm,
+      backgroundColor: c.dangerSoft,
+      borderRadius: radius.sm,
+      padding: spacing.md,
+    },
+    debtWarnText: {
+      flex: 1,
+      color: c.danger,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 19,
+    },
+    debtHintRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingHorizontal: spacing.xs,
+    },
+    debtHintText: {
+      flex: 1,
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 18,
+    },
+    debtActions: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      marginTop: spacing.sm,
     },
 
     // Unit picker modal

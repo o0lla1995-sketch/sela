@@ -32,6 +32,8 @@ import {useCatalogStore} from './src/stores/catalogStore';
 import {useCartStore} from './src/stores/cartStore';
 import {useSettingsStore} from './src/stores/settingsStore';
 import {usePrinterStore} from './src/stores/printerStore';
+import {useSilaStore} from './src/stores/silaStore';
+import {SilaSync} from './src/services/sila/SilaSync';
 import {VisionRecognitionService} from './src/services/vision/VisionRecognitionService';
 import {StockAlertsService} from './src/services/StockAlertsService';
 import {logDiag} from './src/core/diagnostics';
@@ -79,6 +81,15 @@ export default function App(): React.JSX.Element {
 
         // 6. Silent printer auto-reconnect.
         void usePrinterStore.getState().connectSaved();
+
+        // 7. v11 (SILA): load the merchant pairing + queue counts
+        //    and start the 60-second Store & Forward loop when the
+        //    device is paired (SILA_POS_API §8). Quiet when offline —
+        //    the health probe fails fast and retries next cycle.
+        useSilaStore.getState().load();
+        if (useSilaStore.getState().pairing != null) {
+          SilaSync.start();
+        }
 
         if (mounted) {
           setBoot('ready');

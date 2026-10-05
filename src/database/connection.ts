@@ -106,17 +106,51 @@ const DDL_STATEMENTS: string[] = [
     FOREIGN KEY(sale_id) REFERENCES sales(id),
     FOREIGN KEY(product_id) REFERENCES products(id)
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)`,
-  `CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)`,
-  `CREATE INDEX IF NOT EXISTS idx_product_units_product ON product_units(product_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_product_units_barcode ON product_units(barcode)`,
-  `CREATE INDEX IF NOT EXISTS idx_stocktakes_status ON stocktakes(status)`,
-  `CREATE INDEX IF NOT EXISTS idx_stocktake_items_session ON stocktake_items(stocktake_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_embeddings_product ON product_embeddings(product_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)`,
-  `CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id)`,
+  'CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)',
+  'CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)',
+  'CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)',
+  'CREATE INDEX IF NOT EXISTS idx_product_units_product ON product_units(product_id)',
+  'CREATE INDEX IF NOT EXISTS idx_product_units_barcode ON product_units(barcode)',
+  'CREATE INDEX IF NOT EXISTS idx_stocktakes_status ON stocktakes(status)',
+  'CREATE INDEX IF NOT EXISTS idx_stocktake_items_session ON stocktake_items(stocktake_id)',
+  'CREATE INDEX IF NOT EXISTS idx_embeddings_product ON product_embeddings(product_id)',
+  'CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id)',
+  'CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id)',
+  // ── v11 (SILA debt integration — SILA_POS_API §7) ────────────
+  `CREATE TABLE IF NOT EXISTS sila_debt_queue (
+    local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    customer_id TEXT,
+    customer_name TEXT,
+    customer_phone_last4 TEXT,
+    customer_card TEXT,
+    offline_qr TEXT,
+    amount_minor INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'ILS',
+    pos_invoice_ref TEXT NOT NULL UNIQUE,
+    description TEXT,
+    scanned_at TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+      CHECK (state IN ('pending','syncing','synced','failed')),
+    reference_code TEXT,
+    transaction_id TEXT,
+    outstanding_after INTEGER,
+    synced_at TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS sila_customers (
+    customer_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    phone_last4 TEXT,
+    id_number TEXT,
+    outstanding_minor INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_sila_dq_state ON sila_debt_queue(state, created_at)',
 ];
 
 const DEFAULT_CATEGORIES: string[] = [
@@ -243,8 +277,7 @@ async function applyMigrations(database: DB): Promise<void> {
     const cols = await database.execute(
       "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'sold_by_weight'",
     );
-    const hasWeight =
-      (cols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    const hasWeight = (cols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
     if (!hasWeight) {
       await database.execute(
         'ALTER TABLE products ADD COLUMN sold_by_weight INTEGER NOT NULL DEFAULT 0',
@@ -255,14 +288,12 @@ async function applyMigrations(database: DB): Promise<void> {
     const wakfCount = await database.execute(
       "SELECT COUNT(*) AS cnt FROM units WHERE name = 'وقية'",
     );
-    const wakfRow =
-      (wakfCount.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    const wakfRow = (wakfCount.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
     if (wakfRow === 0) {
       const maxOrder = await database.execute(
         'SELECT MAX(sort_order) AS mx FROM units',
       );
-      const mx =
-        (maxOrder.rows?._array?.[0] as {mx?: number | null})?.mx ?? 0;
+      const mx = (maxOrder.rows?._array?.[0] as {mx?: number | null})?.mx ?? 0;
       await database.execute(
         'INSERT INTO units (name, short_name, sort_order) VALUES (?, ?, ?)',
         ['وقية', 'وقية', Number(mx) + 1],
@@ -280,8 +311,7 @@ async function applyMigrations(database: DB): Promise<void> {
     const kindCols = await database.execute(
       "SELECT COUNT(*) AS cnt FROM pragma_table_info('units') WHERE name = 'kind'",
     );
-    const hasKind =
-      (kindCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    const hasKind = (kindCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
     if (!hasKind) {
       await database.execute(
         "ALTER TABLE units ADD COLUMN kind TEXT NOT NULL DEFAULT 'piece'",
@@ -318,13 +348,59 @@ async function applyMigrations(database: DB): Promise<void> {
       const hit = existing.rows?._array?.[0] as {id?: number} | undefined;
       if (hit?.id == null) {
         await database.execute(
-          "INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM units), ?)",
+          'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM units), ?)',
           [unit.name, unit.short, unit.kind],
         );
       }
     }
     logDiag('db', 'ترحيل v5: أنواع الوحدات + كتالوج الوحدات الكامل');
     version = 5;
+  }
+
+  if (version < 6) {
+    // v11 (SILA §7): debt queue + customers cache. Fresh DDL above
+    // already covers new installs; this heals older ones.
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS sila_debt_queue (
+        local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        customer_id TEXT,
+        customer_name TEXT,
+        customer_phone_last4 TEXT,
+        customer_card TEXT,
+        offline_qr TEXT,
+        amount_minor INTEGER NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'ILS',
+        pos_invoice_ref TEXT NOT NULL UNIQUE,
+        description TEXT,
+        scanned_at TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (state IN ('pending','syncing','synced','failed')),
+        reference_code TEXT,
+        transaction_id TEXT,
+        outstanding_after INTEGER,
+        synced_at TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS sila_customers (
+        customer_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        phone_last4 TEXT,
+        id_number TEXT,
+        outstanding_minor INTEGER NOT NULL DEFAULT 0,
+        last_synced_at TEXT
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sila_dq_state ON sila_debt_queue(state, created_at)',
+    );
+    logDiag('db', 'ترحيل v6: جداول ديون صِلة (الطابور + ذاكرة الزبائن)');
+    version = 6;
   }
 
   if (version !== storedVersion) {
@@ -404,15 +480,21 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM products');
   await database.execute('DELETE FROM categories');
   await database.execute('DELETE FROM units');
+  await database.execute('DELETE FROM sila_customers');
+  await database.execute('DELETE FROM sila_debt_queue');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }
 
 export function toMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
   try {
     return JSON.stringify(error);
   } catch {
@@ -424,9 +506,15 @@ export function toMessage(error: unknown): string {
 export function nativeErrorMessage(error: unknown, fallback: string): string {
   if (error && typeof error === 'object') {
     const candidate = error as {message?: string; code?: string};
-    if (candidate.message) return candidate.message;
-    if (candidate.code) return `${fallback} (${candidate.code})`;
+    if (candidate.message) {
+      return candidate.message;
+    }
+    if (candidate.code) {
+      return `${fallback} (${candidate.code})`;
+    }
   }
-  if (typeof error === 'string' && error.length > 0) return error;
+  if (typeof error === 'string' && error.length > 0) {
+    return error;
+  }
   return fallback;
 }

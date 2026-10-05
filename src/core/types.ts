@@ -274,7 +274,10 @@ export type NotificationKind =
   | 'info'
   | 'printer'
   | 'sale'
-  | 'stocktake';
+  | 'stocktake'
+  /** v11: a SILA debt record failed permanently and needs the
+   *  merchant's attention (expired code, duplicate invoice…). */
+  | 'sila_debt';
 
 export interface AppNotification {
   /** Stable id (timestamp-based). */
@@ -289,12 +292,110 @@ export interface AppNotification {
   productId?: number;
 }
 
+// ────────────────────────────────────────────────────────────────
+// SILA — الدين الفلسطيني (v11, SILA_POS_API v1.1)
+// ────────────────────────────────────────────────────────────────
+
+/** What the scanned customer QR turned out to be (§4-5). */
+export type SilaQrKind = 'card' | 'offline' | 'online' | 'pair' | 'unknown';
+
+/** Parsed `sila-card:v1` — identity card, no amount (§5). */
+export interface SilaCardPayload {
+  kind: 'card';
+  cid: string;
+  name: string;
+  phone: string;
+  exp: number;
+  /** The complete raw JWS string — replayed to the server verbatim. */
+  raw: string;
+}
+
+/** Parsed `sila-offline-qr` — customer-signed amount (§3.1). */
+export interface SilaOfflinePayload {
+  kind: 'offline';
+  cid: string;
+  amountMinor: number;
+  currency: string;
+  description: string;
+  exp: number;
+  raw: string;
+}
+
+/** An opaque online-session token — unreadable without the server. */
+export interface SilaOnlinePayload {
+  kind: 'online';
+  raw: string;
+}
+
+/** A `sila-pair:XXXX-XXXX` merchant pairing code (§6.1). */
+export interface SilaPairPayload {
+  kind: 'pair';
+  code: string;
+  raw: string;
+}
+
+export type SilaQrPayload =
+  | SilaCardPayload
+  | SilaOfflinePayload
+  | SilaOnlinePayload
+  | SilaPairPayload
+  | {kind: 'unknown'; raw: string};
+
+/** Persisted merchant pairing (MMKV — SILA_POS_API §7 pos_settings). */
+export interface SilaPairing {
+  posToken: string;
+  deviceId: string;
+  merchantOrgId: string;
+  merchantName: string;
+  /** ISO date — pos_token lives 180 days (§6.1). */
+  tokenExpiresAt: string;
+  pairedAt: string;
+  apiBaseUrl: string;
+}
+
+/** One row of the local debt queue (sila_debt_queue §7). */
+export interface SilaDebtRow {
+  local_id: number;
+  idempotency_key: string;
+  customer_id: string | null;
+  customer_name: string | null;
+  customer_phone_last4: string | null;
+  customer_card: string | null;
+  offline_qr: string | null;
+  amount_minor: number;
+  currency: string;
+  pos_invoice_ref: string;
+  description: string | null;
+  scanned_at: string;
+  state: 'pending' | 'syncing' | 'synced' | 'failed';
+  reference_code: string | null;
+  transaction_id: string | null;
+  outstanding_after: number | null;
+  synced_at: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  retry_count: number;
+  created_at: string;
+}
+
+/** Cached SILA customer balance (sila_customers §7). */
+export interface SilaCustomer {
+  customer_id: string;
+  name: string;
+  phone_last4: string | null;
+  id_number: string | null;
+  outstanding_minor: number;
+  last_synced_at: string | null;
+}
+
 /** Derives the stock state for a product given the global default threshold. */
 export function stockStateOf(
   product: Pick<Product, 'stock_quantity' | 'low_stock_threshold'>,
   defaultThreshold: number,
 ): StockState {
-  if (product.stock_quantity <= 0) return 'out';
+  if (product.stock_quantity <= 0) {
+    return 'out';
+  }
   const threshold = product.low_stock_threshold ?? defaultThreshold;
   return product.stock_quantity <= threshold ? 'low' : 'ok';
 }

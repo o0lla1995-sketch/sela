@@ -16,7 +16,10 @@ import {
 } from '../storage/storage';
 import {logDiag} from '../core/diagnostics';
 import {buildReceiptJob} from './printer/receipt';
+import {buildDebtReceiptJob} from './printer/debtReceipt';
 import {ThermalPrinterService} from './printer/ThermalPrinterService';
+import {SilaRepo} from './sila/SilaRepo';
+import {uuidV4} from './sila/qr';
 import type {CartLine, PricingMode, SaleWithItems} from '../core/types';
 import type {ReceiptSettings} from './printer/receipt';
 
@@ -94,6 +97,20 @@ export interface CompleteSaleOptions {
   /** Callbacks for user feedback. */
   onPrintError?: (message: string) => void;
   productNames?: Map<number, string>;
+  /** v11 (SILA §9.2): when set the sale is a SILA deferred debt —
+   *  a debt_queue row is created at sale time with ONE idempotency
+   *  key (§7 rule 1) and the receipt uses the debt template with
+   *  the customer block + pending-sync note. */
+  debt?: {
+    customerId: string | null;
+    customerName: string;
+    customerPhoneLast4: string | null;
+    customerCard: string | null;
+    offlineQr: string | null;
+    /** The DEBT amount in minor units — from the signed offline QR
+     *  when present, otherwise the invoice total (§4 rules). */
+    amountMinor: number;
+  };
 }
 
 export const InvoiceService = {
@@ -134,10 +151,27 @@ export const InvoiceService = {
 
     logDiag(
       'sale',
-      `تم إتمام البيع ${result.sale.invoice_number} بمبلغ ${result.sale.total_amount.toFixed(
-        2,
-      )} ₪`,
+      `تم إتمام البيع ${
+        result.sale.invoice_number
+      } بمبلغ ${result.sale.total_amount.toFixed(2)} ₪`,
     );
+
+    // v11 (SILA §9.2): the debt row is created AT SALE TIME — one
+    // idempotency key, replayed verbatim on every retry (§7).
+    if (options.debt != null) {
+      await SilaRepo.enqueue({
+        idempotencyKey: uuidV4(),
+        customerId: options.debt.customerId,
+        customerName: options.debt.customerName,
+        customerPhoneLast4: options.debt.customerPhoneLast4,
+        customerCard: options.debt.customerCard,
+        offlineQr: options.debt.offlineQr,
+        amountMinor: options.debt.amountMinor,
+        posInvoiceRef: result.sale.invoice_number,
+        description: `بيع بضاعة — فاتورة ${result.sale.invoice_number}`,
+        scannedAt: new Date().toISOString(),
+      });
+    }
 
     if (options.print) {
       try {
@@ -146,10 +180,27 @@ export const InvoiceService = {
           new Map<number, string>(
             options.lines.map(line => [line.productId, line.name]),
           );
-        const job = buildReceiptJob(
-          {sale: result.sale, items: result.items, productNameById: names},
-          options.receiptSettings,
-        );
+        const job =
+          options.debt != null
+            ? buildDebtReceiptJob(
+                {
+                  sale: result.sale,
+                  items: result.items,
+                  productNameById: names,
+                  customerName: options.debt.customerName,
+                  customerPhoneLast4: options.debt.customerPhoneLast4,
+                  referenceCode: null,
+                },
+                options.receiptSettings,
+              )
+            : buildReceiptJob(
+                {
+                  sale: result.sale,
+                  items: result.items,
+                  productNameById: names,
+                },
+                options.receiptSettings,
+              );
         await ThermalPrinterService.printJob(job);
       } catch (error) {
         // The SALE IS SAVED — printing failure must never roll it back.
@@ -188,6 +239,46 @@ export const InvoiceService = {
   },
 
   /**
+   * v11 (SILA): reprints a debt receipt BY INVOICE REFERENCE —
+   * includes the customer block and, once synced, the official
+   * POS-… reference code.
+   */
+  async reprintDebtReceiptByRef(
+    invoiceRef: string,
+    receiptSettings: ReceiptSettings,
+  ): Promise<void> {
+    const debt = await SilaRepo.byInvoiceRef(invoiceRef);
+    if (debt == null) {
+      throw new Error('هذه ليست فاتورة دين صِلة');
+    }
+    const sales = await SaleRepo.listRecent(500);
+    const record = sales.find(entry => entry.invoice_number === invoiceRef);
+    if (!record) {
+      throw new Error('الفاتورة غير موجودة');
+    }
+    const items = await SaleRepo.getItemsForSale(record.id);
+    const names = new Map<number, string>();
+    for (const item of items) {
+      if (!names.has(item.product_id)) {
+        const product = await ProductRepo.getById(item.product_id);
+        names.set(item.product_id, product?.name ?? `#${item.product_id}`);
+      }
+    }
+    const job = buildDebtReceiptJob(
+      {
+        sale: record,
+        items,
+        productNameById: names,
+        customerName: debt.customer_name ?? 'زبون صِلة',
+        customerPhoneLast4: debt.customer_phone_last4,
+        referenceCode: debt.reference_code,
+      },
+      receiptSettings,
+    );
+    await ThermalPrinterService.printJob(job);
+  },
+
+  /**
    * v10 (round-16 #1): re-syncs the MMKV invoice counter with the
    * DATABASE after a backup restore — walks every stored invoice,
    * finds the latest day + its highest sequence and stores them, so
@@ -196,9 +287,7 @@ export const InvoiceService = {
    */
   async syncInvoiceCounterFromDb(): Promise<void> {
     try {
-      const result = await getDb().execute(
-        'SELECT invoice_number FROM sales',
-      );
+      const result = await getDb().execute('SELECT invoice_number FROM sales');
       let bestDay = '';
       let bestSeq = 0;
       const byDay = new Map<string, number>();
@@ -208,7 +297,10 @@ export const InvoiceService = {
         if (match == null) {
           continue;
         }
-        const day = `${match[1].slice(0, 4)}-${match[1].slice(4, 6)}-${match[1].slice(6, 8)}`;
+        const day = `${match[1].slice(0, 4)}-${match[1].slice(
+          4,
+          6,
+        )}-${match[1].slice(6, 8)}`;
         const seq = parseInt(match[2], 10);
         byDay.set(day, Math.max(byDay.get(day) ?? 0, seq));
         if (day > bestDay) {

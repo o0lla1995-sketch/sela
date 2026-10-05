@@ -36,6 +36,7 @@ import {
   InvoiceDetailScreen,
   InvoicesScreen,
 } from '../screens/invoices/InvoicesScreen';
+import {SilaScreen} from '../screens/sila/SilaScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -49,6 +50,8 @@ export type RootStackParamList = {
   /** v9.1 (round-14 #5): the invoices center + full detail view. */
   Invoices: undefined;
   InvoiceDetail: {saleId: number} | undefined;
+  /** v11 (SILA): merchant pairing + debt dashboard (الدين الفلسطيني). */
+  Sila: undefined;
 };
 
 export type MainTabParamList = {
@@ -173,7 +176,9 @@ export function RootNavigator() {
         <Stack.Screen
           name="InvoiceDetail"
           component={InvoiceDetailScreen}
+          options={{animation: 'slide_from_bottom'}}
         />
+        <Stack.Screen name="Sila" component={SilaScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

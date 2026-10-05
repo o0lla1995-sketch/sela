@@ -29,7 +29,11 @@
 import {getDb, toMessage} from '../database/connection';
 import {requirePlatformUtils} from '../native/nativeBridge';
 import {getSettings, useSettingsStore} from '../stores/settingsStore';
-import {APP_VERSION, APP_BUILD_CODE, EMBEDDING_MODEL_VERSION} from '../core/config';
+import {
+  APP_VERSION,
+  APP_BUILD_CODE,
+  EMBEDDING_MODEL_VERSION,
+} from '../core/config';
 import {InvoiceService} from './InvoiceService';
 import {logDiag} from '../core/diagnostics';
 import type {AppSettings} from '../stores/settingsStore';
@@ -124,6 +128,39 @@ interface BackupFile {
     system_qty: number;
     counted_qty: number | null;
   }[];
+  /** v11 (SILA): the debt queue — restoring must bring debts back
+   *  (they sync by idempotency_key, safe by design §6.2). */
+  sila_debts?: {
+    idempotency_key: string;
+    customer_id: string | null;
+    customer_name: string | null;
+    customer_phone_last4: string | null;
+    customer_card: string | null;
+    offline_qr: string | null;
+    amount_minor: number;
+    currency: string;
+    pos_invoice_ref: string;
+    description: string | null;
+    scanned_at: string;
+    state: 'pending' | 'syncing' | 'synced' | 'failed';
+    reference_code: string | null;
+    transaction_id: string | null;
+    outstanding_after: number | null;
+    synced_at: string | null;
+    error_code: string | null;
+    error_message: string | null;
+    retry_count: number;
+    created_at: string;
+  }[];
+  /** v11 (SILA): cached customers balances. */
+  sila_customers?: {
+    customer_id: string;
+    name: string;
+    phone_last4: string | null;
+    id_number: string | null;
+    outstanding_minor: number;
+    last_synced_at: string | null;
+  }[];
   /** v8.3: embedded product image files (base64 JPEG) — keyed by
    *  `name`, referenced by the products' original image paths. */
   images?: {name: string; data: string}[];
@@ -155,6 +192,8 @@ export const BackupService = {
       saleItems,
       stocktakes,
       stocktakeItems,
+      silaDebts,
+      silaCustomers,
     ] = await Promise.all([
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
@@ -178,6 +217,17 @@ export const BackupService = {
       ),
       db.execute(
         'SELECT stocktake_id, product_id, system_qty, counted_qty FROM stocktake_items',
+      ),
+      db.execute(
+        `SELECT idempotency_key, customer_id, customer_name, customer_phone_last4,
+                customer_card, offline_qr, amount_minor, currency, pos_invoice_ref,
+                description, scanned_at, state, reference_code, transaction_id,
+                outstanding_after, synced_at, error_code, error_message, retry_count, created_at
+         FROM sila_debt_queue`,
+      ),
+      db.execute(
+        `SELECT customer_id, name, phone_last4, id_number, outstanding_minor, last_synced_at
+         FROM sila_customers`,
       ),
     ]);
 
@@ -236,8 +286,7 @@ export const BackupService = {
         retail_price: Number(row.retail_price ?? 0),
         wholesale_price: Number(row.wholesale_price ?? 0),
         stock_quantity: Number(row.stock_quantity ?? 0),
-        category_id:
-          row.category_id == null ? null : Number(row.category_id),
+        category_id: row.category_id == null ? null : Number(row.category_id),
         image_uri: row.image_uri == null ? null : String(row.image_uri),
         low_stock_threshold:
           row.low_stock_threshold == null
@@ -293,8 +342,47 @@ export const BackupService = {
         stocktake_id: Number(row.stocktake_id),
         product_id: Number(row.product_id),
         system_qty: Number(row.system_qty ?? 0),
-        counted_qty:
-          row.counted_qty == null ? null : Number(row.counted_qty),
+        counted_qty: row.counted_qty == null ? null : Number(row.counted_qty),
+      })),
+      sila_debts: rowsOf(silaDebts).map(row => ({
+        idempotency_key: String(row.idempotency_key ?? ''),
+        customer_id: row.customer_id == null ? null : String(row.customer_id),
+        customer_name:
+          row.customer_name == null ? null : String(row.customer_name),
+        customer_phone_last4:
+          row.customer_phone_last4 == null
+            ? null
+            : String(row.customer_phone_last4),
+        customer_card:
+          row.customer_card == null ? null : String(row.customer_card),
+        offline_qr: row.offline_qr == null ? null : String(row.offline_qr),
+        amount_minor: Number(row.amount_minor ?? 0),
+        currency: String(row.currency ?? 'ILS'),
+        pos_invoice_ref: String(row.pos_invoice_ref ?? ''),
+        description: row.description == null ? null : String(row.description),
+        scanned_at: String(row.scanned_at ?? ''),
+        state: (row.state ?? 'pending') as 'pending',
+        reference_code:
+          row.reference_code == null ? null : String(row.reference_code),
+        transaction_id:
+          row.transaction_id == null ? null : String(row.transaction_id),
+        outstanding_after:
+          row.outstanding_after == null ? null : Number(row.outstanding_after),
+        synced_at: row.synced_at == null ? null : String(row.synced_at),
+        error_code: row.error_code == null ? null : String(row.error_code),
+        error_message:
+          row.error_message == null ? null : String(row.error_message),
+        retry_count: Number(row.retry_count ?? 0),
+        created_at: String(row.created_at ?? ''),
+      })),
+      sila_customers: rowsOf(silaCustomers).map(row => ({
+        customer_id: String(row.customer_id ?? ''),
+        name: String(row.name ?? ''),
+        phone_last4: row.phone_last4 == null ? null : String(row.phone_last4),
+        id_number: row.id_number == null ? null : String(row.id_number),
+        outstanding_minor: Number(row.outstanding_minor ?? 0),
+        last_synced_at:
+          row.last_synced_at == null ? null : String(row.last_synced_at),
       })),
       images,
       settings: getSettings(),
@@ -561,7 +649,9 @@ export const BackupService = {
       } else {
         logDiag(
           'backup',
-          `تم تخطي ${doc.embeddings?.length ?? 0} بصمة — نموذج تعرّف مختلف (أعد تسجيل صور المنتجات)`,
+          `تم تخطي ${
+            doc.embeddings?.length ?? 0
+          } بصمة — نموذج تعرّف مختلف (أعد تسجيل صور المنتجات)`,
           'warn',
         );
       }
@@ -641,6 +731,71 @@ export const BackupService = {
             newProductId,
             Number(item.system_qty ?? 0),
             item.counted_qty ?? null,
+          ],
+        );
+      }
+
+      // v11 (SILA): debts + customers cache. Debt rows key on
+      // idempotency_key / pos_invoice_ref (NOT local ids) so they
+      // restore verbatim — the server dedupes replays (§6.2) and
+      // 'syncing' rows from a crash recover to pending (§8).
+      await tx.execute('DELETE FROM sila_debt_queue');
+      await tx.execute('DELETE FROM sila_customers');
+      await tx.execute(
+        "DELETE FROM sqlite_sequence WHERE name IN ('sila_debt_queue')",
+      );
+      for (const debt of doc.sila_debts ?? []) {
+        if (!debt.idempotency_key || !debt.pos_invoice_ref) {
+          continue;
+        }
+        await tx.execute(
+          `INSERT INTO sila_debt_queue
+            (idempotency_key, customer_id, customer_name, customer_phone_last4,
+             customer_card, offline_qr, amount_minor, currency, pos_invoice_ref,
+             description, scanned_at, state, reference_code, transaction_id,
+             outstanding_after, synced_at, error_code, error_message, retry_count, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            debt.idempotency_key,
+            debt.customer_id ?? null,
+            debt.customer_name ?? null,
+            debt.customer_phone_last4 ?? null,
+            debt.customer_card ?? null,
+            debt.offline_qr ?? null,
+            Number(debt.amount_minor ?? 0),
+            debt.currency || 'ILS',
+            debt.pos_invoice_ref,
+            debt.description ?? null,
+            debt.scanned_at || nowLocal(),
+            debt.state === 'synced' || debt.state === 'failed'
+              ? debt.state
+              : 'pending',
+            debt.reference_code ?? null,
+            debt.transaction_id ?? null,
+            debt.outstanding_after ?? null,
+            debt.synced_at ?? null,
+            debt.error_code ?? null,
+            debt.error_message ?? null,
+            Number(debt.retry_count ?? 0),
+            debt.created_at || nowLocal(),
+          ],
+        );
+      }
+      for (const customer of doc.sila_customers ?? []) {
+        if (!customer.customer_id || !customer.name) {
+          continue;
+        }
+        await tx.execute(
+          `INSERT INTO sila_customers
+            (customer_id, name, phone_last4, id_number, outstanding_minor, last_synced_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            customer.customer_id,
+            customer.name,
+            customer.phone_last4 ?? null,
+            customer.id_number ?? null,
+            Number(customer.outstanding_minor ?? 0),
+            customer.last_synced_at ?? null,
           ],
         );
       }

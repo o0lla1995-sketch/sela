@@ -51,6 +51,12 @@ function kindMeta(kind: NotificationKind, c: Palette) {
     },
     sale: {icon: 'cart', bg: c.successSoft, color: c.success, label: 'مبيعات'},
     stocktake: {icon: 'clipboard', bg: c.infoSoft, color: c.info, label: 'جرد'},
+    sila_debt: {
+      icon: 'qrFrame',
+      bg: c.warningSoft,
+      color: c.warning,
+      label: 'دين صِلة',
+    },
   };
   return map[kind] ?? map.info;
 }

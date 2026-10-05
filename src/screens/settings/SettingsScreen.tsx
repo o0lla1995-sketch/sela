@@ -39,6 +39,7 @@ import {wipeAllData} from '../../database/connection';
 import {useToastStore} from '../../stores/toastStore';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useNotificationsStore} from '../../stores/notificationsStore';
+import {useSilaStore} from '../../stores/silaStore';
 import {
   SelaNotificationsNative,
   SelaImagePickerNative,
@@ -68,6 +69,10 @@ export function SettingsScreen() {
   const toast = useToastStore(state => state.show);
   const refreshCatalog = useCatalogStore(state => state.refresh);
   const pushNotification = useNotificationsStore(state => state.push);
+  // v11 (SILA): pairing status + pending count for the SILA card.
+  const silaPairing = useSilaStore(state => state.pairing);
+  const silaPending = useSilaStore(state => state.pending);
+  const silaPaired = silaPairing != null;
 
   const [requestingPermission, setRequestingPermission] = useState(false);
   const [pickingLogo, setPickingLogo] = useState(false);
@@ -540,6 +545,30 @@ export function SettingsScreen() {
             label="التشخيص الذاتي"
             hint="حالة الكاميرا والنموذج وقاعدة البيانات والطابعة"
             onPress={() => navigation.navigate('Diagnostics' as never)}
+          />
+        </Card>
+
+        {/* ── v11 (SILA): merchant account linking + debts ────── */}
+        <Card style={styles.group}>
+          <SectionTitle
+            title="صِلة — الدين الفلسطيني"
+            hint="ربط حساب التاجر، البيع بالدين، والمزامنة"
+          />
+          <SettingRow
+            icon="qrFrame"
+            label={
+              silaPaired
+                ? `صِلة — ${silaPairing?.merchantName ?? 'مرتبط'}`
+                : 'ربط حساب التاجر في صِلة'
+            }
+            hint={
+              silaPaired
+                ? silaPending > 0
+                  ? `${silaPending} دين بانتظار المزامنة`
+                  : 'كل الديون مسجلة في صِلة'
+                : 'لتفعيل زر «دين» في نقطة البيع — أقل من دقيقة'
+            }
+            onPress={() => navigation.navigate('Sila' as never)}
           />
         </Card>
 
