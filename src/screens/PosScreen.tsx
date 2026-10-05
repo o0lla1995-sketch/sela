@@ -1977,17 +1977,21 @@ export function PosScreen() {
 
       {/* ── v11 (SILA §9.2): debt confirmation sheet — the customer
           QR was scanned and parsed offline; one look (name / amount /
-          mode) and one tap commits the sale + debt queue row. */}
-      <Modal
-        visible={debtConfirm != null}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setDebtConfirm(null)}>
-        <View style={styles.debtModalOverlay}>
+          mode) and one tap commits the sale + debt queue row.
+          INLINE absolute overlay (NEVER a Modal — this sheet opens
+          right after the native scanner closes and this ROM renders
+          RN Modals black after native activity transitions, the
+          exact pattern WeightSheet/visionStrip already avoid). */}
+      {debtConfirm != null ? (
+        <View style={styles.debtOverlay}>
           <TouchableOpacity
-            style={{flex: 1}}
+            style={styles.debtOverlayDim}
             activeOpacity={1}
             onPress={() => setDebtConfirm(null)}
+          />
+          <BackHandlerCloser
+            active={debtConfirm != null}
+            onClose={() => setDebtConfirm(null)}
           />
           <View style={styles.debtModalSheet}>
             <View style={styles.unitModalHandle} />
@@ -2072,7 +2076,7 @@ export function PosScreen() {
             </View>
           </View>
         </View>
-      </Modal>
+      ) : null}
     </View>
   );
 }
@@ -2852,11 +2856,21 @@ const useStyles = makeStyles(c =>
       fontSize: 10,
       lineHeight: 13,
     },
-    // v11 (SILA): debt confirmation sheet.
-    debtModalOverlay: {
+    // v11 (SILA): debt confirmation sheet — INLINE absolute overlay
+    // (post-scanner sheets must not be RN Modals on this ROM).
+    debtOverlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      justifyContent: 'flex-end',
+      zIndex: 60,
+      elevation: 60,
+    },
+    debtOverlayDim: {
       flex: 1,
       backgroundColor: c.overlay,
-      justifyContent: 'flex-end',
     },
     debtModalSheet: {
       backgroundColor: c.surface,
