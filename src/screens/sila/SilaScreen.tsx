@@ -80,6 +80,7 @@ import type {SilaDebtRow, SilaCustomer, SilaPaymentRow} from '../../core/types';
 import {uuidV4} from '../../services/sila/qr';
 import {VouchersRepo} from '../../services/sila/VouchersRepo';
 import {VouchersTab} from './VouchersTab';
+import {VoucherRedeemSheet} from './VoucherRedeemSheet';
 
 type SilaTab = 'overview' | 'debts' | 'customers' | 'payments' | 'vouchers';
 type DebtFilter = 'all' | 'pending' | 'failed' | 'synced';
@@ -162,6 +163,16 @@ export function SilaScreen() {
   const [paySheet, setPaySheet] = useState<SilaCustomer | null>(null);
   const [payAmountText, setPayAmountText] = useState('');
   const [payBusy, setPayBusy] = useState(false);
+
+  // v24 (round-31 #4c): the PARCEL redemption sheet lives HERE, at
+  // the Screen level — an absolute overlay rendered inside the
+  // VouchersTab sticks to the ScrollView's CONTENT (the merchant's
+  // «النافذة تظهر أسفل الصفحة ونضطر للسكرول» complaint); hoisted
+  // out it always covers the visible screen. Parcels ONLY (the
+  // tab's button passes mode='parcel'). refreshKey bumps on every
+  // close so the tab reloads whatever landed while it was open.
+  const [parcelSheetOpen, setParcelSheetOpen] = useState(false);
+  const [parcelRefresh, setParcelRefresh] = useState(0);
 
   // ── v20: the campaigns headline (Σ server-stated dues) shown on
   // the overview — the §4.2 indicator the merchant should see.
@@ -530,31 +541,19 @@ export function SilaScreen() {
       return;
     }
     const amountMinor = Math.round(amount * 100);
-    const outstanding = customer.outstanding_minor;
-    // v19 (round-25 #4): receiving MORE than the outstanding is now
-    // ALLOWED — but never silently. The confirmation spells out the
-    // split: the debt is extinguished in صِلة (the server floors at
-    // zero) and the excess stays as cash with the merchant (صِلة
-    // keeps no credit balance), so the merchant can hand it back as
-    // change. The store's books record the FULL received amount.
-    if (amountMinor > outstanding) {
-      const excess = (amountMinor - outstanding) / 100;
-      Alert.alert(
-        'المبلغ أكبر من الدين القائم',
-        `الدين القائم: ${formatMoney(
-          outstanding / 100,
-        )}\nالمبلغ المدخل: ${formatMoney(
-          amount,
-        )}\n\nسيُطفأ دين الزبون في صِلة بالكامل، والزيادة ${formatMoney(
-          excess,
-        )} تبقى نقداً عندك (صِلة لا يحفظ رصيداً دائناً — أعطِ الزيادة فكّاً للزبون إن أراد). كامل المبلغ يُسجَّل في خزينتك.`,
-        [
-          {text: 'تراجع', style: 'cancel'},
-          {
-            text: 'تأكيد السداد',
-            onPress: () => void doConfirmPayment(amount),
-          },
-        ],
+    // v24 (round-31 #2): the cashier repays STORE debts only — the
+    // ceiling is this store's own invoices (the pos part), NEVER the
+    // customer's total balance (which may carry app-origin debts
+    // this store has nothing to do with). A bigger amount is
+    // rejected outright — no silent overpayment path.
+    const storeDebtMinor = customer.pos_outstanding_minor;
+    if (amountMinor > storeDebtMinor) {
+      toast(
+        `المبلغ أكبر من دين فواتير متجرك (${formatMoney(
+          storeDebtMinor / 100,
+        )}) — السداد من المتجر يطفئ ديون متجرك فقط، وديون تطبيق صِلة الأخرى تُسدَّد من التطبيق نفسه`,
+        'error',
+        5000,
       );
       return;
     }
@@ -855,8 +854,8 @@ export function SilaScreen() {
           تلقائياً عند المزامنة).
         </Text>
         <Text style={styles.guideLine}>
-          • القسائم: فعّل حملات المؤسسات في متجرك واصرف قسائمها —
-          مستحقاتك على المؤسسة دين حتى التسوية، وليست ديناً على الزبائن.
+          • القسائم: فعّل حملات المؤسسات في متجرك واصرف قسائمها — مستحقاتك على
+          المؤسسة دين حتى التسوية، وليست ديناً على الزبائن.
         </Text>
       </Card>
     </>
@@ -987,6 +986,11 @@ export function SilaScreen() {
         placeholder="ابحث باسم الزبون أو آخر 4 أرقام من هاتفه…"
         placeholderTextColor={c.textFaint}
       />
+      {/* v24 (round-31 #2): the page's charter — store debts ONLY. */}
+      <Text style={styles.customersScopeNote}>
+        هذه الصفحة تعرض ديون فواتير متجرك فقط على زبائن صِلة — ديون تطبيق صِلة
+        غير الخاصة بمتجرك لا تظهر هنا ولا يُسدّدها الكاشير
+      </Text>
       {filteredCustomers.length === 0 ? (
         <Card style={styles.emptyCard}>
           <Text style={styles.emptyText}>
@@ -1019,44 +1023,29 @@ export function SilaScreen() {
                   <Text
                     style={[
                       styles.customerBalanceNum,
-                      customer.outstanding_minor > 0
+                      customer.pos_outstanding_minor > 0
                         ? {color: c.danger}
                         : {color: c.success},
                     ]}>
-                    {formatMoney(customer.outstanding_minor / 100)}
+                    {formatMoney(customer.pos_outstanding_minor / 100)}
                   </Text>
-                  <Text style={styles.customerBalanceLabel}>دين قائم</Text>
+                  <Text style={styles.customerBalanceLabel}>
+                    دين فواتير متجرك
+                  </Text>
                 </View>
               </View>
 
-              {/* v15 (§3.3): the origin split — only the parts that
-                  carry value (a wall of zeros taught nothing). */}
-              {customer.outstanding_minor > 0 ? (
+              {/* v24 (round-31 #2): the customers page carries STORE
+                  debts ONLY — the app-origin split is gone (the
+                  merchant's rule: «يظهر فقط الديون الخاصة بفواتير
+                  متجري بدون ديون تطبيق صلة»). Last payment stays as
+                  context. */}
+              {customer.pos_outstanding_minor > 0 ? (
                 <View style={styles.splitBox}>
-                  {customer.pos_outstanding_minor > 0 ? (
-                    <View style={styles.splitRow}>
-                      <Text style={styles.splitLabel}>منها فواتير متجري</Text>
-                      <Text style={[styles.splitValue, {color: c.accent}]}>
-                        {formatMoney(customer.pos_outstanding_minor / 100)}
-                      </Text>
-                    </View>
-                  ) : null}
-                  {customer.app_outstanding_minor > 0 ? (
-                    <View style={styles.splitRow}>
-                      <Text style={styles.splitLabel}>منها من تطبيق صِلة</Text>
-                      <Text style={[styles.splitValue, {color: c.info}]}>
-                        {formatMoney(customer.app_outstanding_minor / 100)}
-                      </Text>
-                    </View>
-                  ) : null}
-                  {customer.other_minor !== 0 ? (
-                    <View style={styles.splitRow}>
-                      <Text style={styles.splitLabel}>تعديلات يدوية</Text>
-                      <Text style={[styles.splitValue, {color: c.warning}]}>
-                        {formatMoney(customer.other_minor / 100)}
-                      </Text>
-                    </View>
-                  ) : null}
+                  <Text style={styles.splitNote}>
+                    دين هذا الزبون من فواتير متجرك — يسدّده الكاشير من هنا بحدّه
+                    الأقصى فقط، وديون تطبيق صِلة الأخرى تُسدّد من التطبيق نفسه
+                  </Text>
                   {customer.last_payment_at ? (
                     <Text style={styles.splitNote}>
                       آخر سداد:{' '}
@@ -1071,12 +1060,20 @@ export function SilaScreen() {
                     </Text>
                   ) : null}
                 </View>
-              ) : null}
+              ) : (
+                <View style={styles.settledRow}>
+                  <Icon name="checkCircle" size={14} color={c.success} />
+                  <Text style={styles.settledText}>
+                    لا دين لمتجرك على هذا الزبون
+                  </Text>
+                </View>
+              )}
 
               {/* v15 (§2.3): record a cashier repayment — v21
-                  (round-27 #5): prominent by design (the merchant's
-                  round-25 complaint: cramped + indistinguishable). */}
-              {customer.outstanding_minor > 0 ? (
+                  (round-27 #5): prominent by design. v24 (round-31
+                  #2): STORE debt only — the button appears only while
+                  this store's own invoices are still unpaid. */}
+              {customer.pos_outstanding_minor > 0 ? (
                 <AppButton
                   title="تسجيل سداد نقدي"
                   icon="wallet"
@@ -1084,14 +1081,7 @@ export function SilaScreen() {
                   onPress={() => openPaySheet(customer)}
                   style={{marginTop: spacing.sm}}
                 />
-              ) : (
-                <View style={styles.settledRow}>
-                  <Icon name="checkCircle" size={14} color={c.success} />
-                  <Text style={styles.settledText}>
-                    لا دين قائم على هذا الزبون
-                  </Text>
-                </View>
-              )}
+              ) : null}
             </Card>
           ))}
           {filteredCustomers.length > customersShown ? (
@@ -1369,6 +1359,8 @@ export function SilaScreen() {
                   showProfit: settings.showProfitOnReceipt,
                 }}
                 printerConnected={printerStatus === 'connected'}
+                onOpenParcelRedeem={() => setParcelSheetOpen(true)}
+                refreshKey={parcelRefresh}
               />
             ) : (
               renderPayments()
@@ -1384,6 +1376,32 @@ export function SilaScreen() {
             at the Screen level it always covers the visible screen.
             STRICT validation + overpayment confirmation. */}
       </ScrollView>
+      {parcelSheetOpen ? (
+        /* v24 (round-31 #4c/#5): the PARCELS-only redemption sheet —
+            hoisted to the Screen level (an absolute overlay inside
+            the VouchersTab's ScrollView sticks to the page bottom).
+            mode='parcel': purchase coupons are rejected here and
+            belong to the POS cart only. */
+        <VoucherRedeemSheet
+          visible={parcelSheetOpen}
+          mode="parcel"
+          onClose={() => {
+            setParcelSheetOpen(false);
+            setParcelRefresh(key => key + 1);
+          }}
+          cart={null}
+          receiptSettings={{
+            storeName: settings.storeName,
+            storePhone: settings.storePhone,
+            footerMessage: settings.footerMessage,
+            storeLogoPath: settings.storeLogoPath,
+            paperWidth: settings.paperWidth,
+            codepage: settings.codepage,
+            showProfit: settings.showProfitOnReceipt,
+          }}
+          printerConnected={printerStatus === 'connected'}
+        />
+      ) : null}
       {paySheet != null ? (
         <View style={styles.payOverlay}>
           <TouchableOpacity
@@ -1392,77 +1410,76 @@ export function SilaScreen() {
             onPress={() => setPaySheet(null)}
           />
           <View style={styles.paySheet}>
-              <View style={styles.payHandle} />
-              <Text style={styles.payTitle}>تسجيل سداد نقدي</Text>
-              <View style={styles.payCustomerRow}>
-                <Icon name="wallet" size={20} color={c.accent} />
-                <View style={{flex: 1}}>
-                  <Text style={styles.payCustomerName} numberOfLines={1}>
-                    {paySheet.name}
+            <View style={styles.payHandle} />
+            <Text style={styles.payTitle}>تسجيل سداد نقدي</Text>
+            <View style={styles.payCustomerRow}>
+              <Icon name="wallet" size={20} color={c.accent} />
+              <View style={{flex: 1}}>
+                <Text style={styles.payCustomerName} numberOfLines={1}>
+                  {paySheet.name}
+                </Text>
+                <Text style={styles.payCustomerMeta}>
+                  دين فواتير متجرك:{' '}
+                  {formatMoney(paySheet.pos_outstanding_minor / 100)}
+                  <Text style={[styles.payCustomerMeta, {color: c.textFaint}]}>
+                    {'  '}— يسدّد هذا السداد ديون متجرك فقط
                   </Text>
-                  <Text style={styles.payCustomerMeta}>
-                    الدين القائم:{' '}
-                    {formatMoney(paySheet.outstanding_minor / 100)}
-                    {paySheet.app_outstanding_minor > 0
-                      ? ` (منها ${formatMoney(
-                          paySheet.app_outstanding_minor / 100,
-                        )} عبر تطبيق صِلة)`
-                      : ''}
-                  </Text>
-                </View>
-              </View>
-
-              <Text style={styles.payLabel}>المبلغ المستلم (₪)</Text>
-              <TextInput
-                style={styles.payInput}
-                value={payAmountText}
-                onChangeText={text =>
-                  setPayAmountText(text.replace(/[^\d.,]/g, ''))
-                }
-                placeholder="0.00"
-                placeholderTextColor={c.textFaint}
-                keyboardType="decimal-pad"
-                autoCorrect={false}
-              />
-              {paySheet.outstanding_minor > 0 ? (
-                <TouchableOpacity
-                  style={styles.payQuickBtn}
-                  onPress={() =>
-                    setPayAmountText(
-                      (paySheet.outstanding_minor / 100)
-                        .toFixed(2)
-                        .replace(/\.00$/, ''),
-                    )
-                  }
-                  activeOpacity={0.8}>
-                  <Text style={styles.payQuickText}>
-                    السداد الكامل ({formatMoney(paySheet.outstanding_minor / 100)})
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
-              <Text style={styles.payHint}>
-                قيود صارمة: مبلغ أكبر من صفر، أرقام فقط بفاصلة عشرية واحدة (مثال
-                12.50)، وبحد أقصى مليون شيكل. السداد يطفئ أقدم دين أولاً (FIFO)
-                بنفس قاعدة صِلة. إذا كان المبلغ أكبر من الدين القائم فسيُطفأ
-                الدين بالكامل والزيادة تبقى نقداً عندك.
-              </Text>
-              <View style={styles.payActions}>
-                <AppButton
-                  title="إلغاء"
-                  variant="secondary"
-                  onPress={() => setPaySheet(null)}
-                  style={{flex: 1}}
-                />
-                <AppButton
-                  title="تأكيد السداد"
-                  variant="success"
-                  icon="check"
-                  loading={payBusy}
-                  onPress={confirmPayment}
-                  style={{flex: 1.6}}
-                />
+                </Text>
               </View>
             </View>
+
+            <Text style={styles.payLabel}>المبلغ المستلم (₪)</Text>
+            <TextInput
+              style={styles.payInput}
+              value={payAmountText}
+              onChangeText={text =>
+                setPayAmountText(text.replace(/[^\d.,]/g, ''))
+              }
+              placeholder="0.00"
+              placeholderTextColor={c.textFaint}
+              keyboardType="decimal-pad"
+              autoCorrect={false}
+            />
+            {paySheet.pos_outstanding_minor > 0 ? (
+              <TouchableOpacity
+                style={styles.payQuickBtn}
+                onPress={() =>
+                  setPayAmountText(
+                    (paySheet.pos_outstanding_minor / 100)
+                      .toFixed(2)
+                      .replace(/\.00$/, ''),
+                  )
+                }
+                activeOpacity={0.8}>
+                <Text style={styles.payQuickText}>
+                  السداد الكامل لدين المتجر (
+                  {formatMoney(paySheet.pos_outstanding_minor / 100)})
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+            <Text style={styles.payHint}>
+              قيود صارمة: مبلغ أكبر من صفر، أرقام فقط بفاصلة عشرية واحدة (مثال
+              12.50)، ولا يُقبل مبلغ أكبر من دين فواتير متجرك — السداد من المتجر
+              يطفئ ديون متجرك فقط، وديون تطبيق صِلة الأخرى تُسدّد من التطبيق
+              نفسه. السداد يطفئ أقدم دين أولاً (FIFO) بنفس قاعدة صِلة.
+            </Text>
+            <View style={styles.payActions}>
+              <AppButton
+                title="إلغاء"
+                variant="secondary"
+                onPress={() => setPaySheet(null)}
+                style={{flex: 1}}
+              />
+              <AppButton
+                title="تأكيد السداد"
+                variant="success"
+                icon="check"
+                loading={payBusy}
+                onPress={confirmPayment}
+                style={{flex: 1.6}}
+              />
+            </View>
+          </View>
         </View>
       ) : null}
     </Screen>
@@ -1895,6 +1912,14 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
     },
     // ── customers ──
+    /** v24 (round-31 #2): the customers page's scope charter. */
+    customersScopeNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      lineHeight: 15,
+      marginTop: -spacing.xs,
+    },
     customerCard: {},
     customerRow: {
       flexDirection: 'row',

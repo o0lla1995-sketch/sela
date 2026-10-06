@@ -194,6 +194,16 @@ export interface VoucherRedeemSuccess {
 export interface RedeemVoucherOptions {
   /** Normalized payload from parseSilaVoucherCode(). */
   payload: string;
+  /** v24 (round-31 #5): the FLOW this redemption is opened from —
+   *   'cart'  → the POS checkout button (purchase coupons ONLY);
+   *   'parcel'→ the القسائم tab's parcel button (parcels ONLY).
+   *  The API offers no pre-validation endpoint, so the kind is
+   *  only known from the server's answer — a mismatch is enforced
+   *  the moment it is known: the redemption IS booked (the server
+   *  consumed the code atomically — the books must mirror that
+   *  truth) but NO goods sale is created and a hard Arabic error
+   *  explains the wrong window. Default: derived from the cart. */
+  mode?: 'cart' | 'parcel';
   /** The cart to sell as the voucher's goods (optional — standalone
    *  redemptions like parcel campaigns carry no cart). */
   cart?: {
@@ -279,7 +289,9 @@ async function createGoodsSale(
     const message = error instanceof Error ? error.message : String(error);
     logDiag(
       'sila',
-      `صُرفت القسيمة ${row.pos_receipt_ref ?? ''} لكن إنشاء فاتورة البضاعة فشل: ${message}`,
+      `صُرفت القسيمة ${
+        row.pos_receipt_ref ?? ''
+      } لكن إنشاء فاتورة البضاعة فشل: ${message}`,
       'warn',
     );
     return {sale: null, items: []};
@@ -369,6 +381,43 @@ export const VoucherService = {
         APP_VERSION,
       );
 
+      // v24 (round-31 #5): STRICT FLOW SEPARATION — purchase coupons
+      // redeem ONLY from the POS cart, parcels ONLY from the القسائم
+      // tab's parcel button. The server consumed the code the moment
+      // it answered (atomic, no undo endpoint), so a mismatch is:
+      //   • booked truthfully (the redemption row + the campaign
+      //     mirror — the claim exists server-side whatever we do),
+      //   • but NO goods sale, NO receipt, and a hard error telling
+      //     the cashier exactly what happened and where the code
+      //     should have gone. The books never diverge from صِلة.
+      const mode = options.mode ?? (options.cart != null ? 'cart' : 'parcel');
+      if (mode === 'parcel' && result.kind === 'voucher') {
+        await bookRedemption(row, result);
+        logDiag(
+          'sila',
+          `كود قسيمة شرائية (${result.campaign_name}) صُرف من نافذة الطرود — حُسم من الخادم وسُجّل، ولا بضاعة تُسلّم من هنا`,
+          'warn',
+        );
+        throw new VoucherRedeemError(
+          `هذا كود قسيمة شرائية لحملة «${result.campaign_name}» — القسائم الشرائية تُصرف من سلة البيع فقط (زر قسيمة في شاشة البيع).\nالكود حُسم من خادم صِلة باسم متجرك وسُجّل في سجل الصرف — لا تُسلّم بضاعة من هنا، وراجع سجل الصرف في صفحة القسائم أو تواصل مع دعم صِلة لتسويتها.`,
+          true,
+          false,
+        );
+      }
+      if (mode === 'cart' && result.kind === 'parcel') {
+        await bookRedemption(row, result);
+        logDiag(
+          'sila',
+          `كود طرد (${result.campaign_name}) صُرف من سلة البيع — حُسم من الخادم وسُجّل، ولا تُسلّم بضاعة من هنا`,
+          'warn',
+        );
+        throw new VoucherRedeemError(
+          `هذا كود طرد لحملة «${result.campaign_name}» — الطرود تُصرف من صفحة القسائم في دفتر صِلة فقط (زر صرف الطرد).\nالكود حُسم من خادم صِلة باسم متجرك وسُجّل في سجل الصرف — لم تُنشأ فاتورة بضاعة والسلة كما هي، راجع سجل الصرف في صفحة القسائم أو تواصل مع دعم صِلة لتسويته.`,
+          true,
+          false,
+        );
+      }
+
       const snapshot = parseSnapshot(row.cart_json);
       const totalMinor = cartTotalMinor(snapshot);
 
@@ -385,7 +434,13 @@ export const VoucherService = {
         await bookRedemption(row, result);
         logDiag(
           'sila',
-          `قسيمة ${result.reference_code} بقيمة ${result.value_minor / 100} ₪ أكبر من السلة (${totalMinor / 100} ₪) — حُجز الصرف ولا يُسلَّم حتى تكملة السلة بفارق ${(result.value_minor - totalMinor) / 100} ₪`,
+          `قسيمة ${result.reference_code} بقيمة ${
+            result.value_minor / 100
+          } ₪ أكبر من السلة (${
+            totalMinor / 100
+          } ₪) — حُجز الصرف ولا يُسلَّم حتى تكملة السلة بفارق ${
+            (result.value_minor - totalMinor) / 100
+          } ₪`,
           'warn',
         );
         return {
@@ -461,6 +516,13 @@ export const VoucherService = {
         localId: row.local_id,
       };
     } catch (error) {
+      // v24 (round-31 #5): a flow-mismatch error thrown above is
+      // ALREADY booked and carries its own cashier-ready message —
+      // pass it through untouched (markRetry here would flip the
+      // just-booked 'ok' row back to 'pending').
+      if (error instanceof VoucherRedeemError) {
+        throw error;
+      }
       if (error instanceof SilaApiError) {
         const advice = silaVoucherErrorAdvice(error.code);
         if (
@@ -590,8 +652,7 @@ export const VoucherService = {
         );
         await ThermalPrinterService.printJob(job);
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : String(error);
+        const message = error instanceof Error ? error.message : String(error);
         logDiag('sila', `اكتمل الصرف لكن الطباعة فشلت: ${message}`, 'warn');
         onPrintError?.(message);
       }

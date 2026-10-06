@@ -44,6 +44,12 @@ export interface CashDebtsBundle {
   localCreditSalesAmount: number;
   /** الجزء المسجّل عبر صِلة (INV-D). */
   silaCreditSalesAmount: number;
+  /** v24 (round-31 #3): الديون التي وُلدت عبر قسائم صِلة بالفترة —
+   *  قيمة القسائم المصروفة (مطالبة على المؤسسات حتى التسوية)،
+   *  تُعرض في قسم «فواتير الدين بالفترة» كسطرها الخاص. */
+  voucherCreditSalesAmount: number;
+  /** v24 (round-31 #3): عدد عمليات صرف القسائم بالفترة. */
+  voucherCreditSalesCount: number;
   /** تفكيك المقبوضات (بالشيكل) — صفوف صِلة تُعرض عند الربط فقط. */
   /** سدادّات استلمها الكاشير لفواتير صِلة. */
   cashierSilaAmount: number;
@@ -251,6 +257,8 @@ export const ReportService = {
         creditSalesCount: debtSales.count,
         localCreditSalesAmount: debtSales.localAmount,
         silaCreditSalesAmount: debtSales.silaAmount,
+        voucherCreditSalesAmount: voucherSales.valueMinor / 100,
+        voucherCreditSalesCount: voucherSales.count,
         cashierSilaAmount: silaPayments.minor / 100,
         localBookAmount: localPayments.minor / 100,
         viaSilaAppAmount: appCollections.minor / 100,

@@ -299,3 +299,172 @@ describe('campaign lifecycle (one-way, SQL-guarded)', () => {
     expect(Number(cmp?.due_minor)).toBe(6000); // snapshot updated
   });
 });
+
+// ────────────────────────────────────────────────────────────────
+// v24 (round-31 #4/#5): the STRICT parcel ↔ purchase-coupon
+// separation. The cart's قسيمة button belongs to PURCHASE campaigns
+// only; the القسائم tab's button redeems PARCELS only; a mismatched
+// code is booked truthfully (the server consumed it) but NEVER
+// completes a goods sale.
+// ────────────────────────────────────────────────────────────────
+describe('v24: parcel ↔ purchase separation', () => {
+  async function seedCampaignOfKind(
+    id: string,
+    kind: 'voucher' | 'parcel',
+    status: string,
+  ) {
+    const {VouchersRepo} = load('src/services/sila/VouchersRepo');
+    await VouchersRepo.upsertCampaignFromFeed({
+      campaign_id: id,
+      campaign_name: `حملة ${id}`,
+      kind,
+      campaign_status: status,
+      merchant_status: 'active',
+      starts_at: null,
+      ends_at: null,
+      redeemed_count: 0,
+      redeemed_value_minor: 0,
+      settled_minor: 0,
+      settled_pending_minor: 0,
+      settled_confirmed_minor: 0,
+      due_minor: 0,
+      settlement_state: 'none',
+      last_redemption_at: null,
+      last_settlement_at: null,
+      settlements: [],
+    } as never);
+    await VouchersRepo.activateCampaign(id);
+    return VouchersRepo;
+  }
+
+  test('cart button: PARCEL campaigns never count; unknown status words still count; dead ones never', async () => {
+    const app = freshApp();
+    await app.connection.initDatabase();
+    const {getDb} = load('src/database/connection') as {
+      getDb: () => {execute: (q: string, p?: unknown[]) => {rowsAffected: number}};
+    };
+
+    // A PARCEL campaign, activated — must NOT drive the cart button.
+    await seedCampaignOfKind('cmp-parcel', 'parcel', 'active');
+    const {VouchersRepo} = load('src/services/sila/VouchersRepo');
+    expect(await VouchersRepo.activeCampaignsCount()).toBe(0);
+
+    // A PURCHASE campaign whose server status word is UNKNOWN
+    // ('running') — the merchant activated it, the button MUST show
+    // (the old equality test hid it → the round-31 complaint).
+    await seedCampaignOfKind('cmp-run', 'voucher', 'running');
+    expect(await VouchersRepo.activeCampaignsCount()).toBe(1);
+
+    // A NULL status counts too (defensive server).
+    await seedCampaignOfKind('cmp-null', 'voucher', 'active');
+    getDb().execute(
+      `UPDATE campaign_debts SET campaign_status = NULL WHERE campaign_id = 'cmp-null'`,
+    );
+    expect(await VouchersRepo.activeCampaignsCount()).toBe(2);
+
+    // Clearly DEAD statuses hide the button even while activated.
+    await seedCampaignOfKind('cmp-dead', 'voucher', 'ended');
+    expect(await VouchersRepo.activeCampaignsCount()).toBe(2);
+    const {VouchersRepo: VR} = load('src/services/sila/VouchersRepo');
+    getDb().execute(
+      `UPDATE campaign_debts SET campaign_status = 'cancelled' WHERE campaign_id = 'cmp-run'`,
+    );
+    expect(await VR.activeCampaignsCount()).toBe(1);
+  });
+
+  test('PURCHASE coupon at the PARCEL window → booked truthfully + hard error, no goods sale', async () => {
+    const app = freshApp();
+    await app.connection.initDatabase();
+    const {silaRedeemVoucher} = load('src/services/sila/SilaApi') as {
+      silaRedeemVoucher: jest.Mock;
+    };
+    await seedPairing();
+    (silaRedeemVoucher as jest.Mock).mockResolvedValue(serverAnswer(5000));
+
+    const {VoucherService} = load('src/services/VoucherService');
+    await expect(
+      VoucherService.redeemVoucher({
+        payload: 'SILA:V1:zzz',
+        mode: 'parcel',
+        cart: null,
+        ...NO_PRINT,
+      } as never),
+    ).rejects.toThrow('القسائم الشرائية تُصرف من سلة البيع فقط');
+
+    // The redemption IS in the log as server truth (state ok) —
+    // but NO INV-V goods sale exists.
+    const {VouchersRepo} = load('src/services/sila/VouchersRepo');
+    const rows = await VouchersRepo.recent(10, 0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe('ok');
+    expect(rows[0].sale_id).toBeNull();
+  });
+
+  test('PARCEL code at the CART → booked truthfully + hard error, cart sale never created', async () => {
+    const app = freshApp();
+    await app.connection.initDatabase();
+    const {silaRedeemVoucher} = load('src/services/sila/SilaApi') as {
+      silaRedeemVoucher: jest.Mock;
+    };
+    await seedPairing();
+    (silaRedeemVoucher as jest.Mock).mockResolvedValue({
+      ...serverAnswer(5000),
+      kind: 'parcel',
+      campaign_id: 'cmp-parcel-2',
+      campaign_name: 'طرود العيد',
+    });
+
+    const rice = await seedProduct('أرز', 10, 50);
+    const {VoucherService} = load('src/services/VoucherService');
+    await expect(
+      VoucherService.redeemVoucher({
+        payload: 'SILA:V1:zzz',
+        mode: 'cart',
+        cart: {lines: [cartLine(rice, 5)], discount: 0, pricingMode: 'RETAIL'},
+        ...NO_PRINT,
+      } as never),
+    ).rejects.toThrow('الطرود تُصرف من صفحة القسائم في دفتر صِلة فقط');
+
+    // Booked ok — but no INV-V invoice was created for the cart.
+    const {VouchersRepo} = load('src/services/sila/VouchersRepo');
+    const rows = await VouchersRepo.recent(10, 0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe('ok');
+    expect(rows[0].sale_id).toBeNull();
+    const {SaleRepo} = load('src/database/repositories/SaleRepo');
+    const recent = await SaleRepo.listRecent(50);
+    expect(recent.filter(s => s.invoice_number.startsWith('INV-V-'))).toHaveLength(0);
+  });
+
+  test('PARCEL at the PARCEL window → success, no sale row, the claim mirror lands', async () => {
+    const app = freshApp();
+    await app.connection.initDatabase();
+    const {silaRedeemVoucher} = load('src/services/sila/SilaApi') as {
+      silaRedeemVoucher: jest.Mock;
+    };
+    await seedPairing();
+    (silaRedeemVoucher as jest.Mock).mockResolvedValue({
+      ...serverAnswer(3000),
+      kind: 'parcel',
+      campaign_id: 'cmp-parcel-3',
+      campaign_name: 'طرود الشتاء',
+    });
+
+    const {VoucherService} = load('src/services/VoucherService');
+    const outcome = await VoucherService.redeemVoucher({
+      payload: 'SILA:V1:zzz',
+      mode: 'parcel',
+      cart: null,
+      ...NO_PRINT,
+    } as never);
+    expect(outcome.needsTopUp).toBe(false);
+    expect(outcome.sale).toBeNull();
+
+    // The campaign claim mirror landed from the server answer.
+    const {VouchersRepo} = load('src/services/sila/VouchersRepo');
+    const campaigns = await VouchersRepo.campaigns();
+    const cmp = campaigns.find(r => r.campaign_id === 'cmp-parcel-3');
+    expect(cmp).toBeDefined();
+    expect(Number(cmp?.redeemed_value_minor)).toBe(3000);
+  });
+});

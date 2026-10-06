@@ -45,10 +45,7 @@ import {usePrinterStore} from '../stores/printerStore';
 import {useToastStore} from '../stores/toastStore';
 import {useSilaStore} from '../stores/silaStore';
 import {InvoiceService} from '../services/InvoiceService';
-import {
-  VoucherService,
-  VoucherRedeemError,
-} from '../services/VoucherService';
+import {VoucherService, VoucherRedeemError} from '../services/VoucherService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {SilaRepo} from '../services/sila/SilaRepo';
@@ -389,26 +386,23 @@ export function PosScreen() {
   /** v22 (round-28 #1): drop a blocked redemption's banner — the
    *  claim stays recorded in دفتر الحملات (the server redeemed the
    *  voucher); the merchant completes the handover manually. */
-  const dismissPendingVoucher = useCallback(
-    (localId: number) => {
-      Alert.alert(
-        'إلغاء إتمام القسيمة',
-        'القسيمة مصروفة على خادم صلة ومطالبتك على المؤسسة محفوظة في دفتر الحملات، لكن لن تُسجّل فاتورة بضاعة لها. هل أنت متأكد؟',
-        [
-          {text: 'تراجع', style: 'cancel'},
-          {
-            text: 'إلغاء الإتمام',
-            style: 'destructive',
-            onPress: () =>
-              setPendingVouchers(previous =>
-                previous.filter(item => item.localId !== localId),
-              ),
-          },
-        ],
-      );
-    },
-    [],
-  );
+  const dismissPendingVoucher = useCallback((localId: number) => {
+    Alert.alert(
+      'إلغاء إتمام القسيمة',
+      'القسيمة مصروفة على خادم صلة ومطالبتك على المؤسسة محفوظة في دفتر الحملات، لكن لن تُسجّل فاتورة بضاعة لها. هل أنت متأكد؟',
+      [
+        {text: 'تراجع', style: 'cancel'},
+        {
+          text: 'إلغاء الإتمام',
+          style: 'destructive',
+          onPress: () =>
+            setPendingVouchers(previous =>
+              previous.filter(item => item.localId !== localId),
+            ),
+        },
+      ],
+    );
+  }, []);
 
   // v8.2: a sale that empties the cart also folds the expanded view
   // back down — the grid must return for the next customer.
@@ -2319,13 +2313,20 @@ export function PosScreen() {
                     topped up and completed here. */}
                 {pendingVouchers.map(pending => {
                   const totalMinor = Math.round(totals.total * 100);
-                  const remaining = Math.max(0, pending.valueMinor - totalMinor);
+                  const remaining = Math.max(
+                    0,
+                    pending.valueMinor - totalMinor,
+                  );
                   const ready = lines.length > 0 && remaining === 0;
                   return (
-                    <View key={pending.localId} style={styles.pendingVoucherBox}>
+                    <View
+                      key={pending.localId}
+                      style={styles.pendingVoucherBox}>
                       <View style={styles.pendingVoucherHead}>
                         <Icon name="ticket" size={15} color={c.warning} />
-                        <Text style={styles.pendingVoucherTitle} numberOfLines={1}>
+                        <Text
+                          style={styles.pendingVoucherTitle}
+                          numberOfLines={1}>
                           قسيمة «{pending.campaignName}» بانتظار إكمال السلة
                         </Text>
                         <TouchableOpacity
@@ -2357,9 +2358,7 @@ export function PosScreen() {
                           variant={ready ? 'primary' : 'secondary'}
                           disabled={!ready || busy || debtBusy || voucherBusy}
                           loading={voucherBusy}
-                          onPress={() =>
-                            void completePendingVoucher(pending)
-                          }
+                          onPress={() => void completePendingVoucher(pending)}
                           style={{flex: 1}}
                         />
                       </View>
@@ -2379,13 +2378,14 @@ export function PosScreen() {
                     loading={busy}
                     style={{flex: 1.5}}
                   />
-                  {/* v21 (round-27 #6): صرف قسيمة صِلة — cart-tied
-                    voucher redemption. Shown ONLY when the device is
-                    paired AND at least one campaign is ACTIVE in this
-                    store (the merchant's own switch on القسائم) — a
-                    paired device with no active campaign never shows
-                    the button (the merchant is not committed to any
-                    campaign here). */}
+                  {/* v21 (round-27 #6) → v24 (round-31 #4/#5): صرف
+                    قسيمة صِلة — cart-tied PURCHASE-coupon redemption.
+                    Shown ONLY when the device is paired AND at least
+                    one PURCHASE-COUPON campaign (kind='voucher') is
+                    ACTIVE in this store — parcel campaigns never
+                    show it (they redeem from the القسائم tab's parcel
+                    button only; a parcel code scanned here is
+                    rejected by the service with a clear error). */}
                   {silaPaired && silaActiveCampaigns > 0 ? (
                     <TouchableOpacity
                       style={[styles.debtBtn, styles.voucherBtn]}
@@ -2549,6 +2549,7 @@ export function PosScreen() {
           goods become the INV-V sale once the server says ok. ── */}
       <VoucherRedeemSheet
         visible={voucherSheet}
+        mode="cart"
         onClose={() => setVoucherSheet(false)}
         cart={
           lines.length > 0

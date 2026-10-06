@@ -39,6 +39,7 @@ import {
 import {Icon} from '../../components/Icon';
 import {
   fonts,
+  makeStyles,
   radius,
   spacing,
   typography,
@@ -51,7 +52,6 @@ import {VouchersRepo} from '../../services/sila/VouchersRepo';
 import {VoucherService} from '../../services/VoucherService';
 import {SilaSync} from '../../services/sila/SilaSync';
 import {getString, KEYS} from '../../storage/storage';
-import {VoucherRedeemSheet} from './VoucherRedeemSheet';
 import type {CampaignDebtRow, VoucherRedemptionRow} from '../../core/types';
 import type {ReceiptSettings} from '../../services/printer/receipt';
 
@@ -88,10 +88,25 @@ const STATE_BADGE: Record<
 interface Props {
   receiptSettings: ReceiptSettings;
   printerConnected: boolean;
+  /** v24 (round-31 #4c): opens the PARCELS redemption sheet — the
+   *  sheet itself lives in SilaScreen (Screen level) because an
+   *  absolute overlay inside this tab's ScrollView sticks to the
+   *  page bottom (the scroll-to-see complaint). */
+  onOpenParcelRedeem: () => void;
+  /** v24 (round-31 #4c): bumped by SilaScreen every time the parcel
+   *  sheet closes — reloads the books (a redemption may have
+   *  landed while it was open). */
+  refreshKey: number;
 }
 
-export function VouchersTab({receiptSettings, printerConnected}: Props) {
+export function VouchersTab({
+  receiptSettings,
+  printerConnected,
+  onOpenParcelRedeem,
+  refreshKey,
+}: Props) {
   const c = useThemeColors();
+  const styles = useStyles();
   const toast = useToastStore(state => state.show);
 
   const [view, setView] = useState<VouchersView>('campaigns');
@@ -111,7 +126,6 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
-  const [sheetOpen, setSheetOpen] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState('');
 
   const loadAll = useCallback(async () => {
@@ -138,12 +152,13 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
     void loadAll();
   }, [loadAll]);
 
-  // Reload when the sheet closes (a redemption may have landed).
+  // v24 (round-31 #4c): SilaScreen bumps refreshKey when the parcel
+  // sheet closes — a redemption may have landed while it was open.
   useEffect(() => {
-    if (!sheetOpen) {
+    if (refreshKey > 0) {
       void loadAll();
     }
-  }, [sheetOpen, loadAll]);
+  }, [refreshKey, loadAll]);
 
   // v22: the history search — debounced reload of page 0.
   useEffect(() => {
@@ -190,7 +205,13 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, redemptions.length, redemptionsTotal, filter, historySearch]);
+  }, [
+    loadingMore,
+    redemptions.length,
+    redemptionsTotal,
+    filter,
+    historySearch,
+  ]);
 
   const applyFilter = useCallback(async (next: RedemptionFilter) => {
     setFilter(next);
@@ -223,10 +244,7 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
           campaign.campaign_id,
         );
         if (!changed) {
-          toast(
-            'هذه الحملة مفعّلة أصلاً — لا يمكن تفعيلها مرتين',
-            'info',
-          );
+          toast('هذه الحملة مفعّلة أصلاً — لا يمكن تفعيلها مرتين', 'info');
           await loadAll();
           return;
         }
@@ -277,9 +295,7 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
                 );
               } catch (error) {
                 const message =
-                  error instanceof Error
-                    ? error.message
-                    : 'تعذر إنهاء الحملة';
+                  error instanceof Error ? error.message : 'تعذر إنهاء الحملة';
                 toast(message, 'error');
               } finally {
                 setToggling(null);
@@ -346,8 +362,10 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
               {campaign.campaign_name}
             </Text>
             <Text style={styles.campaignMeta}>
-              {campaign.kind === 'parcel' ? 'طرد' : 'قسيمة'} ·{' '}
-              {campaign.redeemed_count} عملية صرف
+              {campaign.kind === 'parcel'
+                ? 'طرد — يُصرف من صفحة القسائم فقط'
+                : 'قسيمة شرائية — تُصرف من سلة البيع فقط'}{' '}
+              · {campaign.redeemed_count} عملية صرف
               {campaign.ends_at
                 ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
                 : ''}
@@ -389,8 +407,8 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
         </View>
         {completed ? (
           <Text style={styles.campaignFullText}>
-            ✓ مكتملة — بياناتها ومستحقاتها القائمة تبقى محفوظة كما هي في
-            دفاترك، وزر القسيمة اختفى من سلة البيع
+            ✓ مكتملة — بياناتها ومستحقاتها القائمة تبقى محفوظة كما هي في دفاترك،
+            وزر القسيمة اختفى من سلة البيع
           </Text>
         ) : campaign.settlement_state === 'full' ? (
           <Text style={styles.campaignFullText}>
@@ -472,25 +490,25 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
             </Text>
           </View>
         ) : null}
-        {/* v21: the standalone redemption entry stays available for
-            parcel campaigns / unpriced goods — cart-tied redemptions
-            live in the POS checkout (and its قسيمة button appears only
-            when an ACTIVE campaign exists). */}
+        {/* v21 → v24 (round-31 #4/#5): the standalone redemption
+            entry — PARCELS ONLY now (the button's name, hint and the
+            sheet itself all say طرد). Purchase coupons redeem from
+            the POS cart's قسيمة button and are REJECTED here. */}
         <AppButton
-          title="صرف قسيمة صلة (طرود / بدون سلة)"
+          title="صرف طرد صِلة (بدون سلة)"
           icon="qrFrame"
-          onPress={() => setSheetOpen(true)}
+          onPress={onOpenParcelRedeem}
           style={{marginTop: spacing.sm}}
         />
+        <Text style={styles.parcelBtnHint}>
+          لحملات الطرود فقط — أما القسائم الشرائية فتُصرف من سلة البيع في شاشة
+          البيع (زر قسيمة)
+        </Text>
       </Card>
 
       {/* v22 (round-28 #4): the two sub-views — the campaigns book
           and the redemption history, so huge lists never mix. */}
-      <Segmented
-        value={view}
-        onChange={setView}
-        options={VIEW_OPTIONS}
-      />
+      <Segmented value={view} onChange={setView} options={VIEW_OPTIONS} />
 
       {view === 'campaigns' ? (
         <>
@@ -505,8 +523,10 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
 
           {/* ── الحملات الفعّالة ── */}
           <SectionTitle
-            title={`الحملات الفعّالة${activeCampaigns.length > 0 ? ` (${activeCampaigns.length})` : ''}`}
-            hint="المفعّلة في متجرك — المطالبة على المؤسسة حتى التسوية، وإنهاؤها لا يُلغي مستحقاتها"
+            title={`الحملات الفعّالة${
+              activeCampaigns.length > 0 ? ` (${activeCampaigns.length})` : ''
+            }`}
+            hint="المفعّلة في متجرك — حملات القسائم الشرائية يظهر زرها في سلة البيع وتُصرف منها، وحملات الطرود تُصرف من زر صرف الطرد هنا فقط"
           />
           {activeCampaigns.length === 0 && !loading ? (
             <EmptyState
@@ -556,9 +576,9 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
                   محفوظة كما هي — مستحقاتها القائمة باقية في الدفاتر
                 </Text>
               </TouchableOpacity>
-              {completedOpen ? (
-                completedCampaigns.map(renderCampaignCard)
-              ) : null}
+              {completedOpen
+                ? completedCampaigns.map(renderCampaignCard)
+                : null}
             </>
           ) : null}
 
@@ -581,49 +601,51 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
                   متجرك متعاقد فيها عبر صِلة — فعّلها لتُحتسب
                 </Text>
               </TouchableOpacity>
-              {availableOpen ? (
-                availableCampaigns.map(campaign => {
-                  const busy = toggling === campaign.campaign_id;
-                  return (
-                    <Card
-                      key={`off-${campaign.campaign_id}`}
-                      style={styles.offerCard}>
-                      <View style={styles.campaignHead}>
-                        <View style={styles.offerIcon}>
-                          <Icon name="ticket" size={17} color={c.textDim} />
+              {availableOpen
+                ? availableCampaigns.map(campaign => {
+                    const busy = toggling === campaign.campaign_id;
+                    return (
+                      <Card
+                        key={`off-${campaign.campaign_id}`}
+                        style={styles.offerCard}>
+                        <View style={styles.campaignHead}>
+                          <View style={styles.offerIcon}>
+                            <Icon name="ticket" size={17} color={c.textDim} />
+                          </View>
+                          <View style={{flex: 1}}>
+                            <Text style={styles.offerName} numberOfLines={1}>
+                              {campaign.campaign_name}
+                            </Text>
+                            <Text style={styles.campaignMeta}>
+                              {campaign.kind === 'parcel'
+                                ? 'طرد — يُصرف من صفحة القسائم'
+                                : 'قسيمة شرائية — تُصرف من سلة البيع'}
+                              {campaign.merchant_status === 'accepted'
+                                ? ' · متعاقد فيها'
+                                : ''}
+                              {campaign.ends_at
+                                ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
+                                : ''}
+                            </Text>
+                          </View>
                         </View>
-                        <View style={{flex: 1}}>
-                          <Text style={styles.offerName} numberOfLines={1}>
-                            {campaign.campaign_name}
-                          </Text>
-                          <Text style={styles.campaignMeta}>
-                            {campaign.kind === 'parcel' ? 'طرد' : 'قسيمة'}
-                            {campaign.merchant_status === 'accepted'
-                              ? ' · متعاقد فيها'
-                              : ''}
-                            {campaign.ends_at
-                              ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
-                              : ''}
-                          </Text>
-                        </View>
-                      </View>
-                      <Text style={styles.offerHint}>
-                        لن يُحتسب أي شيء من مستحقات وتسويات هذه الحملة في
-                        متجرك حتى تفعيلها — وبعد التفعيل تُضاف مستحقاتها كدين
-                        على المؤسسة حتى التسوية تماماً كديون صِلة. التفعيل لا
-                        يتكرر ولا يمكن التراجع عنه إلا بإنهاء الحملة.
-                      </Text>
-                      <AppButton
-                        title="تفعيل الحملة في متجري"
-                        icon="check"
-                        small
-                        onPress={() => void activateCampaign(campaign)}
-                        loading={busy}
-                      />
-                    </Card>
-                  );
-                })
-              ) : null}
+                        <Text style={styles.offerHint}>
+                          لن يُحتسب أي شيء من مستحقات وتسويات هذه الحملة في
+                          متجرك حتى تفعيلها — وبعد التفعيل تُضاف مستحقاتها كدين
+                          على المؤسسة حتى التسوية تماماً كديون صِلة. التفعيل لا
+                          يتكرر ولا يمكن التراجع عنه إلا بإنهاء الحملة.
+                        </Text>
+                        <AppButton
+                          title="تفعيل الحملة في متجري"
+                          icon="check"
+                          small
+                          onPress={() => void activateCampaign(campaign)}
+                          loading={busy}
+                        />
+                      </Card>
+                    );
+                  })
+                : null}
             </>
           ) : null}
         </>
@@ -717,7 +739,9 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
                       {row.pos_receipt_ref ?? '—'}
                       {row.reference_code ? ` · ${row.reference_code}` : ''}
                       {row.counter_extra_minor > 0
-                        ? ` · فرق نقدي ${formatMoney(row.counter_extra_minor / 100)}`
+                        ? ` · فرق نقدي ${formatMoney(
+                            row.counter_extra_minor / 100,
+                          )}`
                         : ''}
                     </Text>
                     {awaitingGoods ? (
@@ -751,275 +775,281 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
           ) : null}
         </>
       )}
-
-      {/* The standalone redemption sheet (no cart — parcels etc.). */}
-      <VoucherRedeemSheet
-        visible={sheetOpen}
-        onClose={() => setSheetOpen(false)}
-        cart={null}
-        receiptSettings={receiptSettings}
-        printerConnected={printerConnected}
-      />
     </>
   );
 }
 
-const styles = StyleSheet.create({
-  syncRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  dueHero: {
-    gap: spacing.xs,
-  },
-  dueHeroRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  dueHeroIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: 'rgba(249,115,22,0.14)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  dueHeroLabel: {
-    color: '#C9C9D4',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  dueHeroValue: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.title,
-    marginTop: 2,
-  },
-  dueMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-    flexWrap: 'wrap',
-  },
-  dueMetaText: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    flex: 1,
-  },
-  dueMetaTime: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-  },
-  pendingBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(245,158,11,0.10)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-  },
-  pendingText: {
-    flex: 1,
-    color: '#FCD34D',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    lineHeight: 15,
-  },
-  /** v22 (round-28 #4): the campaign/history search boxes. */
-  searchBox: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: radius.sm,
-    color: '#F5F5F7',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-  },
-  /** v22 (round-28 #4): the collapsible section header. */
-  sectionToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: spacing.xs + 2,
-    flexWrap: 'wrap',
-  },
-  sectionToggleTitle: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.small,
-  },
-  sectionToggleHint: {
-    flex: 1,
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    textAlign: 'left',
-    minWidth: 120,
-  },
-  campaignCard: {
-    gap: spacing.sm,
-  },
-  campaignHead: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  campaignName: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  campaignMeta: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    marginTop: 2,
-  },
-  campaignGrid: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  campaignCell: {
-    flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-    alignItems: 'center',
-    gap: 2,
-  },
-  campaignCellDue: {
-    backgroundColor: 'rgba(245,158,11,0.10)',
-  },
-  campaignValue: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  campaignValueLabel: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-  },
-  campaignFullText: {
-    color: '#4ADE80',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-  },
-  /** v22 (round-28 #4): the one-way «complete campaign» button —
-   *  replaces the v21 disable switch (deactivation is gone). */
-  completeBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: 'rgba(245,158,11,0.35)',
-    backgroundColor: 'rgba(245,158,11,0.07)',
-  },
-  completeBtnText: {
-    color: '#FCD34D',
-    fontFamily: fonts.bold,
-    fontSize: typography.micro + 1,
-  },
-  /** The AVAILABLE (not activated) campaign card. */
-  offerCard: {
-    gap: spacing.sm,
-  },
-  offerIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  offerName: {
-    color: '#C9C9D4',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  offerHint: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    lineHeight: 15,
-  },
-  filterRow: {
-    flexDirection: 'row',
-    gap: 6,
-    flexWrap: 'wrap',
-  },
-  filterChip: {
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    minHeight: 26,
-    justifyContent: 'center',
-  },
-  filterChipActive: {
-    backgroundColor: '#F97316',
-    borderColor: '#F97316',
-  },
-  filterChipText: {
-    color: '#C9C9D4',
-    fontFamily: fonts.bold,
-    fontSize: 11.5,
-  },
-  historyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-  },
-  historyIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  historyTitle: {
-    color: '#F5F5F7',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  historyMeta: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    marginTop: 2,
-  },
-  /** v22 (round-28 #1): the needs-top-up note on a history row. */
-  awaitingGoodsText: {
-    color: '#FCD34D',
-    fontFamily: fonts.bold,
-    fontSize: typography.micro,
-    marginTop: 3,
-    lineHeight: 14,
-  },
-  moreBtn: {
-    alignItems: 'center',
-    padding: spacing.sm,
-  },
-  moreText: {
-    color: '#F97316',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-});
+// v24 (round-31 #4e): THEMED — the tab was dark-only (hard-coded
+// #F5F5F7 / #8E8E9A / rgba(255,255,255,…) text and surfaces) and
+// ignored the light mode entirely (the merchant's complaint:
+// «الألوان في الخطوط في صفحة القسائم في الوضع النهاري لا تتبدل»).
+// Every color now reads the live palette.
+const useStyles = makeStyles(c =>
+  StyleSheet.create({
+    syncRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    dueHero: {
+      gap: spacing.xs,
+    },
+    dueHeroRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+    },
+    dueHeroIcon: {
+      width: 46,
+      height: 46,
+      borderRadius: 23,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    dueHeroLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    dueHeroValue: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.title,
+      marginTop: 2,
+    },
+    dueMetaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: spacing.sm,
+      flexWrap: 'wrap',
+    },
+    dueMetaText: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      flex: 1,
+    },
+    dueMetaTime: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+    },
+    pendingBox: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.warningSoft,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+    },
+    pendingText: {
+      flex: 1,
+      color: c.warning,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      lineHeight: 15,
+    },
+    /** v24 (round-31 #4/#5): the parcels-only button's charter. */
+    parcelBtnHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      lineHeight: 15,
+      textAlign: 'center',
+    },
+    /** v22 (round-28 #4): the campaign/history search boxes. */
+    searchBox: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.sm,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.md,
+    },
+    /** v22 (round-28 #4): the collapsible section header. */
+    sectionToggle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingVertical: spacing.xs + 2,
+      flexWrap: 'wrap',
+    },
+    sectionToggleTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.small,
+    },
+    sectionToggleHint: {
+      flex: 1,
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      textAlign: 'left',
+      minWidth: 120,
+    },
+    campaignCard: {
+      gap: spacing.sm,
+    },
+    campaignHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    campaignName: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    campaignMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      marginTop: 2,
+    },
+    campaignGrid: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    campaignCell: {
+      flex: 1,
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      alignItems: 'center',
+      gap: 2,
+    },
+    campaignCellDue: {
+      backgroundColor: c.warningSoft,
+    },
+    campaignValue: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    campaignValueLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+    },
+    campaignFullText: {
+      color: c.success,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+    },
+    /** v22 (round-28 #4): the one-way «complete campaign» button —
+     *  replaces the v21 disable switch (deactivation is gone). */
+    completeBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: spacing.xs + 2,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.warning,
+      backgroundColor: c.warningSoft,
+    },
+    completeBtnText: {
+      color: c.warning,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    /** The AVAILABLE (not activated) campaign card. */
+    offerCard: {
+      gap: spacing.sm,
+    },
+    offerIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      backgroundColor: c.surfaceHi,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    offerName: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    offerHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      lineHeight: 15,
+    },
+    filterRow: {
+      flexDirection: 'row',
+      gap: 6,
+      flexWrap: 'wrap',
+    },
+    filterChip: {
+      borderRadius: 6,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: 10,
+      paddingVertical: 3,
+      minHeight: 26,
+      justifyContent: 'center',
+    },
+    filterChipActive: {
+      backgroundColor: c.accent,
+      borderColor: c.accent,
+    },
+    filterChipText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: 11.5,
+    },
+    historyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+    },
+    historyIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      backgroundColor: c.surfaceHi,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    historyTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    historyMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      marginTop: 2,
+    },
+    /** v22 (round-28 #1): the needs-top-up note on a history row. */
+    awaitingGoodsText: {
+      color: c.warning,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+      marginTop: 3,
+      lineHeight: 14,
+    },
+    moreBtn: {
+      alignItems: 'center',
+      padding: spacing.sm,
+    },
+    moreText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+  }),
+);

@@ -1124,8 +1124,10 @@ export const SilaRepo = {
   async listCustomers(): Promise<SilaCustomer[]> {
     try {
       const result = await getDb().execute(
+        // v24 (round-31 #2): the customers page is the STORE-debt
+        // book now — order by the store's own part, not the total.
         `SELECT * FROM sila_customers
-         ORDER BY outstanding_minor DESC, name COLLATE NOCASE ASC`,
+         ORDER BY pos_outstanding_minor DESC, name COLLATE NOCASE ASC`,
       );
       return (result.rows?._array ?? []).map(row =>
         rowToCustomer(row as Record<string, unknown>),

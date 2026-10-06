@@ -327,6 +327,22 @@ export function ReportsScreen() {
                     </Text>
                   </View>
                 ) : null}
+                {/* v24 (round-31 #3): the coupon-born debts of the
+                    period — the claims created on the institutions by
+                    voucher redemptions (face value), until the
+                    settlements land. Its own line, NOT a «منها» of
+                    the customer-debt total above. */}
+                {(cash?.voucherCreditSalesAmount ?? 0) > 0 ? (
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      عبر قسائم صِلة · {cash?.voucherCreditSalesCount ?? 0}{' '}
+                      عملية صرف (مستحقات على المؤسسات حتى التسوية)
+                    </Text>
+                    <Text style={[styles.rowValue, {color: c.info}]}>
+                      {formatMoney(cash?.voucherCreditSalesAmount ?? 0)}
+                    </Text>
+                  </View>
+                ) : null}
               </View>
 
               {/* 2-ج-2) v20: مبيعات القسائم الشرائية بالفترة — the

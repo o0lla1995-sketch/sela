@@ -526,17 +526,28 @@ export const VouchersRepo = {
     return changed;
   },
 
-  /** v22 (round-28 #4): how many campaigns are ACTIVE in this store
-   *  — drives the POS cart's قسيمة button (the button only appears
-   *  when an active campaign exists and the merchant is contracted
-   *  in it). COMPLETED campaigns no longer show the button (round-28
-   *  #4: «عند وضعها مكتملة يختفي زر قسيمة من سلة البيع»). */
+  /** v22 (round-28 #4) → v24 (round-31 #4/#5): how many campaigns
+   *  drive the POS cart's قسيمة button. TWO changes:
+   *   1. KIND filter — PURCHASE-COUPON campaigns (kind='voucher')
+   *      only. Parcel campaigns NEVER show the cart button (they
+   *      redeem from the القسائم tab's parcel button only — no
+   *      mixing, the merchant's round-31 rule).
+   *   2. Status robustness — the merchant ACTIVATED the campaign in
+   *      his store (store_state='active'), so the button must appear
+   *      regardless of the server's status vocabulary. Only clearly
+   *      DEAD statuses (ended/completed/cancelled/archived) hide it;
+   *      NULL/'active'/'running'/anything else keeps it — fixes the
+   *      «الزر لا يظهر رغم تفعيل الحملة» complaint (the server sent
+   *      a status word the old equality test didn't know). */
   async activeCampaignsCount(): Promise<number> {
     try {
       const result = await getDb().execute(
         `SELECT COUNT(*) AS cnt FROM campaign_debts
          WHERE store_state = 'active'
-           AND COALESCE(campaign_status, 'active') = 'active'`,
+           AND kind = 'voucher'
+           AND LOWER(COALESCE(campaign_status, 'active')) NOT IN
+               ('ended', 'completed', 'cancelled', 'canceled',
+                'archived', 'inactive')`,
       );
       const row = result.rows?._array?.[0] as {cnt?: number} | undefined;
       return Number(row?.cnt ?? 0);

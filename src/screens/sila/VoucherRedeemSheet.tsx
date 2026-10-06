@@ -61,6 +61,11 @@ export interface VoucherCartContext {
 interface Props {
   visible: boolean;
   onClose: () => void;
+  /** v24 (round-31 #4/#5): the flow this sheet serves —
+   *   'cart'   → the POS checkout (purchase coupons ONLY);
+   *   'parcel' → the القسائم tab (parcels ONLY, no cart).
+   *  Defaults to 'cart' when a cart is given, 'parcel' otherwise. */
+  mode?: 'cart' | 'parcel';
   /** The POS cart when redeeming from checkout (null = standalone). */
   cart: VoucherCartContext | null;
   receiptSettings: ReceiptSettings;
@@ -96,6 +101,7 @@ type Step =
 export function VoucherRedeemSheet({
   visible,
   onClose,
+  mode,
   cart,
   receiptSettings,
   printerConnected,
@@ -105,6 +111,11 @@ export function VoucherRedeemSheet({
   const c = useThemeColors();
   const toast = useToastStore(state => state.show);
   const pairing = useSilaStore(state => state.pairing);
+
+  // v24 (round-31 #5): the flow decides the window's identity —
+  // titles, hints and the service's kind enforcement all follow it.
+  const flow: 'cart' | 'parcel' = mode ?? (cart != null ? 'cart' : 'parcel');
+  const styles = sheetStyles(c);
 
   const [step, setStep] = useState<Step>({phase: 'input'});
   const [manualCode, setManualCode] = useState('');
@@ -170,6 +181,7 @@ export function VoucherRedeemSheet({
       try {
         const success = await VoucherService.redeemVoucher({
           payload,
+          mode: flow,
           cart: cart
             ? {
                 lines: cart.lines,
@@ -209,7 +221,7 @@ export function VoucherRedeemSheet({
         }
       }
     },
-    [pairing, cart, printerConnected, receiptSettings, toast, onRedeemed],
+    [pairing, flow, cart, printerConnected, receiptSettings, toast, onRedeemed],
   );
 
   const runScan = useCallback(async () => {
@@ -291,15 +303,18 @@ export function VoucherRedeemSheet({
           <View style={styles.titleIcon}>
             <Icon name="ticket" size={22} color={c.accent} />
           </View>
-          <Text style={styles.title}>صرف قسيمة صِلة</Text>
+          <Text style={styles.title}>
+            {flow === 'parcel' ? 'صرف طرد صِلة (بدون سلة)' : 'صرف قسيمة صِلة'}
+          </Text>
         </View>
 
         {/* ── The golden rule, always visible (§2 rule 5) ── */}
         <View style={styles.ruleBox}>
           <Icon name="info" size={15} color={c.info} />
           <Text style={styles.ruleText}>
-            القسيمة حقٌّ مؤمَّن من المؤسسة — ليست ديناً على الزبون، ولا تظهر في
-            كشف حسابه
+            {flow === 'parcel'
+              ? 'الطرد حقٌّ مؤمَّن من المؤسسة — هذه النافذة تصرف الطرود فقط، والقسائم الشرائية تُصرف من سلة البيع'
+              : 'القسيمة حقٌّ مؤمَّن من المؤسسة — ليست ديناً على الزبون، ولا تظهر في كشف حسابه'}
           </Text>
         </View>
 
@@ -322,15 +337,17 @@ export function VoucherRedeemSheet({
           </View>
         ) : null}
 
-        {/* ── Standalone note (no cart): a redemption commits the
-            campaign to this store's books (round-27 #1) ── */}
+        {/* ── Standalone note (no cart): parcels ONLY — v24
+            (round-31 #4/#5): this window redeems PARCEL campaigns'
+            codes; purchase coupons belong to the POS cart. ── */}
         {cart == null && step.phase === 'input' ? (
           <View style={styles.standaloneBox}>
             <Icon name="info" size={14} color={c.info} />
             <Text style={styles.standaloneText}>
-              الصرف المباشر (بدون سلة) مخصص لحملات الطرود والبضاعة غير
-              المسعّرة — إذا كانت الحملة غير مفعّلة في متجرك فسيُفعّلها هذا
-              الصرف تلقائياً لأنه التزام محسوب عليك في صِلة
+              صرف الطرود (بدون سلة) — مخصص لحملات الطرود فقط. إذا كانت حملة
+              الطرود غير مفعّلة في متجرك فسيُفعّلها هذا الصرف تلقائياً لأنه
+              التزام محسوب عليك في صِلة. أما القسائم الشرائية فتُصرف من سلة
+              البيع في شاشة البيع فقط
             </Text>
           </View>
         ) : null}
@@ -349,9 +366,15 @@ export function VoucherRedeemSheet({
                 <Icon name="qrFrame" size={26} color={c.onAccent} />
               )}
               <View style={{flex: 1}}>
-                <Text style={styles.scanBtnTitle}>مسح رمز القسيمة (QR)</Text>
+                <Text style={styles.scanBtnTitle}>
+                  {flow === 'parcel'
+                    ? 'مسح رمز الطرد (QR)'
+                    : 'مسح رمز القسيمة (QR)'}
+                </Text>
                 <Text style={styles.scanBtnText}>
-                  من تطبيق صِلة على هاتف المستحق أو الورقة المطبوعة
+                  {flow === 'parcel'
+                    ? 'من تطبيق صِلة على هاتف المستحق أو على الطرد'
+                    : 'من تطبيق صِلة على هاتف المستحق أو على الورقة المطبوعة'}
                 </Text>
               </View>
             </TouchableOpacity>
@@ -363,7 +386,11 @@ export function VoucherRedeemSheet({
             </View>
 
             <View style={styles.fieldWrap}>
-              <Text style={styles.fieldLabel}>كود القسيمة (20 محرفاً)</Text>
+              <Text style={styles.fieldLabel}>
+                {flow === 'parcel'
+                  ? 'كود الطرد (20 محرفاً)'
+                  : 'كود القسيمة (20 محرفاً)'}
+              </Text>
               <TextInput
                 style={styles.fieldInput}
                 value={manualCode}
@@ -385,7 +412,7 @@ export function VoucherRedeemSheet({
             </View>
 
             <AppButton
-              title="صرف القسيمة"
+              title={flow === 'parcel' ? 'صرف الطرد' : 'صرف القسيمة'}
               variant="primary"
               onPress={submitManual}
               disabled={manualCode.trim().length === 0}
@@ -442,9 +469,9 @@ export function VoucherRedeemSheet({
                 </View>
               </View>
               <Text style={styles.stateText}>
-                الصرف محجوز باسم متجرك على خادم صِلة — لا تُسلَّم البضاعة
-                ولا يُطبع الإيصال قبل أن تُكمل السلة إلى قيمة القسيمة على
-                الأقل، ثم تُتمّ العملية من شاشة البيع.
+                الصرف محجوز باسم متجرك على خادم صِلة — لا تُسلَّم البضاعة ولا
+                يُطبع الإيصال قبل أن تُكمل السلة إلى قيمة القسيمة على الأقل، ثم
+                تُتمّ العملية من شاشة البيع.
               </Text>
               <Text style={styles.stateMeta}>
                 حملة «{step.data.result.campaign_name}» · المرجع الرسمي{' '}
@@ -459,11 +486,13 @@ export function VoucherRedeemSheet({
             </View>
           ) : (
             <View style={styles.stateBox}>
-              <View style={[styles.stateIcon, {backgroundColor: c.successSoft}]}>
+              <View
+                style={[styles.stateIcon, {backgroundColor: c.successSoft}]}>
                 <Icon name="checkCircle" size={34} color={c.success} />
               </View>
               <Text style={[styles.stateTitle, {color: c.success}]}>
-                صُرفت القسيمة — {formatMoney(step.data.result.value_minor / 100)}
+                صُرفت القسيمة —{' '}
+                {formatMoney(step.data.result.value_minor / 100)}
               </Text>
               <Text style={styles.stateText}>
                 حملة «{step.data.result.campaign_name}» · المرجع الرسمي{' '}
@@ -623,320 +652,332 @@ export function VoucherRedeemSheet({
   );
 }
 
-const styles = StyleSheet.create({
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'flex-end',
-    zIndex: 70,
-    elevation: 70,
-  },
-  dim: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-  },
-  sheet: {
-    backgroundColor: '#1C1C24',
-    borderTopLeftRadius: radius.lg + 4,
-    borderTopRightRadius: radius.lg + 4,
-    padding: spacing.lg,
-    paddingBottom: spacing.xxl,
-    gap: spacing.sm,
-  },
-  handle: {
-    alignSelf: 'center',
-    width: 44,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    marginBottom: spacing.xs,
-  },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    marginBottom: spacing.xs,
-  },
-  titleIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(249,115,22,0.14)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  title: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.heading,
-  },
-  ruleBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: 'rgba(59,130,246,0.10)',
-    borderWidth: 1,
-    borderColor: 'rgba(59,130,246,0.25)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-  },
-  ruleText: {
-    flex: 1,
-    color: '#9EC5FE',
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    lineHeight: 17,
-  },
-  cartBox: {
-    backgroundColor: 'rgba(249,115,22,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(249,115,22,0.22)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-    gap: 4,
-  },
-  cartRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  cartLabel: {
-    color: '#C9C9D4',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  cartValue: {
-    color: '#F5F5F7',
-    fontFamily: fonts.bold,
-    fontSize: typography.body,
-  },
-  cartHint: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-  },
-  /** v21 (round-27 #2): the exact-match rule, stated up front. */
-  cartRule: {
-    color: '#FDBA74',
-    fontFamily: fonts.bold,
-    fontSize: typography.micro + 1,
-  },
-  /** v21 (round-27 #1): standalone-redemption commitment note. */
-  standaloneBox: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: spacing.sm,
-    backgroundColor: 'rgba(59,130,246,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(59,130,246,0.20)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-  },
-  standaloneText: {
-    flex: 1,
-    color: '#9EC5FE',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    lineHeight: 16,
-  },
-  /** v21 (round-27 #2): exact-match confirmation / mismatch warning. */
-  matchBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    alignSelf: 'stretch',
-    backgroundColor: 'rgba(74,222,128,0.10)',
-    borderWidth: 1,
-    borderColor: 'rgba(74,222,128,0.30)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-  },
-  matchText: {
-    flex: 1,
-    color: '#4ADE80',
-    fontFamily: fonts.bold,
-    fontSize: typography.micro + 1,
-    lineHeight: 16,
-  },
-  mismatchBox: {
-    alignSelf: 'stretch',
-    backgroundColor: 'rgba(245,158,11,0.12)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(245,158,11,0.55)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-    gap: 4,
-  },
-  mismatchTitle: {
-    color: '#FCD34D',
-    fontFamily: fonts.black,
-    fontSize: typography.small,
-    textAlign: 'center',
-  },
-  mismatchText: {
-    color: '#FDE68A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    textAlign: 'center',
-    lineHeight: 16,
-  },
-  /** v22 (round-28 #1): the blocked-handover breakdown box. */
-  blockedBox: {
-    alignSelf: 'stretch',
-    backgroundColor: 'rgba(239,68,68,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(239,68,68,0.30)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-    gap: 6,
-  },
-  scanBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    backgroundColor: '#F97316',
-    borderRadius: radius.md,
-    padding: spacing.md,
-  },
-  scanBtnTitle: {
-    color: '#FFFFFF',
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  scanBtnText: {
-    color: 'rgba(255,255,255,0.82)',
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    marginTop: 2,
-  },
-  orRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  orLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-  },
-  orText: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-  },
-  fieldWrap: {
-    gap: 4,
-  },
-  fieldLabel: {
-    color: '#C9C9D4',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  fieldInput: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-    borderRadius: radius.sm,
-    color: '#F5F5F7',
-    fontFamily: fonts.bold,
-    fontSize: typography.heading,
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    letterSpacing: 1.5,
-  },
-  fieldHint: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    textAlign: 'center',
-  },
-  stateBox: {
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.sm,
-  },
-  stateIcon: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stateTitle: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.body + 2,
-    textAlign: 'center',
-  },
-  stateText: {
-    color: '#C9C9D4',
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    textAlign: 'center',
-    lineHeight: 18,
-  },
-  stateMeta: {
-    color: '#8E8E9A',
-    fontFamily: fonts.regular,
-    fontSize: typography.micro,
-    textAlign: 'center',
-    lineHeight: 16,
-  },
-  decompBox: {
-    alignSelf: 'stretch',
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-    gap: 6,
-  },
-  decompRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  decompLabel: {
-    color: '#C9C9D4',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  decompValue: {
-    color: '#F5F5F7',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-  decompRowTotal: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.12)',
-    paddingTop: 8,
-    marginTop: 2,
-  },
-  decompLabelTotal: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  decompValueTotal: {
-    color: '#F5F5F7',
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  actionsRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    alignSelf: 'stretch',
-    marginTop: spacing.xs,
-  },
-  closeRow: {
-    alignItems: 'center',
-    paddingVertical: spacing.xs,
-  },
-  closeText: {
-    color: '#8E8E9A',
-    fontFamily: fonts.bold,
-    fontSize: typography.small,
-  },
-});
+/**
+ * v24 (round-31 #4d): THEMED styles — the sheet was dark-only
+ * (hard-coded #1C1C24 / #F5F5F7 / rgba(255,255,255,…)) and ignored
+ * the light mode entirely (the merchant's complaint: «النافذة ليلية
+ * فقط»). Now every surface/text/border reads the live palette, so
+ * the sheet follows نهاري/ليلي like the rest of the app.
+ */
+function sheetStyles(c: ReturnType<typeof useThemeColors>) {
+  return StyleSheet.create({
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      justifyContent: 'flex-end',
+      zIndex: 70,
+      elevation: 70,
+    },
+    dim: {
+      flex: 1,
+      backgroundColor: c.overlay,
+    },
+    sheet: {
+      backgroundColor: c.bg,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      paddingBottom: spacing.xxl,
+      gap: spacing.sm,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+    },
+    handle: {
+      alignSelf: 'center',
+      width: 44,
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: c.hairline,
+      marginBottom: spacing.xs,
+    },
+    titleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.sm,
+      marginBottom: spacing.xs,
+    },
+    titleIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 19,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    title: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+    },
+    ruleBox: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.infoSoft,
+      borderWidth: 1,
+      borderColor: c.infoSoft,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+    },
+    ruleText: {
+      flex: 1,
+      color: c.info,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 17,
+    },
+    cartBox: {
+      backgroundColor: c.accentSofter,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      gap: 4,
+    },
+    cartRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    cartLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    cartValue: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    cartHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+    },
+    /** v21 (round-27 #2): the exact-match rule, stated up front. */
+    cartRule: {
+      color: c.warning,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    /** v21 (round-27 #1): standalone-redemption commitment note. */
+    standaloneBox: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: spacing.sm,
+      backgroundColor: c.infoSoft,
+      borderWidth: 1,
+      borderColor: c.infoSoft,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+    },
+    standaloneText: {
+      flex: 1,
+      color: c.info,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 16,
+    },
+    /** v21 (round-27 #2): exact-match confirmation / mismatch warning. */
+    matchBox: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      alignSelf: 'stretch',
+      backgroundColor: c.successSoft,
+      borderWidth: 1,
+      borderColor: c.successSoft,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+    },
+    matchText: {
+      flex: 1,
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+      lineHeight: 16,
+    },
+    mismatchBox: {
+      alignSelf: 'stretch',
+      backgroundColor: c.warningSoft,
+      borderWidth: 1.5,
+      borderColor: c.warning,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      gap: 4,
+    },
+    mismatchTitle: {
+      color: c.warning,
+      fontFamily: fonts.black,
+      fontSize: typography.small,
+      textAlign: 'center',
+    },
+    mismatchText: {
+      color: c.warning,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+      lineHeight: 16,
+    },
+    /** v22 (round-28 #1): the blocked-handover breakdown box. */
+    blockedBox: {
+      alignSelf: 'stretch',
+      backgroundColor: c.dangerSoft,
+      borderWidth: 1,
+      borderColor: c.dangerSoft,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      gap: 6,
+    },
+    scanBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.accent,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    scanBtnTitle: {
+      color: c.onAccent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    scanBtnText: {
+      color: c.onAccent,
+      opacity: 0.85,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      marginTop: 2,
+    },
+    orRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    orLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: c.border,
+    },
+    orText: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+    },
+    fieldWrap: {
+      gap: 4,
+    },
+    fieldLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    fieldInput: {
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.heading,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.md,
+      letterSpacing: 1.5,
+    },
+    fieldHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      textAlign: 'center',
+    },
+    stateBox: {
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingVertical: spacing.sm,
+    },
+    stateIcon: {
+      width: 64,
+      height: 64,
+      borderRadius: 32,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stateTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body + 2,
+      textAlign: 'center',
+    },
+    stateText: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'center',
+      lineHeight: 18,
+    },
+    stateMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      textAlign: 'center',
+      lineHeight: 16,
+    },
+    decompBox: {
+      alignSelf: 'stretch',
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      gap: 6,
+    },
+    decompRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    decompLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    decompValue: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    decompRowTotal: {
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+      paddingTop: 8,
+      marginTop: 2,
+    },
+    decompLabelTotal: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    decompValueTotal: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    actionsRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      alignSelf: 'stretch',
+      marginTop: spacing.xs,
+    },
+    closeRow: {
+      alignItems: 'center',
+      paddingVertical: spacing.xs,
+    },
+    closeText: {
+      color: c.textFaint,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+  });
+}

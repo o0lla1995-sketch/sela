@@ -346,3 +346,61 @@ describe('campaign dues in the period bundle', () => {
     expect(treasury.campaignSettlementsAllTime).toBeCloseTo(25, 5);
   });
 });
+
+// v24 (round-31 #3): «عبر قسائم صلة» — the coupon-born debts of the
+// period (face value of the redemptions = the claim created on the
+// institutions) carry their OWN line in the debt-invoices section.
+describe('v24: coupon-born debts in the period bundle', () => {
+  test('a standalone parcel redemption lands in voucherCreditSalesAmount', async () => {
+    const app = freshApp();
+    await app.connection.initDatabase();
+    const {VouchersRepo} = load('src/services/sila/VouchersRepo');
+
+    // A parcel campaign + its redemption of 40₪ (booked directly —
+    // exactly what VoucherService.bookRedemption writes on ok).
+    await VouchersRepo.upsertCampaignFromFeed({
+      campaign_id: 'cmp-ramadan',
+      campaign_name: 'طرود رمضان',
+      kind: 'parcel',
+      campaign_status: 'active',
+      merchant_status: 'active',
+      starts_at: null,
+      ends_at: null,
+      redeemed_count: 0,
+      redeemed_value_minor: 0,
+      settled_minor: 0,
+      settled_pending_minor: 0,
+      settled_confirmed_minor: 0,
+      due_minor: 0,
+      settlement_state: 'none',
+      last_redemption_at: null,
+      last_settlement_at: null,
+      settlements: [],
+    } as never);
+    await VouchersRepo.activateCampaign('cmp-ramadan');
+    await VouchersRepo.createRedemption({
+      idempotencyKey: 'idem-1',
+      payload: 'SILA:V1:zzz',
+      posReceiptRef: 'INV-V-20261007-0001',
+      redeemedAt: new Date().toISOString(),
+      cartJson: null,
+    });
+    const {getDb} = load('src/database/connection') as {
+      getDb: () => {execute: (q: string, p?: unknown[]) => Promise<{rowsAffected: number}>};
+    };
+    await getDb().execute(
+      `UPDATE voucher_redemptions SET state = 'ok', value_minor = 4000,
+         campaign_id = 'cmp-ramadan', campaign_name = 'طرود رمضان',
+         campaign_kind = 'parcel', reference_code = 'POS-VR-77'
+       WHERE pos_receipt_ref = 'INV-V-20261007-0001'`,
+    );
+
+    const {ReportService} = load('src/services/ReportService');
+    const bundle = await ReportService.loadBundle('today');
+    expect(bundle.cash.voucherCreditSalesCount).toBe(1);
+    expect(bundle.cash.voucherCreditSalesAmount).toBeCloseTo(40, 5);
+    // Customer-debt invoices stay zero — the coupon line is its own
+    // kind of debt, never folded into the INV-L/INV-D totals.
+    expect(bundle.cash.creditSalesAmount).toBe(0);
+  });
+});

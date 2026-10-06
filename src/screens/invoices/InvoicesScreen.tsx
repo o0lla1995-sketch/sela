@@ -15,8 +15,8 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
+  BackHandler,
   Clipboard,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -1383,188 +1383,213 @@ function ReturnSheet({
     onDone,
   ]);
 
+  // v24 (round-31 #1): hardware back closes the sheet — the
+  // replacement for the Modal's onRequestClose (an INLINE overlay
+  // has none).
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!busy) {
+        onClose();
+      }
+      return true;
+    });
+    return () => sub.remove();
+  }, [visible, busy, onClose]);
+
+  // v24 (round-31 #1): INLINE absolute overlay — NEVER a RN Modal
+  // (a Modal rendered EMPTY/BLACK on this ROM right after the native
+  // scanner closes — the exact «النافذة فارغة لا تحتوي على أصناف»
+  // complaint, the same lesson as the POS debt sheet, the Sila pay
+  // sheet and the voucher sheet). Mounted only while open.
+  if (!visible) {
+    return null;
+  }
+
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="slide"
-      onRequestClose={onClose}>
-      <Pressable style={retStyles(c).backdrop} onPress={onClose}>
-        <Pressable
-          style={retStyles(c).sheet}
-          onPress={() => undefined}
-          disabled={busy}>
-          {/* ── Sheet header ── */}
-          <View style={retStyles(c).head}>
-            <View style={retStyles(c).headIcon}>
-              <Icon name="undo" size={20} color={c.warning} />
-            </View>
-            <View style={{flex: 1}}>
-              <Text style={retStyles(c).headTitle}>إرجاع أصناف للفاتورة</Text>
-              <Text style={retStyles(c).headSub}>
-                اختر الكميات المُرجعة — تُستعاد للمخزون فوراً
-              </Text>
-            </View>
-            <TouchableOpacity
-              onPress={onClose}
-              style={retStyles(c).closeBtn}
-              disabled={busy}>
-              <Icon name="x" size={16} color={c.textDim} />
-            </TouchableOpacity>
+    <View style={retStyles(c).backdrop}>
+      <Pressable
+        style={{flex: 1}}
+        onPress={() => {
+          if (!busy) {
+            onClose();
+          }
+        }}
+      />
+      <Pressable
+        style={retStyles(c).sheet}
+        onPress={() => undefined}
+        disabled={busy}>
+        {/* ── Sheet header ── */}
+        <View style={retStyles(c).head}>
+          <View style={retStyles(c).headIcon}>
+            <Icon name="undo" size={20} color={c.warning} />
           </View>
+          <View style={{flex: 1}}>
+            <Text style={retStyles(c).headTitle}>إرجاع أصناف للفاتورة</Text>
+            <Text style={retStyles(c).headSub}>
+              اختر الكميات المُرجعة — تُستعاد للمخزون فوراً
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={onClose}
+            style={retStyles(c).closeBtn}
+            disabled={busy}>
+            <Icon name="x" size={16} color={c.textDim} />
+          </TouchableOpacity>
+        </View>
 
-          {loading ? (
-            <View style={retStyles(c).centerBox}>
-              <ActivityIndicator size="large" color={c.accent} />
-            </View>
-          ) : error != null ? (
-            <View style={retStyles(c).centerBox}>
-              <Icon name="alert" size={30} color={c.warning} />
-              <Text style={retStyles(c).errorText}>{error}</Text>
-              <AppButton small title="إغلاق" onPress={onClose} />
-            </View>
-          ) : (
-            <>
-              <ScrollView
-                style={{flex: 1}}
-                contentContainerStyle={retStyles(c).linesList}
-                showsVerticalScrollIndicator={false}>
-                {lines.map(line => {
-                  const qty = quantities[line.item.id] ?? 0;
-                  const step = stepFor(line.remaining);
-                  const lineValue = line.item.unit_price * qty * ratio;
-                  return (
-                    <View key={line.item.id} style={retStyles(c).lineCard}>
-                      <View style={{flex: 1}}>
-                        <Text style={retStyles(c).lineName} numberOfLines={2}>
-                          {line.productName}
-                          {line.item.unit_name && line.item.unit_name !== 'قطعة'
-                            ? ` (${line.item.unit_name})`
-                            : ''}
+        {loading ? (
+          <View style={retStyles(c).centerBox}>
+            <ActivityIndicator size="large" color={c.accent} />
+          </View>
+        ) : error != null ? (
+          <View style={retStyles(c).centerBox}>
+            <Icon name="alert" size={30} color={c.warning} />
+            <Text style={retStyles(c).errorText}>{error}</Text>
+            <AppButton small title="إغلاق" onPress={onClose} />
+          </View>
+        ) : (
+          <>
+            <ScrollView
+              style={{flex: 1}}
+              contentContainerStyle={retStyles(c).linesList}
+              showsVerticalScrollIndicator={false}>
+              {lines.map(line => {
+                const qty = quantities[line.item.id] ?? 0;
+                const step = stepFor(line.remaining);
+                const lineValue = line.item.unit_price * qty * ratio;
+                return (
+                  <View key={line.item.id} style={retStyles(c).lineCard}>
+                    <View style={{flex: 1}}>
+                      <Text style={retStyles(c).lineName} numberOfLines={2}>
+                        {line.productName}
+                        {line.item.unit_name && line.item.unit_name !== 'قطعة'
+                          ? ` (${line.item.unit_name})`
+                          : ''}
+                      </Text>
+                      <Text style={retStyles(c).lineMeta}>
+                        المتبقي قابل للإرجاع: {formatQty(line.remaining)} ·{' '}
+                        {formatMoney(line.item.unit_price)} للوحدة
+                      </Text>
+                      {qty > 0 ? (
+                        <Text
+                          style={[retStyles(c).lineMeta, {color: c.warning}]}>
+                          قيمة الإرجاع: {formatMoney(lineValue)}
                         </Text>
-                        <Text style={retStyles(c).lineMeta}>
-                          المتبقي قابل للإرجاع: {formatQty(line.remaining)} ·{' '}
-                          {formatMoney(line.item.unit_price)} للوحدة
-                        </Text>
-                        {qty > 0 ? (
-                          <Text
-                            style={[retStyles(c).lineMeta, {color: c.warning}]}>
-                            قيمة الإرجاع: {formatMoney(lineValue)}
-                          </Text>
-                        ) : null}
-                      </View>
-                      <View style={retStyles(c).stepper}>
-                        <TouchableOpacity
-                          style={retStyles(c).stepBtn}
-                          onPress={() =>
-                            setQty(line.item.id, qty - step, line.remaining)
-                          }
-                          disabled={busy || qty <= 0}>
-                          <Icon name="minus" size={14} color={c.text} />
-                        </TouchableOpacity>
-                        <Text style={retStyles(c).stepValue}>
-                          {formatQty(qty)}
-                        </Text>
-                        <TouchableOpacity
-                          style={retStyles(c).stepBtn}
-                          onPress={() =>
-                            setQty(line.item.id, qty + step, line.remaining)
-                          }
-                          disabled={busy || qty >= line.remaining}>
-                          <Icon name="plus" size={14} color={c.text} />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={retStyles(c).allBtn}
-                          onPress={() =>
-                            setQty(line.item.id, line.remaining, line.remaining)
-                          }
-                          disabled={busy || qty >= line.remaining}>
-                          <Text style={retStyles(c).allBtnText}>الكل</Text>
-                        </TouchableOpacity>
-                      </View>
+                      ) : null}
                     </View>
-                  );
-                })}
-              </ScrollView>
+                    <View style={retStyles(c).stepper}>
+                      <TouchableOpacity
+                        style={retStyles(c).stepBtn}
+                        onPress={() =>
+                          setQty(line.item.id, qty - step, line.remaining)
+                        }
+                        disabled={busy || qty <= 0}>
+                        <Icon name="minus" size={14} color={c.text} />
+                      </TouchableOpacity>
+                      <Text style={retStyles(c).stepValue}>
+                        {formatQty(qty)}
+                      </Text>
+                      <TouchableOpacity
+                        style={retStyles(c).stepBtn}
+                        onPress={() =>
+                          setQty(line.item.id, qty + step, line.remaining)
+                        }
+                        disabled={busy || qty >= line.remaining}>
+                        <Icon name="plus" size={14} color={c.text} />
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={retStyles(c).allBtn}
+                        onPress={() =>
+                          setQty(line.item.id, line.remaining, line.remaining)
+                        }
+                        disabled={busy || qty >= line.remaining}>
+                        <Text style={retStyles(c).allBtnText}>الكل</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              })}
+            </ScrollView>
 
-              {/* ── The live summary + the debt action ── */}
-              <View style={retStyles(c).summaryBox}>
-                {book === 'cash' ? (
-                  <View style={retStyles(c).methodRow}>
-                    <TouchableOpacity
+            {/* ── The live summary + the debt action ── */}
+            <View style={retStyles(c).summaryBox}>
+              {book === 'cash' ? (
+                <View style={retStyles(c).methodRow}>
+                  <TouchableOpacity
+                    style={[
+                      retStyles(c).methodChip,
+                      refundMethod === 'cash'
+                        ? {backgroundColor: c.accent, borderColor: c.accent}
+                        : null,
+                    ]}
+                    onPress={() => setRefundMethod('cash')}
+                    disabled={busy}>
+                    <Text
                       style={[
-                        retStyles(c).methodChip,
-                        refundMethod === 'cash'
-                          ? {backgroundColor: c.accent, borderColor: c.accent}
-                          : null,
-                      ]}
-                      onPress={() => setRefundMethod('cash')}
-                      disabled={busy}>
-                      <Text
-                        style={[
-                          retStyles(c).methodText,
-                          refundMethod === 'cash' ? {color: c.onAccent} : null,
-                        ]}>
-                        استرداد نقدي للزبون
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        retStyles(c).methodChip,
-                        refundMethod === 'none'
-                          ? {backgroundColor: c.accent, borderColor: c.accent}
-                          : null,
-                      ]}
-                      onPress={() => setRefundMethod('none')}
-                      disabled={busy}>
-                      <Text
-                        style={[
-                          retStyles(c).methodText,
-                          refundMethod === 'none' ? {color: c.onAccent} : null,
-                        ]}>
-                        استبدال بضاعة (بلا استرداد)
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                ) : null}
-                {debtAction.length > 0 ? (
-                  <View style={retStyles(c).debtActionBox}>
-                    <Icon
-                      name={debtAction.startsWith('تنبيه') ? 'alert' : 'info'}
-                      size={15}
-                      color={c.warning}
-                    />
-                    <Text style={retStyles(c).debtActionText}>
-                      {debtAction}
+                        retStyles(c).methodText,
+                        refundMethod === 'cash' ? {color: c.onAccent} : null,
+                      ]}>
+                      استرداد نقدي للزبون
                     </Text>
-                  </View>
-                ) : null}
-                <View style={retStyles(c).totalRow}>
-                  <Text style={retStyles(c).totalLabel}>
-                    إجمالي قيمة المرتجع ({pickedCount} صنف)
-                  </Text>
-                  <Text style={retStyles(c).totalValue}>
-                    {formatMoney(refundTotal)}
-                  </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      retStyles(c).methodChip,
+                      refundMethod === 'none'
+                        ? {backgroundColor: c.accent, borderColor: c.accent}
+                        : null,
+                    ]}
+                    onPress={() => setRefundMethod('none')}
+                    disabled={busy}>
+                    <Text
+                      style={[
+                        retStyles(c).methodText,
+                        refundMethod === 'none' ? {color: c.onAccent} : null,
+                      ]}>
+                      استبدال بضاعة (بلا استرداد)
+                    </Text>
+                  </TouchableOpacity>
                 </View>
-                <AppButton
-                  title="تأكيد الإرجاع"
-                  icon="undo"
-                  onPress={() => void confirm()}
-                  loading={busy}
-                  disabled={refundTotal <= 0 || pickedCount === 0}
-                />
-                {printerConnected ? null : (
-                  <Text style={retStyles(c).printHint}>
-                    لا طابعة متصلة — سيُسجّل المرتجع دون طباعة إشعار
-                  </Text>
-                )}
+              ) : null}
+              {debtAction.length > 0 ? (
+                <View style={retStyles(c).debtActionBox}>
+                  <Icon
+                    name={debtAction.startsWith('تنبيه') ? 'alert' : 'info'}
+                    size={15}
+                    color={c.warning}
+                  />
+                  <Text style={retStyles(c).debtActionText}>{debtAction}</Text>
+                </View>
+              ) : null}
+              <View style={retStyles(c).totalRow}>
+                <Text style={retStyles(c).totalLabel}>
+                  إجمالي قيمة المرتجع ({pickedCount} صنف)
+                </Text>
+                <Text style={retStyles(c).totalValue}>
+                  {formatMoney(refundTotal)}
+                </Text>
               </View>
-            </>
-          )}
-        </Pressable>
+              <AppButton
+                title="تأكيد الإرجاع"
+                icon="undo"
+                onPress={() => void confirm()}
+                loading={busy}
+                disabled={refundTotal <= 0 || pickedCount === 0}
+              />
+              {printerConnected ? null : (
+                <Text style={retStyles(c).printHint}>
+                  لا طابعة متصلة — سيُسجّل المرتجع دون طباعة إشعار
+                </Text>
+              )}
+            </View>
+          </>
+        )}
       </Pressable>
-    </Modal>
+    </View>
   );
 }
 
@@ -1572,9 +1597,14 @@ function ReturnSheet({
 function retStyles(c: ReturnType<typeof useThemeColors>) {
   return StyleSheet.create({
     backdrop: {
-      flex: 1,
-      backgroundColor: 'rgba(0,0,0,0.55)',
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
       justifyContent: 'flex-end',
+      zIndex: 70,
+      elevation: 70,
     },
     sheet: {
       maxHeight: '86%',
