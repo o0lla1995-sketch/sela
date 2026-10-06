@@ -88,7 +88,10 @@ export type IconName =
    *  line). */
   | 'ticket'
   /** v21: pause — the «disable in this store» campaign switch. */
-  | 'pause';
+  | 'pause'
+  // v23 (round-29): archived products + the returns system.
+  | 'archive'
+  | 'undo';
 
 interface IconProps {
   name: IconName;
@@ -551,6 +554,20 @@ const P: Record<IconName, React.ReactNode> = {
     <G>
       <Path d="M9.5 5.5v13" />
       <Path d="M14.5 5.5v13" />
+    </G>
+  ),
+  // v23 (round-29): archived products + the returns system.
+  archive: (
+    <G>
+      <Path d="M3.5 7.5h17" />
+      <Path d="M5 7.5v11a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5v-11" />
+      <Path d="M9.5 11.5h5" />
+    </G>
+  ),
+  undo: (
+    <G>
+      <Path d="M4 9h9.5a5 5 0 0 1 0 10H8" />
+      <Path d="m7.5 5.5-3.5 3.5 3.5 3.5" />
     </G>
   ),
 };

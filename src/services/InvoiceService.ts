@@ -17,12 +17,23 @@ import {
 import {logDiag} from '../core/diagnostics';
 import {buildReceiptJob} from './printer/receipt';
 import {buildDebtReceiptJob} from './printer/debtReceipt';
+import {buildReturnReceiptJob} from './printer/returnReceipt';
 import {ThermalPrinterService} from './printer/ThermalPrinterService';
 import {SilaRepo} from './sila/SilaRepo';
 import {VoucherService} from './VoucherService';
 import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {uuidV4} from './sila/qr';
-import type {CartLine, PricingMode, SaleWithItems} from '../core/types';
+import type {
+  CartLine,
+  PricingMode,
+  ReturnBook,
+  ReturnLineInput,
+  SaleItemRecord,
+  SaleRecord,
+  SaleReturnItem,
+  SaleReturnRecord,
+  SaleWithItems,
+} from '../core/types';
 import type {ReceiptSettings} from './printer/receipt';
 
 /** INV-YYYYMMDD-NNNN for a day + sequence (CASH series). */
@@ -36,6 +47,53 @@ function formatInvoiceNumber(day: string, seq: number): string {
  *  the two counters from ever stealing numbers from each other. */
 function formatDebtInvoiceNumber(day: string, seq: number): string {
   return `INV-D-${day.replace(/-/g, '')}-${String(seq).padStart(4, '0')}`;
+}
+
+/** v23 (round-29 #2): RET-YYYYMMDD-NNNN — the RETURNS series. */
+function formatReturnNumber(day: string, seq: number): string {
+  return `RET-${day.replace(/-/g, '')}-${String(seq).padStart(4, '0')}`;
+}
+
+/** v23: numeric suffix of a RET number (0 when malformed). */
+function returnSequence(number: string): number {
+  const match = /^(?:RET-\d{8}-)?(\d+)$/.exec(String(number ?? '').trim());
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+/** v23: the highest RET sequence already stored for a day prefix. */
+async function maxReturnSequenceInDb(prefix: string): Promise<number> {
+  let max = 0;
+  try {
+    const result = await getDb().execute(
+      'SELECT return_number AS ref FROM sale_returns WHERE return_number LIKE ?',
+      [`${prefix}%`],
+    );
+    for (const row of result.rows?._array ?? []) {
+      const seq = returnSequence(String(row.ref ?? ''));
+      if (seq > max) {
+        max = seq;
+      }
+    }
+  } catch {
+    // Fresh installs (table created later by the migration).
+  }
+  return max;
+}
+
+/** v23 (round-29 #2): DB-AWARE reservation for the RET series —
+ *  the same reconciliation discipline as the invoice counters:
+ *  next = max(MMKV next, highest stored sequence for today) + 1. */
+async function reserveReturnNumber(): Promise<string> {
+  const today = localToday();
+  const prefix = `RET-${today.replace(/-/g, '')}-`;
+  const dbMax = await maxReturnSequenceInDb(prefix);
+  const lastDay = getString(KEYS.returnDay, '');
+  const counter = getNumber(KEYS.returnCounter, 0);
+  const mmkvNext = lastDay === today ? counter + 1 : 1;
+  const next = Math.max(mmkvNext, dbMax + 1);
+  setNumber(KEYS.returnCounter, next);
+  setString(KEYS.returnDay, today);
+  return formatReturnNumber(today, next);
 }
 
 /** Parses the numeric suffix of a CASH invoice number (0 when
@@ -376,9 +434,7 @@ export const InvoiceService = {
             options.debt.amountMinor - (options.debt.creditCoveredMinor ?? 0),
           );
           if (options.debt.customerId) {
-            const cached = await SilaRepo.findCustomer(
-              options.debt.customerId,
-            );
+            const cached = await SilaRepo.findCustomer(options.debt.customerId);
             if (cached != null) {
               silaTotalDebtsMinor =
                 Math.max(0, cached.outstanding_minor) + silaThisDebtMinor;
@@ -469,6 +525,21 @@ export const InvoiceService = {
 
     // ── v17 (round-23 #1): debt-invoice reprints keep the debt look ──
     const ref = record.invoice_number;
+    // v23 (round-29 #2): RET rows reprint with the RETURN template —
+    //  the original-invoice block + the debt adjustment lines.
+    if (ref.startsWith('RET-') || record.return_kind != null) {
+      const ret = await SaleRepo.returnByNumber(ref);
+      if (ret == null) {
+        throw new Error('سجل المرتجع غير موجود');
+      }
+      const retItems = await SaleRepo.returnItems(ret.id);
+      const job = buildReturnReceiptJob(
+        {ret, items: retItems},
+        receiptSettings,
+      );
+      await ThermalPrinterService.printJob(job);
+      return;
+    }
     // v20: VOUCHER redemptions (INV-V) reprint with the voucher
     // template — the campaign block + the official POS-VR reference
     // are the whole point of that receipt.
@@ -781,5 +852,264 @@ export const InvoiceService = {
       logDiag('sila', `تقدّم عداد إيصالات اليوم خلف صِلة حتى #${receiptNext}`);
     }
     return {debt: debtMax, receipts: receiptMax};
+  },
+
+  // ── v23 (round-29 #2): THE RETURNS FLOW ─────────────────────
+
+  /** Everything the ReturnSheet needs before the merchant picks
+   *  quantities: the invoice's lines with their remaining (not yet
+   *  returned) quantities, the book this invoice belongs to, the
+   *  debt rows' state and the pro-rata discount ratio.
+   *
+   *  Blocks impossible returns up front with a THROWN Arabic reason:
+   *  voucher invoices (INV-V — settled with the institution, not
+   *  returnable here), return receipts themselves (RET-), and a
+   *  صِلة debt still mid-upload ('syncing' — wait for the sync). */
+  async prepareReturn(saleId: number): Promise<{
+    sale: SaleRecord;
+    lines: {
+      item: SaleItemRecord;
+      productName: string;
+      remaining: number;
+    }[];
+    book: ReturnBook;
+    /** Pro-rata ratio: invoice total / pre-discount subtotal. */
+    discountRatio: number;
+    /** The debt context for the confirmation card. */
+    debtLabel: string | null;
+    debtState:
+      | {kind: 'sila-synced'; amountMinor: number}
+      | {kind: 'sila-pending'; amountMinor: number}
+      | {kind: 'local'; amountMinor: number}
+      | {kind: 'migrated'}
+      | {kind: 'missing'}
+      | {kind: 'none'}
+      | {kind: 'blocked'; reason: string};
+    returnsSoFar: SaleReturnRecord[];
+  }> {
+    const sale = await SaleRepo.getById(saleId);
+    if (sale == null) {
+      throw new Error('الفاتورة غير موجودة');
+    }
+    const ref = sale.invoice_number;
+    if (ref.startsWith('RET-') || sale.return_kind != null) {
+      throw new Error('هذه فاتورة مرتجع — لا يمكن الإرجاع من مرتجع');
+    }
+    if (ref.startsWith('INV-V-')) {
+      throw new Error(
+        'فواتير القسائم تُسوّى مع المؤسسة عبر صفحة القسائم — لا تُرجع من هنا',
+      );
+    }
+
+    const items = await SaleRepo.getItemsForSale(saleId);
+    if (items.length === 0) {
+      throw new Error('لا أصناف في هذه الفاتورة');
+    }
+    const returnedQty = await SaleRepo.returnedQtyByLine(saleId);
+    const returnsSoFar = await SaleRepo.returnsForSale(saleId);
+
+    const nameMap = new Map<number, string>();
+    for (const item of items) {
+      if (!nameMap.has(item.product_id)) {
+        const product = await ProductRepo.getById(item.product_id);
+        nameMap.set(item.product_id, product?.name ?? `#${item.product_id}`);
+      }
+    }
+    const lines = items
+      .map(item => ({
+        item,
+        productName: nameMap.get(item.product_id) ?? `#${item.product_id}`,
+        remaining: Math.max(0, item.quantity - (returnedQty.get(item.id) ?? 0)),
+      }))
+      .filter(line => line.remaining > 0.0001);
+    if (lines.length === 0) {
+      throw new Error('أُرجعت كل أصناف هذه الفاتورة سابقاً');
+    }
+
+    const subtotal = sale.total_amount + sale.discount;
+    const discountRatio = subtotal > 0.0001 ? sale.total_amount / subtotal : 1;
+
+    // ── The book + the debt context ──
+    let book: ReturnBook = 'cash';
+    let debtLabel: string | null = null;
+    let debtState:
+      | {kind: 'sila-synced'; amountMinor: number}
+      | {kind: 'sila-pending'; amountMinor: number}
+      | {kind: 'local'; amountMinor: number}
+      | {kind: 'migrated'}
+      | {kind: 'missing'}
+      | {kind: 'none'}
+      | {kind: 'blocked'; reason: string} = {kind: 'none'};
+
+    if (ref.startsWith('INV-D-')) {
+      book = 'sila';
+      const debt = await SilaRepo.byInvoiceRef(ref);
+      debtLabel = debt?.customer_name ?? 'زبون صِلة';
+      if (debt == null) {
+        debtState = {
+          kind: 'missing',
+        };
+      } else if (debt.state === 'syncing') {
+        debtState = {
+          kind: 'blocked',
+          reason:
+            'دين صِلة قيد الرفع للخادم الآن — انتظر اكتمال المزامنة ثم أعد المحاولة',
+        };
+      } else if (debt.state === 'synced') {
+        debtState = {kind: 'sila-synced', amountMinor: debt.amount_minor};
+      } else {
+        debtState = {kind: 'sila-pending', amountMinor: debt.amount_minor};
+      }
+    } else if (ref.startsWith('INV-L-')) {
+      book = 'local';
+      const debt = await LocalDebtsRepo.debtRowByRef(ref);
+      const creditor = await LocalDebtsRepo.creditorByInvoiceRef(ref);
+      debtLabel = creditor?.name ?? 'زبون الدفتر';
+      if (debt == null) {
+        debtState = {kind: 'missing'};
+      } else if (debt.migrated) {
+        debtState = {kind: 'migrated'};
+      } else {
+        debtState = {kind: 'local', amountMinor: debt.amountMinor};
+      }
+    }
+
+    return {
+      sale,
+      lines,
+      book,
+      discountRatio,
+      debtLabel,
+      debtState,
+      returnsSoFar,
+    };
+  },
+
+  /** v23 (round-29 #2): executes a return — reserves the RET number
+   *  (DB-aware, UNIQUE-retry), runs the ONE-transaction return in
+   *  SaleRepo, then prints the return slip (a print failure never
+   *  rolls the return back — same discipline as sales). */
+  async createReturn(input: {
+    saleId: number;
+    lines: ReturnLineInput[];
+    refundMethod: 'none' | 'cash';
+    note?: string | null;
+    print: boolean;
+    receiptSettings: ReceiptSettings;
+    onPrintError?: (message: string) => void;
+  }): Promise<SaleReturnRecord> {
+    const prep = await this.prepareReturn(input.saleId);
+
+    // Re-validate against the PREP state (the sheet may be stale).
+    if (prep.debtState.kind === 'blocked') {
+      throw new Error(prep.debtState.reason);
+    }
+    for (const line of input.lines) {
+      const known = prep.lines.find(l => l.item.id === line.saleItemId);
+      if (known == null || line.quantity > known.remaining + 0.0001) {
+        throw new Error(
+          `الكمية المطلوب إرجاعها من «${line.productName}» أكبر من المتبقي`,
+        );
+      }
+      if (line.quantity <= 0) {
+        throw new Error('كمية الإرجاع غير صالحة');
+      }
+    }
+
+    // The sila reversal payload — ONLY for already-synced debts (the
+    // queue row keeps its amount; the reversal payment reduces the
+    // customer's debt on the صلة server, exactly like a repayment).
+    // The upload receipt ref uses the API's own RCP-… series (kept
+    // unique by the same reservation as cashier repayments).
+    let silaReversal: {
+      customerId: string | null;
+      customerName: string | null;
+      customerPhoneLast4: string | null;
+      amountMinor: number;
+      posReceiptRef: string;
+      idempotencyKey: string;
+    } | null = null;
+    if (prep.book === 'sila' && prep.debtState.kind === 'sila-synced') {
+      const debt = await SilaRepo.byInvoiceRef(prep.sale.invoice_number);
+      if (debt != null) {
+        const refundMinor = Math.round(
+          input.lines.reduce(
+            (sum, line) => sum + line.unitPrice * line.quantity,
+            0,
+          ) *
+            prep.discountRatio *
+            100,
+        );
+        silaReversal = {
+          customerId: debt.customer_id,
+          customerName: debt.customer_name,
+          customerPhoneLast4: debt.customer_phone_last4,
+          amountMinor: Math.min(refundMinor, debt.amount_minor),
+          posReceiptRef: await SilaRepo.reserveReceiptRef(),
+          idempotencyKey: uuidV4(),
+        };
+      }
+    }
+
+    let result: SaleReturnRecord | null = null;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 4 && result == null; attempt += 1) {
+      const returnNumber = await reserveReturnNumber();
+      try {
+        result = await SaleRepo.createReturn({
+          returnNumber,
+          saleId: input.saleId,
+          invoiceRef: prep.sale.invoice_number,
+          book: prep.book,
+          refundMethod: input.refundMethod,
+          discountRatio: prep.discountRatio,
+          lines: input.lines,
+          silaReversal,
+          note: input.note,
+        });
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/UNIQUE/i.test(message)) {
+          throw error;
+        }
+        logDiag(
+          'sale',
+          `تضارب رقم المرتجع ${returnNumber} — إعادة الحجز من قاعدة البيانات`,
+          'warn',
+        );
+      }
+    }
+    if (result == null) {
+      throw lastError instanceof Error
+        ? lastError
+        : new Error('تعذر حجز رقم مرتجع — حاول مرة أخرى');
+    }
+
+    logDiag(
+      'sale',
+      `تم إرجاع ${input.lines.length} صنف من ${
+        prep.sale.invoice_number
+      } بإيصال ${result.return_number} بقيمة ${(
+        result.refund_minor / 100
+      ).toFixed(2)} ₪`,
+    );
+
+    if (input.print) {
+      try {
+        const items: SaleReturnItem[] = await SaleRepo.returnItems(result.id);
+        const job = buildReturnReceiptJob(
+          {ret: result, items},
+          input.receiptSettings,
+        );
+        await ThermalPrinterService.printJob(job);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logDiag('sale', `المرتجع سُجّل لكن الطباعة فشلت: ${message}`, 'warn');
+        input.onPrintError?.(message);
+      }
+    }
+
+    return result;
   },
 };

@@ -39,8 +39,33 @@ import {SilaSync} from './sila/SilaSync';
 import {logDiag} from '../core/diagnostics';
 import type {AppSettings} from '../stores/settingsStore';
 
-const BACKUP_VERSION = 4;
+const BACKUP_VERSION = 5;
 const JSON_MIME = 'application/json';
+
+/** v23 (round-29 #2): one RET receipt in a backup — keyed by the
+ *  ORIGINAL invoice number (internal ids get remapped on restore). */
+interface SaleReturnBackupEntry {
+  return_number: string;
+  sale_invoice_ref: string;
+  book: string;
+  refund_method: string;
+  refund_minor: number;
+  debt_adjusted_minor: number;
+  note: string | null;
+  created_at: string;
+  items: {
+    /** The ORIGINAL sale_items row id (mapped on restore). */
+    sale_item_ref: string;
+    product_id: number;
+    product_name: string;
+    quantity: number;
+    unit_name: string | null;
+    base_quantity: number;
+    unit_price: number;
+    line_total: number;
+    cost_price: number;
+  }[];
+}
 
 export interface BackupSummary {
   categories: number;
@@ -86,6 +111,8 @@ interface BackupFile {
     low_stock_threshold: number | null;
     barcode: string | null;
     sold_by_weight?: number;
+    /** v23 (round-29 #1): 1 = archived (old backups: live). */
+    is_archived?: number;
     created_at: string;
   }[];
   product_units: {
@@ -113,14 +140,52 @@ interface BackupFile {
     discount: number;
     payment_type: string | null;
     created_at: string;
+    /** v23 (round-29 #2): the return columns (old backups: 0/NULL —
+     * a backup from before returns simply had none). */
+    returned_minor?: number;
+    return_kind?: string | null;
   }[];
   sale_items: {
+    /** v23 (round-29 #2): the ORIGINAL line id — lets the restore
+     *  remap sale_return_items.sale_item_id (old backups: the
+     *  return lines simply restore unmapped). */
+    id?: number;
     sale_id: number;
     product_id: number;
     quantity: number;
     unit_price: number;
     cost_price: number;
     total_line_price: number;
+    /** v23 (round-29 #2): fixing a PRE-EXISTING gap — unit_name and
+     * base_quantity never traveled with backups, so restored
+     * history lost its unit labels and stock math. Optional so old
+     * files still restore. */
+    unit_name?: string | null;
+    base_quantity?: number | null;
+  }[];
+  /** v23 (round-29 #2): the RETURNS — RET receipts (and their own
+  // negative sales rows above) with the line snapshots. Optional
+  // so older backups restore cleanly without them. */
+  sale_returns?: {
+    return_number: string;
+    sale_invoice_ref: string;
+    book: string;
+    refund_method: string;
+    refund_minor: number;
+    debt_adjusted_minor: number;
+    note: string | null;
+    created_at: string;
+    items: {
+      sale_item_ref: string;
+      product_id: number;
+      product_name: string;
+      quantity: number;
+      unit_name: string | null;
+      base_quantity: number;
+      unit_price: number;
+      line_total: number;
+      cost_price: number;
+    }[];
   }[];
   stocktakes: {
     id: number;
@@ -199,6 +264,9 @@ interface BackupFile {
     description: string | null;
     paid_at: string;
     state: 'pending' | 'syncing' | 'synced' | 'failed';
+    /** v23 (round-29 #2): 'return_reversal' rows restore as such;
+     * older backups default to 'repayment'. */
+    kind?: 'repayment' | 'return_reversal';
     reference_code: string | null;
     transaction_id: string | null;
     outstanding_after: number | null;
@@ -341,6 +409,7 @@ export const BackupService = {
       embeddings,
       sales,
       saleItems,
+      saleReturnsRaw,
       stocktakes,
       stocktakeItems,
       silaDebts,
@@ -357,7 +426,7 @@ export const BackupService = {
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
       db.execute(
-        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, created_at FROM products',
+        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, created_at FROM products',
       ),
       db.execute(
         'SELECT product_id, unit_id, conversion, barcode, retail_price, wholesale_price FROM product_units',
@@ -366,11 +435,27 @@ export const BackupService = {
         'SELECT product_id, angle_label, embedding_data, thumbnail_path FROM product_embeddings',
       ),
       db.execute(
-        'SELECT id, invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at FROM sales',
+        'SELECT id, invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, returned_minor, return_kind FROM sales',
       ),
       db.execute(
-        'SELECT sale_id, product_id, quantity, unit_price, cost_price, total_line_price FROM sale_items',
+        'SELECT id, sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity FROM sale_items',
       ),
+      // v23 (round-29 #2): the RETURNS — with the ORIGINAL invoice
+      //  number (invoice_ref), NOT the internal sale id (ids get
+      //  remapped on restore; invoice numbers are stable).
+      db
+        .execute(
+          `SELECT sr.return_number, sr.invoice_ref AS sale_invoice_ref, sr.book,
+                  sr.refund_method, sr.refund_minor, sr.debt_adjusted_minor,
+                  sr.note, sr.created_at,
+                  si.id AS sale_item_id, si.product_id, si.product_name,
+                  si.quantity, si.unit_name, si.base_quantity, si.unit_price,
+                  si.line_total, si.cost_price
+           FROM sale_returns sr
+           LEFT JOIN sale_return_items si ON si.return_id = sr.id
+           ORDER BY sr.id ASC, si.id ASC`,
+        )
+        .catch(() => ({rows: {_array: []}})),
       db.execute(
         'SELECT id, started_at, completed_at, status, note FROM stocktakes',
       ),
@@ -397,7 +482,7 @@ export const BackupService = {
         .execute(
           `SELECT idempotency_key, customer_id, customer_name, customer_phone_last4,
                 amount_minor, payment_method, pos_receipt_ref, description,
-                paid_at, state, reference_code, transaction_id,
+                paid_at, state, kind, reference_code, transaction_id,
                 outstanding_after, synced_at, error_code, error_message,
                 retry_count, created_at
          FROM sila_payment_queue`,
@@ -523,6 +608,7 @@ export const BackupService = {
             : Number(row.low_stock_threshold),
         barcode: row.barcode == null ? null : String(row.barcode),
         sold_by_weight: Number(row.sold_by_weight ?? 0) === 1 ? 1 : 0,
+        is_archived: Number(row.is_archived ?? 0) === 1 ? 1 : 0,
         created_at: String(row.created_at ?? ''),
       })),
       product_units: rowsOf(productUnits).map(row => ({
@@ -554,15 +640,62 @@ export const BackupService = {
         payment_type:
           row.payment_type == null ? null : String(row.payment_type),
         created_at: String(row.created_at ?? ''),
+        returned_minor: Number(row.returned_minor ?? 0),
+        return_kind: row.return_kind == null ? null : String(row.return_kind),
       })),
       sale_items: rowsOf(saleItems).map(row => ({
+        id: Number(row.id),
         sale_id: Number(row.sale_id),
         product_id: Number(row.product_id),
         quantity: Number(row.quantity ?? 0),
         unit_price: Number(row.unit_price ?? 0),
         cost_price: Number(row.cost_price ?? 0),
         total_line_price: Number(row.total_line_price ?? 0),
+        unit_name: row.unit_name == null ? null : String(row.unit_name),
+        base_quantity:
+          row.base_quantity == null ? null : Number(row.base_quantity),
       })),
+      // v23 (round-29 #2): the returns, grouped one entry per RET
+      //  receipt with its line snapshots (the export's LEFT JOIN
+      //  yields one row per line + a bare row for empty receipts).
+      sale_returns: (() => {
+        const byNumber = new Map<string, SaleReturnBackupEntry>();
+        for (const row of rowsOf(saleReturnsRaw)) {
+          const number = String(row.return_number ?? '');
+          if (number.length === 0) {
+            continue;
+          }
+          let ret = byNumber.get(number);
+          if (ret == null) {
+            ret = {
+              return_number: number,
+              sale_invoice_ref: String(row.sale_invoice_ref ?? ''),
+              book: String(row.book ?? 'cash'),
+              refund_method: String(row.refund_method ?? 'none'),
+              refund_minor: Number(row.refund_minor ?? 0),
+              debt_adjusted_minor: Number(row.debt_adjusted_minor ?? 0),
+              note: row.note == null ? null : String(row.note),
+              created_at: String(row.created_at ?? ''),
+              items: [],
+            };
+            byNumber.set(number, ret);
+          }
+          if (row.sale_item_id != null) {
+            ret.items.push({
+              sale_item_ref: String(row.sale_item_id),
+              product_id: Number(row.product_id),
+              product_name: String(row.product_name ?? ''),
+              quantity: Number(row.quantity ?? 0),
+              unit_name: row.unit_name == null ? null : String(row.unit_name),
+              base_quantity: Number(row.base_quantity ?? 0),
+              unit_price: Number(row.unit_price ?? 0),
+              line_total: Number(row.line_total ?? 0),
+              cost_price: Number(row.cost_price ?? 0),
+            });
+          }
+        }
+        return [...byNumber.values()];
+      })(),
       stocktakes: rowsOf(stocktakes).map(row => ({
         id: Number(row.id),
         started_at: String(row.started_at ?? ''),
@@ -646,6 +779,7 @@ export const BackupService = {
         description: row.description == null ? null : String(row.description),
         paid_at: String(row.paid_at ?? ''),
         state: (row.state ?? 'pending') as 'pending',
+        kind: row.kind === 'return_reversal' ? 'return_reversal' : 'repayment',
         reference_code:
           row.reference_code == null ? null : String(row.reference_code),
         transaction_id:
@@ -963,6 +1097,8 @@ export const BackupService = {
     };
 
     await db.transaction(async tx => {
+      await tx.execute('DELETE FROM sale_return_items');
+      await tx.execute('DELETE FROM sale_returns');
       await tx.execute('DELETE FROM sale_items');
       await tx.execute('DELETE FROM sales');
       await tx.execute('DELETE FROM stocktake_items');
@@ -973,7 +1109,7 @@ export const BackupService = {
       await tx.execute('DELETE FROM units');
       await tx.execute('DELETE FROM categories');
       await tx.execute(
-        "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_units','product_embeddings','sales','sale_items','stocktakes','stocktake_items')",
+        "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_units','product_embeddings','sales','sale_items','sale_returns','sale_return_items','stocktakes','stocktake_items')",
       );
 
       // Categories & units — keep maps from backup ids to fresh ids.
@@ -1024,8 +1160,8 @@ export const BackupService = {
             : null;
         const inserted = await tx.execute(
           `INSERT INTO products
-            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             product.name,
             Number(product.cost_price ?? 0),
@@ -1039,6 +1175,7 @@ export const BackupService = {
             product.low_stock_threshold ?? null,
             product.barcode ?? null,
             product.sold_by_weight === 1 ? 1 : 0,
+            product.is_archived === 1 ? 1 : 0,
             product.created_at || nowLocal(),
           ],
         );
@@ -1107,15 +1244,18 @@ export const BackupService = {
 
       // Sales history — v15: a single bad row is SKIPPED (counted as
       // skipped) instead of killing the whole restore transaction.
+      // v23 (round-29 #2): returned_minor + return_kind travel with
+      // every sale; the invoice-number map feeds the returns below.
       const saleMap = new Map<number, number>();
+      const saleIdByInvoiceRef = new Map<string, number>();
       let sales = 0;
       let skippedSales = 0;
       for (const sale of doc.sales ?? []) {
         try {
           const inserted = await tx.execute(
             `INSERT INTO sales
-              (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, returned_minor, return_kind)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               sale.invoice_number || `R-${Date.now()}-${sales}`,
               Number(sale.total_amount ?? 0),
@@ -1124,9 +1264,17 @@ export const BackupService = {
               Number(sale.discount ?? 0),
               sale.payment_type ?? null,
               sale.created_at || nowLocal(),
+              Number(sale.returned_minor ?? 0),
+              sale.return_kind ?? null,
             ],
           );
           saleMap.set(Number(sale.id), Number(inserted.insertId));
+          if (sale.invoice_number) {
+            saleIdByInvoiceRef.set(
+              String(sale.invoice_number),
+              Number(inserted.insertId),
+            );
+          }
           sales += 1;
         } catch {
           skippedSales += 1;
@@ -1134,16 +1282,21 @@ export const BackupService = {
       }
       summary.skippedSales = skippedSales;
 
+      // v23 (round-29 #2): sale_items keep unit_name + base_quantity
+      //  (a PRE-EXISTING backup gap — restored history used to lose
+      //  its unit labels and stock math), and the old→new line-id
+      //  map feeds the return lines below.
+      const saleItemMap = new Map<number, number>();
       for (const item of doc.sale_items ?? []) {
         const newSaleId = saleMap.get(Number(item.sale_id));
         const newProductId = productMap.get(Number(item.product_id));
         if (newSaleId == null || newProductId == null) {
           continue;
         }
-        await tx.execute(
+        const inserted = await tx.execute(
           `INSERT INTO sale_items
-            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             newSaleId,
             newProductId,
@@ -1151,8 +1304,67 @@ export const BackupService = {
             Number(item.unit_price ?? 0),
             Number(item.cost_price ?? 0),
             Number(item.total_line_price ?? 0),
+            item.unit_name ?? null,
+            item.base_quantity == null ? null : Number(item.base_quantity),
           ],
         );
+        if (item.id != null) {
+          saleItemMap.set(Number(item.id), Number(inserted.insertId));
+        }
+      }
+
+      // v23 (round-29 #2): the RETURNS — RET receipts against the
+      //  ORIGINAL invoice (mapped by invoice number; the internal
+      //  sale ids were remapped above), each line mapped to its new
+      //  sale_items id so per-line remaining math stays correct.
+      let saleReturns = 0;
+      for (const ret of doc.sale_returns ?? []) {
+        const newSaleId = saleIdByInvoiceRef.get(String(ret.sale_invoice_ref));
+        if (newSaleId == null) {
+          continue;
+        }
+        const insertedReturn = await tx.execute(
+          `INSERT INTO sale_returns
+            (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, note, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            ret.return_number,
+            newSaleId,
+            String(ret.sale_invoice_ref),
+            ret.book || 'cash',
+            ret.refund_method || 'none',
+            Number(ret.refund_minor ?? 0),
+            Number(ret.debt_adjusted_minor ?? 0),
+            ret.note ?? null,
+            ret.created_at || nowLocal(),
+          ],
+        );
+        for (const line of ret.items ?? []) {
+          const newProductId = productMap.get(Number(line.product_id));
+          if (newProductId == null) {
+            continue;
+          }
+          const newSaleItemId =
+            saleItemMap.get(Number(line.sale_item_ref)) ?? -1;
+          await tx.execute(
+            `INSERT INTO sale_return_items
+              (return_id, sale_item_id, product_id, product_name, quantity, unit_name, base_quantity, unit_price, line_total, cost_price)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              Number(insertedReturn.insertId),
+              newSaleItemId,
+              newProductId,
+              line.product_name || `#${line.product_id}`,
+              Number(line.quantity ?? 0),
+              line.unit_name ?? null,
+              Number(line.base_quantity ?? 0),
+              Number(line.unit_price ?? 0),
+              Number(line.line_total ?? 0),
+              Number(line.cost_price ?? 0),
+            ],
+          );
+        }
+        saleReturns += 1;
       }
 
       // Stocktake sessions.
@@ -1275,16 +1487,18 @@ export const BackupService = {
 
       // v15 (round-21 #3): the repayments queue — restored verbatim by
       // idempotency key / receipt ref (server dedupes replays §2.5).
+      // v23 (round-29 #2): kind travels too — a 'return_reversal'
+      // row stays excluded from the collections statistics.
       for (const payment of cleanPayments) {
         try {
           await tx.execute(
             `INSERT INTO sila_payment_queue
               (idempotency_key, customer_id, customer_name, customer_phone_last4,
                amount_minor, payment_method, pos_receipt_ref, description,
-               paid_at, state, reference_code, transaction_id,
+               paid_at, state, kind, reference_code, transaction_id,
                outstanding_after, synced_at, error_code, error_message,
                retry_count, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               payment.idempotency_key,
               payment.customer_id ?? null,
@@ -1298,6 +1512,9 @@ export const BackupService = {
               payment.state === 'synced' || payment.state === 'failed'
                 ? payment.state
                 : 'pending',
+              payment.kind === 'return_reversal'
+                ? 'return_reversal'
+                : 'repayment',
               payment.reference_code ?? null,
               payment.transaction_id ?? null,
               payment.outstanding_after ?? null,

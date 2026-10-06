@@ -203,6 +203,20 @@ export function ReportsScreen() {
                   icon="box"
                 />
               </View>
+              {/* v23 (round-29 #2): the period's returns — their own
+                  KPI so a refund never hides inside the net numbers. */}
+              <View style={styles.statsCell}>
+                <StatCard
+                  label="المرتجعات"
+                  value={`${formatMoney(bundle.summary.returnsTotal)}${
+                    bundle.summary.returnsCount > 0
+                      ? ` · ${bundle.summary.returnsCount} إيصال`
+                      : ''
+                  }`}
+                  tone={bundle.summary.returnsTotal > 0 ? 'danger' : undefined}
+                  icon="undo"
+                />
+              </View>
             </View>
 
             {/* ── 2) النقد والديون — ONE clean card (v18) ────── */}
@@ -397,9 +411,13 @@ export function ReportsScreen() {
                   <Text style={styles.outstandingMeta}>
                     {(cash?.campaignDueMinor ?? 0) > 0
                       ? paired
-                        ? `${(cash?.localDebtorsCount ?? 0) +
-                            (cash?.silaDebtorsCount ?? 0)} زبون + مستحقات الحملات — دفتر المتجر + صِلة + المؤسسات`
-                        : `${cash?.localDebtorsCount ?? 0} زبون + مستحقات الحملات — دفتر المتجر + المؤسسات`
+                        ? `${
+                            (cash?.localDebtorsCount ?? 0) +
+                            (cash?.silaDebtorsCount ?? 0)
+                          } زبون + مستحقات الحملات — دفتر المتجر + صِلة + المؤسسات`
+                        : `${
+                            cash?.localDebtorsCount ?? 0
+                          } زبون + مستحقات الحملات — دفتر المتجر + المؤسسات`
                       : paired
                       ? `${
                           (cash?.localDebtorsCount ?? 0) +

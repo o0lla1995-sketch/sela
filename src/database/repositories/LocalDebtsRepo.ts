@@ -97,7 +97,9 @@ async function maxLocalDebtSequence(): Promise<number> {
       "SELECT invoice_number FROM sales WHERE invoice_number LIKE 'INV-L-%'",
     );
     for (const row of sales.rows?._array ?? []) {
-      const match = /^INV-L-\d{8}-(\d+)$/.exec(String(row.invoice_number ?? ''));
+      const match = /^INV-L-\d{8}-(\d+)$/.exec(
+        String(row.invoice_number ?? ''),
+      );
       if (match) {
         max = Math.max(max, parseInt(match[1], 10));
       }
@@ -367,8 +369,8 @@ export const LocalDebtsRepo = {
           outstandingMinor: debtTotalMinor - paidTotalMinor,
           debtsCount: Number((row as {debts_count?: number}).debts_count ?? 0),
           lastActivityAt:
-            ((row as {last_activity?: string | null}).last_activity as string) ??
-            null,
+            ((row as {last_activity?: string | null})
+              .last_activity as string) ?? null,
         };
       });
     } catch (error) {
@@ -478,9 +480,35 @@ export const LocalDebtsRepo = {
    *  detail card (local-book debts have no صِلة queue row).
    *  v21 (round-27 #6): also returns the local customer id so the
    *  reprint can print the customer's WHOLE outstanding. */
-  async creditorByInvoiceRef(
+  /** v23 (round-29 #2): the local debt row behind an invoice ref —
+   *  the RETURNS engine's state check: an existing unmigrated row
+   *  gets its amount shrunk by the return; a migrated (or missing)
+   *  row means the debt lives elsewhere (صِلة) and the merchant is
+   *  warned before confirming. */
+  async debtRowByRef(
     invoiceRef: string,
-  ): Promise<{
+  ): Promise<{amountMinor: number; migrated: boolean} | null> {
+    try {
+      const result = await getDb().execute(
+        'SELECT amount_minor, migrated FROM local_debts WHERE invoice_ref = ? LIMIT 1',
+        [invoiceRef],
+      );
+      const row = result.rows?._array?.[0] as
+        | {amount_minor?: number; migrated?: number}
+        | undefined;
+      if (row == null) {
+        return null;
+      }
+      return {
+        amountMinor: Number(row.amount_minor ?? 0),
+        migrated: Number(row.migrated ?? 0) === 1,
+      };
+    } catch {
+      return null;
+    }
+  },
+
+  async creditorByInvoiceRef(invoiceRef: string): Promise<{
     name: string;
     phone: string | null;
     localCustomerId: number | null;
@@ -509,9 +537,7 @@ export const LocalDebtsRepo = {
         name: String(row.name),
         phone: row.phone ?? null,
         localCustomerId:
-          row.local_customer_id == null
-            ? null
-            : Number(row.local_customer_id),
+          row.local_customer_id == null ? null : Number(row.local_customer_id),
       };
     } catch {
       return null;
@@ -738,9 +764,7 @@ export const LocalDebtsRepo = {
     logDiag(
       'localDebts',
       `رُحّل رصيد ${customer.name} إلى صِلة: ${net} وحدة صغرى عبر ${freshRef}` +
-        (creditCovered > 0
-          ? ` (غطّى الرصيد المسبق ${creditCovered})`
-          : '') +
+        (creditCovered > 0 ? ` (غطّى الرصيد المسبق ${creditCovered})` : '') +
         ' — حُذف الحساب المحلي',
     );
     return {

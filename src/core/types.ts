@@ -61,6 +61,9 @@ export interface Product {
    *  kilogram: prices are per-kilo, stock is fractional kg and the
    *  POS opens a weight pad instead of adding whole pieces. */
   sold_by_weight: number;
+  /** v23 (round-29 #1): 1 = ARCHIVED — hidden from POS/inventory/
+   *  alerts but kept for invoice history, reports and returns. */
+  is_archived: number;
   /** Unit rows loaded on demand (ProductForm / POS unit picker). */
   units?: ProductUnit[];
 }
@@ -145,6 +148,12 @@ export interface SaleRecord {
   discount: number;
   payment_type: PricingMode;
   created_at: string;
+  /** v23 (round-29 #2): cumulative value (agora) returned against
+   *  THIS invoice — «مرتجع» badge + remaining-value math. */
+  returned_minor?: number;
+  /** v23 (round-29 #2): set only on RET-… rows — which book the
+   *  return reverses ('cash' | 'sila' | 'local'). */
+  return_kind?: 'cash' | 'sila' | 'local' | null;
 }
 
 export interface SaleItemRecord {
@@ -159,6 +168,59 @@ export interface SaleItemRecord {
   unit_name: string | null;
   /** Base pieces actually deducted from stock. */
   base_quantity: number | null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Returns (المرتجعات) — v23 (round-29 #2)
+// ────────────────────────────────────────────────────────────────
+
+/** Which book a return reverses — decides the debt adjustment path. */
+export type ReturnBook = 'cash' | 'sila' | 'local';
+
+/** One return receipt (RET-… series) against an original invoice. */
+export interface SaleReturnRecord {
+  id: number;
+  return_number: string;
+  sale_id: number;
+  invoice_ref: string;
+  book: ReturnBook;
+  refund_method: 'none' | 'cash';
+  /** Value of the returned goods, minor units. */
+  refund_minor: number;
+  /** The part that reduced a DEBT book (sila queue / local row). */
+  debt_adjusted_minor: number;
+  note: string | null;
+  created_at: string;
+}
+
+/** A returned line — snapshot kept even if the product is later
+ *  archived (name + prices live on the row itself). */
+export interface SaleReturnItem {
+  id: number;
+  return_id: number;
+  /** The ORIGINAL sale_items row this line returns. */
+  sale_item_id: number;
+  product_id: number;
+  product_name: string;
+  quantity: number;
+  unit_name: string | null;
+  base_quantity: number;
+  unit_price: number;
+  line_total: number;
+  cost_price: number;
+}
+
+/** A return in progress (the ReturnSheet's payload). */
+export interface ReturnLineInput {
+  saleItemId: number;
+  productId: number;
+  productName: string;
+  quantity: number;
+  unitName: string | null;
+  /** Base units per 1 sold unit (conversion at sale time). */
+  basePerUnit: number;
+  unitPrice: number;
+  costPrice: number;
 }
 
 export interface SaleWithItems {
@@ -219,13 +281,20 @@ export interface DateRange {
 }
 
 export interface ReportSummary {
+  /** NET figures: returned goods (RET rows, negative) net out
+   *  automatically — revenue here is sales minus returns. */
   revenue: number;
   cogs: number;
   netProfit: number;
+  /** v23: REAL invoices only (return receipts excluded). */
   invoicesCount: number;
   itemsCount: number;
   discountTotal: number;
   avgInvoice: number;
+  /** v23 (round-29 #2): the period's returns — count + refunded
+   *  value, displayed as their own «المرتجعات» line. */
+  returnsCount: number;
+  returnsTotal: number;
 }
 
 export interface TopProduct {
@@ -440,6 +509,11 @@ export interface SilaPaymentRow {
   description: string | null;
   paid_at: string;
   state: 'pending' | 'syncing' | 'synced' | 'failed';
+  /** v23 (round-29 #2): 'repayment' (سداد نقدي فعلي — counts in
+   *  collections) vs 'return_reversal' (العملية العكسية لمرتجع
+   *  بضاعة على دين مرفوع للخادم — reduces the debt on the صلة
+   *  server but NEVER counts as collected cash). */
+  kind: 'repayment' | 'return_reversal';
   reference_code: string | null;
   transaction_id: string | null;
   outstanding_after: number | null;

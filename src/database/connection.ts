@@ -75,6 +75,12 @@ const DDL_STATEMENTS: string[] = [
     -- instead of counting pieces (the professional grocery pattern:
     -- Loyverse / Square scale-weighed products).
     sold_by_weight INTEGER NOT NULL DEFAULT 0,
+    -- v23 (round-29 #1): 1 = ARCHIVED — a product with sales/stocktake
+    -- history can never be hard-deleted (sale_items FK), so «حذف
+    -- المنتج» archives it instead: hidden from POS + inventory +
+    -- alerts, kept forever for invoice history, reports and RETURNS
+    -- (a return must still find the product row to restore stock).
+    is_archived INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(category_id) REFERENCES categories(id)
   )`,
@@ -94,7 +100,16 @@ const DDL_STATEMENTS: string[] = [
     total_profit REAL NOT NULL,
     discount REAL DEFAULT 0,
     payment_type TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- v23 (round-29 #2): cumulative value returned against THIS
+    -- invoice (agora) — drives the «مرتجع» badge and the remaining-
+    -- value math; the return itself lives in sale_returns.
+    returned_minor REAL NOT NULL DEFAULT 0,
+    -- v23 (round-29 #2): set ONLY on RET-… rows — which book the
+    -- return reverses ('cash' | 'sila' | 'local'). Lets the report
+    -- queries net the debt buckets by the return's OWN period.
+    return_kind TEXT
+      CHECK (return_kind IS NULL OR return_kind IN ('cash','sila','local'))
   )`,
   `CREATE TABLE IF NOT EXISTS sale_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,6 +122,43 @@ const DDL_STATEMENTS: string[] = [
     FOREIGN KEY(sale_id) REFERENCES sales(id),
     FOREIGN KEY(product_id) REFERENCES products(id)
   )`,
+  // ── v23 (round-29 #2): نظام إرجاع المنتجات — المرتجع سجل مستقل
+  // (إيصال RET-…) بصورته الذاتية، لا طمس للفاتورة الأصلية. السالب
+  // يعيش في صف sales/sale_items الخاص بالمرتجع (RET-) فتتصفّى كل
+  // تجميعات التقارير تلقائياً، بينما يبقى الأصل مُميّزاً بمقدار
+  // المرتجع منه (returned_minor) وبقائمة مرتجعاته.
+  `CREATE TABLE IF NOT EXISTS sale_returns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    return_number TEXT NOT NULL UNIQUE,
+    sale_id INTEGER NOT NULL REFERENCES sales(id),
+    invoice_ref TEXT NOT NULL,
+    book TEXT NOT NULL
+      CHECK (book IN ('cash','sila','local')),
+    refund_method TEXT NOT NULL DEFAULT 'none'
+      CHECK (refund_method IN ('none','cash')),
+    refund_minor INTEGER NOT NULL CHECK (refund_minor > 0),
+    debt_adjusted_minor INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS sale_return_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    return_id INTEGER NOT NULL REFERENCES sale_returns(id) ON DELETE CASCADE,
+    sale_item_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    product_name TEXT NOT NULL,
+    quantity REAL NOT NULL CHECK (quantity > 0),
+    unit_name TEXT,
+    base_quantity REAL NOT NULL CHECK (base_quantity > 0),
+    unit_price REAL NOT NULL,
+    line_total REAL NOT NULL,
+    cost_price REAL NOT NULL DEFAULT 0
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_sale_returns_sale ON sale_returns(sale_id)',
+  'CREATE INDEX IF NOT EXISTS idx_sale_returns_created ON sale_returns(created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_sri_return ON sale_return_items(return_id)',
+  'CREATE INDEX IF NOT EXISTS idx_sri_sale_item ON sale_return_items(sale_item_id)',
+  'CREATE INDEX IF NOT EXISTS idx_sales_return_kind ON sales(return_kind)',
   'CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)',
   'CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)',
   'CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)',
@@ -175,6 +227,13 @@ const DDL_STATEMENTS: string[] = [
     paid_at TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'pending'
       CHECK (state IN ('pending','syncing','synced','failed')),
+    -- v23 (round-29 #2): 'repayment' = سداد نقدي فعلي (enters the
+    -- collections statistics); 'return_reversal' = العملية العكسية
+    -- لمرتجع بضاعة على فاتورة دين مرفوعة للخادم — يُرفع كدفعة
+    -- (method other) ليخفض دين الزبون في صِلة، لكنه لا يُحتسب
+    -- أبداً ضمن المحصلات النقدية.
+    kind TEXT NOT NULL DEFAULT 'repayment'
+      CHECK (kind IN ('repayment','return_reversal')),
     reference_code TEXT,
     transaction_id TEXT,
     outstanding_after INTEGER,
@@ -877,9 +936,7 @@ async function applyMigrations(database: DB): Promise<void> {
     // Campaigns that already carry activity (a redemption landed at
     // this store) start ACTIVE so nothing the store is already
     // claiming disappears; feed-only rows start inactive.
-    const columns = await database.execute(
-      "PRAGMA table_info(campaign_debts)",
-    );
+    const columns = await database.execute('PRAGMA table_info(campaign_debts)');
     const hasActiveColumn = (columns.rows?._array ?? []).some(
       row => String((row as {name?: unknown}).name ?? '') === 'active_in_store',
     );
@@ -914,11 +971,9 @@ async function applyMigrations(database: DB): Promise<void> {
     // the books exactly as they were. Fresh DDL above covers new
     // installs; this heals v13 installs (active_in_store 1 →
     // 'active') and any pre-v13 stragglers (redemptions → 'active').
-    const columns = await database.execute(
-      "PRAGMA table_info(campaign_debts)",
-    );
-    const names = (columns.rows?._array ?? []).map(
-      row => String((row as {name?: unknown}).name ?? ''),
+    const columns = await database.execute('PRAGMA table_info(campaign_debts)');
+    const names = (columns.rows?._array ?? []).map(row =>
+      String((row as {name?: unknown}).name ?? ''),
     );
     if (!names.includes('store_state')) {
       await database.execute(
@@ -944,6 +999,108 @@ async function applyMigrations(database: DB): Promise<void> {
       'ترحيل v14: دورة حياة الحملات (متاحة → مفعّلة → مكتملة) — لا تفعيل مرتين ولا تعطيل، والمكتملة تبقى محفوظة كما هي',
     );
     version = 14;
+  }
+
+  if (version < 15) {
+    // v23 (round-29 #1 + #2): product archiving + the returns system.
+    // ── #1: products.is_archived — «حذف المنتج» لم يكن يعمل أبداً
+    // لمنتج له سجل مبيعات/جرد (FOREIGN KEY constraint failed على
+    // sale_items)؛ الآن يُؤرشف بدل الحذف: يختفي من البيع والمخزن
+    // والتنبيهات ويبقى للتقارير والمرتجعات.
+    const productCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'is_archived'",
+    );
+    const hasArchived =
+      (productCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasArchived) {
+      await database.execute(
+        'ALTER TABLE products ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_products_archived ON products(is_archived, name)',
+    );
+
+    // ── #2: sales.returned_minor + sales.return_kind — الفاتورة
+    // تحمل قيمة ما أُرجع منها، وصف المرتجع (RET-) يحدد أي دفتر
+    // يعكسه حتى تتصفّى تجميعات الديون بفترة المرتجع نفسها.
+    const salesCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sales') WHERE name = 'returned_minor'",
+    );
+    const hasReturned =
+      (salesCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasReturned) {
+      await database.execute(
+        'ALTER TABLE sales ADD COLUMN returned_minor REAL NOT NULL DEFAULT 0',
+      );
+      await database.execute(`ALTER TABLE sales ADD COLUMN return_kind TEXT`);
+    }
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sales_return_kind ON sales(return_kind)',
+    );
+
+    // ── #2: sila_payment_queue.kind — فصل السداد الفعلي عن العملية
+    // العكسية للمرتجعات في كل إحصائيات المحصلات.
+    const pqCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sila_payment_queue') WHERE name = 'kind'",
+    );
+    const hasKind = (pqCols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasKind) {
+      await database.execute(
+        `ALTER TABLE sila_payment_queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'repayment'`,
+      );
+    }
+
+    // ── #2: جداول المرتجعات (التعريف الكامل أعلاه في DDL — هذا
+    // للمثبتات القديمة).
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS sale_returns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        return_number TEXT NOT NULL UNIQUE,
+        sale_id INTEGER NOT NULL REFERENCES sales(id),
+        invoice_ref TEXT NOT NULL,
+        book TEXT NOT NULL
+          CHECK (book IN ('cash','sila','local')),
+        refund_method TEXT NOT NULL DEFAULT 'none'
+          CHECK (refund_method IN ('none','cash')),
+        refund_minor INTEGER NOT NULL CHECK (refund_minor > 0),
+        debt_adjusted_minor INTEGER NOT NULL DEFAULT 0,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS sale_return_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        return_id INTEGER NOT NULL REFERENCES sale_returns(id) ON DELETE CASCADE,
+        sale_item_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        product_name TEXT NOT NULL,
+        quantity REAL NOT NULL CHECK (quantity > 0),
+        unit_name TEXT,
+        base_quantity REAL NOT NULL CHECK (base_quantity > 0),
+        unit_price REAL NOT NULL,
+        line_total REAL NOT NULL,
+        cost_price REAL NOT NULL DEFAULT 0
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sale_returns_sale ON sale_returns(sale_id)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sale_returns_created ON sale_returns(created_at)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sri_return ON sale_return_items(return_id)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sri_sale_item ON sale_return_items(sale_item_id)',
+    );
+    logDiag(
+      'db',
+      'ترحيل v15: أرشفة المنتجات بدل حذفها + نظام إرجاع المنتجات (RET) + العملية العكسية لمرتجعات صِلة',
+    );
+    version = 15;
   }
 
   if (version !== storedVersion) {
@@ -1016,6 +1173,8 @@ export async function wipeAllData(): Promise<void> {
   const database = getDb();
   await database.execute('DELETE FROM stocktake_items');
   await database.execute('DELETE FROM stocktakes');
+  await database.execute('DELETE FROM sale_return_items');
+  await database.execute('DELETE FROM sale_returns');
   await database.execute('DELETE FROM sale_items');
   await database.execute('DELETE FROM sales');
   await database.execute('DELETE FROM product_embeddings');
@@ -1034,7 +1193,7 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM campaign_debts');
   await database.execute('DELETE FROM voucher_redemptions');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

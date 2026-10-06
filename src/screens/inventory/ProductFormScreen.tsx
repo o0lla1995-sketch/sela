@@ -7,6 +7,7 @@
  */
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  Alert,
   Image,
   Keyboard,
   KeyboardAvoidingView,
@@ -194,6 +195,10 @@ export function ProductFormScreen() {
   });
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(productId != null);
+  // v23 (round-29 #1): the archived flag — an archived product keeps
+  //  its full history (reports + returns) and comes back with one
+  //  button; the form makes the state impossible to miss.
+  const [archived, setArchived] = useState(false);
 
   // Load existing product for editing.
   useEffect(() => {
@@ -220,6 +225,7 @@ export function ProductFormScreen() {
           const savedVectors = await EmbeddingRepo.listForProduct(productId);
           if (product != null && mounted) {
             setName(product.name);
+            setArchived(product.is_archived === 1);
             setBarcode(product.barcode ?? '');
             setCostPrice(String(product.cost_price));
             setRetailPrice(String(product.retail_price));
@@ -544,8 +550,7 @@ export function ProductFormScreen() {
       ? parseNumber(wholesalePrice)
       : baseRetail;
     const retailOk = !Number.isNaN(baseRetail) && baseRetail > 0;
-    const wholesaleOk =
-      !Number.isNaN(baseWholesale) && baseWholesale > 0;
+    const wholesaleOk = !Number.isNaN(baseWholesale) && baseWholesale > 0;
     if (!retailOk && !wholesaleOk) {
       return;
     }
@@ -759,12 +764,8 @@ export function ProductFormScreen() {
     return {
       totalPieces,
       perPiece,
-      retail:
-        perPiece != null
-          ? suggestPrice(perPiece, 0.25, 0.25)
-          : null,
-      wholesale:
-        perPiece != null ? suggestPrice(perPiece, 0.12, 0.1) : null,
+      retail: perPiece != null ? suggestPrice(perPiece, 0.25, 0.25) : null,
+      wholesale: perPiece != null ? suggestPrice(perPiece, 0.12, 0.1) : null,
       cartonRetail:
         perPiece != null
           ? Math.round(suggestPrice(perPiece, 0.25, 0.25) * p * 100) / 100
@@ -805,9 +806,7 @@ export function ProductFormScreen() {
     if (cartonMath != null) {
       setStock(String(cartonMath.totalPieces));
       if (cartonMath.perPiece != null) {
-        setCostPrice(
-          String(Math.round(cartonMath.perPiece * 1000) / 1000),
-        );
+        setCostPrice(String(Math.round(cartonMath.perPiece * 1000) / 1000));
       }
     }
   }, [cartonMath]);
@@ -824,23 +823,20 @@ export function ProductFormScreen() {
   /** v16 (round-22 #3): switching the receiving mode also switches
    *  the sale mode (carton = pieces, bag = weight) and resets the
    *  other mode's inputs so no stale numbers linger. */
-  const switchReceiveMode = useCallback(
-    (mode: 'none' | 'carton' | 'bag') => {
-      setReceiveMode(mode);
-      if (mode === 'carton') {
-        setSaleMode('piece');
-        setBagsCount('');
-        setKgPerBag('');
-        setBagCost('');
-      } else if (mode === 'bag') {
-        setSaleMode('weight');
-        setCartonsCount('');
-        setPiecesPerCarton('');
-        setCartonCost('');
-      }
-    },
-    [],
-  );
+  const switchReceiveMode = useCallback((mode: 'none' | 'carton' | 'bag') => {
+    setReceiveMode(mode);
+    if (mode === 'carton') {
+      setSaleMode('piece');
+      setBagsCount('');
+      setKgPerBag('');
+      setBagCost('');
+    } else if (mode === 'bag') {
+      setSaleMode('weight');
+      setCartonsCount('');
+      setPiecesPerCarton('');
+      setCartonCost('');
+    }
+  }, []);
 
   /** v16 (round-22 #3): apply a receiving suggestion to the price
    *  fields — one tap, no math. */
@@ -884,10 +880,7 @@ export function ProductFormScreen() {
                 ? {
                     ...row,
                     conversion: String(conversion),
-                    retail:
-                      row.retail.trim().length > 0
-                        ? row.retail
-                        : '',
+                    retail: row.retail.trim().length > 0 ? row.retail : '',
                   }
                 : row,
             ),
@@ -923,7 +916,9 @@ export function ProductFormScreen() {
       const kind = receiveMode === 'bag' ? 'bag' : 'carton';
       const name = kind === 'carton' ? 'كرتونة' : 'كيس';
       const conversion =
-        kind === 'carton' ? parseNumber(piecesPerCarton) : parseNumber(kgPerBag);
+        kind === 'carton'
+          ? parseNumber(piecesPerCarton)
+          : parseNumber(kgPerBag);
       if (
         !Number.isNaN(conversion) &&
         conversion > 0 &&
@@ -1018,7 +1013,14 @@ export function ProductFormScreen() {
         void ensureReceivingUnit('bag');
       }
     }
-  }, [receiveMode, cartonMath, bagMath, piecesPerCarton, kgPerBag, ensureReceivingUnit]);
+  }, [
+    receiveMode,
+    cartonMath,
+    bagMath,
+    piecesPerCarton,
+    kgPerBag,
+    ensureReceivingUnit,
+  ]);
 
   const save = useCallback(async () => {
     const trimmedName = name.trim();
@@ -1196,22 +1198,76 @@ export function ProductFormScreen() {
     navigation,
   ]);
 
-  const removeProduct = useCallback(async () => {
+  // v23 (round-29 #1): the actual removal — archive when history
+  //  exists, real delete otherwise (the FOREIGN KEY fix).
+  const doRemoveProduct = useCallback(async () => {
     if (productId == null) {
       return;
     }
     setBusy(true);
     try {
-      await ProductRepo.remove(productId);
+      const outcome = await ProductRepo.remove(productId);
       await refreshCatalog();
-      toast('تم حذف المنتج', 'success');
-      navigation.goBack();
+      if (outcome === 'archived') {
+        toast(
+          'أُرشف المنتج — اختفى من البيع والمخزن وبقي سجله للتقارير والمرتجعات (يمكن استرجاعه)',
+          'success',
+        );
+        setArchived(true);
+      } else {
+        toast('تم حذف المنتج نهائياً', 'success');
+        navigation.goBack();
+      }
     } catch (error) {
       toast(error instanceof Error ? error.message : 'فشل حذف المنتج', 'error');
     } finally {
       setBusy(false);
     }
   }, [productId, refreshCatalog, toast, navigation]);
+
+  const removeProduct = useCallback(async () => {
+    if (productId == null) {
+      return;
+    }
+    // v23 (round-29 #1): an explicit confirmation that ALSO tells
+    //  the merchant what will actually happen (archive vs delete).
+    const hasHistory = await ProductRepo.hasHistory(productId);
+    const title = hasHistory ? 'أرشفة المنتج؟' : 'حذف المنتج نهائياً؟';
+    const message = hasHistory
+      ? 'هذا المنتج له سجل مبيعات أو جرد يمنع حذفه نهائياً (سلامة الفواتير والتقارير والمرتجعات). سيُؤرشف: يختفي من البيع والمخزن والتنبيهات ويبقى سجله كاملاً، ويمكن استرجاعه في أي وقت.'
+      : 'لا سجل لهذا المنتج — سيُحذف نهائياً مع وحداته وصوره وبصماته. لا يمكن التراجع.';
+    Alert.alert(title, message, [
+      {text: 'إلغاء', style: 'cancel'},
+      {
+        text: hasHistory ? 'أرشفة' : 'حذف نهائي',
+        style: hasHistory ? 'default' : 'destructive',
+        onPress: () => {
+          void doRemoveProduct();
+        },
+      },
+    ]);
+  }, [productId, doRemoveProduct]);
+
+  // v23 (round-29 #1): استرجاع منتج مؤرشف — عودة فورية للرف.
+  const restoreProduct = useCallback(async () => {
+    if (productId == null) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await ProductRepo.unarchive(productId);
+      await refreshCatalog();
+      setArchived(false);
+      toast('استُرجع المنتج — عاد للعرض والبيع', 'success');
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل استرجاع المنتج',
+        'error',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [productId, refreshCatalog, toast]);
 
   if (loading) {
     return (
@@ -1486,7 +1542,9 @@ export function ProductFormScreen() {
               <Text
                 style={[
                   styles.saleModeText,
-                  receiveMode === 'none' ? {color: c.onAccent} : {color: c.textDim},
+                  receiveMode === 'none'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
                 ]}>
                 يدوي
               </Text>
@@ -1506,7 +1564,9 @@ export function ProductFormScreen() {
               <Text
                 style={[
                   styles.saleModeText,
-                  receiveMode === 'carton' ? {color: c.onAccent} : {color: c.textDim},
+                  receiveMode === 'carton'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
                 ]}>
                 بالكرتونة
               </Text>
@@ -1526,7 +1586,9 @@ export function ProductFormScreen() {
               <Text
                 style={[
                   styles.saleModeText,
-                  receiveMode === 'bag' ? {color: c.onAccent} : {color: c.textDim},
+                  receiveMode === 'bag'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
                 ]}>
                 بالوزن (كيس)
               </Text>
@@ -1572,10 +1634,14 @@ export function ProductFormScreen() {
                   <Text style={styles.receiveSummaryText}>
                     {cartonMath.totalPieces} {BASE_UNIT_NAME} إجمالاً
                     {cartonMath.perPiece != null
-                      ? ` · تكلفة ${BASE_UNIT_NAME} ${cartonMath.perPiece.toFixed(3)}`
+                      ? ` · تكلفة ${BASE_UNIT_NAME} ${cartonMath.perPiece.toFixed(
+                          3,
+                        )}`
                       : ''}
                     {cartonMath.cartonRetail != null
-                      ? ` · سعر الكرتونة المقترح ${cartonMath.cartonRetail.toFixed(2)}`
+                      ? ` · سعر الكرتونة المقترح ${cartonMath.cartonRetail.toFixed(
+                          2,
+                        )}`
                       : ''}
                   </Text>
                   {cartonMath.retail != null && cartonMath.wholesale != null ? (
@@ -1600,8 +1666,8 @@ export function ProductFormScreen() {
                 </View>
               ) : (
                 <Text style={styles.receiveHintText}>
-                  أدخل عدد الكراتين وعدد القطع بالكرتونة — الكمية وتكلفة
-                  القطعة تُملأ تلقائياً في الحقول أدناه
+                  أدخل عدد الكراتين وعدد القطع بالكرتونة — الكمية وتكلفة القطعة
+                  تُملأ تلقائياً في الحقول أدناه
                 </Text>
               )}
             </Card>
@@ -1646,7 +1712,9 @@ export function ProductFormScreen() {
                   <Text style={styles.receiveSummaryText}>
                     {bagMath.totalKg} {WEIGHT_UNIT_NAME} إجمالاً
                     {bagMath.perKg != null
-                      ? ` · تكلفة ${WEIGHT_UNIT_NAME} ${bagMath.perKg.toFixed(3)}`
+                      ? ` · تكلفة ${WEIGHT_UNIT_NAME} ${bagMath.perKg.toFixed(
+                          3,
+                        )}`
                       : ''}
                   </Text>
                   {bagMath.retail != null && bagMath.wholesale != null ? (
@@ -2100,14 +2168,39 @@ export function ProductFormScreen() {
           />
 
           {productId != null ? (
-            <View style={{marginTop: spacing.lg}}>
-              <AppButton
-                title="حذف المنتج نهائياً"
-                variant="danger"
-                icon="trash"
-                onPress={removeProduct}
-                loading={busy}
-              />
+            <View style={{marginTop: spacing.lg, gap: spacing.md}}>
+              {/* v23 (round-29 #1): the archived state card + restore —
+                history is never lost, and the button says exactly
+                what happens. */}
+              {archived ? (
+                <View style={styles.archivedCard}>
+                  <Icon name="archive" size={18} color={c.warning} />
+                  <View style={{flex: 1}}>
+                    <Text style={styles.archivedTitle}>منتج مؤرشف</Text>
+                    <Text style={styles.archivedSub}>
+                      اختفى من البيع والمخزن والتنبيهات، وبقي سجله للفواتير
+                      والتقارير والمرتجعات
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+              {archived ? (
+                <AppButton
+                  title="استرجاع المنتج للعرض والبيع"
+                  variant="primary"
+                  icon="plus"
+                  onPress={restoreProduct}
+                  loading={busy}
+                />
+              ) : (
+                <AppButton
+                  title="حذف المنتج"
+                  variant="danger"
+                  icon="trash"
+                  onPress={removeProduct}
+                  loading={busy}
+                />
+              )}
             </View>
           ) : null}
         </ScrollView>
@@ -2152,6 +2245,29 @@ const useStyles = makeStyles(c =>
   StyleSheet.create({
     screen: {flex: 1, backgroundColor: c.bg},
     center: {flex: 1, alignItems: 'center', justifyContent: 'center'},
+    // v23 (round-29 #1): the archived state card.
+    archivedCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.warning,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    archivedTitle: {
+      color: c.warning,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    archivedSub: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      marginTop: 2,
+      lineHeight: 16,
+    },
     muted: {
       color: c.textDim,
       fontFamily: fonts.regular,

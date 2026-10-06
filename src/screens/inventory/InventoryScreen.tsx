@@ -37,6 +37,7 @@ import {
   stockStateOf,
   type Product,
 } from '../../core/types';
+import {ProductRepo} from '../../database/repositories/ProductRepo';
 
 type CategoryFilter = number | 'all';
 
@@ -54,10 +55,18 @@ export function InventoryScreen() {
   // behind the ⋮ header button, so the product list starts right
   // under the search.
   const [menuOpen, setMenuOpen] = useState(false);
+  // v23 (round-29 #1): the archived view — products with sales/
+  //  stocktake history that were «deleted» live here, restorable
+  //  with one tap. Loaded on focus (cheap indexed query).
+  const [showArchived, setShowArchived] = useState(false);
+  const [archivedProducts, setArchivedProducts] = useState<Product[]>([]);
 
   useFocusEffect(
     useCallback(() => {
       void refresh();
+      void ProductRepo.list({archival: 'archived'}).then(rows => {
+        setArchivedProducts(rows);
+      });
     }, [refresh]),
   );
 
@@ -112,6 +121,9 @@ export function InventoryScreen() {
       onRefresh={refresh}
       menuOpen={menuOpen}
       setMenuOpen={setMenuOpen}
+      showArchived={showArchived}
+      setShowArchived={setShowArchived}
+      archivedProducts={archivedProducts}
     />
   );
 }
@@ -131,6 +143,9 @@ function InventoryLayout({
   onRefresh: _onRefresh,
   menuOpen,
   setMenuOpen,
+  showArchived,
+  setShowArchived,
+  archivedProducts,
 }: {
   products: Product[];
   allProducts: Product[];
@@ -146,6 +161,9 @@ function InventoryLayout({
   onRefresh: () => Promise<void>;
   menuOpen: boolean;
   setMenuOpen: (value: boolean) => void;
+  showArchived: boolean;
+  setShowArchived: (value: boolean) => void;
+  archivedProducts: Product[];
 }) {
   const c = useThemeColors();
   const styles = useStyles();
@@ -248,7 +266,9 @@ function InventoryLayout({
         {/* ── Category chips — compact, horizontally scrollable.
             v8.3 (round-12 #2): hidden while the search keyboard is
             open (more room for results + the search field), and the
-            list starts DIRECTLY under them (no dead gap). ── */}
+            list starts DIRECTLY under them (no dead gap).
+            v23 (round-29 #1): «المؤرشفة» chip at the end — products
+            deleted WITH history (kept for reports/returns). ── */}
         {!keyboardOpen ? (
           <ScrollView
             horizontal
@@ -261,22 +281,81 @@ function InventoryLayout({
             <FilterChip
               label="الكل"
               count={countFor('all')}
-              active={filter === 'all'}
-              onPress={() => setFilter('all')}
+              active={filter === 'all' && !showArchived}
+              onPress={() => {
+                setShowArchived(false);
+                setFilter('all');
+              }}
             />
             {categories.map(category => (
               <FilterChip
                 key={category.id}
                 label={category.name}
                 count={countFor(category.id)}
-                active={filter === category.id}
-                onPress={() => setFilter(category.id)}
+                active={filter === category.id && !showArchived}
+                onPress={() => {
+                  setShowArchived(false);
+                  setFilter(category.id);
+                }}
               />
             ))}
+            {archivedProducts.length > 0 ? (
+              <FilterChip
+                label="المؤرشفة"
+                count={archivedProducts.length}
+                active={showArchived}
+                onPress={() => setShowArchived(!showArchived)}
+              />
+            ) : null}
           </ScrollView>
         ) : null}
 
-        {products.length === 0 ? (
+        {showArchived ? (
+          archivedProducts.length === 0 ? (
+            <EmptyState
+              icon="archive"
+              title="لا منتجات مؤرشفة"
+              subtitle="المنتجات المحذوفة ذات سجل مبيعات أو جرد تُؤرشف هنا بدل حذفها نهائياً"
+            />
+          ) : (
+            <ScrollView
+              style={{flex: 1}}
+              contentContainerStyle={{
+                gap: spacing.sm,
+                paddingBottom: spacing.xxl,
+              }}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag">
+              {archivedProducts.map(product => (
+                <TouchableOpacity
+                  key={product.id}
+                  style={[styles.row, {borderColor: c.warning}]}
+                  activeOpacity={0.75}
+                  onPress={() =>
+                    navigation.navigate('ProductForm', {
+                      productId: product.id,
+                    })
+                  }>
+                  <View style={[styles.thumb, styles.thumbFallback]}>
+                    <Icon name="archive" size={18} color={c.warning} />
+                  </View>
+                  <View style={{flex: 1}}>
+                    <Text style={styles.name} numberOfLines={1}>
+                      {product.name}
+                    </Text>
+                    <Text style={styles.meta} numberOfLines={1}>
+                      مؤرشف — سجله محفوظ للفواتير والتقارير والمرتجعات
+                    </Text>
+                  </View>
+                  <View style={styles.rowEnd}>
+                    <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          )
+        ) : products.length === 0 ? (
           <EmptyState
             icon="box"
             title={allProducts.length === 0 ? 'المخزون فارغ' : 'لا نتائج'}
@@ -381,10 +460,9 @@ function InventoryLayout({
                         ]}>
                         {state === 'out'
                           ? 'نفد'
-                          : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(
-                              product,
-                              BASE_UNIT_NAME,
-                            )}`}
+                          : `${formatQty(
+                              product.stock_quantity,
+                            )} ${baseUnitLabelOf(product, BASE_UNIT_NAME)}`}
                       </Text>
                     </View>
                     <Icon name="chevronLeft" size={16} color={c.textFaint} />

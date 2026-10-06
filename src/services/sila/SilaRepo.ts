@@ -86,6 +86,7 @@ function rowToPayment(row: Record<string, unknown>): SilaPaymentRow {
     description: (row.description as string) ?? null,
     paid_at: String(row.paid_at ?? ''),
     state: (row.state as SilaPaymentRow['state']) ?? 'pending',
+    kind: (row.kind as SilaPaymentRow['kind']) ?? 'repayment',
     reference_code: (row.reference_code as string) ?? null,
     transaction_id: (row.transaction_id as string) ?? null,
     outstanding_after:
@@ -127,6 +128,10 @@ export interface EnqueuePaymentInput {
   posReceiptRef: string;
   description: string;
   paidAt: string;
+  /** v23 (round-29 #2): 'return_reversal' marks the reverse
+   *  operation for a returned debt invoice (excluded from the
+   *  collections statistics). */
+  kind?: 'repayment' | 'return_reversal';
 }
 
 export const SilaRepo = {
@@ -635,15 +640,19 @@ export const SilaRepo = {
   // ── v15 (round-21 #3): repayments queue (§3.1 sila_payment_uploads) ──
 
   /** Creates a payment row at collection time — ONE idempotency key
-   *  per receipt, forever (§3 golden rule 3). */
+   *  per receipt, forever (§3 golden rule 3).
+   *  v23 (round-29 #2): kind — 'repayment' (the default, counts in
+   *  collections) vs 'return_reversal' (the reverse operation for a
+   *  returned debt invoice — uploads identically, excluded from
+   *  every collections statistic). */
   async enqueuePayment(input: EnqueuePaymentInput): Promise<SilaPaymentRow> {
     const db = getDb();
     await db.execute(
       `INSERT INTO sila_payment_queue (
         idempotency_key, customer_id, customer_name, customer_phone_last4,
         amount_minor, payment_method, pos_receipt_ref, description,
-        paid_at, state
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        paid_at, state, kind
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       [
         input.idempotencyKey,
         input.customerId,
@@ -654,6 +663,7 @@ export const SilaRepo = {
         input.posReceiptRef,
         input.description,
         input.paidAt,
+        input.kind ?? 'repayment',
       ],
     );
     const row = await db.execute(
@@ -857,6 +867,8 @@ export const SilaRepo = {
     pendingMinor: number;
   }> {
     try {
+      // v23 (round-29 #2): return_reversal rows NEVER count as
+      // collected cash — they reverse DEBT, they are not income.
       const result = await getDb().execute(
         `SELECT
            COALESCE(SUM(amount_minor), 0) AS all_minor,
@@ -864,7 +876,8 @@ export const SilaRepo = {
            COALESCE(SUM(CASE WHEN date(created_at, 'localtime') = date('now', 'localtime') THEN amount_minor ELSE 0 END), 0) AS today_minor,
            COALESCE(SUM(CASE WHEN state = 'synced' THEN amount_minor ELSE 0 END), 0) AS synced_minor,
            COALESCE(SUM(CASE WHEN state IN ('pending','syncing') THEN amount_minor ELSE 0 END), 0) AS pending_minor
-         FROM sila_payment_queue`,
+         FROM sila_payment_queue
+         WHERE COALESCE(kind, 'repayment') = 'repayment'`,
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
         all_minor?: number | null;
@@ -896,7 +909,9 @@ export const SilaRepo = {
    *  created_at timestamp (v19 round-25 #6: these tables store UTC
    *  via datetime('now'); comparing the raw string against local
    *  date boundaries misattributed payments made between 00:00 and
-   *  03:00 to the PREVIOUS day — Asia/Jerusalem is UTC+3). */
+   *  03:00 to the PREVIOUS day — Asia/Jerusalem is UTC+3).
+   *  v23 (round-29 #2): return_reversal rows are EXCLUDED — a
+   *  goods return is not a collection, in ANY period. */
   async paymentsInRange(
     from: string,
     to: string,
@@ -905,7 +920,8 @@ export const SilaRepo = {
       const result = await getDb().execute(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(amount_minor), 0) AS minor
          FROM sila_payment_queue
-         WHERE date(created_at, 'localtime') >= ?
+         WHERE COALESCE(kind, 'repayment') = 'repayment'
+           AND date(created_at, 'localtime') >= ?
            AND date(created_at, 'localtime') <= ?`,
         [from, to],
       );
@@ -916,6 +932,31 @@ export const SilaRepo = {
       return {count: Number(row.cnt ?? 0), minor: Number(row.minor ?? 0)};
     } catch {
       return {count: 0, minor: 0};
+    }
+  },
+
+  /** v23 (round-29 #2): the all-time total of return reversals —
+   *  the amount by which the treasury's credit-sales figure must
+   *  shrink for synced صِلة debts that were later (partly)
+   *  returned. Pending queue rows were already shrunk at return
+   *  time; SYNCED rows keep their original amount in the queue,
+   *  and the reversal payment row is what cancels them — so the
+   *  treasury subtracts the reversals from creditSales, keeping
+   *  revenue(net) − creditSales(net) + collections(no reversals)
+   *  balanced in every scenario. */
+  async returnReversalsTotal(): Promise<number> {
+    try {
+      const result = await getDb().execute(
+        `SELECT COALESCE(SUM(amount_minor), 0) AS minor
+         FROM sila_payment_queue
+         WHERE COALESCE(kind, 'repayment') = 'return_reversal'`,
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        minor?: number | null;
+      };
+      return Number(row.minor ?? 0);
+    } catch {
+      return 0;
     }
   },
 

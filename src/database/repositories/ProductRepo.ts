@@ -20,6 +20,7 @@ function rowToProduct(row: Record<string, unknown>): Product {
     barcode:
       row.barcode == null || row.barcode === '' ? null : String(row.barcode),
     sold_by_weight: Number(row.sold_by_weight ?? 0) === 1 ? 1 : 0,
+    is_archived: Number(row.is_archived ?? 0) === 1 ? 1 : 0,
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -42,6 +43,10 @@ export const ProductRepo = {
   async list(options?: {
     search?: string;
     categoryId?: number | 'all';
+    /** v23 (round-29 #1): 'active' (default) hides archived products
+     *  from POS/inventory/alerts; 'archived' shows ONLY the archived
+     *  ones (the «المؤرشفة» view); 'all' returns everything. */
+    archival?: 'active' | 'archived' | 'all';
   }): Promise<Product[]> {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
@@ -54,6 +59,13 @@ export const ProductRepo = {
     if (options?.categoryId != null && options.categoryId !== 'all') {
       conditions.push('p.category_id = ?');
       params.push(options.categoryId);
+    }
+    if (options?.archival !== 'all') {
+      if (options?.archival === 'archived') {
+        conditions.push('p.is_archived = 1');
+      } else {
+        conditions.push('p.is_archived = 0');
+      }
     }
 
     const where =
@@ -150,20 +162,56 @@ export const ProductRepo = {
     );
   },
 
-  /** Exact barcode lookup for POS scanning (base-unit barcode). */
+  /** Exact barcode lookup for POS scanning (base-unit barcode).
+   *  v23 (round-29 #1): a LIVE product always wins over an archived
+   *  one sharing the same barcode (a re-added product must sell). */
   async findByBarcode(code: string): Promise<Product | null> {
     const clean = code.trim();
     if (!clean) return null;
     const result = await getDb().execute(
-      'SELECT * FROM products WHERE barcode = ? LIMIT 1',
+      'SELECT * FROM products WHERE barcode = ? ORDER BY is_archived ASC LIMIT 1',
       [clean],
     );
     const row = result.rows?._array?.[0];
     return row ? rowToProduct(row) : null;
   },
 
-  async remove(id: number): Promise<void> {
+  /** v23 (round-29 #1): has this product left history behind
+   *  (sales lines or stocktake counts)? Such rows can NEVER be
+   *  hard-deleted — sale_items/stocktake_items FKs — so «حذف»
+   *  archives them instead. */
+  async hasHistory(id: number): Promise<boolean> {
+    const result = await getDb().execute(
+      `SELECT 1 WHERE EXISTS (SELECT 1 FROM sale_items WHERE product_id = ?)
+              OR EXISTS (SELECT 1 FROM stocktake_items WHERE product_id = ?)
+         LIMIT 1`,
+      [id, id],
+    );
+    return (result.rows?._array ?? []).length > 0;
+  },
+
+  /** v23 (round-29 #1): the fix for the FOREIGN KEY crash on
+   *  «حذف المنتج» — a product with sales/stocktake history is
+   *  ARCHIVED (hidden, kept for reports + returns) instead of
+   *  crashing; a historyless product is deleted for real. */
+  async remove(id: number): Promise<'deleted' | 'archived'> {
+    if (await this.hasHistory(id)) {
+      await getDb().execute(
+        'UPDATE products SET is_archived = 1 WHERE id = ?',
+        [id],
+      );
+      return 'archived';
+    }
     await getDb().execute('DELETE FROM products WHERE id = ?', [id]);
+    return 'deleted';
+  },
+
+  /** v23 (round-29 #1): brings an archived product back to the
+   *  shelf (POS + inventory + alerts) — history was never lost. */
+  async unarchive(id: number): Promise<void> {
+    await getDb().execute('UPDATE products SET is_archived = 0 WHERE id = ?', [
+      id,
+    ]);
   },
 
   /** Atomically decrements stock; throws a friendly error on oversell. */
@@ -190,10 +238,9 @@ export const ProductRepo = {
   /** v8.3: nulls a product's image (its file is gone — restore /
    *  reinstall left a dead path; the fallback icon must come back). */
   async clearImage(id: number): Promise<void> {
-    await getDb().execute(
-      'UPDATE products SET image_uri = NULL WHERE id = ?',
-      [id],
-    );
+    await getDb().execute('UPDATE products SET image_uri = NULL WHERE id = ?', [
+      id,
+    ]);
   },
 
   safeMessage(error: unknown): string {

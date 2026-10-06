@@ -2,14 +2,21 @@
  * Sales repository — the checkout transaction itself.
  * The sale, its items and all stock decrements run inside ONE SQLite
  * transaction so a crash can never leave half-written accounting data.
+ * v23 (round-29 #2): the RETURNS engine lives here too — a return is
+ * a NEGATIVE invoice (RET-… row + negative sale_items) plus stock
+ * restore plus the debt-book adjustment, ALL inside one transaction.
  */
 import {getDb, toMessage} from '../connection';
 import {localNow} from '../../core/format';
 import type {
   CartLine,
   PricingMode,
+  ReturnBook,
+  ReturnLineInput,
   SaleItemRecord,
   SaleRecord,
+  SaleReturnItem,
+  SaleReturnRecord,
   SaleWithItems,
 } from '../../core/types';
 
@@ -64,6 +71,8 @@ function rowToSale(row: Record<string, unknown>): SaleRecord {
     discount: Number(row.discount ?? 0),
     payment_type: String(row.payment_type ?? 'RETAIL') as PricingMode,
     created_at: String(row.created_at ?? ''),
+    returned_minor: Number(row.returned_minor ?? 0),
+    return_kind: (row.return_kind as SaleRecord['return_kind']) ?? null,
   };
 }
 
@@ -78,6 +87,39 @@ function rowToItem(row: Record<string, unknown>): SaleItemRecord {
     total_line_price: Number(row.total_line_price ?? 0),
     unit_name: row.unit_name == null ? null : String(row.unit_name),
     base_quantity: row.base_quantity == null ? null : Number(row.base_quantity),
+  };
+}
+
+/** v23 (round-29 #2): sale_returns row mapper. */
+function rowToReturn(row: Record<string, unknown>): SaleReturnRecord {
+  return {
+    id: Number(row.id),
+    return_number: String(row.return_number ?? ''),
+    sale_id: Number(row.sale_id),
+    invoice_ref: String(row.invoice_ref ?? ''),
+    book: String(row.book ?? 'cash') as SaleReturnRecord['book'],
+    refund_method: String(row.refund_method ?? 'none') as 'none' | 'cash',
+    refund_minor: Number(row.refund_minor ?? 0),
+    debt_adjusted_minor: Number(row.debt_adjusted_minor ?? 0),
+    note: row.note == null ? null : String(row.note),
+    created_at: String(row.created_at ?? ''),
+  };
+}
+
+/** v23 (round-29 #2): sale_return_items row mapper. */
+function rowToReturnItem(row: Record<string, unknown>): SaleReturnItem {
+  return {
+    id: Number(row.id),
+    return_id: Number(row.return_id),
+    sale_item_id: Number(row.sale_item_id),
+    product_id: Number(row.product_id),
+    product_name: String(row.product_name ?? ''),
+    quantity: Number(row.quantity ?? 0),
+    unit_name: row.unit_name == null ? null : String(row.unit_name),
+    base_quantity: Number(row.base_quantity ?? 0),
+    unit_price: Number(row.unit_price ?? 0),
+    line_total: Number(row.line_total ?? 0),
+    cost_price: Number(row.cost_price ?? 0),
   };
 }
 
@@ -224,6 +266,322 @@ export const SaleRepo = {
     };
   },
 
+  // ── v23 (round-29 #2): THE RETURNS ENGINE ────────────────────
+
+  /** Per-line already-returned quantities for an invoice — the
+   *  ReturnSheet's ceiling (each original sale_items row can only be
+   *  returned once, in total, across every RET receipt). */
+  async returnedQtyByLine(saleId: number): Promise<Map<number, number>> {
+    try {
+      const result = await getDb().execute(
+        `SELECT sri.sale_item_id AS sale_item_id, COALESCE(SUM(sri.quantity), 0) AS qty
+         FROM sale_return_items sri
+         JOIN sale_returns sr ON sr.id = sri.return_id
+         WHERE sr.sale_id = ?
+         GROUP BY sri.sale_item_id`,
+        [saleId],
+      );
+      const map = new Map<number, number>();
+      for (const row of result.rows?._array ?? []) {
+        map.set(
+          Number((row as {sale_item_id?: unknown}).sale_item_id ?? 0),
+          Number((row as {qty?: unknown}).qty ?? 0),
+        );
+      }
+      return map;
+    } catch {
+      return new Map();
+    }
+  },
+
+  /** Every return receipt issued against an invoice (newest first). */
+  async returnsForSale(saleId: number): Promise<SaleReturnRecord[]> {
+    try {
+      const result = await getDb().execute(
+        'SELECT * FROM sale_returns WHERE sale_id = ? ORDER BY id DESC',
+        [saleId],
+      );
+      return (result.rows?._array ?? []).map(rowToReturn);
+    } catch {
+      return [];
+    }
+  },
+
+  /** v23 (round-29 #2): one return receipt by its RET-… number. */
+  async returnByNumber(returnNumber: string): Promise<SaleReturnRecord | null> {
+    try {
+      const result = await getDb().execute(
+        'SELECT * FROM sale_returns WHERE return_number = ? LIMIT 1',
+        [returnNumber],
+      );
+      const row = result.rows?._array?.[0];
+      return row ? rowToReturn(row) : null;
+    } catch {
+      return null;
+    }
+  },
+
+  /** The return's own line snapshot (detail view). */
+  async returnItems(returnId: number): Promise<SaleReturnItem[]> {
+    try {
+      const result = await getDb().execute(
+        'SELECT * FROM sale_return_items WHERE return_id = ? ORDER BY id ASC',
+        [returnId],
+      );
+      return (result.rows?._array ?? []).map(rowToReturnItem);
+    } catch {
+      return [];
+    }
+  },
+
+  /** v23 (round-29 #2): creates a RETURN — one atomic transaction:
+   *   1. a NEGATIVE RET-… invoice row (nets revenue/cogs/profit in
+   *      every report automatically) + negative sale_items lines,
+   *   2. stock restore (base units) for every returned line,
+   *   3. the sale_returns + sale_return_items snapshot rows,
+   *   4. the original invoice's returned_minor accumulator,
+   *   5. the DEBT adjustment inside the SAME transaction:
+   *      • sila pending/failed → the queue row's amount shrinks
+   *        (deleted at zero — the server never learns the returned
+   *        part); sila synced → a return_reversal payment row is
+   *        enqueued (uploads as method 'other' and reduces the
+   *        customer's debt on the صلة server — the ONLY reverse
+   *        operation the API offers); sila syncing → rejected
+   *        before the transaction even starts;
+   *      • local → the local_debts row's amount shrinks (never
+   *        below zero);
+   *      • cash → nothing to adjust (the refund itself is the
+   *        merchant's cash-out, already netted by the RET row).
+   *
+   * discountRatio = total_amount / subtotal of the ORIGINAL invoice
+   * (pro-rata discount) — returning every line refunds exactly the
+   * invoice total, not the pre-discount subtotal.
+   */
+  async createReturn(input: {
+    returnNumber: string;
+    saleId: number;
+    invoiceRef: string;
+    book: ReturnBook;
+    refundMethod: 'none' | 'cash';
+    /** Pro-rata discount ratio of the original invoice (0..1]. */
+    discountRatio: number;
+    lines: ReturnLineInput[];
+    /** sila reversal payload when the queue row is already synced. */
+    silaReversal?: {
+      customerId: string | null;
+      customerName: string | null;
+      customerPhoneLast4: string | null;
+      amountMinor: number;
+      /** The RCP-… receipt ref for the payment upload (the API's
+       *  own series — safer than the RET- number against any
+       *  server-side receipt pattern validation). */
+      posReceiptRef: string;
+      idempotencyKey: string;
+    } | null;
+    note?: string | null;
+  }): Promise<SaleReturnRecord> {
+    if (input.lines.length === 0) {
+      throw new Error('لم يتم اختيار أي صنف للإرجاع');
+    }
+    const db = getDb();
+
+    // ── Compute the money first (pure, no DB) ──────────────────
+    // Line value at sale price, pro-rated for the invoice discount.
+    const lineValues = input.lines.map(line => ({
+      ...line,
+      lineTotal: line.unitPrice * line.quantity * input.discountRatio,
+      lineCost: line.costPrice * line.quantity,
+      baseQty: line.quantity * line.basePerUnit,
+    }));
+    const refundValue = lineValues.reduce((sum, l) => sum + l.lineTotal, 0);
+    const refundMinor = Math.round(refundValue * 100);
+    if (refundMinor <= 0) {
+      throw new Error('قيمة المرتجع غير صالحة');
+    }
+    const totalCost = lineValues.reduce((sum, l) => sum + l.lineCost, 0);
+    const createdAt = localNow();
+
+    let returnId = -1;
+
+    await db.transaction(async tx => {
+      // 1) The NEGATIVE invoice — every existing aggregation (revenue,
+      //    cogs, profit, daily, hourly, top products) nets out with
+      //    ZERO query changes; return_kind tells the debt buckets
+      //    which side to net.
+      const insertRet = await tx.execute(
+        `INSERT INTO sales
+          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, return_kind)
+         VALUES (?, ?, ?, ?, 0, 'RETAIL', ?, ?)`,
+        [
+          input.returnNumber,
+          -refundValue,
+          -totalCost,
+          -(refundValue - totalCost),
+          createdAt,
+          input.book,
+        ],
+      );
+      const retSaleId = insertRet.insertId ?? -1;
+      if (retSaleId < 0) {
+        throw new Error('فشل إنشاء سجل المرتجع');
+      }
+
+      // 2) Negative lines + stock restore + the snapshot rows.
+      for (const line of lineValues) {
+        await tx.execute(
+          `INSERT INTO sale_items
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            retSaleId,
+            line.productId,
+            -line.quantity,
+            line.unitPrice,
+            line.costPrice,
+            -line.lineTotal,
+            line.unitName,
+            -line.baseQty,
+          ],
+        );
+        // Stock comes back (base units) — the product row ALWAYS
+        // exists: history-bearing products are archived, never
+        // deleted (v23 #1), and only history-bearing products can
+        // be returned.
+        await tx.execute(
+          'UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?',
+          [line.baseQty, line.productId],
+        );
+      }
+
+      // 3) The return receipt + its line snapshots.
+      const insertReturn = await tx.execute(
+        `INSERT INTO sale_returns
+          (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        [
+          input.returnNumber,
+          input.saleId,
+          input.invoiceRef,
+          input.book,
+          input.refundMethod,
+          refundMinor,
+          input.note?.trim() || null,
+          createdAt,
+        ],
+      );
+      returnId = insertReturn.insertId ?? -1;
+      if (returnId < 0) {
+        throw new Error('فشل إنشاء إيصال المرتجع');
+      }
+      for (const line of lineValues) {
+        await tx.execute(
+          `INSERT INTO sale_return_items
+            (return_id, sale_item_id, product_id, product_name, quantity, unit_name, base_quantity, unit_price, line_total, cost_price)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            returnId,
+            line.saleItemId,
+            line.productId,
+            line.productName,
+            line.quantity,
+            line.unitName,
+            line.baseQty,
+            line.unitPrice,
+            line.lineTotal,
+            line.costPrice,
+          ],
+        );
+      }
+
+      // 4) The original invoice's accumulator — «تعديل الفاتورة
+      //    التي تم الإرجاع منها مع تمييزها».
+      await tx.execute(
+        'UPDATE sales SET returned_minor = returned_minor + ? WHERE id = ?',
+        [refundMinor, input.saleId],
+      );
+
+      // 5) The DEBT reversal — same transaction, no half states.
+      let debtAdjustedMinor = 0;
+      if (input.book === 'local') {
+        const adjusted = await tx.execute(
+          `UPDATE local_debts
+             SET amount_minor = MAX(0, amount_minor - ?)
+           WHERE invoice_ref = ? AND migrated = 0`,
+          [refundMinor, input.invoiceRef],
+        );
+        if (adjusted.rowsAffected === 1) {
+          debtAdjustedMinor = refundMinor;
+        }
+      } else if (input.book === 'sila') {
+        if (input.silaReversal != null) {
+          // Synced debt — the reverse operation: a payment upload
+          // (kind 'return_reversal') reduces the customer's debt on
+          // the صلة server exactly like a repayment, but never
+          // counts as collected cash in the store's statistics.
+          await tx.execute(
+            `INSERT INTO sila_payment_queue (
+              idempotency_key, customer_id, customer_name, customer_phone_last4,
+              amount_minor, payment_method, pos_receipt_ref, description,
+              paid_at, state, kind
+            ) VALUES (?, ?, ?, ?, ?, 'other', ?, ?, ?, 'pending', 'return_reversal')`,
+            [
+              input.silaReversal.idempotencyKey,
+              input.silaReversal.customerId,
+              input.silaReversal.customerName,
+              input.silaReversal.customerPhoneLast4,
+              input.silaReversal.amountMinor,
+              input.silaReversal.posReceiptRef,
+              `عكس قيمة مرتجع بضاعة — فاتورة ${input.invoiceRef} (إشعار ${input.returnNumber})`,
+              createdAt,
+            ],
+          );
+          debtAdjustedMinor = input.silaReversal.amountMinor;
+        } else {
+          // Pending/failed queue row — shrink it directly; the
+          // server never learns the returned part. Zero → the row
+          // disappears entirely (no zero-amount upload).
+          const row = await tx.execute(
+            'SELECT amount_minor, credit_covered_minor FROM sila_debt_queue WHERE pos_invoice_ref = ?',
+            [input.invoiceRef],
+          );
+          const debtRow = row.rows?._array?.[0] as
+            | {amount_minor?: number; credit_covered_minor?: number}
+            | undefined;
+          if (debtRow != null) {
+            const current = Number(debtRow.amount_minor ?? 0);
+            const nextAmount = Math.max(0, current - refundMinor);
+            if (nextAmount === 0) {
+              await tx.execute(
+                'DELETE FROM sila_debt_queue WHERE pos_invoice_ref = ?',
+                [input.invoiceRef],
+              );
+            } else {
+              await tx.execute(
+                `UPDATE sila_debt_queue
+                   SET amount_minor = ?,
+                       credit_covered_minor = MIN(COALESCE(credit_covered_minor, 0), ?)
+                 WHERE pos_invoice_ref = ?`,
+                [nextAmount, nextAmount, input.invoiceRef],
+              );
+            }
+            debtAdjustedMinor = Math.min(refundMinor, current);
+          }
+        }
+      }
+      if (debtAdjustedMinor > 0) {
+        await tx.execute(
+          'UPDATE sale_returns SET debt_adjusted_minor = ? WHERE id = ?',
+          [debtAdjustedMinor, returnId],
+        );
+      }
+    });
+
+    const result = await db.execute('SELECT * FROM sale_returns WHERE id = ?', [
+      returnId,
+    ]);
+    return rowToReturn(result.rows?._array?.[0] ?? {});
+  },
+
   async listRecent(limit = 20): Promise<SaleRecord[]> {
     const result = await getDb().execute(
       'SELECT * FROM sales ORDER BY id DESC LIMIT ?',
@@ -258,32 +616,111 @@ export const SaleRepo = {
     return rows.map(rowToItem);
   },
 
-  /** v9.1 (round-14 #5): a paged invoice with its line count — the
-   *  Invoices screen loads page after page as the merchant scrolls
-   *  back through history. */
+  /** v9.1 (round-14 #5) → v23 (round-29 #3): a REAL search engine.
+   *  ─────────────────────────────────────────────────────────
+   *  Was: invoice-number LIKE only. Now ONE paged query matches:
+   *   • invoice number (any series — INV-/INV-D/INV-L/INV-V/RET-)
+   *     including its DIGITS-ONLY form (202610061),
+   *   • the CREDITOR name (صِلة queue + local book, via invoice ref),
+   *   • any PRODUCT NAME on the invoice's lines,
+   *   • the total amount (12 / 12.5 / 12.50),
+   *   • the date (2026-10-06 / 20261006 / 10-06).
+   *  Plus FILTERS (kind + date range) — all index-friendly and
+   *  paged exactly as before. */
   async listPagePaged(options: {
     limit: number;
     offset: number;
     search?: string;
+    /** v23: 'all' | cash (INV-) | sila debt (INV-D) | local debt
+     *  (INV-L) | voucher (INV-V) | returns (RET-). */
+    kind?: 'all' | 'cash' | 'sila' | 'local' | 'voucher' | 'returns';
+    /** v23: inclusive local-date bounds ('' = open). */
+    fromDate?: string;
+    toDate?: string;
   }): Promise<(SaleRecord & {itemsCount: number})[]> {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
     const search = options.search?.trim() ?? '';
-    const rowsResult = search
-      ? await getDb().execute(
-          `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS items_count
-           FROM sales s
-           WHERE s.invoice_number LIKE ?
-           ORDER BY s.id DESC
-           LIMIT ? OFFSET ?`,
-          [`%${search}%`, options.limit, options.offset],
-        )
-      : await getDb().execute(
-          `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS items_count
-           FROM sales s
-           ORDER BY s.id DESC
-           LIMIT ? OFFSET ?`,
-          [options.limit, options.offset],
+    if (search.length > 0) {
+      const like = `%${search}%`;
+      const digits = search.replace(/[^0-9.]/g, '');
+      const amount = Number.parseFloat(search);
+      const searchClauses = [
+        's.invoice_number LIKE ?',
+        `EXISTS (
+           SELECT 1 FROM sila_debt_queue dq
+           WHERE dq.pos_invoice_ref = s.invoice_number
+             AND dq.customer_name LIKE ?)`,
+        `EXISTS (
+           SELECT 1 FROM local_debts ld
+           JOIN local_customers lc ON lc.id = ld.local_customer_id
+           WHERE ld.invoice_ref = s.invoice_number
+             AND lc.name LIKE ?)`,
+        `EXISTS (
+           SELECT 1 FROM sale_items si
+           JOIN products p ON p.id = si.product_id
+           WHERE si.sale_id = s.id AND p.name LIKE ?)`,
+      ];
+      conditions.push(`(${searchClauses.join(' OR ')})`);
+      params.push(like, like, like, like);
+      // Digits-only typing (20261006 / 0001) — match the invoice
+      // number with every letter/dash of the series stripped out.
+      if (digits.length >= 2 && !search.includes('.')) {
+        const stripped = ['-', 'I', 'N', 'V', 'D', 'L', 'R', 'E', 'T'].reduce(
+          (expr, ch) => `REPLACE(${expr}, '${ch}', '')`,
+          's.invoice_number',
         );
-    const rows = rowsResult.rows?._array ?? [];
+        conditions.push(`(${stripped} LIKE ?)`);
+        params.push(`%${digits}%`);
+      }
+      // An exact amount (12 / 12.5 / 12.50).
+      if (!Number.isNaN(amount) && search.match(/^[0-9]+(\.[0-9]+)?$/)) {
+        conditions.push('ABS(s.total_amount - ?) < 0.005');
+        params.push(amount);
+      }
+    }
+
+    if (options.kind != null && options.kind !== 'all') {
+      switch (options.kind) {
+        case 'cash':
+          conditions.push(
+            "s.invoice_number LIKE 'INV-%' AND s.invoice_number NOT LIKE 'INV-D-%' AND s.invoice_number NOT LIKE 'INV-L-%' AND s.invoice_number NOT LIKE 'INV-V-%'",
+          );
+          break;
+        case 'sila':
+          conditions.push("s.invoice_number LIKE 'INV-D-%'");
+          break;
+        case 'local':
+          conditions.push("s.invoice_number LIKE 'INV-L-%'");
+          break;
+        case 'voucher':
+          conditions.push("s.invoice_number LIKE 'INV-V-%'");
+          break;
+        case 'returns':
+          conditions.push('s.return_kind IS NOT NULL');
+          break;
+      }
+    }
+    if (options.fromDate) {
+      conditions.push('date(s.created_at) >= date(?)');
+      params.push(options.fromDate);
+    }
+    if (options.toDate) {
+      conditions.push('date(s.created_at) <= date(?)');
+      params.push(options.toDate);
+    }
+
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await getDb().execute(
+      `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS items_count
+       FROM sales s ${where}
+       ORDER BY s.id DESC
+       LIMIT ? OFFSET ?`,
+      [...params, options.limit, options.offset],
+    );
+    const rows = result.rows?._array ?? [];
     return rows.map(row => ({
       ...rowToSale(row),
       itemsCount: Number(row.items_count ?? 0),

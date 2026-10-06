@@ -290,6 +290,7 @@ export const ReportService = {
       voucherGoodsAllTime,
       voucherRedemptionsAllTime,
       campaignTotals,
+      returnReversalsTotalMinor,
     ] = await Promise.all([
       SaleRepo.allTimeRevenue(),
       SilaRepo.totals(),
@@ -299,13 +300,25 @@ export const ReportService = {
       ReportRepo.voucherSalesSummary({from: '2000-01-01', to: '2999-12-31'}),
       VouchersRepo.okInRange('2000-01-01', '2999-12-31'),
       VouchersRepo.campaignsTotals(),
+      // v23 (round-29 #2): the synced-debt reversals — see below.
+      SilaRepo.returnReversalsTotal(),
     ]);
     // Credit sales that never entered the drawer as cash at sale
     // time: the whole INV-D queue (credit-covered parts return via
     // prepaidCovered below) + the local book's unmigrated debts
     // (migrated ones live in the INV-D queue already).
+    // v23 (round-29 #2): NET OF RETURNS — a returned local debt
+    // already shrank its local_debts row, and a returned PENDING
+    // صِلة debt already shrank its queue row; a returned SYNCED
+    // صِلة debt keeps its queue amount (the reversal payment row
+    // is what cancels it server-side), so the reversal total is
+    // subtracted here. The equation stays balanced in every
+    // scenario: revenue (net of RET rows) − creditSales (net of
+    // returns) + collections (reversals excluded) = the drawer.
     const creditSalesAllTime =
-      debtQueueTotals.allMinor / 100 + localBook.debtsMinor / 100;
+      debtQueueTotals.allMinor / 100 +
+      localBook.debtsMinor / 100 -
+      returnReversalsTotalMinor / 100;
     const localCollectionsAllTime = localBook.paymentsMinor / 100;
     const cashierCollectionsAllTime = cashierTotals.allMinor / 100;
     const appCollectionsAllTime = appTotals.allMinor / 100;
@@ -321,8 +334,7 @@ export const ReportService = {
     const voucherSalesAllTime = voucherGoodsAllTime.goodsAmount;
     const voucherCounterExtraAllTime =
       voucherRedemptionsAllTime.counterExtraMinor / 100;
-    const campaignSettlementsAllTime =
-      campaignTotals.settledMinorTotal / 100;
+    const campaignSettlementsAllTime = campaignTotals.settledMinorTotal / 100;
     return {
       revenueAllTime,
       creditSalesAllTime,

@@ -35,13 +35,19 @@ function rangeBounds(range: DateRange): [string, string] {
 export const ReportRepo = {
   async summary(range: DateRange): Promise<ReportSummary> {
     const [start, end] = rangeBounds(range);
+    // v23 (round-29 #2): RET rows are NEGATIVE sales — revenue/cogs/
+    // profit net out automatically; the invoice COUNT excludes them
+    // (a return is not an invoice) and they surface as their own
+    // returns line (count + refunded value).
     const salesResult = await getDb().execute(
       `SELECT
          COALESCE(SUM(total_amount), 0) AS revenue,
          COALESCE(SUM(total_cost), 0) AS cogs,
          COALESCE(SUM(total_profit), 0) AS profit,
          COALESCE(SUM(discount), 0) AS discount_total,
-         COUNT(*) AS invoices
+         COUNT(*) AS invoices,
+         COALESCE(SUM(CASE WHEN return_kind IS NOT NULL THEN 1 ELSE 0 END), 0) AS returns_cnt,
+         COALESCE(SUM(CASE WHEN return_kind IS NOT NULL THEN -total_amount ELSE 0 END), 0) AS returns_total
        FROM sales
        WHERE created_at >= ? AND created_at <= ?`,
       [start, end],
@@ -54,6 +60,8 @@ export const ReportRepo = {
             profit?: number;
             discount_total?: number;
             invoices?: number;
+            returns_cnt?: number;
+            returns_total?: number;
           }
         | undefined) ?? {};
 
@@ -68,7 +76,9 @@ export const ReportRepo = {
       | {items?: number}
       | undefined;
 
-    const invoices = Number(salesRow.invoices ?? 0);
+    const invoicesAll = Number(salesRow.invoices ?? 0);
+    const returnsCount = Number(salesRow.returns_cnt ?? 0);
+    const invoices = invoicesAll - returnsCount;
     const revenue = Number(salesRow.revenue ?? 0);
     return {
       revenue,
@@ -78,6 +88,8 @@ export const ReportRepo = {
       itemsCount: Number(itemsRow?.items ?? 0),
       discountTotal: Number(salesRow.discount_total ?? 0),
       avgInvoice: invoices > 0 ? revenue / invoices : 0,
+      returnsCount,
+      returnsTotal: Number(salesRow.returns_total ?? 0),
     };
   },
 
@@ -182,23 +194,29 @@ export const ReportRepo = {
     return points;
   },
 
-  /** v15 (round-21 #4) → v17 (round-23 #2): credit invoices in the
-   *  range, SPLIT BY SERIES — INV-D (صِلة debts) and INV-L (دفتر
-   *  المتجر). The store's accounting shows BOTH books; before v17
-   *  the local-book debt sales were invisible in the reports
-   *  («لا تظهر الديون المحلية بشكل صحيح في لوحة التقارير»). */
+  /** v15 (round-21 #4) → v17 (round-23 #2) → v23 (round-29 #2):
+   *  credit sales in the range, SPLIT BY SERIES — INV-D (صِلة) and
+   *  INV-L (دفتر المتجر) — NET OF RETURNS: a RET row carrying
+   *  return_kind 'sila'/'local' subtracts from its book's amount
+   * IN THE RETURN'S OWN PERIOD, so a debt-invoice return never
+   *  distorts the period's cash-sales math (its negative revenue
+   * and its negative credit-sale cancel out). */
   async debtSalesSummary(range: DateRange): Promise<DebtSalesSummary> {
     const [start, end] = rangeBounds(range);
     try {
       const result = await getDb().execute(
         `SELECT
            COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-D-%' THEN 1 ELSE 0 END), 0) AS sila_cnt,
-           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-D-%' THEN total_amount ELSE 0 END), 0) AS sila_amount,
+           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-D-%' THEN total_amount ELSE 0 END), 0)
+             + COALESCE(SUM(CASE WHEN return_kind = 'sila' THEN total_amount ELSE 0 END), 0) AS sila_amount,
            COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN 1 ELSE 0 END), 0) AS local_cnt,
-           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN total_amount ELSE 0 END), 0) AS local_amount
+           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN total_amount ELSE 0 END), 0)
+             + COALESCE(SUM(CASE WHEN return_kind = 'local' THEN total_amount ELSE 0 END), 0) AS local_amount
          FROM sales
          WHERE created_at >= ? AND created_at <= ?
-           AND (invoice_number LIKE 'INV-D-%' OR invoice_number LIKE 'INV-L-%')`,
+           AND (invoice_number LIKE 'INV-D-%'
+             OR invoice_number LIKE 'INV-L-%'
+             OR return_kind IS NOT NULL)`,
         [start, end],
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
@@ -267,7 +285,9 @@ export const ReportRepo = {
     }
   },
 
-  /** Detailed sale rows used by the CSV / XLS exporters. */
+  /** Detailed sale rows used by the CSV / XLS exporters.
+   *  v23 (round-29 #2): RET rows are included (negative) and
+   *  labelled «مرتجع». */
   async salesDetail(range: DateRange): Promise<
     {
       invoice: string;
@@ -292,7 +312,8 @@ export const ReportRepo = {
          s.total_cost AS cost,
          s.total_profit AS profit,
          s.discount AS discount,
-         s.payment_type AS payment_type
+         s.payment_type AS payment_type,
+         s.return_kind AS return_kind
        FROM sales s
        WHERE s.created_at >= ? AND s.created_at <= ?
        ORDER BY s.created_at ASC`,
@@ -309,7 +330,11 @@ export const ReportRepo = {
       profit: Number(row.profit ?? 0),
       discount: Number(row.discount ?? 0),
       paymentType:
-        String(row.payment_type ?? 'RETAIL') === 'WHOLESALE' ? 'جملة' : 'مفرق',
+        row.return_kind != null
+          ? 'مرتجع'
+          : String(row.payment_type ?? 'RETAIL') === 'WHOLESALE'
+          ? 'جملة'
+          : 'مفرق',
     }));
   },
 

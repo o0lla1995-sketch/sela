@@ -33,6 +33,11 @@ export const KEYS = {
   localDebtDay: 'local_debt_day_v1',
   localReceiptCounter: 'local_receipt_counter_v1',
   localReceiptDay: 'local_receipt_day_v1',
+  /** v23 (round-29 #2): the RETURNS series RET-YYYYMMDD-NNNN — its
+   *  own counter/day pair, same DB-aware never-backwards discipline
+   *  as the invoice series. */
+  returnCounter: 'return_counter_v1',
+  returnDay: 'return_day_v1',
   savedPrinter: 'saved_printer_v1',
   seededFlag: 'db_seeded_v1',
   notifications: 'notifications_v1',
