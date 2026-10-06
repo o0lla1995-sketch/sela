@@ -534,7 +534,8 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
         canvas = page.canvas
         y = margin + 18f
         // Page header on continuation pages.
-        val headPaint = android.graphics.Paint(bold).apply {
+        val headPaint = android.graphics.Paint().apply {
+          typeface = bold
           textSize = 10f
           color = android.graphics.Color.GRAY
           isAntiAlias = true
@@ -551,27 +552,32 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
       }
 
       // ── Title block ──
-      val titlePaint = android.graphics.Paint(bold).apply {
+      val titlePaint = android.graphics.Paint().apply {
+        typeface = bold
         textSize = 22f
         color = android.graphics.Color.BLACK
         isAntiAlias = true
       }
-      val subPaint = android.graphics.Paint(regular).apply {
+      val subPaint = android.graphics.Paint().apply {
+        typeface = regular
         textSize = 12f
         color = android.graphics.Color.DKGRAY
         isAntiAlias = true
       }
-      val cellPaint = android.graphics.Paint(regular).apply {
+      val cellPaint = android.graphics.Paint().apply {
+        typeface = regular
         textSize = 11f
         color = android.graphics.Color.BLACK
         isAntiAlias = true
       }
-      val cellBold = android.graphics.Paint(bold).apply {
+      val cellBold = android.graphics.Paint().apply {
+        typeface = bold
         textSize = 11f
         color = android.graphics.Color.BLACK
         isAntiAlias = true
       }
-      val accentPaint = android.graphics.Paint(bold).apply {
+      val accentPaint = android.graphics.Paint().apply {
+        typeface = bold
         textSize = 16f
         color = android.graphics.Color.rgb(0xF9, 0x73, 0x16)
         isAntiAlias = true
@@ -681,7 +687,8 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
       ensureSpace(30f)
       canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
       y += 20f
-      val footPaint = android.graphics.Paint(regular).apply {
+      val footPaint = android.graphics.Paint().apply {
+        typeface = regular
         textSize = 9f
         color = android.graphics.Color.GRAY
         isAntiAlias = true
