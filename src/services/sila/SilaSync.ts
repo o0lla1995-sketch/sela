@@ -39,11 +39,14 @@ import {notificationsStore} from '../../stores/notificationsStore';
 import {logDiag} from '../../core/diagnostics';
 import {getString, setString} from '../../storage/storage';
 import {SilaRepo} from './SilaRepo';
+import {VouchersRepo} from './VouchersRepo';
+import {VoucherService} from '../VoucherService';
 import {
   silaHealth,
   silaSendDebtBatch,
   silaSendPaymentBatch,
   silaFetchCustomers,
+  silaFetchSettlements,
   SilaApiError,
   silaErrorAdvice,
   type SilaDebtRecordInput,
@@ -61,6 +64,11 @@ const CUSTOMERS_CURSOR_KEY = 'sila_customers_updated_since_v1';
 /** One-time v12 repair flag — requeues rows failed by the v11
  *  null-fields VALIDATION_ERROR bug (see SilaRepo). */
 const VALIDATION_REQUEUE_FLAG = 'sila_requeued_validation_fix_v1';
+/** v20 (SILA_POS_VOUCHERS_API §4.2/§6): the settlements light-sync
+ *  cursor (updated_since) + the last-successful-sync stamp shown on
+ *  the campaigns screen as «آخر مزامنة». */
+const KEYS_CURSOR = 'sila_settlements_cursor_v1';
+const KEYS_SYNCED_AT = 'sila_settlements_synced_at_v1';
 /** v19 (round-25 #1): one-time baseline freeze — the FIRST v19
  *  customers pass anchors every existing customer's current
  *  reconciliation gap as HISTORY, so old app payments from before
@@ -260,7 +268,11 @@ async function syncCustomersCycle(): Promise<void> {
       notificationsStore.push(
         'sila_collection',
         'تحصيل جديد عبر تطبيق صِلة',
-        `سدّد زبون دينه من تطبيق صِلة — استلمت صِلة ${(recordedMinor / 100).toFixed(2)} ₪ نيابة عنك على ديون فواتير متجرك، وسُجّلت في الخزينة والتقارير`,
+        `سدّد زبون دينه من تطبيق صِلة — استلمت صِلة ${(
+          recordedMinor / 100
+        ).toFixed(
+          2,
+        )} ₪ نيابة عنك على ديون فواتير متجرك، وسُجّلت في الخزينة والتقارير`,
         {system: true},
       );
     }
@@ -371,6 +383,128 @@ async function refreshBalancesCycle(): Promise<boolean> {
   }
 }
 
+/** v20 (SILA_POS_VOUCHERS_API §5 rule 1 / §7.3): retries PENDING
+ *  voucher redemptions — each one a LIVE call replaying the SAME
+ *  idempotency_key until it resolves. Bounded per cycle so a long
+ *  backlog can never stall the debts loop; every resolution fires
+ *  a notification (the cashier must know before handing goods). */
+async function voucherRedemptionsCycle(): Promise<void> {
+  let rows;
+  try {
+    rows = await VouchersRepo.pendingRedemptions();
+  } catch {
+    return; // table missing on very old installs — quiet.
+  }
+  if (rows.length === 0) {
+    return;
+  }
+  const batch = rows.slice(0, 10);
+  for (const row of batch) {
+    try {
+      const outcome = await VoucherService.completePendingRedemption(row);
+      if (outcome === 'ok') {
+        const fresh = await VouchersRepo.byId(row.local_id);
+        notificationsStore.push(
+          'sila_voucher',
+          'اكتمل صرف قسيمة صِلة',
+          `نجح صرف القسيمة ${fresh?.reference_code ?? ''} (${
+            fresh?.campaign_name ?? 'حملة'
+          }) بمبلغ ${((fresh?.value_minor ?? 0) / 100).toFixed(
+            2,
+          )} ₪ — سلِّم المستحق بضاعته الآن. الإيصال: ${
+            fresh?.pos_receipt_ref ?? ''
+          }`,
+          {system: true},
+        );
+      } else if (outcome === 'failed') {
+        const fresh = await VouchersRepo.byId(row.local_id);
+        notificationsStore.push(
+          'sila_voucher',
+          'فشل صرف قسيمة نهائياً',
+          `${
+            fresh?.error_message ?? 'تعذر الصرف'
+          } — لا تُسلَّم البضاعة. الإيصال: ${fresh?.pos_receipt_ref ?? ''}`,
+          {system: true},
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logDiag('sila', `إعادة محاولة صرف قسيمة فشلت: ${message}`, 'warn');
+    }
+  }
+}
+
+/** v20 (§4.2/§6): the settlements light sync — the ONE source of
+ *  campaign-truth. Mirrors every campaign row + its settlements[]
+ *  into the local book, fires the two §6 notifications (partial→full
+ *  «استُوفي حقك كاملاً» + a new settlement arriving) and records the
+ *  updated_since cursor. Isolated: a failure here NEVER poisons the
+ *  debts sync state. */
+async function settlementsSyncCycle(): Promise<void> {
+  const store = useSilaStore.getState();
+  const pairing = store.pairing;
+  if (pairing == null) {
+    return;
+  }
+  const cursor = getString(KEYS_CURSOR, '');
+  try {
+    const feed = await silaFetchSettlements(
+      pairing,
+      cursor.length > 0 ? cursor : null,
+    );
+    for (const server of feed.campaigns ?? []) {
+      const before = await VouchersRepo.upsertCampaignFromFeed(server);
+      const freshSettlements = await VouchersRepo.upsertSettlements(
+        server.campaign_id,
+        server.campaign_name,
+        server.settlements,
+      );
+      // §6 rule: ONE notification when a campaign reaches full —
+      // «استُوفي حقك كاملاً» (never per-change noise).
+      if (
+        before != null &&
+        before.settlement_state !== 'full' &&
+        server.settlement_state === 'full'
+      ) {
+        notificationsStore.push(
+          'sila_campaign',
+          'تسوية كاملة لحملة',
+          `سدّدت المؤسسة كامل مستحقاتك في حملة «${server.campaign_name}» (${
+            server.redeemed_value_minor / 100
+          } ₪) — الحملة مسدَّدة كاملة الآن`,
+          {system: true},
+        );
+      }
+      // §6 rule: a NEW settlement arrived (money on its way / to
+      // confirm in the Sila app).
+      for (const entry of freshSettlements) {
+        const pending =
+          entry.status === 'pending' ? ' — أكّد الاستلام من تطبيق صِلة' : '';
+        notificationsStore.push(
+          'sila_campaign',
+          'تسوية جديدة من حملة',
+          `وصلت تسوية ${
+            entry.kind === 'advance' ? 'دفعة مقدمة' : 'تعويض'
+          } بمبلغ ${entry.amount_minor / 100} ₪ من حملة «${
+            server.campaign_name
+          }»${pending}`,
+          {system: true},
+        );
+      }
+    }
+    setString(KEYS_CURSOR, new Date().toISOString());
+    setString(KEYS_SYNCED_AT, new Date().toISOString());
+  } catch (error) {
+    if (error instanceof SilaApiError && error.errorClass === 'device') {
+      // The engine's device handling owns this case — stay quiet so
+      // the message stays single-sourced.
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    logDiag('sila', `مزامنة تسويات الحملات تأجلت: ${message}`, 'warn');
+  }
+}
+
 async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
   const store = useSilaStore.getState();
   const pairing = store.pairing;
@@ -446,6 +580,24 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
     // Recover rows stuck in 'syncing' from a crash mid-batch (§8).
     await SilaRepo.recoverStuck();
 
+    // ── v20: the voucher cycles — independent of the debts queue,
+    //    isolated so a failure here can never poison the debt sync
+    //    state (the v12 customers-cycle lesson). Pending redemptions
+    //    replay LIVE with the same idempotency keys (§5 rule 1);
+    //    the settlements feed mirrors the campaigns book (§4.2).
+    try {
+      await voucherRedemptionsCycle();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logDiag('sila', `دورة صرف القسائم فشلت: ${message}`, 'warn');
+    }
+    try {
+      await settlementsSyncCycle();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logDiag('sila', `دورة تسويات الحملات فشلت: ${message}`, 'warn');
+    }
+
     const [counts, paymentCounts] = await Promise.all([
       SilaRepo.counts(),
       SilaRepo.paymentCounts(),
@@ -464,7 +616,9 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
       }
       const idleText =
         counts.failed > 0 || paymentCounts.failed > 0
-          ? `لا توجد عمليات بانتظار المزامنة — و${counts.failed + paymentCounts.failed} عملية فاشلة بحاجة لمراجعة`
+          ? `لا توجد عمليات بانتظار المزامنة — و${
+              counts.failed + paymentCounts.failed
+            } عملية فاشلة بحاجة لمراجعة`
           : 'كل الديون والسدادّات مسجلة في صِلة';
       useSilaStore.getState().setSyncState('idle', idleText, nowIso());
       return {
@@ -860,7 +1014,9 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
       if (renumberedReceipts > 0) {
         bits.push(`${renumberedReceipts} إيصال`);
       }
-      parts.push(`أُعيد ترقيم ${bits.join(' و')} بعد تعارض مع أرقام قديمة في صِلة`);
+      parts.push(
+        `أُعيد ترقيم ${bits.join(' و')} بعد تعارض مع أرقام قديمة في صِلة`,
+      );
     }
     const stillWaiting = after.pending + paymentAfter.pending;
     const message =
@@ -873,11 +1029,7 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
         : 'كل الديون والسدادّات مسجلة في صِلة';
     useSilaStore
       .getState()
-      .setSyncState(
-        stillWaiting > 0 ? 'syncing' : 'idle',
-        message,
-        nowIso(),
-      );
+      .setSyncState(stillWaiting > 0 ? 'syncing' : 'idle', message, nowIso());
     return {
       state: stillWaiting > 0 ? 'syncing' : 'idle',
       synced: syncedThisCycle,
@@ -1016,6 +1168,22 @@ export const SilaSync = {
    * repayments. Safe offline (resolves false, never throws). */
   async refreshBalances(): Promise<boolean> {
     return refreshBalancesCycle();
+  },
+
+  /** v20 (§6): public settlements refresh for the campaigns screen's
+   *  manual sync button — retries pending redemptions + mirrors the
+   *  settlements feed immediately. Safe offline (never throws). */
+  async refreshVouchers(): Promise<void> {
+    try {
+      await voucherRedemptionsCycle();
+    } catch {
+      // isolated by design
+    }
+    try {
+      await settlementsSyncCycle();
+    } catch {
+      // isolated by design
+    }
   },
 
   /** v16 (round-22 #1): public pairing/restore hook — advances the

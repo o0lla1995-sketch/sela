@@ -51,6 +51,10 @@ import {SilaRepo} from '../services/sila/SilaRepo';
 import {SilaSync} from '../services/sila/SilaSync';
 import {parseSilaQr} from '../services/sila/qr';
 import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
+import {
+  VoucherRedeemSheet,
+  type VoucherCartContext,
+} from './sila/VoucherRedeemSheet';
 import type {LocalCustomerBalance, SilaCustomer} from '../core/types';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {
@@ -238,15 +242,18 @@ export function PosScreen() {
   /** v15 (round-21 #5): the debt chooser — scan the customer's QR or
    *  pick a known صِلة customer straight from the cached list. */
   const [debtChooser, setDebtChooser] = useState(false);
+  // v20: the voucher redemption sheet — «صرف قسيمة صلة» from the
+  // checkout row (cart-tied: the goods become the INV-V sale).
+  const [voucherSheet, setVoucherSheet] = useState(false);
   const [customerPicker, setCustomerPicker] = useState(false);
   const [pickerCustomers, setPickerCustomers] = useState<SilaCustomer[]>([]);
   const [pickerQuery, setPickerQuery] = useState('');
   /** v16 (round-22 #4): the LOCAL debt-book picker — customers of
    *  this store (دفتر المتجر), searched live, charged directly. */
   const [localPicker, setLocalPicker] = useState(false);
-  const [localCustomers, setLocalCustomers] = useState<
-    LocalCustomerBalance[]
-  >([]);
+  const [localCustomers, setLocalCustomers] = useState<LocalCustomerBalance[]>(
+    [],
+  );
   const [localQuery, setLocalQuery] = useState('');
 
   const scannerMode: ScannerMode = settings.scannerMode;
@@ -1574,7 +1581,11 @@ export function PosScreen() {
       Math.abs(debtConfirm.amountMinor - Math.round(totals.total * 100)) > 0
     ) {
       toast(
-        `مبلغ الرمز ${formatMoney(debtConfirm.amountMinor / 100)} يختلف عن قيمة الفاتورة ${formatMoney(totals.total)} — لا يُسجَّل الدين`,
+        `مبلغ الرمز ${formatMoney(
+          debtConfirm.amountMinor / 100,
+        )} يختلف عن قيمة الفاتورة ${formatMoney(
+          totals.total,
+        )} — لا يُسجَّل الدين`,
         'error',
         5000,
       );
@@ -2172,6 +2183,33 @@ export function PosScreen() {
                     loading={busy}
                     style={{flex: 1.5}}
                   />
+                  {/* v20: صرف قسيمة صِلة — cart-tied voucher redemption
+                    (campaigns the store is contracted in). Shown when
+                    paired: the whole voucher path is a live صِلة flow. */}
+                  {silaPaired ? (
+                    <TouchableOpacity
+                      style={[styles.debtBtn, styles.voucherBtn]}
+                      onPress={() => {
+                        if (lines.length === 0) {
+                          toast(
+                            'أضف بضاعة المستحق إلى السلة أولاً — ثم اصرف القسيمة',
+                            'info',
+                          );
+                          return;
+                        }
+                        if (busy || debtBusy) {
+                          return;
+                        }
+                        setVoucherSheet(true);
+                      }}
+                      disabled={busy || debtBusy}
+                      activeOpacity={0.8}>
+                      <Icon name="ticket" size={16} color={c.info} />
+                      <Text style={[styles.debtBtnText, {color: c.info}]}>
+                        قسيمة
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
                   {/* v11 (round-17 #2): البيع بالدين — v16 (round-22 #4)
                     opens the chooser: صِلة QR / صِلة customers / the
                     STORE-LOCAL debt book (works without صِلة). The
@@ -2304,6 +2342,41 @@ export function PosScreen() {
         pricingMode={pricingMode}
         onClose={closeWeightSheet}
         onConfirm={confirmWeight}
+      />
+
+      {/* ── v20: صرف قسيمة صلة — the shared redemption sheet. INLINE
+          absolute overlay (the ROM Modal lesson). Cart-tied: the
+          goods become the INV-V sale once the server says ok. ── */}
+      <VoucherRedeemSheet
+        visible={voucherSheet}
+        onClose={() => setVoucherSheet(false)}
+        cart={
+          lines.length > 0
+            ? ({
+                lines,
+                discount,
+                pricingMode,
+                total: totals.total,
+                itemsCount: totals.itemsCount,
+              } as VoucherCartContext)
+            : null
+        }
+        receiptSettings={{
+          storeName: settings.storeName,
+          storePhone: settings.storePhone,
+          footerMessage: settings.footerMessage,
+          storeLogoPath: settings.storeLogoPath,
+          paperWidth: settings.paperWidth,
+          codepage: settings.codepage,
+          showProfit: settings.showProfitOnReceipt,
+        }}
+        printerConnected={printerStatus === 'connected'}
+        onRedeemed={() => {
+          // The INV-V sale is booked — the cart is fulfilled.
+          clear();
+          setDiscountText('');
+          void refreshCatalog();
+        }}
       />
 
       {/* ── v15 (round-21 #5): debt chooser — scan the QR or pick a
@@ -2602,9 +2675,7 @@ export function PosScreen() {
               <View style={styles.debtCustomerIcon}>
                 <Icon
                   name={
-                    debtConfirm?.amountSource === 'local'
-                      ? 'book'
-                      : 'qrFrame'
+                    debtConfirm?.amountSource === 'local' ? 'book' : 'qrFrame'
                   }
                   size={22}
                   color={c.accent}
@@ -2656,7 +2727,8 @@ export function PosScreen() {
                   <View style={styles.debtCreditRow}>
                     <Icon name="wallet" size={15} color={c.success} />
                     <Text style={[styles.debtCreditText, {color: c.success}]}>
-                      رصيد مسبق في صِلة: {formatMoney((confirm.creditMinor ?? 0) / 100)}
+                      رصيد مسبق في صِلة:{' '}
+                      {formatMoney((confirm.creditMinor ?? 0) / 100)}
                     </Text>
                   </View>
                   <View style={styles.debtCreditRow}>
@@ -2666,7 +2738,11 @@ export function PosScreen() {
                     </Text>
                   </View>
                   <View style={styles.debtCreditRow}>
-                    <Icon name="book" size={14} color={net > 0 ? c.warning : c.success} />
+                    <Icon
+                      name="book"
+                      size={14}
+                      color={net > 0 ? c.warning : c.success}
+                    />
                     <Text
                       style={[
                         styles.debtCreditText,
@@ -2694,10 +2770,11 @@ export function PosScreen() {
               <View style={styles.debtWarnBox}>
                 <Icon name="alert" size={15} color={c.danger} />
                 <Text style={styles.debtWarnText}>
-                  مبلغ الرمز ({formatMoney((debtConfirm?.amountMinor ?? 0) / 100)})
-                  يختلف عن قيمة فاتورة البيع ({formatMoney(totals.total)})
-                  — لا يمكن تسجيل الدين. اطلب من الزبون رمزاً بمبلغ الفاتورة
-                  نفسه أو عدّل السلة.
+                  مبلغ الرمز (
+                  {formatMoney((debtConfirm?.amountMinor ?? 0) / 100)}) يختلف عن
+                  قيمة فاتورة البيع ({formatMoney(totals.total)}) — لا يمكن
+                  تسجيل الدين. اطلب من الزبون رمزاً بمبلغ الفاتورة نفسه أو عدّل
+                  السلة.
                 </Text>
               </View>
             ) : null}
@@ -2934,9 +3011,7 @@ function WeightSheet({
                           setWeightText('');
                         }}
                         activeOpacity={0.75}>
-                        <Text
-                          style={styles.weightQuickValue}
-                          numberOfLines={1}>
+                        <Text style={styles.weightQuickValue} numberOfLines={1}>
                           {row.unitName}
                         </Text>
                         <Text style={styles.weightQuickName} numberOfLines={1}>
@@ -3517,6 +3592,10 @@ const useStyles = makeStyles(c =>
       zIndex: 10,
       elevation: 0,
     },
+    /** v20: the قسيمة chip — the voucher twin of the debt chip. */
+    voucherBtn: {
+      borderColor: c.infoSoft,
+    },
     debtBtnPaired: {
       backgroundColor: c.accentSofter,
       borderColor: c.accent,
@@ -3907,104 +3986,104 @@ const useStyles = makeStyles(c =>
       marginTop: 1,
     },
     // v15 (round-21 #5): debt chooser + customers picker sheets.
-  chooserHint: {
-    color: c.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    textAlign: 'center',
-    marginBottom: spacing.xs,
-  },
-  chooserBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    backgroundColor: c.surfaceHi,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: c.borderSoft,
-    padding: spacing.md,
-  },
-  chooserIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    backgroundColor: c.accentSofter,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  chooserTitle: {
-    color: c.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.body,
-  },
-  chooserText: {
-    color: c.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    lineHeight: 17,
-    marginTop: 1,
-  },
-  pickerSheet: {
-    backgroundColor: c.surface,
-    borderTopLeftRadius: radius.lg + 4,
-    borderTopRightRadius: radius.lg + 4,
-    padding: spacing.lg,
-    gap: spacing.sm,
-    paddingBottom: spacing.lg,
-    maxHeight: '82%',
-  },
-  pickerSearch: {
-    backgroundColor: c.surfaceHi,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: c.border,
-    color: c.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.body,
-    textAlign: 'right',
-    paddingVertical: spacing.sm + 2,
-    paddingHorizontal: spacing.md,
-  },
-  pickerList: {
-    flexGrow: 0,
-  },
-  pickerListContent: {
-    gap: spacing.xs,
-    paddingBottom: spacing.sm,
-  },
-  pickerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    backgroundColor: c.surfaceHi,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: c.borderSoft,
-    padding: spacing.sm + 2,
-  },
-  pickerAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: c.accentSofter,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pickerInitial: {
-    color: c.accent,
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  pickerName: {
-    color: c.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.caption + 1,
-  },
-  pickerMeta: {
-    color: c.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.micro + 1,
-    marginTop: 1,
-  },
+    chooserHint: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'center',
+      marginBottom: spacing.xs,
+    },
+    chooserBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.md,
+    },
+    chooserIcon: {
+      width: 46,
+      height: 46,
+      borderRadius: 14,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    chooserTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    chooserText: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 17,
+      marginTop: 1,
+    },
+    pickerSheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      gap: spacing.sm,
+      paddingBottom: spacing.lg,
+      maxHeight: '82%',
+    },
+    pickerSearch: {
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+      textAlign: 'right',
+      paddingVertical: spacing.sm + 2,
+      paddingHorizontal: spacing.md,
+    },
+    pickerList: {
+      flexGrow: 0,
+    },
+    pickerListContent: {
+      gap: spacing.xs,
+      paddingBottom: spacing.sm,
+    },
+    pickerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.sm + 2,
+    },
+    pickerAvatar: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pickerInitial: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    pickerName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption + 1,
+    },
+    pickerMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+    },
   }),
 );

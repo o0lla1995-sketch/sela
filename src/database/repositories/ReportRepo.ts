@@ -231,6 +231,42 @@ export const ReportRepo = {
     }
   },
 
+  /** v20 (SILA_POS_VOUCHERS_API §2): the VOUCHER sales series
+   *  (INV-V-…) in a range — the goods part of voucher redemptions
+   *  lives in the sales table like every sale (revenue, top
+   *  products, daily series all count it), while the CLAIM on the
+   *  institution is mirrored in campaign_debts from the server.
+   *  The cash card subtracts these totals from «المبيعات النقدية»
+   *  because no counter cash entered for them at sale time (only
+   *  the counter-extra part did) — the money arrives with the
+   *  campaign settlements instead. */
+  async voucherSalesSummary(
+    range: DateRange,
+  ): Promise<{count: number; goodsAmount: number}> {
+    const [start, end] = rangeBounds(range);
+    try {
+      const result = await getDb().execute(
+        `SELECT
+           COUNT(*) AS cnt,
+           COALESCE(SUM(total_amount), 0) AS goods_amount
+         FROM sales
+         WHERE created_at >= ? AND created_at <= ?
+           AND invoice_number LIKE 'INV-V-%'`,
+        [start, end],
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        cnt?: number | null;
+        goods_amount?: number | null;
+      };
+      return {
+        count: Number(row.cnt ?? 0),
+        goodsAmount: Number(row.goods_amount ?? 0),
+      };
+    } catch {
+      return {count: 0, goodsAmount: 0};
+    }
+  },
+
   /** Detailed sale rows used by the CSV / XLS exporters. */
   async salesDetail(range: DateRange): Promise<
     {

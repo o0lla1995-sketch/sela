@@ -15,6 +15,7 @@ import {ReportRepo} from '../database/repositories/ReportRepo';
 import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 import {SilaRepo} from './sila/SilaRepo';
+import {VouchersRepo} from './sila/VouchersRepo';
 import {useSilaStore} from '../stores/silaStore';
 import {localDateShift, localMonthStart, localToday} from '../core/format';
 import type {
@@ -64,6 +65,20 @@ export interface CashDebtsBundle {
   paired: boolean;
   /** آخر تحديث لأرصدة صِلة (يُعرض فقط عند الربط). */
   lastSyncedAt: string | null;
+  /** v20: مبيعات القسائم بالفترة — عدد القسائم المصروفة وقيمتها
+   *  الاسمية كما يقرّها الخادم (تطابق «مبيعات الشهر والحملات» في
+   *  تطبيق صِلة). */
+  voucherSalesCount: number;
+  voucherSalesAmount: number;
+  /** v20: جزء البضاعة المسجّل كفواتير INV-V (ضمن المبيعات). */
+  voucherGoodsAmount: number;
+  /** v20: الفرق النقدي الذي دفعه المستحق بالكاشير (سلة > قسيمة). */
+  voucherCounterExtraAmount: number;
+  /** v20: تسويات الحملات المؤكّدة المستلمة بالفترة — المال الذي
+   *  وصل فعلاً من المؤسسات (الباقي «بانتظار تأكيد الاستلام»). */
+  campaignSettlementsAmount: number;
+  /** v20: المستحق الآن من كل الحملات (لقطة الخادم). */
+  campaignDueMinor: number;
 }
 
 export interface ReportBundle {
@@ -95,6 +110,12 @@ export interface TreasurySnapshot {
   appCollectionsAllTime: number;
   /** تسويات الرصيد المسبق عبر التاريخ. */
   prepaidCoveredAllTime: number;
+  /** v20: تسويات الحملات المؤكّدة عبر التاريخ (من لقطة الخادم). */
+  campaignSettlementsAllTime: number;
+  /** v20: فواتير القسائم عبر التاريخ (بضاعة خرجت بلا نقدي كاشير). */
+  voucherSalesAllTime: number;
+  /** v20: الفرق النقدي الذي دفعه المستحقون بالكاشير عبر التاريخ. */
+  voucherCounterExtraAllTime: number;
   /** النقد المتوقع في الخزينة الآن. */
   cashTotal: number;
 }
@@ -149,6 +170,10 @@ export const ReportService = {
       localBook,
       appCollections,
       debtQueueTotals,
+      voucherSales,
+      voucherGoods,
+      voucherSettlements,
+      campaignTotals,
     ] = await Promise.all([
       ReportRepo.summary(range),
       ReportRepo.topProducts(range, 10),
@@ -164,18 +189,33 @@ export const ReportService = {
       // inside the range — the rows the reconciliation engine writes.
       SilaRepo.appCollectionsInRange(range.from, range.to),
       SilaRepo.totals(),
+      // v20: the voucher campaigns columns (§2 — sale at face value,
+      // goods as INV-V invoices, confirmed settlements as receipts).
+      VouchersRepo.okInRange(range.from, range.to),
+      ReportRepo.voucherSalesSummary(range),
+      VouchersRepo.settlementsConfirmedInRange(range.from, range.to),
+      VouchersRepo.campaignsTotals(),
     ]);
 
     const topByProfit = [...topByRevenue]
       .sort((a, b) => b.profit - a.profit)
       .slice(0, 10);
 
-    const salesCash = summary.revenue - debtSales.amount;
+    // v20: the voucher sales are inside revenue (INV-V invoices) but
+    // only their COUNTER-EXTRA part entered the drawer at sale time —
+    // the claim part arrives later with the campaign settlements
+    // (§2: التسوية تحصيل). The equation stays balanced either way.
+    const salesCash =
+      summary.revenue -
+      debtSales.amount -
+      voucherGoods.goodsAmount +
+      voucherSales.counterExtraMinor / 100;
     const collections =
       (silaPayments.minor +
         localPayments.minor +
         appCollections.minor +
-        creditCovered) /
+        creditCovered +
+        voucherSettlements.minor) /
       100;
 
     return {
@@ -204,11 +244,16 @@ export const ReportService = {
         silaOutstandingMinor:
           silaTotals.posTotalMinor + debtQueueTotals.pendingMinor,
         silaDebtorsCount:
-          silaTotals.debtorsCount +
-          (debtQueueTotals.pendingCount > 0 ? 1 : 0),
+          silaTotals.debtorsCount + (debtQueueTotals.pendingCount > 0 ? 1 : 0),
         appOriginOutstandingMinor: silaTotals.appTotalMinor,
         paired: isActuallyPaired(),
         lastSyncedAt: silaTotals.lastSyncedAt,
+        voucherSalesCount: voucherSales.count,
+        voucherSalesAmount: voucherSales.valueMinor / 100,
+        voucherGoodsAmount: voucherGoods.goodsAmount,
+        voucherCounterExtraAmount: voucherSales.counterExtraMinor / 100,
+        campaignSettlementsAmount: voucherSettlements.minor / 100,
+        campaignDueMinor: campaignTotals.dueMinor,
       },
     };
   },
@@ -224,12 +269,18 @@ export const ReportService = {
       localBook,
       cashierTotals,
       appTotals,
+      voucherGoodsAllTime,
+      voucherRedemptionsAllTime,
+      campaignTotals,
     ] = await Promise.all([
       SaleRepo.allTimeRevenue(),
       SilaRepo.totals(),
       LocalDebtsRepo.totals(),
       SilaRepo.paymentsTotals(),
       SilaRepo.appCollectionsTotals(),
+      ReportRepo.voucherSalesSummary({from: '2000-01-01', to: '2999-12-31'}),
+      VouchersRepo.okInRange('2000-01-01', '2999-12-31'),
+      VouchersRepo.campaignsTotals(),
     ]);
     // Credit sales that never entered the drawer as cash at sale
     // time: the whole INV-D queue (credit-covered parts return via
@@ -242,6 +293,14 @@ export const ReportService = {
     const appCollectionsAllTime = appTotals.allMinor / 100;
     const prepaidCoveredAllTime =
       (await SilaRepo.creditCoveredInRange('2000-01-01', '2999-12-31')) / 100;
+    // v20: voucher goods left the store inside revenue but only the
+    // counter-extra entered the drawer — the claim part arrives with
+    // the CONFIRMED campaign settlements (server snapshot truth).
+    const voucherSalesAllTime = voucherGoodsAllTime.goodsAmount;
+    const voucherCounterExtraAllTime =
+      voucherRedemptionsAllTime.counterExtraMinor / 100;
+    const campaignSettlementsAllTime =
+      campaignTotals.settledConfirmedMinor / 100;
     return {
       revenueAllTime,
       creditSalesAllTime,
@@ -249,13 +308,19 @@ export const ReportService = {
       cashierCollectionsAllTime,
       appCollectionsAllTime,
       prepaidCoveredAllTime,
+      campaignSettlementsAllTime,
+      voucherSalesAllTime,
+      voucherCounterExtraAllTime,
       cashTotal:
         revenueAllTime -
-        creditSalesAllTime +
+        creditSalesAllTime -
+        voucherSalesAllTime +
+        voucherCounterExtraAllTime +
         localCollectionsAllTime +
         cashierCollectionsAllTime +
         appCollectionsAllTime +
-        prepaidCoveredAllTime,
+        prepaidCoveredAllTime +
+        campaignSettlementsAllTime,
     };
   },
 

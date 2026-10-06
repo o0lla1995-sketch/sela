@@ -223,8 +223,8 @@ export function ReportsScreen() {
                   {formatMoney(cash?.collected ?? 0)}
                 </Text>
                 <Text style={styles.cashHeroMeta}>
-                  مبيعات نقدية {formatMoney(cash?.salesCash ?? 0)} + تحصيلات
-                  ديون {formatMoney(cash?.collections ?? 0)}
+                  مبيعات نقدية {formatMoney(cash?.salesCash ?? 0)} + مقبوضات
+                  (ديون وحملات) {formatMoney(cash?.collections ?? 0)}
                 </Text>
               </View>
 
@@ -271,6 +271,19 @@ export function ReportsScreen() {
                         {formatMoney(cash?.prepaidAmount ?? 0)}
                       </Text>
                     </View>
+                    {/* v20: money actually received from institutions
+                        (confirmed settlements only — pending ones wait
+                        for the merchant's receipt confirmation). */}
+                    {(cash?.campaignSettlementsAmount ?? 0) > 0 ? (
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          منها: تسويات الحملات (قسائم مؤكّدة)
+                        </Text>
+                        <Text style={[styles.rowValue, {color: c.success}]}>
+                          {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
+                        </Text>
+                      </View>
+                    ) : null}
                   </>
                 ) : null}
               </View>
@@ -294,15 +307,69 @@ export function ReportsScreen() {
                 </View>
                 {paired ? (
                   <View style={styles.rowLine}>
-                    <Text style={styles.rowLabel}>
-                      منها: عبر صِلة (INV-D)
-                    </Text>
+                    <Text style={styles.rowLabel}>منها: عبر صِلة (INV-D)</Text>
                     <Text style={styles.rowValue}>
                       {formatMoney(cash?.silaCreditSalesAmount ?? 0)}
                     </Text>
                   </View>
                 ) : null}
               </View>
+
+              {/* 2-ج-2) v20: مبيعات القسائم الشرائية بالفترة — the
+                  campaigns column (face value from the server + the
+                  goods invoices + the counter difference). Shown when
+                  there is any voucher activity in the range. */}
+              {(cash?.voucherSalesCount ?? 0) > 0 ? (
+                <>
+                  <Text style={styles.subTitle}>القسائم الشرائية بالفترة</Text>
+                  <View style={styles.rowBox}>
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        قسائم مصروفة · {cash?.voucherSalesCount ?? 0} عملية
+                      </Text>
+                      <Text style={[styles.rowValue, {color: c.info}]}>
+                        {formatMoney(cash?.voucherSalesAmount ?? 0)}
+                      </Text>
+                    </View>
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        منها: بضاعة مسجّلة (INV-V)
+                      </Text>
+                      <Text style={styles.rowValue}>
+                        {formatMoney(cash?.voucherGoodsAmount ?? 0)}
+                      </Text>
+                    </View>
+                    {(cash?.voucherCounterExtraAmount ?? 0) > 0 ? (
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          منها: فرق نقدي استُلم فوراً بالكاشير
+                        </Text>
+                        <Text style={styles.rowValue}>
+                          {formatMoney(cash?.voucherCounterExtraAmount ?? 0)}
+                        </Text>
+                      </View>
+                    ) : null}
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        تسويات مؤكّدة وصلت بالفترة
+                      </Text>
+                      <Text style={styles.rowValue}>
+                        {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
+                      </Text>
+                    </View>
+                    {(cash?.campaignDueMinor ?? 0) > 0 ? (
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          المستحق الآن من الحملات
+                        </Text>
+                        <Text style={[styles.rowValue, {color: c.warning}]}>
+                          {formatMoney((cash?.campaignDueMinor ?? 0) / 100)}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                </>
+              ) : null}
 
               {/* 2-د) The outstanding snapshot — receivables now.
                   v19 (round-25 #2): the informational app-origin cell
@@ -338,7 +405,9 @@ export function ReportsScreen() {
                 {paired && (cash?.appOriginOutstandingMinor ?? 0) > 0 ? (
                   <View style={styles.outstandingCellInfo}>
                     <Text style={styles.outstandingValueInfo}>
-                      {formatMoney((cash?.appOriginOutstandingMinor ?? 0) / 100)}
+                      {formatMoney(
+                        (cash?.appOriginOutstandingMinor ?? 0) / 100,
+                      )}
                     </Text>
                     <Text style={styles.outstandingMeta}>
                       ديون تطبيق صِلة — للمعلومية فقط، ليست من مبيعاتك
@@ -348,10 +417,9 @@ export function ReportsScreen() {
               </View>
 
               <Text style={styles.chartHint}>
-                المبيعات أعلاه تشمل فواتير الدين لأنها بضاعة خرجت من
-                مخزونك؛ «النقد المحصّل» يطرحها ويعيد إضافة ما استلمته
-                فعلاً من المقبوضات. السداد ليس إيراداً — إنه تحويل الدين
-                إلى نقد.
+                المبيعات أعلاه تشمل فواتير الدين لأنها بضاعة خرجت من مخزونك؛
+                «النقد المحصّل» يطرحها ويعيد إضافة ما استلمته فعلاً من
+                المقبوضات. السداد ليس إيراداً — إنه تحويل الدين إلى نقد.
               </Text>
             </Card>
 

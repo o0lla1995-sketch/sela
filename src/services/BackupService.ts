@@ -249,6 +249,65 @@ interface BackupFile {
     amount_minor: number;
     detected_at: string;
   }[];
+  /** v20 (SILA_POS_VOUCHERS_API): the voucher campaigns book —
+   *  redemption attempts (with their cart snapshots + sale links),
+   *  the campaigns claim ledger and the settlements mirror.
+   *  Restoring them keeps the treasury/reports whole and stops the
+   *  settlements sync from re-notifying old arrivals; campaign
+   *  balances re-verify against the server on the next sync anyway
+   *  (server truth wins). */
+  voucher_redemptions?: {
+    idempotency_key: string;
+    payload: string;
+    campaign_id: string | null;
+    campaign_name: string | null;
+    campaign_kind: string | null;
+    voucher_id: string | null;
+    value_minor: number;
+    pos_receipt_ref: string | null;
+    reference_code: string | null;
+    beneficiary_last4: string | null;
+    redeemed_at: string;
+    state: string;
+    cart_json: string | null;
+    sale_id: number | null;
+    counter_extra_minor: number;
+    error_code: string | null;
+    error_message: string | null;
+    retry_count: number;
+    synced_at: string | null;
+    created_at: string;
+  }[];
+  campaign_debts?: {
+    campaign_id: string;
+    campaign_name: string;
+    kind: string | null;
+    campaign_status: string | null;
+    merchant_status: string | null;
+    starts_at: string | null;
+    ends_at: string | null;
+    redeemed_count: number;
+    redeemed_value_minor: number;
+    settled_minor: number;
+    settled_pending_minor: number;
+    settled_confirmed_minor: number;
+    due_minor: number;
+    settlement_state: string;
+    last_redemption_at: string | null;
+    last_settlement_at: string | null;
+    updated_at: string | null;
+  }[];
+  campaign_settlements?: {
+    settlement_id: string;
+    campaign_id: string;
+    campaign_name: string | null;
+    amount_minor: number;
+    kind: string | null;
+    status: string;
+    method: string | null;
+    reference: string | null;
+    created_at: string;
+  }[];
   /** v8.3: embedded product image files (base64 JPEG) — keyed by
    *  `name`, referenced by the products' original image paths. */
   images?: {name: string; data: string}[];
@@ -287,6 +346,9 @@ export const BackupService = {
       localDebts,
       localPayments,
       appCollections,
+      voucherRedemptions,
+      campaignDebts,
+      campaignSettlements,
     ] = await Promise.all([
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
@@ -327,33 +389,70 @@ export const BackupService = {
                 reconcile_offset_minor, last_synced_at
          FROM sila_customers`,
       ),
-      db.execute(
-        `SELECT idempotency_key, customer_id, customer_name, customer_phone_last4,
+      db
+        .execute(
+          `SELECT idempotency_key, customer_id, customer_name, customer_phone_last4,
                 amount_minor, payment_method, pos_receipt_ref, description,
                 paid_at, state, reference_code, transaction_id,
                 outstanding_after, synced_at, error_code, error_message,
                 retry_count, created_at
          FROM sila_payment_queue`,
-      ).catch(() => ({rows: {_array: []}})),
-      db.execute(
-        `SELECT id, id_number, name, phone, notes, sila_customer_id,
+        )
+        .catch(() => ({rows: {_array: []}})),
+      db
+        .execute(
+          `SELECT id, id_number, name, phone, notes, sila_customer_id,
                 sila_linked_at, created_at
          FROM local_customers`,
-      ).catch(() => ({rows: {_array: []}})),
-      db.execute(
-        `SELECT local_customer_id, invoice_ref, amount_minor, description,
+        )
+        .catch(() => ({rows: {_array: []}})),
+      db
+        .execute(
+          `SELECT local_customer_id, invoice_ref, amount_minor, description,
                 migrated, migrated_ref, created_at
          FROM local_debts`,
-      ).catch(() => ({rows: {_array: []}})),
-      db.execute(
-        `SELECT local_customer_id, receipt_ref, amount_minor, method, note,
+        )
+        .catch(() => ({rows: {_array: []}})),
+      db
+        .execute(
+          `SELECT local_customer_id, receipt_ref, amount_minor, method, note,
                 created_at
          FROM local_payments`,
-      ).catch(() => ({rows: {_array: []}})),
-      db.execute(
-        `SELECT customer_id, customer_name, amount_minor, detected_at
+        )
+        .catch(() => ({rows: {_array: []}})),
+      db
+        .execute(
+          `SELECT customer_id, customer_name, amount_minor, detected_at
          FROM sila_app_collections`,
-      ).catch(() => ({rows: {_array: []}})),
+        )
+        .catch(() => ({rows: {_array: []}})),
+      db
+        .execute(
+          `SELECT idempotency_key, payload, campaign_id, campaign_name,
+                campaign_kind, voucher_id, value_minor, pos_receipt_ref,
+                reference_code, beneficiary_last4, redeemed_at, state,
+                cart_json, sale_id, counter_extra_minor, error_code,
+                error_message, retry_count, synced_at, created_at
+         FROM voucher_redemptions`,
+        )
+        .catch(() => ({rows: {_array: []}})),
+      db
+        .execute(
+          `SELECT campaign_id, campaign_name, kind, campaign_status,
+                merchant_status, starts_at, ends_at, redeemed_count,
+                redeemed_value_minor, settled_minor, settled_pending_minor,
+                settled_confirmed_minor, due_minor, settlement_state,
+                last_redemption_at, last_settlement_at, updated_at
+         FROM campaign_debts`,
+        )
+        .catch(() => ({rows: {_array: []}})),
+      db
+        .execute(
+          `SELECT settlement_id, campaign_id, campaign_name, amount_minor,
+                kind, status, method, reference, created_at
+         FROM campaign_settlements`,
+        )
+        .catch(() => ({rows: {_array: []}})),
     ]);
 
     // v8.3 (round-12 #3): embed every product image as base64 so a
@@ -591,9 +690,79 @@ export const BackupService = {
       // v18 (round-24 #1): the Sila-app collections ledger.
       sila_app_collections: rowsOf(appCollections).map(row => ({
         customer_id: String(row.customer_id ?? ''),
-        customer_name: row.customer_name == null ? null : String(row.customer_name),
+        customer_name:
+          row.customer_name == null ? null : String(row.customer_name),
         amount_minor: Number(row.amount_minor ?? 0),
         detected_at: String(row.detected_at ?? ''),
+      })),
+      // v20: the voucher campaigns book (redemptions + claims +
+      // settlements mirror) — sale_id restores by receipt ref.
+      voucher_redemptions: rowsOf(voucherRedemptions).map(row => ({
+        idempotency_key: String(row.idempotency_key ?? ''),
+        payload: String(row.payload ?? ''),
+        campaign_id: row.campaign_id == null ? null : String(row.campaign_id),
+        campaign_name:
+          row.campaign_name == null ? null : String(row.campaign_name),
+        campaign_kind:
+          row.campaign_kind == null ? null : String(row.campaign_kind),
+        voucher_id: row.voucher_id == null ? null : String(row.voucher_id),
+        value_minor: Number(row.value_minor ?? 0),
+        pos_receipt_ref:
+          row.pos_receipt_ref == null ? null : String(row.pos_receipt_ref),
+        reference_code:
+          row.reference_code == null ? null : String(row.reference_code),
+        beneficiary_last4:
+          row.beneficiary_last4 == null ? null : String(row.beneficiary_last4),
+        redeemed_at: String(row.redeemed_at ?? ''),
+        state: String(row.state ?? 'pending'),
+        cart_json: row.cart_json == null ? null : String(row.cart_json),
+        sale_id: row.sale_id == null ? null : Number(row.sale_id),
+        counter_extra_minor: Number(row.counter_extra_minor ?? 0),
+        error_code: row.error_code == null ? null : String(row.error_code),
+        error_message:
+          row.error_message == null ? null : String(row.error_message),
+        retry_count: Number(row.retry_count ?? 0),
+        synced_at: row.synced_at == null ? null : String(row.synced_at),
+        created_at: String(row.created_at ?? ''),
+      })),
+      campaign_debts: rowsOf(campaignDebts).map(row => ({
+        campaign_id: String(row.campaign_id ?? ''),
+        campaign_name: String(row.campaign_name ?? ''),
+        kind: row.kind == null ? null : String(row.kind),
+        campaign_status:
+          row.campaign_status == null ? null : String(row.campaign_status),
+        merchant_status:
+          row.merchant_status == null ? null : String(row.merchant_status),
+        starts_at: row.starts_at == null ? null : String(row.starts_at),
+        ends_at: row.ends_at == null ? null : String(row.ends_at),
+        redeemed_count: Number(row.redeemed_count ?? 0),
+        redeemed_value_minor: Number(row.redeemed_value_minor ?? 0),
+        settled_minor: Number(row.settled_minor ?? 0),
+        settled_pending_minor: Number(row.settled_pending_minor ?? 0),
+        settled_confirmed_minor: Number(row.settled_confirmed_minor ?? 0),
+        due_minor: Number(row.due_minor ?? 0),
+        settlement_state: String(row.settlement_state ?? 'none'),
+        last_redemption_at:
+          row.last_redemption_at == null
+            ? null
+            : String(row.last_redemption_at),
+        last_settlement_at:
+          row.last_settlement_at == null
+            ? null
+            : String(row.last_settlement_at),
+        updated_at: row.updated_at == null ? null : String(row.updated_at),
+      })),
+      campaign_settlements: rowsOf(campaignSettlements).map(row => ({
+        settlement_id: String(row.settlement_id ?? ''),
+        campaign_id: String(row.campaign_id ?? ''),
+        campaign_name:
+          row.campaign_name == null ? null : String(row.campaign_name),
+        amount_minor: Number(row.amount_minor ?? 0),
+        kind: row.kind == null ? null : String(row.kind),
+        status: String(row.status ?? 'pending'),
+        method: row.method == null ? null : String(row.method),
+        reference: row.reference == null ? null : String(row.reference),
+        created_at: String(row.created_at ?? ''),
       })),
       images,
       settings: getSettings(),
@@ -1253,6 +1422,140 @@ export const BackupService = {
         logDiag(
           'backup',
           `استُعيد ${appCollectionsRestored} تحصيل عبر تطبيق صِلة`,
+        );
+      }
+
+      // v20: the voucher campaigns book — redemptions, claims and the
+      // settlements mirror. sale_id is re-linked by pos_receipt_ref
+      // (the STABLE key — sales get fresh ids during the restore).
+      let voucherRowsRestored = 0;
+      await tx.execute('DELETE FROM voucher_redemptions');
+      await tx.execute('DELETE FROM campaign_debts');
+      await tx.execute('DELETE FROM campaign_settlements');
+      await tx.execute(
+        "DELETE FROM sqlite_sequence WHERE name IN ('voucher_redemptions')",
+      );
+      for (const redemption of doc.voucher_redemptions ?? []) {
+        if (!redemption.idempotency_key || !redemption.payload) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO voucher_redemptions (
+              idempotency_key, payload, campaign_id, campaign_name,
+              campaign_kind, voucher_id, value_minor, pos_receipt_ref,
+              reference_code, beneficiary_last4, redeemed_at, state,
+              cart_json, sale_id, counter_extra_minor, error_code,
+              error_message, retry_count, synced_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+            [
+              redemption.idempotency_key,
+              redemption.payload,
+              redemption.campaign_id ?? null,
+              redemption.campaign_name ?? null,
+              redemption.campaign_kind ?? null,
+              redemption.voucher_id ?? null,
+              Number(redemption.value_minor ?? 0),
+              redemption.pos_receipt_ref ?? null,
+              redemption.reference_code ?? null,
+              redemption.beneficiary_last4 ?? null,
+              redemption.redeemed_at || nowLocal(),
+              redemption.state || 'pending',
+              redemption.cart_json ?? null,
+              Number(redemption.counter_extra_minor ?? 0),
+              redemption.error_code ?? null,
+              redemption.error_message ?? null,
+              Number(redemption.retry_count ?? 0),
+              redemption.synced_at ?? null,
+              redemption.created_at || nowLocal(),
+            ],
+          );
+          voucherRowsRestored += 1;
+        } catch {
+          // Duplicate idempotency key — first copy wins.
+        }
+      }
+      // Re-link the sale rows by the STABLE receipt ref (INV-V-…).
+      await tx.execute(
+        `UPDATE voucher_redemptions
+         SET sale_id = (
+           SELECT s.id FROM sales s
+           WHERE s.invoice_number = voucher_redemptions.pos_receipt_ref
+           LIMIT 1
+         )
+         WHERE pos_receipt_ref IS NOT NULL AND state = 'ok'`,
+      );
+      let campaignsRestored = 0;
+      for (const campaign of doc.campaign_debts ?? []) {
+        if (!campaign.campaign_id || !campaign.campaign_name) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO campaign_debts (
+              campaign_id, campaign_name, kind, campaign_status,
+              merchant_status, starts_at, ends_at, redeemed_count,
+              redeemed_value_minor, settled_minor, settled_pending_minor,
+              settled_confirmed_minor, due_minor, settlement_state,
+              last_redemption_at, last_settlement_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              campaign.campaign_id,
+              campaign.campaign_name,
+              campaign.kind ?? null,
+              campaign.campaign_status ?? null,
+              campaign.merchant_status ?? null,
+              campaign.starts_at ?? null,
+              campaign.ends_at ?? null,
+              Number(campaign.redeemed_count ?? 0),
+              Number(campaign.redeemed_value_minor ?? 0),
+              Number(campaign.settled_minor ?? 0),
+              Number(campaign.settled_pending_minor ?? 0),
+              Number(campaign.settled_confirmed_minor ?? 0),
+              Number(campaign.due_minor ?? 0),
+              campaign.settlement_state || 'none',
+              campaign.last_redemption_at ?? null,
+              campaign.last_settlement_at ?? null,
+              campaign.updated_at ?? null,
+            ],
+          );
+          campaignsRestored += 1;
+        } catch {
+          // Duplicate campaign — first copy wins.
+        }
+      }
+      let settlementsRestored = 0;
+      for (const settlement of doc.campaign_settlements ?? []) {
+        if (!settlement.settlement_id || !settlement.campaign_id) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO campaign_settlements (
+              settlement_id, campaign_id, campaign_name, amount_minor,
+              kind, status, method, reference, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              settlement.settlement_id,
+              settlement.campaign_id,
+              settlement.campaign_name ?? null,
+              Number(settlement.amount_minor ?? 0),
+              settlement.kind ?? null,
+              settlement.status || 'pending',
+              settlement.method ?? null,
+              settlement.reference ?? null,
+              settlement.created_at || nowLocal(),
+            ],
+          );
+          settlementsRestored += 1;
+        } catch {
+          // Duplicate settlement — first copy wins.
+        }
+      }
+      if (voucherRowsRestored + campaignsRestored + settlementsRestored > 0) {
+        logDiag(
+          'backup',
+          `استُعيد دفتر القسائم: ${voucherRowsRestored} صرف و${campaignsRestored} حملة و${settlementsRestored} تسوية`,
         );
       }
       logDiag(

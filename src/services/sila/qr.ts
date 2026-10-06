@@ -185,6 +185,119 @@ export function normalizePairingCode(input: string): string {
     .replace(/\s+/g, '');
 }
 
+// ── v20 (SILA_POS_VOUCHERS_API §1/§4.1): voucher codes ───────────
+// The beneficiary's code comes in TWO shapes, both valid as the
+// `payload` of POST /api/pos/vouchers/redeem (sent verbatim):
+//   1. The signed QR payload — 5 pipe-separated parts:
+//      SILAV1|<voucher uuid>|<20-char code>|<unix exp>|<hmac-sha256 hex>
+//   2. The bare 20-char code typed by the cashier.
+// Signature/expiry are verified SERVER-side (§8) — the POS only
+// classifies the shape and surfaces what the cashier needs.
+
+export interface SilaVoucherCodeParse {
+  valid: boolean;
+  /** 'qr' (SILAV1|… payload) | 'manual' (bare 20-char code). */
+  form: 'qr' | 'manual' | null;
+  /** The payload to send verbatim (normalized for manual codes:
+   *  trimmed + uppercased). */
+  payload: string;
+  /** The 20-char code when extractable (QR part 3 / manual input). */
+  code: string | null;
+  voucherId: string | null;
+  /** unix seconds from the QR (null for manual codes). */
+  expUnix: number | null;
+  /** Soft local hint only — the SERVER is the redemption authority. */
+  looksExpired: boolean;
+  /** Arabic reason when !valid (null when valid). */
+  reason: string | null;
+}
+
+const MANUAL_CODE_RE = /^[A-Za-z0-9]{20}$/;
+
+/** Parses a scanned/typed string in the voucher redemption flow. */
+export function parseSilaVoucherCode(raw: string): SilaVoucherCodeParse {
+  const text = (raw ?? '').trim();
+  if (!text) {
+    return {
+      valid: false,
+      form: null,
+      payload: '',
+      code: null,
+      voucherId: null,
+      expUnix: null,
+      looksExpired: false,
+      reason: 'أدخل رمز القسيمة أو امسح رمز الـ QR',
+    };
+  }
+  if (/^SILAV1\|/i.test(text)) {
+    const parts = text.split('|');
+    if (parts.length !== 5 || parts.some(part => part.length === 0)) {
+      return {
+        valid: false,
+        form: 'qr',
+        payload: text,
+        code: null,
+        voucherId: null,
+        expUnix: null,
+        looksExpired: false,
+        reason:
+          'رمز الـ QR غير مكتمل (خمسة أجزاء مطلوبة) — اطلب من المستحق إظهار الرمز من جديد',
+      };
+    }
+    const voucherId = parts[1];
+    const code = parts[2];
+    const expUnix = parseInt(parts[3], 10);
+    if (!MANUAL_CODE_RE.test(code)) {
+      return {
+        valid: false,
+        form: 'qr',
+        payload: text,
+        code: null,
+        voucherId: null,
+        expUnix: null,
+        looksExpired: false,
+        reason: 'شكل الكود داخل الرمز غير سليم — أعد المسح',
+      };
+    }
+    return {
+      valid: true,
+      form: 'qr',
+      payload: text,
+      code,
+      voucherId,
+      expUnix: Number.isFinite(expUnix) ? expUnix : null,
+      looksExpired:
+        Number.isFinite(expUnix) && expUnix > 0 && Date.now() > expUnix * 1000,
+      reason: null,
+    };
+  }
+  if (MANUAL_CODE_RE.test(text)) {
+    return {
+      valid: true,
+      form: 'manual',
+      payload: text.toUpperCase(),
+      code: text.toUpperCase(),
+      voucherId: null,
+      expUnix: null,
+      looksExpired: false,
+      reason: null,
+    };
+  }
+  return {
+    valid: false,
+    form: null,
+    payload: text,
+    code: null,
+    voucherId: null,
+    expUnix: null,
+    looksExpired: false,
+    reason:
+      text.length === 20
+        ? 'الكود يحوي محارف غير مقبولة — الأرقام والحروف الإنجليزية فقط'
+        : 'الكود اليدوي 20 محرفاً بالضبط — أو امسح رمز الـ QR كاملاً',
+  };
+}
+
 /** UUID v4 for idempotency keys (§6.2 — MANDATORY per record). */
 export function uuidV4(): string {
   const hex = '0123456789abcdef';
@@ -195,10 +308,8 @@ export function uuidV4(): string {
     } else if (i === 14) {
       out += '4';
     } else if (i === 19) {
-      // eslint-disable-next-line no-bitwise
       out += hex[((Math.random() * 4) | 0) + 8];
     } else {
-      // eslint-disable-next-line no-bitwise
       out += hex[(Math.random() * 16) | 0];
     }
   }

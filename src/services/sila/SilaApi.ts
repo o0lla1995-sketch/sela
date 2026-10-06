@@ -14,8 +14,16 @@ import {logDiag} from '../../core/diagnostics';
 
 export const SILA_DEFAULT_BASE_URL = 'https://sila.pornxvideo.com';
 
-/** §11 classification — drives every sync decision. */
-export type SilaErrorClass = 'transient' | 'permanent' | 'device' | 'conflict';
+/** §11 classification — drives every sync decision. v20: the
+ *  vouchers API (§9) adds the 'forbidden' class — the device is
+ *  fine and the voucher is fine, but the STORE is not contracted in
+ *  that campaign (a merchant-contract issue, not a retry case). */
+export type SilaErrorClass =
+  | 'transient'
+  | 'permanent'
+  | 'device'
+  | 'conflict'
+  | 'forbidden';
 
 export class SilaApiError extends Error {
   readonly status: number;
@@ -62,6 +70,29 @@ const PERMANENT_CODES = new Set([
 const DEVICE_CODES = new Set(['DEVICE_INVALID', 'UNAUTHENTICATED']);
 const CONFLICT_CODES = new Set(['IDEMPOTENT_MISMATCH']);
 
+/** v20 (SILA_POS_VOUCHERS_API §9 — الصلاحية): 403 codes that are a
+ *  merchant-contract problem, not a voucher or device problem —
+ *  surfaced to the merchant, never retried. */
+const FORBIDDEN_CODES = new Set([
+  'MERCHANT_NOT_IN_CAMPAIGN',
+  'MERCHANT_ORG_NOT_FOUND',
+]);
+
+/** v20 (SILA_POS_VOUCHERS_API §9 — دائم): voucher redemption codes
+ *  that end the attempt for good (no retry, no goods delivered). */
+const VOUCHER_PERMANENT_CODES = new Set([
+  'VOUCHER_NOT_FOUND',
+  'VOUCHER_ALREADY_REDEEMED',
+  'VOUCHER_CANCELLED',
+  'VOUCHER_EXPIRED',
+  'INVALID_SIGNATURE',
+  'CODE_MISMATCH',
+  'INVALID_PAYLOAD_FORMAT',
+  'CAMPAIGN_NOT_ACTIVE',
+  'CAMPAIGN_PERIOD_ENDED',
+  'EMPTY_PAYLOAD',
+]);
+
 export function classifySilaError(
   status: number,
   code: string,
@@ -72,10 +103,13 @@ export function classifySilaError(
   if (DEVICE_CODES.has(code)) {
     return 'device';
   }
+  if (FORBIDDEN_CODES.has(code)) {
+    return 'forbidden';
+  }
   if (status === 401) {
     return 'device';
   }
-  if (PERMANENT_CODES.has(code)) {
+  if (PERMANENT_CODES.has(code) || VOUCHER_PERMANENT_CODES.has(code)) {
     return 'permanent';
   }
   // 429 / 5xx / timeouts / network / leaked PG codes → retry later.
@@ -147,6 +181,46 @@ export function silaErrorAdvice(code: string): string {
       return 'تضارب تقني في مفتاح العملية — تواصل مع الدعم';
     default:
       return 'تعذر تسجيل الدين في صِلة — راجع تفاصيل الفاتورة';
+  }
+}
+
+/** v20 (SILA_POS_VOUCHERS_API §9): Arabic, cashier-readable advice
+ *  for a failed voucher redemption — every permanent/forbidden
+ *  code gets a clear «no goods» instruction. */
+export function silaVoucherErrorAdvice(code: string): string {
+  switch (code) {
+    case 'VOUCHER_NOT_FOUND':
+      return 'القسيمة غير موجودة — تأكد من الكود أو رمز الـ QR وحاول مجدداً';
+    case 'VOUCHER_ALREADY_REDEEMED':
+      return 'هذه القسيمة صُرفت مسبقاً (ربما في متجر آخر) — لا تُسلَّم البضاعة';
+    case 'VOUCHER_CANCELLED':
+      return 'القسيمة ملغاة من المؤسسة — لا تُسلَّم البضاعة';
+    case 'VOUCHER_EXPIRED':
+      return 'القسيمة منتهية الصلاحية — لا تُسلَّم البضاعة';
+    case 'INVALID_SIGNATURE':
+    case 'CODE_MISMATCH':
+    case 'INVALID_PAYLOAD_FORMAT':
+    case 'EMPTY_PAYLOAD':
+      return 'رمز القسيمة غير سليم — أعد المسح أو اطلب من المستحق إظهار رمز جديد';
+    case 'CAMPAIGN_NOT_ACTIVE':
+      return 'الحملة غير مفعّلة حالياً — لا يمكن صرف هذه القسيمة';
+    case 'CAMPAIGN_PERIOD_ENDED':
+      return 'انتهت مدة الحملة — لا يمكن صرف هذه القسيمة';
+    case 'DUPLICATE_RECEIPT_REF':
+      return 'رقم الإيصال مستخدم لعملية صرف سابقة — راجع سجل القسائم';
+    case 'MERCHANT_NOT_IN_CAMPAIGN':
+      return 'متجرك غير متعاقد في هذه الحملة — راجع دعوة المؤسسة في تطبيق صِلة';
+    case 'MERCHANT_ORG_NOT_FOUND':
+      return 'حساب المتجر موقوف في صِلة — تواصل مع الدعم';
+    case 'DEVICE_INVALID':
+      return 'ربط هذا الجهاز ملغى أو منتهٍ — أعد الربط برمز جديد من تطبيق صِلة';
+    case 'UNAUTHENTICATED':
+      return 'الجهاز غير مرتبط بصِلة — أعد الربط من إعدادات صِلة';
+    case 'VALIDATION_ERROR':
+    case 'INVALID_JSON':
+      return 'خطأ في بيانات الصرف — راجع الرمز أو تواصل مع الدعم';
+    default:
+      return 'تعذر صرف القسيمة — لا تُسلَّم البضاعة حتى تنجح العملية';
   }
 }
 
@@ -522,4 +596,194 @@ export async function silaSendPaymentBatch(
     results?: SilaPaymentRecordResult[];
   };
   return body.results ?? [];
+}
+
+// ── v20 (SILA_POS_VOUCHERS_API §4.1): POST /api/pos/vouchers/redeem ──
+// The ONE live call behind «صرف قسيمة صلة» — a single documented
+// redemption against the merchant's paired store. NOT an offline
+// queue (§5 rule 1): the voucher may be redeemed elsewhere at this
+// very moment, so the call is live and the goods are handed over
+// ONLY after ok:true (§7.1 rule).
+
+export interface SilaVoucherRedeemInput {
+  /** The scanned QR payload (SILAV1|… 5 parts) OR the hand-typed
+   *  20-char code — sent verbatim, no local processing (§4.1). */
+  payload: string;
+  /** 1-60 chars — the store's INV-V-… number; one receipt = one
+   *  redemption per store (DUPLICATE_RECEIPT_REF otherwise). */
+  pos_receipt_ref?: string;
+  /** UUID v4 generated per attempt and NEVER changed — a network
+   *  cut before the answer replays the same key and gets the same
+   *  result (idempotent_replay) with zero double redemption. */
+  idempotency_key: string;
+  /** Real redemption time, store-local ISO — clamped server-side to
+   *  [now − 24h, now] so the voucher lands in the right month's
+   *  statistics. */
+  redeemed_at: string;
+}
+
+export interface SilaVoucherRedeemResult {
+  ok: boolean;
+  /** POS-VR-… — the OFFICIAL redemption number in صِلة (print it on
+   *  the receipt; support & reconciliation use it). */
+  reference_code: string;
+  voucher_id: string;
+  value_minor: number;
+  currency: string;
+  /** voucher | parcel. */
+  kind: 'voucher' | 'parcel';
+  campaign_id: string;
+  campaign_name: string;
+  beneficiary_last4: string | null;
+  merchant_name: string;
+  redeemed_at: string;
+  /** The campaign's settlement snapshot AFTER this redemption was
+   *  booked — write it straight into campaign_debts (§5 rule 3). */
+  settlement: {
+    redeemed_value_minor: number;
+    settled_minor: number;
+    due_minor: number;
+    state: 'none' | 'partial' | 'full';
+  };
+  /** True when the same idempotency_key was already processed — the
+   *  same redemption answered twice; NOT a second redemption. */
+  idempotent_replay?: boolean;
+}
+
+export async function silaRedeemVoucher(
+  pairing: SilaPairing,
+  input: SilaVoucherRedeemInput,
+  posVersion: string,
+): Promise<SilaVoucherRedeemResult> {
+  const {baseUrl, token} = endpointOf(pairing);
+  let response: Response;
+  try {
+    response = await silaFetch(
+      `${baseUrl}/api/pos/vouchers/redeem`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? {Authorization: `Bearer ${token}`} : {}),
+        },
+        body: JSON.stringify({
+          payload: input.payload,
+          pos_receipt_ref: input.pos_receipt_ref,
+          idempotency_key: input.idempotency_key,
+          redeemed_at: input.redeemed_at,
+          client_meta: {pos_version: posVersion},
+        }),
+      },
+      CALL_TIMEOUT_MS,
+    );
+  } catch (error) {
+    const aborted = error instanceof Error && error.name === 'AbortError';
+    throw new SilaApiError(
+      0,
+      'NETWORK',
+      aborted
+        ? 'انتهت مهلة الصرف — سيُعاد تلقائياً بنفس مفتاح العملية'
+        : 'انقطع الاتصال أثناء الصرف — سيُعاد تلقائياً عند عودة الإنترنت',
+    );
+  }
+  if (!response.ok) {
+    throw await toApiError(response);
+  }
+  const body = (await response.json()) as SilaVoucherRedeemResult;
+  logDiag(
+    'sila',
+    `صُرفت قسيمة ${body.campaign_name} بقيمة ${body.value_minor / 100} ₪ (${
+      body.reference_code
+    })`,
+  );
+  return body;
+}
+
+// ── v20 (§4.2): GET /api/pos/vouchers/settlements ──────────────────
+// The ONE source of settlement truth — every campaign the store is
+// contracted in, with its balances and latest settlements. Called
+// by the 60s loop with updated_since (light) and after every
+// successful redemption.
+
+export interface SilaCampaignSettlementEntry {
+  settlement_id: string;
+  amount_minor: number;
+  /** compensation (تعويض) | advance (دفعة مقدمة). */
+  kind: string;
+  status: 'pending' | 'confirmed' | 'disputed' | 'cancelled';
+  method: string | null;
+  reference: string | null;
+  created_at: string;
+}
+
+export interface SilaCampaignServerRow {
+  campaign_id: string;
+  campaign_name: string;
+  kind: 'voucher' | 'parcel';
+  campaign_status: string;
+  starts_at: string | null;
+  ends_at: string | null;
+  merchant_status: string;
+  redeemed_count: number;
+  redeemed_value_minor: number;
+  last_redemption_at: string | null;
+  settled_minor: number;
+  settled_pending_minor: number;
+  settled_confirmed_minor: number;
+  last_settlement_at: string | null;
+  settlement_state: 'none' | 'partial' | 'full';
+  due_minor: number;
+  settlements: SilaCampaignSettlementEntry[];
+}
+
+export interface SilaSettlementsFeed {
+  ok: boolean;
+  merchant_org_id: string;
+  merchant_name: string;
+  updated_since: string | null;
+  campaigns: SilaCampaignServerRow[];
+  totals: {
+    campaigns_count: number;
+    redeemed_value_minor: number;
+    due_minor: number;
+  };
+}
+
+export async function silaFetchSettlements(
+  pairing: SilaPairing,
+  updatedSince?: string | null,
+): Promise<SilaSettlementsFeed> {
+  const {baseUrl, token} = endpointOf(pairing);
+  const query = updatedSince
+    ? `?updated_since=${encodeURIComponent(updatedSince)}`
+    : '';
+  let response: Response;
+  try {
+    response = await silaFetch(
+      `${baseUrl}/api/pos/vouchers/settlements${query}`,
+      {
+        method: 'GET',
+        headers: token ? {Authorization: `Bearer ${token}`} : {},
+      },
+      CALL_TIMEOUT_MS,
+    );
+  } catch (error) {
+    const aborted = error instanceof Error && error.name === 'AbortError';
+    throw new SilaApiError(
+      0,
+      'NETWORK',
+      aborted ? 'انتهت مهلة جلب التسويات' : 'انقطع الاتصال أثناء جلب التسويات',
+    );
+  }
+  if (!response.ok) {
+    throw await toApiError(response);
+  }
+  const body = (await response.json()) as SilaSettlementsFeed;
+  logDiag(
+    'sila',
+    `جُلبت تسويات ${body.campaigns?.length ?? 0} حملة — المستحق ${(
+      (body.totals?.due_minor ?? 0) / 100
+    ).toFixed(2)} ₪`,
+  );
+  return body;
 }

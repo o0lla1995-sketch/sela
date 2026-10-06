@@ -195,13 +195,21 @@ export function HomeScreen() {
   const debtorsTotal =
     (localBook?.debtorsCount ?? 0) + (paired ? silaDebt?.debtorsCount ?? 0 : 0);
   // Treasury breakdown (all-time sources of the cash number).
+  // v20: voucher goods left with no counter cash (only the extra
+  // part entered) — subtract the INV-V totals, add the extras back;
+  // the claim part arrives as confirmed campaign settlements.
   const salesCash =
-    (treasury?.revenueAllTime ?? 0) - (treasury?.creditSalesAllTime ?? 0);
+    (treasury?.revenueAllTime ?? 0) -
+    (treasury?.creditSalesAllTime ?? 0) -
+    (treasury?.voucherSalesAllTime ?? 0) +
+    (treasury?.voucherCounterExtraAllTime ?? 0);
   const collectionsTotal =
     (treasury?.localCollectionsAllTime ?? 0) +
     (treasury?.cashierCollectionsAllTime ?? 0) +
     (treasury?.appCollectionsAllTime ?? 0) +
-    (treasury?.prepaidCoveredAllTime ?? 0);
+    (treasury?.prepaidCoveredAllTime ?? 0) +
+    (treasury?.campaignSettlementsAllTime ?? 0);
+  const campaignSettlementsShekels = treasury?.campaignSettlementsAllTime ?? 0;
   const viaSilaShekels =
     (treasury?.cashierCollectionsAllTime ?? 0) +
     (treasury?.appCollectionsAllTime ?? 0) +
@@ -348,7 +356,9 @@ export function HomeScreen() {
           {/* The short breakdown — sources of the two numbers above. */}
           <View style={styles.breakdownBox}>
             <View style={styles.breakdownRow}>
-              <Text style={styles.breakdownLabel}>مبيعات نقدية (كامل السجل)</Text>
+              <Text style={styles.breakdownLabel}>
+                مبيعات نقدية (كامل السجل)
+              </Text>
               <Text style={[styles.breakdownValue, {color: c.text}]}>
                 {formatMoney(salesCash)}
               </Text>
@@ -366,6 +376,18 @@ export function HomeScreen() {
                 </Text>
                 <Text style={[styles.breakdownValue, {color: c.info}]}>
                   {formatMoney(viaSilaShekels)}
+                </Text>
+              </View>
+            ) : null}
+            {/* v20: money received from the campaign institutions
+                (confirmed settlements — Σ the server's snapshot). */}
+            {campaignSettlementsShekels > 0 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  منها: تسويات الحملات (قسائم شرائية)
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.info}]}>
+                  {formatMoney(campaignSettlementsShekels)}
                 </Text>
               </View>
             ) : null}

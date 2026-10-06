@@ -71,6 +71,21 @@ function kindMeta(kind: NotificationKind, c: Palette) {
       color: c.success,
       label: 'تحصيل عبر صِلة',
     },
+    // v20: a voucher redemption resolved — completed (goods ready to
+    // hand over) or permanently failed (no goods).
+    sila_voucher: {
+      icon: 'ticket',
+      bg: c.accentSoft,
+      color: c.accent,
+      label: 'قسيمة صِلة',
+    },
+    // v20: a campaign settlement arrived / a campaign fully settled.
+    sila_campaign: {
+      icon: 'checkCircle',
+      bg: c.successSoft,
+      color: c.success,
+      label: 'تسوية حملة',
+    },
   };
   return map[kind] ?? map.info;
 }

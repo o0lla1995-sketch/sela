@@ -18,6 +18,11 @@ const LABELS = {
   date: 'Date',
   debtTitleSila: 'DEBT - SILA',
   debtTitleLocal: 'DEBT - STORE BOOK',
+  /** v20 (requirement: invoices NAMED BY TYPE so the print always
+   *  tells them apart): a صِلة debt invoice that prepaid credit
+   *  (partially) covered — its own title, never mistaken for a
+   *  pure debt receipt. */
+  debtPrepaidTitleSila: 'DEBT+PREPAID - SILA',
   subtotal: 'Subtotal',
   discount: 'Discount',
   total: 'TOTAL',
@@ -58,6 +63,18 @@ export function buildDebtReceiptJob(
   const rasterWidth = settings.paperWidth === '58' ? 384 : 576;
   const b = ReceiptBuilder.create();
 
+  // v20: the covered part decides the TITLE — a (partly) prepaid
+  // invoice prints as DEBT+PREPAID, a pure credit invoice as DEBT.
+  const coveredMinorForTitle = Math.max(
+    0,
+    Math.min(
+      Math.round(data.creditCoveredMinor ?? 0),
+      Math.round(data.sale.total_amount * 100),
+    ),
+  );
+  const prepaidPartiallyCovered =
+    data.mode !== 'local' && coveredMinorForTitle > 0;
+
   if (settings.storeLogoPath) {
     b.image(settings.storeLogoPath, rasterWidth).feed(1);
   }
@@ -81,7 +98,11 @@ export function buildDebtReceiptJob(
     .size(1, 1)
     .align(1)
     .textLine(
-      data.mode === 'local' ? LABELS.debtTitleLocal : LABELS.debtTitleSila,
+      data.mode === 'local'
+        ? LABELS.debtTitleLocal
+        : prepaidPartiallyCovered
+        ? LABELS.debtPrepaidTitleSila
+        : LABELS.debtTitleSila,
     )
     .size(0, 0)
     .bold(false)
@@ -141,6 +162,14 @@ export function buildDebtReceiptJob(
       .align(1);
     if (netMinor === 0) {
       b.textLine('الفاتورة مسددة بالكامل من الرصيد المسبق');
+    } else {
+      // v20: the Arabic split line — the customer sees exactly what
+      // was paid from balance and what remains as debt.
+      b.textLine(
+        `مسدّد من الرصيد المسبق: ${(coveredMinor / 100).toFixed(
+          2,
+        )} ₪ — والباقي ديناً: ${(netMinor / 100).toFixed(2)} ₪`,
+      );
     }
   }
 

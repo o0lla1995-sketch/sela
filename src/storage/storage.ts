@@ -53,6 +53,19 @@ export const KEYS = {
   /** v11 (SILA §6.1/§7): merchant pairing blob (pos_token, device,
    *  merchant name, expiry, api base, last sync). */
   silaPairing: 'sila_pairing_v1',
+  /** v20 (SILA_POS_VOUCHERS_API): the VOUCHER invoice series
+   *  INV-V-YYYYMMDD-NNNN — its own counter/day pair, same
+   *  never-backwards discipline (one receipt = one redemption,
+   *  pos_receipt_ref UNIQUE per store §4.1). */
+  voucherInvoiceCounter: 'voucher_invoice_counter_v1',
+  voucherInvoiceDay: 'voucher_invoice_day_v1',
+  /** v20 §4.2/§6: the light settlements-sync cursor
+   *  (updated_since) — only campaigns with activity since the last
+   *  successful fetch come back. */
+  silaSettlementsCursor: 'sila_settlements_cursor_v1',
+  /** v20 §6: when the last settlements sync succeeded (shown on the
+   *  campaigns screen as «آخر مزامنة»). */
+  silaSettlementsSyncedAt: 'sila_settlements_synced_at_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {

@@ -78,8 +78,10 @@ import {
 import {APP_VERSION} from '../../core/config';
 import type {SilaDebtRow, SilaCustomer, SilaPaymentRow} from '../../core/types';
 import {uuidV4} from '../../services/sila/qr';
+import {VouchersRepo} from '../../services/sila/VouchersRepo';
+import {VouchersTab} from './VouchersTab';
 
-type SilaTab = 'overview' | 'debts' | 'customers' | 'payments';
+type SilaTab = 'overview' | 'debts' | 'customers' | 'payments' | 'vouchers';
 type DebtFilter = 'all' | 'pending' | 'failed' | 'synced';
 
 const PAGE_SIZE = 20;
@@ -89,6 +91,7 @@ const TAB_OPTIONS: {value: SilaTab; label: string}[] = [
   {value: 'debts', label: 'الديون'},
   {value: 'customers', label: 'الزبائن'},
   {value: 'payments', label: 'السدادّات'},
+  {value: 'vouchers', label: 'القسائم'},
 ];
 
 const DEBT_FILTERS: {value: DebtFilter; label: string}[] = [
@@ -143,7 +146,6 @@ export function SilaScreen() {
     Awaited<ReturnType<typeof SilaRepo.recentAppCollections>>
   >([]);
   const [collectionsShown, setCollectionsShown] = useState(PAGE_SIZE);
-  const [collectionsTotal, setCollectionsTotal] = useState(0);
 
   // ── overview KPIs (server pos part + this device's unsynced
   //  queue rows — never understate while offline) ──
@@ -160,6 +162,11 @@ export function SilaScreen() {
   const [paySheet, setPaySheet] = useState<SilaCustomer | null>(null);
   const [payAmountText, setPayAmountText] = useState('');
   const [payBusy, setPayBusy] = useState(false);
+
+  // ── v20: the campaigns headline (Σ server-stated dues) shown on
+  // the overview — the §4.2 indicator the merchant should see. ──
+  const [campaignDueMinor, setCampaignDueMinor] = useState(0);
+  const [campaignCount, setCampaignCount] = useState(0);
 
   // ── data loading ───────────────────────────────────────────────
 
@@ -219,25 +226,33 @@ export function SilaScreen() {
 
   const reload = useCallback(async () => {
     try {
-      const [customersList, payRows, collections, counts, silaTotals, queueTotals] =
-        await Promise.all([
-          SilaRepo.listCustomers(),
-          SilaRepo.recentPayments(200),
-          SilaRepo.recentAppCollections(200),
-          SilaRepo.counts(),
-          SilaRepo.customersOutstandingTotal(),
-          SilaRepo.totals(),
-        ]);
+      const [
+        customersList,
+        payRows,
+        collections,
+        silaTotals,
+        queueTotals,
+        campaignTotals,
+      ] = await Promise.all([
+        SilaRepo.listCustomers(),
+        SilaRepo.recentPayments(200),
+        SilaRepo.recentAppCollections(200),
+        SilaRepo.customersOutstandingTotal(),
+        SilaRepo.totals(),
+        // v20: the campaigns headline for the overview card.
+        VouchersRepo.campaignsTotals(),
+      ]);
       setCustomers(customersList);
       setPayments(payRows);
       setAppCollections(collections);
-      setCollectionsTotal(await SilaRepo.appCollectionsCount());
       setTotals({
         posMinor: silaTotals.posTotalMinor,
         appMinor: silaTotals.appTotalMinor,
         debtors: silaTotals.debtorsCount,
         queuePendingMinor: queueTotals.pendingMinor,
       });
+      setCampaignDueMinor(campaignTotals.dueMinor);
+      setCampaignCount(campaignTotals.campaignsCount);
       await refreshCounts();
       await loadDebtsPage(debtFilter, debtSearch);
     } catch {
@@ -436,20 +451,17 @@ export function SilaScreen() {
   }, []);
 
   /** v19: the strict parse — decimal-only, positive, sane ceiling. */
-  const parsePayAmount = useCallback(
-    (text: string): number | null => {
-      const normalized = text.trim().replace(',', '.');
-      if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
-        return null;
-      }
-      const amount = Number(normalized);
-      if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
-        return null;
-      }
-      return amount;
-    },
-    [],
-  );
+  const parsePayAmount = useCallback((text: string): number | null => {
+    const normalized = text.trim().replace(',', '.');
+    if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
+      return null;
+    }
+    const amount = Number(normalized);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
+      return null;
+    }
+    return amount;
+  }, []);
 
   const doConfirmPayment = useCallback(
     async (amount: number) => {
@@ -475,7 +487,9 @@ export function SilaScreen() {
         setPayAmountText('');
         await reload();
         toast(
-          `سُجّل سداد ${formatMoney(amount)} من ${customer.name} — إيصال ${receiptRef} سيُرفع لصِلة`,
+          `سُجّل سداد ${formatMoney(amount)} من ${
+            customer.name
+          } — إيصال ${receiptRef} سيُرفع لصِلة`,
           'success',
           5000,
         );
@@ -518,7 +532,13 @@ export function SilaScreen() {
       const excess = (amountMinor - outstanding) / 100;
       Alert.alert(
         'المبلغ أكبر من الدين القائم',
-        `الدين القائم: ${formatMoney(outstanding / 100)}\nالمبلغ المدخل: ${formatMoney(amount)}\n\nسيُطفأ دين الزبون في صِلة بالكامل، والزيادة ${formatMoney(excess)} تبقى نقداً عندك (صِلة لا يحفظ رصيداً دائناً — أعطِ الزيادة فكّاً للزبون إن أراد). كامل المبلغ يُسجَّل في خزينتك.`,
+        `الدين القائم: ${formatMoney(
+          outstanding / 100,
+        )}\nالمبلغ المدخل: ${formatMoney(
+          amount,
+        )}\n\nسيُطفأ دين الزبون في صِلة بالكامل، والزيادة ${formatMoney(
+          excess,
+        )} تبقى نقداً عندك (صِلة لا يحفظ رصيداً دائناً — أعطِ الزيادة فكّاً للزبون إن أراد). كامل المبلغ يُسجَّل في خزينتك.`,
         [
           {text: 'تراجع', style: 'cancel'},
           {
@@ -723,10 +743,8 @@ export function SilaScreen() {
           <Icon name="wallet" size={15} color={c.success} />
           <Text style={styles.kpiValue}>
             {formatMoney(
-              appCollections.reduce(
-                (sum, row) => sum + row.amount_minor,
-                0,
-              ) / 100,
+              appCollections.reduce((sum, row) => sum + row.amount_minor, 0) /
+                100,
             )}
           </Text>
           <Text style={styles.kpiLabel}>تحصيلات عبر التطبيق</Text>
@@ -753,13 +771,49 @@ export function SilaScreen() {
         </Card>
       ) : null}
 
+      {/* v20: the campaigns headline — المستحق لك من المؤسسات (§4.2).
+          Appears once the store has any campaign activity; tapping
+          it jumps to the القسائم tab. */}
+      {campaignCount > 0 ? (
+        <TouchableOpacity
+          style={styles.campaignsRow}
+          activeOpacity={0.8}
+          onPress={() => setTab('vouchers')}>
+          <View style={styles.campaignsIcon}>
+            <Icon name="ticket" size={19} color={c.accent} />
+          </View>
+          <View style={{flex: 1}}>
+            <Text style={styles.campaignsLabel}>مستحقات الحملات (قسائم)</Text>
+            <Text style={styles.campaignsMeta}>
+              {campaignCount} حملة · اضغط لعرض التفاصيل والصرف
+            </Text>
+          </View>
+          <Text
+            style={[
+              styles.campaignsValue,
+              campaignDueMinor > 0 ? {color: c.warning} : {color: c.success},
+            ]}>
+            {formatMoney(campaignDueMinor / 100)}
+          </Text>
+          <Icon name="chevronLeft" size={16} color={c.textFaint} />
+        </TouchableOpacity>
+      ) : null}
+
       <Card style={styles.guideCard}>
         <Text style={styles.guideTitle}>ماذا يوجد في هذا الدفتر؟</Text>
-        <Text style={styles.guideLine}>• الديون: كل فاتورة بِعتها ديناً عبر صِلة وحالة مزامنتها.</Text>
-        <Text style={styles.guideLine}>• الزبائن: أرصدة زبائن صِلة لدى متجرك مع تسجيل السداد النقدي.</Text>
+        <Text style={styles.guideLine}>
+          • الديون: كل فاتورة بِعتها ديناً عبر صِلة وحالة مزامنتها.
+        </Text>
+        <Text style={styles.guideLine}>
+          • الزبائن: أرصدة زبائن صِلة لدى متجرك مع تسجيل السداد النقدي.
+        </Text>
         <Text style={styles.guideLine}>
           • السدادّات: ما استلمته بالكاشير، وما سدده الزبائن من تطبيقهم (يُكتشف
           تلقائياً عند المزامنة).
+        </Text>
+        <Text style={styles.guideLine}>
+          • القسائم: صرف قسائم الحملات المؤسسية + مستحقاتك على المؤسسات حتى
+          التسوية — ليست ديناً على الزبائن.
         </Text>
       </Card>
     </>
@@ -799,9 +853,7 @@ export function SilaScreen() {
       <Text style={styles.resultCount}>
         {debtsLoading && debts.length === 0
           ? 'جارٍ التحميل…'
-          : `${debtsTotal} فاتورة${
-              debtFilter !== 'all' ? ' (مفلترة)' : ''
-            }`}
+          : `${debtsTotal} فاتورة${debtFilter !== 'all' ? ' (مفلترة)' : ''}`}
       </Text>
       {debts.length === 0 && !debtsLoading ? (
         <Card style={styles.emptyCard}>
@@ -819,8 +871,8 @@ export function SilaScreen() {
                   {row.customer_name ?? 'زبون صِلة'}
                 </Text>
                 <Text style={styles.queueInvoice}>
-                  {row.pos_invoice_ref} ·{' '}
-                  {(row.amount_minor / 100).toFixed(2)} ₪ ·{' '}
+                  {row.pos_invoice_ref} · {(row.amount_minor / 100).toFixed(2)}{' '}
+                  ₪ ·{' '}
                   {formatDateTime(
                     row.created_at.replace('T', ' ').slice(0, 19),
                   )}
@@ -941,8 +993,7 @@ export function SilaScreen() {
                   {customer.pos_outstanding_minor > 0 ? (
                     <View style={styles.splitRow}>
                       <Text style={styles.splitLabel}>منها فواتير متجري</Text>
-                      <Text
-                        style={[styles.splitValue, {color: c.accent}]}>
+                      <Text style={[styles.splitValue, {color: c.accent}]}>
                         {formatMoney(customer.pos_outstanding_minor / 100)} ₪
                       </Text>
                     </View>
@@ -950,8 +1001,7 @@ export function SilaScreen() {
                   {customer.app_outstanding_minor > 0 ? (
                     <View style={styles.splitRow}>
                       <Text style={styles.splitLabel}>منها من تطبيق صِلة</Text>
-                      <Text
-                        style={[styles.splitValue, {color: c.info}]}>
+                      <Text style={[styles.splitValue, {color: c.info}]}>
                         {formatMoney(customer.app_outstanding_minor / 100)} ₪
                       </Text>
                     </View>
@@ -959,8 +1009,7 @@ export function SilaScreen() {
                   {customer.other_minor !== 0 ? (
                     <View style={styles.splitRow}>
                       <Text style={styles.splitLabel}>تعديلات يدوية</Text>
-                      <Text
-                        style={[styles.splitValue, {color: c.warning}]}>
+                      <Text style={[styles.splitValue, {color: c.warning}]}>
                         {formatMoney(customer.other_minor / 100)}
                       </Text>
                     </View>
@@ -969,9 +1018,7 @@ export function SilaScreen() {
                     <Text style={styles.splitNote}>
                       آخر سداد:{' '}
                       {formatDateTime(
-                        customer.last_payment_at
-                          .replace('T', ' ')
-                          .slice(0, 19),
+                        customer.last_payment_at.replace('T', ' ').slice(0, 19),
                       )}
                       {customer.last_payment_amount_minor != null
                         ? ` — ${formatMoney(
@@ -1026,8 +1073,8 @@ export function SilaScreen() {
       {payments.length === 0 ? (
         <Card style={styles.emptyCard}>
           <Text style={styles.emptyText}>
-            لا توجد سدادّات بعد — عند استلام مبلغ من زبون مدين اضغط «تسجيل
-            سداد نقدي» في بطاقته من تبويب الزبائن.
+            لا توجد سدادّات بعد — عند استلام مبلغ من زبون مدين اضغط «تسجيل سداد
+            نقدي» في بطاقته من تبويب الزبائن.
           </Text>
         </Card>
       ) : (
@@ -1092,8 +1139,8 @@ export function SilaScreen() {
       {appCollections.length === 0 ? (
         <Card style={styles.emptyCard}>
           <Text style={styles.emptyText}>
-            لا توجد تحصيلات بعد — عندما يسدد زبون دينه من تطبيق صِلة ستظهر
-            هنا وتُحسب في الخزينة تلقائياً.
+            لا توجد تحصيلات بعد — عندما يسدد زبون دينه من تطبيق صِلة ستظهر هنا
+            وتُحسب في الخزينة تلقائياً.
           </Text>
         </Card>
       ) : (
@@ -1119,8 +1166,8 @@ export function SilaScreen() {
               </View>
               <View style={styles.collActionsRow}>
                 <Text style={styles.collNote}>
-                  سدّد الزبون هذا المبلغ من تطبيق صِلة على ديون فواتير متجرك
-                  — صِلة تسلّمك قيمته ضمن تحويلاتها.
+                  سدّد الزبون هذا المبلغ من تطبيق صِلة على ديون فواتير متجرك —
+                  صِلة تسلّمك قيمته ضمن تحويلاتها.
                 </Text>
                 <TouchableOpacity
                   style={styles.collDeleteBtn}
@@ -1165,7 +1212,9 @@ export function SilaScreen() {
                   <Icon name="qrFrame" size={26} color={c.accent} />
                 </View>
                 <View style={{flex: 1}}>
-                  <Text style={styles.introTitle}>اربط حساب التاجر في صِلة</Text>
+                  <Text style={styles.introTitle}>
+                    اربط حساب التاجر في صِلة
+                  </Text>
                   <Text style={styles.introText}>
                     صِلة منظومة الدين الفلسطينية — بعد الربط يستطيع الكاشير بيع
                     أي فاتورة ديناً على زبون بمسح رمزه من تطبيق صِلة، ويُزامَن
@@ -1236,9 +1285,7 @@ export function SilaScreen() {
                   </Text>
                   <Text style={styles.identityMeta}>
                     مرتبط منذ {formatDate(pairing.pairedAt.slice(0, 10))}
-                    {syncState === 'device_invalid'
-                      ? ' · الربط منتهٍ'
-                      : ''}
+                    {syncState === 'device_invalid' ? ' · الربط منتهٍ' : ''}
                   </Text>
                 </View>
                 <Badge
@@ -1257,19 +1304,30 @@ export function SilaScreen() {
               ) : null}
             </Card>
 
-            <Segmented
-              value={tab}
-              onChange={setTab}
-              options={TAB_OPTIONS}
-            />
+            <Segmented value={tab} onChange={setTab} options={TAB_OPTIONS} />
 
-            {tab === 'overview'
-              ? renderOverview()
-              : tab === 'debts'
-              ? renderDebts()
-              : tab === 'customers'
-              ? renderCustomers()
-              : renderPayments()}
+            {tab === 'overview' ? (
+              renderOverview()
+            ) : tab === 'debts' ? (
+              renderDebts()
+            ) : tab === 'customers' ? (
+              renderCustomers()
+            ) : tab === 'vouchers' ? (
+              <VouchersTab
+                receiptSettings={{
+                  storeName: settings.storeName,
+                  storePhone: settings.storePhone,
+                  footerMessage: settings.footerMessage,
+                  storeLogoPath: settings.storeLogoPath,
+                  paperWidth: settings.paperWidth,
+                  codepage: settings.codepage,
+                  showProfit: settings.showProfitOnReceipt,
+                }}
+                printerConnected={printerStatus === 'connected'}
+              />
+            ) : (
+              renderPayments()
+            )}
           </>
         )}
 
@@ -1328,16 +1386,16 @@ export function SilaScreen() {
                   }
                   activeOpacity={0.8}>
                   <Text style={styles.payQuickText}>
-                    السداد الكامل ({formatMoney(paySheet.outstanding_minor / 100)}{' '}
-                    ₪)
+                    السداد الكامل (
+                    {formatMoney(paySheet.outstanding_minor / 100)} ₪)
                   </Text>
                 </TouchableOpacity>
               ) : null}
               <Text style={styles.payHint}>
-                قيود صارمة: مبلغ أكبر من صفر، أرقام فقط بفاصلة عشرية واحدة
-                (مثال 12.50)، وبحد أقصى مليون شيكل. السداد يطفئ أقدم دين أولاً
-                (FIFO) بنفس قاعدة صِلة. إذا كان المبلغ أكبر من الدين القائم
-                فسيُطفأ الدين بالكامل والزيادة تبقى نقداً عندك.
+                قيود صارمة: مبلغ أكبر من صفر، أرقام فقط بفاصلة عشرية واحدة (مثال
+                12.50)، وبحد أقصى مليون شيكل. السداد يطفئ أقدم دين أولاً (FIFO)
+                بنفس قاعدة صِلة. إذا كان المبلغ أكبر من الدين القائم فسيُطفأ
+                الدين بالكامل والزيادة تبقى نقداً عندك.
               </Text>
               <View style={styles.payActions}>
                 <AppButton
@@ -1585,6 +1643,43 @@ const useStyles = makeStyles(c =>
       alignItems: 'flex-start',
       gap: spacing.sm,
       backgroundColor: c.surface,
+    },
+    /** v20: the campaigns headline row on the overview tab. */
+    campaignsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderRadius: radius.md,
+      padding: spacing.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRightWidth: 3,
+      borderRightColor: c.accent,
+    },
+    campaignsIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    campaignsLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    campaignsMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      marginTop: 2,
+    },
+    campaignsValue: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
     },
     infoText: {
       flex: 1,

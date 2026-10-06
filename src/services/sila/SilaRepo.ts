@@ -385,10 +385,7 @@ export const SilaRepo = {
    * The queue row AND the sale row move to the fresh number together
    * so the receipt, the invoices center and the upload all agree.
    */
-  async renumberDebtInvoice(
-    oldRef: string,
-    newRef: string,
-  ): Promise<boolean> {
+  async renumberDebtInvoice(oldRef: string, newRef: string): Promise<boolean> {
     if (oldRef === newRef || oldRef.length === 0 || newRef.length === 0) {
       return false;
     }
@@ -442,10 +439,7 @@ export const SilaRepo = {
          WHERE pos_receipt_ref = ?`,
         [newRef, oldRef],
       );
-      logDiag(
-        'sila',
-        `أُعيد ترقيم إيصال السداد ${oldRef} ← ${newRef}`,
-      );
+      logDiag('sila', `أُعيد ترقيم إيصال السداد ${oldRef} ← ${newRef}`);
       return true;
     } catch (error) {
       logDiag(
@@ -463,6 +457,29 @@ export const SilaRepo = {
     try {
       const result = await getDb().execute(
         'SELECT pos_invoice_ref FROM sila_debt_queue',
+      );
+      const refs = new Set<string>();
+      for (const row of result.rows?._array ?? []) {
+        const ref = String(
+          (row as {pos_invoice_ref?: string}).pos_invoice_ref ?? '',
+        );
+        if (ref.length > 0) {
+          refs.add(ref);
+        }
+      }
+      return refs;
+    } catch {
+      return new Set();
+    }
+  },
+
+  /** v20: the debt invoices whose prepaid credit (partly) covered
+   *  them — the invoices center badges these «رصيد» so a
+   *  DEBT+PREPAID invoice is never mistaken for a pure debt. */
+  async prepaidCoveredInvoiceRefs(): Promise<Set<string>> {
+    try {
+      const result = await getDb().execute(
+        'SELECT pos_invoice_ref FROM sila_debt_queue WHERE credit_covered_minor > 0',
       );
       const refs = new Set<string>();
       for (const row of result.rows?._array ?? []) {
@@ -619,9 +636,7 @@ export const SilaRepo = {
 
   /** Creates a payment row at collection time — ONE idempotency key
    *  per receipt, forever (§3 golden rule 3). */
-  async enqueuePayment(
-    input: EnqueuePaymentInput,
-  ): Promise<SilaPaymentRow> {
+  async enqueuePayment(input: EnqueuePaymentInput): Promise<SilaPaymentRow> {
     const db = getDb();
     await db.execute(
       `INSERT INTO sila_payment_queue (
@@ -781,10 +796,7 @@ export const SilaRepo = {
     }
   },
 
-  async recentPayments(
-    limit = 40,
-    offset = 0,
-  ): Promise<SilaPaymentRow[]> {
+  async recentPayments(limit = 40, offset = 0): Promise<SilaPaymentRow[]> {
     try {
       const result = await getDb().execute(
         `SELECT * FROM sila_payment_queue
@@ -814,7 +826,7 @@ export const SilaRepo = {
         'SELECT pos_receipt_ref FROM sila_payment_queue WHERE pos_receipt_ref LIKE ?',
         [`${prefix}%`],
       );
-      const re = new RegExp(`^RCP-(\d{8})-(\d+)$`);
+      const re = new RegExp('^RCP-(d{8})-(d+)$');
       for (const row of result.rows?._array ?? []) {
         const match = re.exec(String(row.pos_receipt_ref ?? ''));
         if (match) {
@@ -1093,9 +1105,7 @@ export const SilaRepo = {
         [customerId],
       );
       const row = result.rows?._array?.[0];
-      return row
-        ? rowToCustomer(row as Record<string, unknown>)
-        : null;
+      return row ? rowToCustomer(row as Record<string, unknown>) : null;
     } catch {
       return null;
     }
@@ -1133,10 +1143,7 @@ export const SilaRepo = {
    *  the range — the money prepaid credit absorbed (treated as
    *  received at sale/migration time in the store's cash math).
    *  v19 (round-25 #6): LOCAL-day comparison (created_at is UTC). */
-  async creditCoveredInRange(
-    from: string,
-    to: string,
-  ): Promise<number> {
+  async creditCoveredInRange(from: string, to: string): Promise<number> {
     try {
       const result = await getDb().execute(
         `SELECT COALESCE(SUM(credit_covered_minor), 0) AS minor
@@ -1288,7 +1295,9 @@ export const SilaRepo = {
           );
           logDiag(
             'sila',
-            `جُمّد أساس مطابقة تحصيلات ${row.name} عند ${(currentGap / 100).toFixed(2)}₪ (تاريخ قديم — لن يُسجّل كتحصيل جديد)`,
+            `جُمّد أساس مطابقة تحصيلات ${row.name} عند ${(
+              currentGap / 100
+            ).toFixed(2)}₪ (تاريخ قديم — لن يُسجّل كتحصيل جديد)`,
           );
           continue;
         }
@@ -1313,7 +1322,9 @@ export const SilaRepo = {
         recordedCount += 1;
         logDiag(
           'sila',
-          `تحصيل عبر تطبيق صِلة: ${row.name} — ${(unrecorded / 100).toFixed(2)}₪ على ديون المتجر`,
+          `تحصيل عبر تطبيق صِلة: ${row.name} — ${(unrecorded / 100).toFixed(
+            2,
+          )}₪ على ديون المتجر`,
         );
       } catch (error) {
         // One customer's reconciliation failing must never block
@@ -1329,7 +1340,9 @@ export const SilaRepo = {
     if (recordedCount > 0) {
       logDiag(
         'sila',
-        `سُجّل ${recordedCount} تحصيل عبر تطبيق صِلة بإجمالي ${(recordedTotal / 100).toFixed(2)}₪`,
+        `سُجّل ${recordedCount} تحصيل عبر تطبيق صِلة بإجمالي ${(
+          recordedTotal / 100
+        ).toFixed(2)}₪`,
       );
     }
     return recordedTotal;
@@ -1427,11 +1440,14 @@ export const SilaRepo = {
         local_id: Number((row as {local_id?: number}).local_id ?? 0),
         customer_id: String((row as {customer_id?: string}).customer_id ?? ''),
         customer_name: (row as {customer_name?: string}).customer_name ?? null,
-        amount_minor: Number((row as {amount_minor?: number}).amount_minor ?? 0),
+        amount_minor: Number(
+          (row as {amount_minor?: number}).amount_minor ?? 0,
+        ),
         pos_purchases_minor:
           (row as {pos_purchases_minor?: number}).pos_purchases_minor ?? null,
         pos_outstanding_minor:
-          (row as {pos_outstanding_minor?: number}).pos_outstanding_minor ?? null,
+          (row as {pos_outstanding_minor?: number}).pos_outstanding_minor ??
+          null,
         detected_at: String((row as {detected_at?: string}).detected_at ?? ''),
       }));
     } catch {
@@ -1482,7 +1498,10 @@ export const SilaRepo = {
         `UPDATE sila_customers
            SET reconcile_offset_minor = reconcile_offset_minor + ?
          WHERE customer_id = ?`,
-        [Math.max(0, Math.round(Number(hit.amount_minor ?? 0))), hit.customer_id],
+        [
+          Math.max(0, Math.round(Number(hit.amount_minor ?? 0))),
+          hit.customer_id,
+        ],
       );
       logDiag(
         'sila',

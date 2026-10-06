@@ -287,7 +287,14 @@ export type NotificationKind =
   /** v18 (round-24 #1): صِلة collected money on the store's behalf
    *  (customer repaid through the Sila app) — the books now show it
    *  as an incoming collection instead of a vanishing debt. */
-  | 'sila_collection';
+  | 'sila_collection'
+  /** v20: a voucher redemption resolved (completed after a network
+   *  cut, or permanently failed) — the cashier must know either way
+   *  before handing goods. */
+  | 'sila_voucher'
+  /** v20: a campaign settlement arrived / a campaign was fully
+   *  settled (المؤسسة سدّدت حقك). */
+  | 'sila_campaign';
 
 export interface AppNotification {
   /** Stable id (timestamp-based). */
@@ -497,6 +504,96 @@ export interface LocalCustomerBalance {
   outstandingMinor: number;
   debtsCount: number;
   lastActivityAt: string | null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// v20: القسائم الشرائية للحملات (SILA_POS_VOUCHERS_API v1.0).
+// The campaign-as-virtual-customer architecture: every campaign the
+// merchant joined is a DEBTOR in the store's books (the institution
+// owes the store for every redeemed voucher) — mirrored EXACTLY
+// from the server, never computed locally (§2/§5).
+// ────────────────────────────────────────────────────────────────
+
+/** One redemption attempt (voucher_redemptions §5) — the row is
+ *  created AT REDEEM TIME with ONE idempotency_key that never
+ *  changes; retries replay the same key (§5 rule 1: صرف القسيمة
+ *  يتطلب اتصالاً حياً — ليس طابور أوفلاين). */
+export interface VoucherRedemptionRow {
+  local_id: number;
+  idempotency_key: string;
+  /** The scanned QR payload (SILAV1|…) or the manual 20-char code,
+   *  stored verbatim for retries. */
+  payload: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  /** voucher | parcel (kind from the server answer). */
+  campaign_kind: 'voucher' | 'parcel' | null;
+  voucher_id: string | null;
+  value_minor: number;
+  pos_receipt_ref: string | null;
+  reference_code: string | null;
+  beneficiary_last4: string | null;
+  redeemed_at: string;
+  state: 'pending' | 'ok' | 'failed';
+  /** v20: the cart snapshot (JSON) taken when a cart-tied redemption
+   *  started — lets the sync engine finish the INV-V sale if the
+   *  app died between the server's ok and the local sale commit. */
+  cart_json: string | null;
+  /** v20: the created sale row (INV-V) once the redemption is ok —
+   *  the invoices center / reprints join through this. */
+  sale_id: number | null;
+  /** v20: cash the beneficiary paid at the counter when the cart
+   *  exceeded the voucher (cart − voucher, ≥ 0) — part of the
+   *  treasury's expected cash from day one. */
+  counter_extra_minor: number;
+  error_code: string | null;
+  error_message: string | null;
+  retry_count: number;
+  synced_at: string | null;
+  created_at: string;
+}
+
+/** A campaign claim in the store's ledger (campaign_debts §5) —
+ *  the institution owes the store redeemed_value − settled. EVERY
+ *  figure here is the SERVER's truth (the settlement snapshot of
+ *  the redeem answer + the settlements sync loop); the POS never
+ *  sums or subtracts on its own (§5 rule 3). */
+export interface CampaignDebtRow {
+  campaign_id: string;
+  campaign_name: string;
+  kind: 'voucher' | 'parcel';
+  campaign_status: string | null;
+  merchant_status: string | null;
+  starts_at: string | null;
+  ends_at: string | null;
+  redeemed_count: number;
+  redeemed_value_minor: number;
+  settled_minor: number;
+  settled_pending_minor: number;
+  settled_confirmed_minor: number;
+  due_minor: number;
+  settlement_state: 'none' | 'partial' | 'full';
+  last_redemption_at: string | null;
+  last_settlement_at: string | null;
+  updated_at: string | null;
+}
+
+/** v20: one institution settlement mirrored from the server's
+ *  settlements[] feed (§4.2) — the period reports read these rows
+ *  («تحصيلات الحملات بالفترة»); only status='confirmed' counts as
+ *  money actually received (pending = the merchant hasn't confirmed
+ *  receipt in the Sila app yet). */
+export interface CampaignSettlementRow {
+  settlement_id: string;
+  campaign_id: string;
+  campaign_name: string | null;
+  amount_minor: number;
+  /** compensation (تعويض) | advance (دفعة مقدمة). */
+  kind: string;
+  status: 'pending' | 'confirmed' | 'disputed' | 'cancelled';
+  method: string | null;
+  reference: string | null;
+  created_at: string;
 }
 
 /** Derives the stock state for a product given the global default threshold. */

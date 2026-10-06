@@ -238,6 +238,76 @@ const DDL_STATEMENTS: string[] = [
     detected_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   'CREATE INDEX IF NOT EXISTS idx_sila_acct_cust ON sila_app_collections(customer_id, detected_at DESC)',
+  // ── v20 (SILA_POS_VOUCHERS_API §5): القسائم الشرائية للحملات ──
+  // Mirror of every voucher redemption attempt (§5 rule 1: NOT an
+  // offline queue — the row is created at redeem time with ONE
+  // idempotency_key and retries replay the same key on a live call).
+  `CREATE TABLE IF NOT EXISTS voucher_redemptions (
+    local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    payload TEXT NOT NULL,
+    campaign_id TEXT,
+    campaign_name TEXT,
+    campaign_kind TEXT,
+    voucher_id TEXT,
+    value_minor INTEGER NOT NULL DEFAULT 0,
+    pos_receipt_ref TEXT UNIQUE,
+    reference_code TEXT,
+    beneficiary_last4 TEXT,
+    redeemed_at TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+      CHECK (state IN ('pending','ok','failed')),
+    cart_json TEXT,
+    sale_id INTEGER,
+    counter_extra_minor INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT,
+    error_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    synced_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_vr_state ON voucher_redemptions(state, created_at)',
+  // The campaigns claim book — the institution owes the store for
+  // every redeemed voucher until settlement completes (§2 rule 4).
+  // EVERY figure is written from server snapshots only (§5 rule 3).
+  `CREATE TABLE IF NOT EXISTS campaign_debts (
+    campaign_id TEXT PRIMARY KEY,
+    campaign_name TEXT NOT NULL,
+    kind TEXT,
+    campaign_status TEXT,
+    merchant_status TEXT,
+    starts_at TEXT,
+    ends_at TEXT,
+    redeemed_count INTEGER NOT NULL DEFAULT 0,
+    redeemed_value_minor INTEGER NOT NULL DEFAULT 0,
+    settled_minor INTEGER NOT NULL DEFAULT 0,
+    settled_pending_minor INTEGER NOT NULL DEFAULT 0,
+    settled_confirmed_minor INTEGER NOT NULL DEFAULT 0,
+    due_minor INTEGER NOT NULL DEFAULT 0,
+    settlement_state TEXT NOT NULL DEFAULT 'none'
+      CHECK (settlement_state IN ('none','partial','full')),
+    last_redemption_at TEXT,
+    last_settlement_at TEXT,
+    updated_at TEXT
+  )`,
+  // v20 POS-side mirror of the server's settlements[] feed (§4.2) —
+  // feeds the period reports («تحصيلات الحملات بالفترة») and the
+  // treasury (confirmed = money actually received).
+  `CREATE TABLE IF NOT EXISTS campaign_settlements (
+    settlement_id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL,
+    campaign_name TEXT,
+    amount_minor INTEGER NOT NULL,
+    kind TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending','confirmed','disputed','cancelled')),
+    method TEXT,
+    reference TEXT,
+    created_at TEXT NOT NULL,
+    mirrored_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_csettle_campaign ON campaign_settlements(campaign_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_csettle_status ON campaign_settlements(status, created_at)',
 ];
 
 const DEFAULT_CATEGORIES: string[] = [
@@ -633,16 +703,8 @@ async function applyMigrations(database: DB): Promise<void> {
     // sale/migration time, reconciled to the server's exact
     // credit_consumed_minor once the row syncs).
     const creditCols: [string, string, string][] = [
-      [
-        'sila_customers',
-        'credit_minor',
-        'INTEGER NOT NULL DEFAULT 0',
-      ],
-      [
-        'sila_debt_queue',
-        'credit_covered_minor',
-        'INTEGER NOT NULL DEFAULT 0',
-      ],
+      ['sila_customers', 'credit_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['sila_debt_queue', 'credit_covered_minor', 'INTEGER NOT NULL DEFAULT 0'],
     ];
     for (const [table, column, ddl] of creditCols) {
       const check = await database.execute(
@@ -707,6 +769,90 @@ async function applyMigrations(database: DB): Promise<void> {
       'ترحيل v11: سجل تحصيلات تطبيق صِلة (مطابقة الديون المسددة خارج الكاشير)',
     );
     version = 11;
+  }
+
+  if (version < 12) {
+    // v20 (SILA_POS_VOUCHERS_API §5): the voucher campaigns book —
+    // redemption attempts mirror + the campaigns claim ledger + the
+    // settlements mirror. Fresh DDL above covers new installs; this
+    // heals older ones.
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS voucher_redemptions (
+        local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload TEXT NOT NULL,
+        campaign_id TEXT,
+        campaign_name TEXT,
+        campaign_kind TEXT,
+        voucher_id TEXT,
+        value_minor INTEGER NOT NULL DEFAULT 0,
+        pos_receipt_ref TEXT UNIQUE,
+        reference_code TEXT,
+        beneficiary_last4 TEXT,
+        redeemed_at TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (state IN ('pending','ok','failed')),
+        cart_json TEXT,
+        sale_id INTEGER,
+        counter_extra_minor INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT,
+        error_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        synced_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_vr_state ON voucher_redemptions(state, created_at)',
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS campaign_debts (
+        campaign_id TEXT PRIMARY KEY,
+        campaign_name TEXT NOT NULL,
+        kind TEXT,
+        campaign_status TEXT,
+        merchant_status TEXT,
+        starts_at TEXT,
+        ends_at TEXT,
+        redeemed_count INTEGER NOT NULL DEFAULT 0,
+        redeemed_value_minor INTEGER NOT NULL DEFAULT 0,
+        settled_minor INTEGER NOT NULL DEFAULT 0,
+        settled_pending_minor INTEGER NOT NULL DEFAULT 0,
+        settled_confirmed_minor INTEGER NOT NULL DEFAULT 0,
+        due_minor INTEGER NOT NULL DEFAULT 0,
+        settlement_state TEXT NOT NULL DEFAULT 'none'
+          CHECK (settlement_state IN ('none','partial','full')),
+        last_redemption_at TEXT,
+        last_settlement_at TEXT,
+        updated_at TEXT
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS campaign_settlements (
+        settlement_id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        campaign_name TEXT,
+        amount_minor INTEGER NOT NULL,
+        kind TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending','confirmed','disputed','cancelled')),
+        method TEXT,
+        reference TEXT,
+        created_at TEXT NOT NULL,
+        mirrored_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_csettle_campaign ON campaign_settlements(campaign_id, created_at DESC)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_csettle_status ON campaign_settlements(status, created_at)',
+    );
+    logDiag(
+      'db',
+      'ترحيل v12: القسائم الشرائية للحملات (صرف + مطالبات + تسويات)',
+    );
+    version = 12;
   }
 
   if (version !== storedVersion) {
@@ -793,8 +939,11 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM local_payments');
   await database.execute('DELETE FROM local_debts');
   await database.execute('DELETE FROM local_customers');
+  await database.execute('DELETE FROM campaign_settlements');
+  await database.execute('DELETE FROM campaign_debts');
+  await database.execute('DELETE FROM voucher_redemptions');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

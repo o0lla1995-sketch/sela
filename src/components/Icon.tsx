@@ -83,7 +83,10 @@ export type IconName =
   | 'lock'
   | 'fingerprint'
   | 'backspace'
-  | 'mail';
+  | 'mail'
+  /** v20: قسيمة شرائية — a voucher/ticket (notched sides + value
+   *  line). */
+  | 'ticket';
 
 interface IconProps {
   name: IconName;
@@ -168,6 +171,15 @@ const P: Record<IconName, React.ReactNode> = {
     <G>
       <Rect x={3.5} y={5.5} width={17} height={13} rx={2} />
       <Path d="M4 7l8 6 8-6" />
+    </G>
+  ),
+  /** v20: voucher ticket — two notches + a dashed value divider. */
+  ticket: (
+    <G>
+      <Path d="M3.5 7.5v9a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-9" />
+      <Path d="M3.5 7.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2" />
+      <Path d="M8.5 5.5v2.4M8.5 10v4M8.5 16.1v2.4" />
+      <Path d="M3.5 12h2M18.5 12h2" />
     </G>
   ),
   box: (

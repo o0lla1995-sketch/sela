@@ -19,6 +19,7 @@ import {buildReceiptJob} from './printer/receipt';
 import {buildDebtReceiptJob} from './printer/debtReceipt';
 import {ThermalPrinterService} from './printer/ThermalPrinterService';
 import {SilaRepo} from './sila/SilaRepo';
+import {VoucherService} from './VoucherService';
 import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {uuidV4} from './sila/qr';
 import type {CartLine, PricingMode, SaleWithItems} from '../core/types';
@@ -434,6 +435,13 @@ export const InvoiceService = {
 
     // ── v17 (round-23 #1): debt-invoice reprints keep the debt look ──
     const ref = record.invoice_number;
+    // v20: VOUCHER redemptions (INV-V) reprint with the voucher
+    // template — the campaign block + the official POS-VR reference
+    // are the whole point of that receipt.
+    if (ref.startsWith('INV-V-')) {
+      await VoucherService.reprintByReceiptRef(ref, receiptSettings);
+      return;
+    }
     if (ref.startsWith('INV-D-')) {
       // صِلة debt — the queue row carries the creditor + the
       // official POS-… reference once synced.
@@ -670,7 +678,10 @@ export const InvoiceService = {
     // Debt series.
     const debtDay = getString(KEYS.debtInvoiceDay, '');
     const debtCounter = getNumber(KEYS.debtInvoiceCounter, 0);
-    const debtNext = Math.max(debtDay === today ? debtCounter + 1 : 1, debtMax + 1);
+    const debtNext = Math.max(
+      debtDay === today ? debtCounter + 1 : 1,
+      debtMax + 1,
+    );
     if (debtNext > (debtDay === today ? debtCounter + 1 : 1)) {
       setNumber(KEYS.debtInvoiceCounter, debtNext);
       setString(KEYS.debtInvoiceDay, today);

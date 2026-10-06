@@ -41,6 +41,8 @@ import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {InvoiceService} from '../../services/InvoiceService';
 import {SilaRepo} from '../../services/sila/SilaRepo';
+import {VouchersRepo} from '../../services/sila/VouchersRepo';
+import type {VoucherRedemptionRow} from '../../core/types';
 import {LocalDebtsRepo} from '../../database/repositories/LocalDebtsRepo';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {usePrinterStore} from '../../stores/printerStore';
@@ -75,6 +77,8 @@ export function InvoicesScreen() {
   // v11 (SILA): invoice numbers carrying a SILA debt — one query,
   // refreshed on focus so fresh debt sales badge immediately.
   const [debtRefs, setDebtRefs] = useState<Set<string>>(new Set());
+  // v20: debt invoices (partly) covered by prepaid credit → «رصيد».
+  const [prepaidRefs, setPrepaidRefs] = useState<Set<string>>(new Set());
 
   const load = useCallback(
     async (query: string, replace: boolean) => {
@@ -118,6 +122,8 @@ export function InvoicesScreen() {
       void loadRef.current(searchRef.current, true);
       // v11 (SILA): refresh the debt-invoice badge set with it.
       void SilaRepo.allDebtInvoiceRefs().then(setDebtRefs);
+      // v20: the prepaid-covered set for the «رصيد» badge.
+      void SilaRepo.prepaidCoveredInvoiceRefs().then(setPrepaidRefs);
     }, []),
   );
 
@@ -201,6 +207,28 @@ export function InvoicesScreen() {
                     <Text style={styles.debtChipText}>دين</Text>
                   </View>
                 ) : null}
+                {/* v20: INV-V numbers are VOUCHER redemptions — their
+                    own chip so the type is visible at a glance (the
+                    naming-by-type requirement). */}
+                {row.invoice_number.startsWith('INV-V-') ? (
+                  <View style={[styles.debtChip, styles.voucherChip]}>
+                    <Icon name="ticket" size={11} color={c.info} />
+                    <Text style={[styles.debtChipText, {color: c.info}]}>
+                      قسيمة
+                    </Text>
+                  </View>
+                ) : null}
+                {/* v20: an INV-D debt invoice the prepaid credit
+                    (partly) covered — marked «رصيد» so the merchant
+                    reads instantly it is not a pure debt. */}
+                {prepaidRefs.has(row.invoice_number) ? (
+                  <View style={[styles.debtChip, styles.prepaidChip]}>
+                    <Icon name="wallet" size={11} color={c.success} />
+                    <Text style={[styles.debtChipText, {color: c.success}]}>
+                      رصيد
+                    </Text>
+                  </View>
+                ) : null}
                 <Badge
                   label={row.payment_type === 'WHOLESALE' ? 'جملة' : 'مفرق'}
                   tone={row.payment_type === 'WHOLESALE' ? 'info' : 'neutral'}
@@ -256,6 +284,10 @@ export function InvoiceDetailScreen() {
     name: string;
     phone: string | null;
   } | null>(null);
+  // v20: the voucher redemption behind an INV-V invoice — campaign,
+  // face value, official POS-VR reference + the golden «not a debt
+  // on the customer» line.
+  const [voucher, setVoucher] = useState<VoucherRedemptionRow | null>(null);
 
   const copyText = useCallback(
     (label: string, value: string) => {
@@ -284,9 +316,13 @@ export function InvoiceDetailScreen() {
         // creditor in the store's own ledger.
         const localRow =
           record != null && record.invoice_number.startsWith('INV-L-')
-            ? await LocalDebtsRepo.creditorByInvoiceRef(
-                record.invoice_number,
-              )
+            ? await LocalDebtsRepo.creditorByInvoiceRef(record.invoice_number)
+            : null;
+        // v20: voucher redemptions (INV-V) carry the campaign + the
+        // official reference in their own ledger.
+        const voucherRow =
+          record != null && record.invoice_number.startsWith('INV-V-')
+            ? await VouchersRepo.byReceiptRef(record.invoice_number)
             : null;
         const nameMap = new Map<number, string>();
         for (const item of lines) {
@@ -304,6 +340,7 @@ export function InvoiceDetailScreen() {
           setNames(nameMap);
           setDebt(debtRow);
           setLocalCreditor(localRow);
+          setVoucher(voucherRow);
         }
       } catch (error) {
         toast(
@@ -416,6 +453,95 @@ export function InvoiceDetailScreen() {
             />
           </View>
         </Card>
+
+        {/* ── v20: the VOUCHER redemption card — campaign + face value +
+            the official POS-VR reference + the golden «not a debt»
+            line (SILA_POS_VOUCHERS_API §2 rule 1/5). ── */}
+        {voucher != null ? (
+          <Card style={styles.creditorCard}>
+            <View style={styles.creditorHeadRow}>
+              <View style={styles.creditorIcon}>
+                <Icon name="ticket" size={20} color={c.info} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.creditorTitle}>
+                  صرف قسيمة صِلة — حملة «{voucher.campaign_name ?? '—'}»
+                </Text>
+                <Text style={styles.creditorSub}>
+                  قسيمة شرائية مؤمَّنة من المؤسسة — ليست ديناً على الزبون
+                </Text>
+              </View>
+              <Badge
+                label={
+                  voucher.state === 'ok'
+                    ? 'مصروفة'
+                    : voucher.state === 'pending'
+                    ? 'معلّقة'
+                    : 'فاشلة'
+                }
+                tone={
+                  voucher.state === 'ok'
+                    ? 'success'
+                    : voucher.state === 'pending'
+                    ? 'warning'
+                    : 'danger'
+                }
+              />
+            </View>
+            <View style={styles.creditorRows}>
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>قيمة القسيمة</Text>
+                <Text style={[styles.creditorValue, {color: c.info}]}>
+                  {(voucher.value_minor / 100).toFixed(2)} ₪
+                </Text>
+              </View>
+              {voucher.counter_extra_minor > 0 ? (
+                <View style={styles.creditorRow}>
+                  <Text style={styles.creditorLabel}>
+                    الفرق النقدي بالكاشير
+                  </Text>
+                  <Text style={styles.creditorValue}>
+                    {(voucher.counter_extra_minor / 100).toFixed(2)} ₪
+                  </Text>
+                </View>
+              ) : null}
+              {voucher.beneficiary_last4 ? (
+                <View style={styles.creditorRow}>
+                  <Text style={styles.creditorLabel}>هوية المستحق</Text>
+                  <Text style={styles.creditorValue}>
+                    ****{voucher.beneficiary_last4}
+                  </Text>
+                </View>
+              ) : null}
+              {voucher.reference_code ? (
+                <View style={styles.creditorRow}>
+                  <Text style={styles.creditorLabel}>
+                    رقم عملية الصرف في صِلة
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.copyRow}
+                    onPress={() =>
+                      copyText('رقم عملية الصرف', voucher.reference_code ?? '')
+                    }
+                    activeOpacity={0.7}>
+                    <Text
+                      style={[styles.creditorMono, {color: c.success}]}
+                      numberOfLines={1}>
+                      {voucher.reference_code}
+                    </Text>
+                    <Icon name="clipboard" size={15} color={c.success} />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+              <View style={styles.creditorRow}>
+                <Text style={styles.creditorLabel}>طريقة السداد</Text>
+                <Text style={styles.creditorValue}>
+                  تُسوّى قيمتها مع المؤسسة ضمن الحملة
+                </Text>
+              </View>
+            </View>
+          </Card>
+        ) : null}
 
         {/* ── v12 (round-18 #3): SILA creditor card — the debt holder's
           identity + the debt operation number, copyable for support
@@ -714,6 +840,13 @@ const useStyles = makeStyles(c =>
       borderRadius: 6,
       paddingHorizontal: 6,
       paddingVertical: 3,
+    },
+    /** v20: the قسيمة chip (info tint) + the رصيد chip (success tint). */
+    voucherChip: {
+      backgroundColor: c.infoSoft,
+    },
+    prepaidChip: {
+      backgroundColor: c.successSoft,
     },
     debtChipText: {
       color: c.warning,
