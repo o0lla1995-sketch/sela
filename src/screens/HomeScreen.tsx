@@ -407,6 +407,38 @@ export function HomeScreen() {
                 </Text>
               </View>
             ) : null}
+            {/* v25 (round-32 #3): the drawer's non-sale life —
+                expenses + withdrawals out, deposits back in. */}
+            {(treasury?.expensesAllTime ?? 0) > 0 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  مصروفات مسجّلة (خصمت من الخزينة)
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.danger}]}>
+                    − {formatMoney(treasury?.expensesAllTime ?? 0)}
+                </Text>
+              </View>
+            ) : null}
+            {(treasury?.withdrawalsAllTime ?? 0) > 0 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  مسحوبات رصيد (خصمت من الخزينة)
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.danger}]}>
+                    − {formatMoney(treasury?.withdrawalsAllTime ?? 0)}
+                </Text>
+              </View>
+            ) : null}
+            {(treasury?.depositsAllTime ?? 0) > 0 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  إيداعات نقدية للخزينة
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.success}]}>
+                    + {formatMoney(treasury?.depositsAllTime ?? 0)}
+                </Text>
+              </View>
+            ) : null}
             <View style={styles.breakdownDivider} />
             <View style={styles.breakdownRow}>
               <Text style={styles.breakdownLabel}>من الدين: دفتر المتجر</Text>

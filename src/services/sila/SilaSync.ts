@@ -508,6 +508,17 @@ async function settlementsSyncCycle(full = false): Promise<void> {
     }
     setString(KEYS_CURSOR, new Date().toISOString());
     setString(KEYS_SYNCED_AT, new Date().toISOString());
+    // v25 (round-32 #2): the campaigns book just changed — refresh the
+    // POS cart's قسيمة button counter RIGHT NOW. Before this the
+    // store's count only refreshed on POS focus / pairing change, so
+    // a campaign that arrived with this feed kept the button hidden
+    // until the merchant navigated away and back (the exact
+    // «يتأخر زر القسيمة في الظهور بالسلة» complaint). Quiet by design.
+    try {
+      await useSilaStore.getState().refreshActiveCampaigns();
+    } catch {
+      // Isolated — never poisons the settlements cycle.
+    }
   } catch (error) {
     if (error instanceof SilaApiError && error.errorClass === 'device') {
       // The engine's device handling owns this case — stay quiet so

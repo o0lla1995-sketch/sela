@@ -159,9 +159,9 @@ export function buildVoucherReceiptJob(
     .textLine(settings.footerMessage || 'شكراً لتعاملكم معنا — عداكم خيراً')
     .bold(true)
     .textLine(LABELS.thanks)
-    .bold(false)
-    .feed(3)
-    .cut();
+    .bold(false);
+  // v25 (round-32 #4): the invoice barcode — scan-to-open.
+  b.align(1).barcode('CODE128', data.receiptRef, 60).feed(3).cut();
 
   return b.build();
 }

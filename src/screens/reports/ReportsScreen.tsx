@@ -134,12 +134,23 @@ export function ReportsScreen() {
         subtitle="المبيعات والنقد والديون"
         showBack={false}
         right={
-          <AppButton
-            small
-            title="الفواتير"
-            icon="inbox"
-            onPress={() => navigation.navigate('Invoices' as never)}
-          />
+          <View style={{flexDirection: 'row', gap: spacing.sm}}>
+            {/* v25 (round-32 #3): the treasury movements center —
+                expenses / withdrawals / deposits + the PDF
+                statement. */}
+            <AppButton
+              small
+              title="الخزينة"
+              icon="wallet"
+              onPress={() => navigation.navigate('CashMovements' as never)}
+            />
+            <AppButton
+              small
+              title="الفواتير"
+              icon="inbox"
+              onPress={() => navigation.navigate('Invoices' as never)}
+            />
+          </View>
         }
       />
 
@@ -399,6 +410,74 @@ export function ReportsScreen() {
                         </Text>
                       </View>
                     ) : null}
+                  </View>
+                </>
+              ) : null}
+
+              {/* 2-ج-3) v25 (round-32 #3): المصروفات والمسحوبات
+                  بالفترة — the drawer's non-sale life. Expenses and
+                  withdrawals LEFT the drawer, deposits came back;
+                  the net line answers «كم بقي فعلياً من نقدي
+                  بالفترة». */}
+              {(cash?.expensesCount ?? 0) > 0 ||
+              (cash?.withdrawalsCount ?? 0) > 0 ||
+              (cash?.depositsCount ?? 0) > 0 ? (
+                <>
+                  <Text style={styles.subTitle}>
+                    المصروفات والمسحوبات بالفترة
+                  </Text>
+                  <View style={styles.rowBox}>
+                    {(cash?.expensesCount ?? 0) > 0 ? (
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          مصروفات · {cash?.expensesCount ?? 0} سند
+                        </Text>
+                        <Text style={[styles.rowValue, {color: c.danger}]}>
+                          − {formatMoney(cash?.expensesAmount ?? 0)}
+                        </Text>
+                      </View>
+                    ) : null}
+                    {(cash?.withdrawalsCount ?? 0) > 0 ? (
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          مسحوبات رصيد · {cash?.withdrawalsCount ?? 0} سند
+                        </Text>
+                        <Text style={[styles.rowValue, {color: c.danger}]}>
+                          − {formatMoney(cash?.withdrawalsAmount ?? 0)}
+                        </Text>
+                      </View>
+                    ) : null}
+                    {(cash?.depositsCount ?? 0) > 0 ? (
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          إيداعات نقدية · {cash?.depositsCount ?? 0} سند
+                        </Text>
+                        <Text style={[styles.rowValue, {color: c.success}]}>
+                          + {formatMoney(cash?.depositsAmount ?? 0)}
+                        </Text>
+                      </View>
+                    ) : null}
+                    <View style={styles.rowLine}>
+                      <Text
+                        style={[
+                          styles.rowLabel,
+                          {fontFamily: fonts.bold, color: c.text},
+                        ]}>
+                        صافي النقد بالفترة (بعد المصروفات والمسحوبات)
+                      </Text>
+                      <Text
+                        style={[
+                          styles.rowValue,
+                          {
+                            fontFamily: fonts.bold,
+                            color: (cash?.netCashAfterMovements ?? 0) >= 0
+                              ? c.success
+                              : c.danger,
+                          },
+                        ]}>
+                        {formatMoney(cash?.netCashAfterMovements ?? 0)}
+                      </Text>
+                    </View>
                   </View>
                 </>
               ) : null}

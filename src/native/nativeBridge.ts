@@ -87,6 +87,17 @@ interface PlatformUtilsNative {
     name: string,
     base64: string,
   ): Promise<string>;
+  /** v25 (round-32 #3): renders the A4 Arabic statement PDF (JSON
+   *  payload → Downloads/SmartVisionPOS) → readable location. */
+  createStatementPdf(
+    fileName: string,
+    payloadJson: string,
+  ): Promise<string>;
+  /** v25: opens the system share sheet for an exported PDF. */
+  shareExportedPdf(fileName: string, title: string): Promise<boolean>;
+  /** v25: prints an exported PDF via Android's system print
+   *  framework (every printer app the merchant configured). */
+  printExportedPdf(fileName: string, jobName: string): Promise<boolean>;
 }
 
 /**

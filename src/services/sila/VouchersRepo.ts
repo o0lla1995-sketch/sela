@@ -18,6 +18,7 @@
  */
 import {getDb, toMessage} from '../../database/connection';
 import {logDiag} from '../../core/diagnostics';
+import {classifyCampaignKind} from './campaignKind';
 import type {
   CampaignDebtRow,
   CampaignSettlementRow,
@@ -526,31 +527,39 @@ export const VouchersRepo = {
     return changed;
   },
 
-  /** v22 (round-28 #4) → v24 (round-31 #4/#5): how many campaigns
-   *  drive the POS cart's قسيمة button. TWO changes:
-   *   1. KIND filter — PURCHASE-COUPON campaigns (kind='voucher')
-   *      only. Parcel campaigns NEVER show the cart button (they
-   *      redeem from the القسائم tab's parcel button only — no
-   *      mixing, the merchant's round-31 rule).
+  /** v22 (round-28 #4) → v25 (round-32 #2): how many campaigns
+   *  drive the POS cart's قسيمة button. THREE changes:
+   *   1. KIND filter — PURCHASE-COUPON campaigns only. Parcel
+   *      campaigns NEVER show the cart button (they redeem from the
+   *      القسائم tab's parcel button only — no mixing, the
+   *      merchant's round-31 rule).
    *   2. Status robustness — the merchant ACTIVATED the campaign in
    *      his store (store_state='active'), so the button must appear
    *      regardless of the server's status vocabulary. Only clearly
-   *      DEAD statuses (ended/completed/cancelled/archived) hide it;
-   *      NULL/'active'/'running'/anything else keeps it — fixes the
-   *      «الزر لا يظهر رغم تفعيل الحملة» complaint (the server sent
-   *      a status word the old equality test didn't know). */
+   *      DEAD statuses (ended/completed/cancelled/archived) hide it.
+   *   3. v25 (round-32 #2): TITLE-based classification — the type is
+   *      read from the campaign TITLE first («قسيمة شرائية _» →
+   *      purchase, «طرد …» → parcel), the institution's naming
+   *      convention the merchant himself pointed out. The server's
+   *      kind field is the fallback, and a kind-less untitled row
+   *      defaults to purchase. This makes the button's presence
+   *      correct the moment the feed lands — no delay, no misses. */
   async activeCampaignsCount(): Promise<number> {
     try {
       const result = await getDb().execute(
-        `SELECT COUNT(*) AS cnt FROM campaign_debts
+        `SELECT campaign_name, kind FROM campaign_debts
          WHERE store_state = 'active'
-           AND kind = 'voucher'
            AND LOWER(COALESCE(campaign_status, 'active')) NOT IN
                ('ended', 'completed', 'cancelled', 'canceled',
                 'archived', 'inactive')`,
       );
-      const row = result.rows?._array?.[0] as {cnt?: number} | undefined;
-      return Number(row?.cnt ?? 0);
+      const rows = (result.rows?._array ?? []) as {
+        campaign_name?: string | null;
+        kind?: string | null;
+      }[];
+      return rows.filter(
+        row => classifyCampaignKind(row.kind, row.campaign_name) === 'voucher',
+      ).length;
     } catch {
       return 0;
     }

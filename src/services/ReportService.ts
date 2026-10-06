@@ -16,6 +16,7 @@ import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 import {SilaRepo} from './sila/SilaRepo';
 import {VouchersRepo} from './sila/VouchersRepo';
+import {CashRepo} from '../database/repositories/CashRepo';
 import {useSilaStore} from '../stores/silaStore';
 import {localDateShift, localMonthStart, localToday} from '../core/format';
 import type {
@@ -89,6 +90,17 @@ export interface CashDebtsBundle {
    *  #2): يدخل ضمن «الدين القائم الآن» في صفحة التقارير — دين
    *  على المؤسسات حتى التسوية، تماماً كديون الزبائن. */
   campaignDueMinor: number;
+  /** v25 (round-32 #3): المصروفات بالفترة — خصم من الخزينة. */
+  expensesAmount: number;
+  expensesCount: number;
+  /** v25: مسحوبات الرصيد بالفترة — خصم من الخزينة. */
+  withdrawalsAmount: number;
+  withdrawalsCount: number;
+  /** v25: الإيداعات النقدية بالفترة — إضافة للخزينة. */
+  depositsAmount: number;
+  depositsCount: number;
+  /** v25: صافي النقد بالفترة بعد المصروفات والمسحوبات. */
+  netCashAfterMovements: number;
 }
 
 export interface ReportBundle {
@@ -133,6 +145,13 @@ export interface TreasurySnapshot {
   voucherSalesAllTime: number;
   /** v20: الفرق النقدي الذي دفعه المستحقون بالكاشير عبر التاريخ. */
   voucherCounterExtraAllTime: number;
+  /** v25 (round-32 #3): المصروفات المسجّلة عبر التاريخ — خصم من
+   *  النقد المتوقع بالخزينة (كل مصروف دُفع من الدرج). */
+  expensesAllTime: number;
+  /** v25: مسحوبات الرصيد عبر التاريخ — خصم من الخزينة. */
+  withdrawalsAllTime: number;
+  /** v25: الإيداعات النقدية للخزينة عبر التاريخ — إضافة. */
+  depositsAllTime: number;
   /** النقد المتوقع في الخزينة الآن. */
   cashTotal: number;
 }
@@ -191,6 +210,7 @@ export const ReportService = {
       voucherGoods,
       voucherSettlementsReceived,
       campaignTotals,
+      cashMovements,
     ] = await Promise.all([
       ReportRepo.summary(range),
       ReportRepo.topProducts(range, 10),
@@ -215,6 +235,8 @@ export const ReportService = {
       // النقد المحصّل بالفترة.
       VouchersRepo.settlementsReceivedInRange(range.from, range.to),
       VouchersRepo.campaignsTotals(),
+      // v25 (round-32 #3): the cash-movements ledger of the period.
+      CashRepo.totalsFor(range.from, range.to),
     ]);
 
     const topByProfit = [...topByRevenue]
@@ -280,12 +302,27 @@ export const ReportService = {
         voucherCounterExtraAmount: voucherSales.counterExtraMinor / 100,
         campaignSettlementsAmount: voucherSettlementsReceived.minor / 100,
         campaignDueMinor: campaignTotals.dueMinor,
+        // v25 (round-32 #3): the drawer's non-sale life of the period.
+        expensesAmount: cashMovements.expensesMinor / 100,
+        expensesCount: cashMovements.expensesCount,
+        withdrawalsAmount: cashMovements.withdrawalsMinor / 100,
+        withdrawalsCount: cashMovements.withdrawalsCount,
+        depositsAmount: cashMovements.depositsMinor / 100,
+        depositsCount: cashMovements.depositsCount,
+        netCashAfterMovements:
+          salesCash +
+          collections +
+          cashMovements.depositsMinor / 100 -
+          cashMovements.expensesMinor / 100 -
+          cashMovements.withdrawalsMinor / 100,
       },
     };
   },
 
   /** v18 (round-24 #2): the Home treasury — all-time expected cash.
-   *  revenue − credit sales + every collection source. A repayment
+   *  revenue − credit sales + every collection source − the cash
+   *  movements ledger (v25: المصروفات والمسحوبات تُخصم والإيداعات
+   *  تعود — Loyverse's expected-cash discipline). A repayment
    *  is an asset swap (دين → كاش), NEVER revenue (Square's
    *  house-account double-count rule). */
   async treasurySnapshot(): Promise<TreasurySnapshot> {
@@ -299,6 +336,7 @@ export const ReportService = {
       voucherRedemptionsAllTime,
       campaignTotals,
       returnReversalsTotalMinor,
+      cashTotals,
     ] = await Promise.all([
       SaleRepo.allTimeRevenue(),
       SilaRepo.totals(),
@@ -310,6 +348,9 @@ export const ReportService = {
       VouchersRepo.campaignsTotals(),
       // v23 (round-29 #2): the synced-debt reversals — see below.
       SilaRepo.returnReversalsTotal(),
+      // v25 (round-32 #3): the cash-movements ledger (expenses /
+      // withdrawals / deposits) — the drawer's non-sale life.
+      CashRepo.allTimeTotals(),
     ]);
     // Credit sales that never entered the drawer as cash at sale
     // time: the whole INV-D queue (credit-covered parts return via
@@ -358,6 +399,13 @@ export const ReportService = {
       campaignsActiveCount: campaignTotals.campaignsCount,
       voucherSalesAllTime,
       voucherCounterExtraAllTime,
+      // v25 (round-32 #3): the drawer's non-sale life — expenses and
+      // withdrawals LEAVE the drawer, deposits come back. The
+      // expected cash never goes negative: the service layer caps
+      // every movement at the drawer's live balance.
+      expensesAllTime: cashTotals.expensesMinor / 100,
+      withdrawalsAllTime: cashTotals.withdrawalsMinor / 100,
+      depositsAllTime: cashTotals.depositsMinor / 100,
       cashTotal:
         revenueAllTime -
         creditSalesAllTime -
@@ -367,7 +415,10 @@ export const ReportService = {
         cashierCollectionsAllTime +
         appCollectionsAllTime +
         prepaidCoveredAllTime +
-        campaignSettlementsAllTime,
+        campaignSettlementsAllTime +
+        cashTotals.depositsMinor / 100 -
+        cashTotals.expensesMinor / 100 -
+        cashTotals.withdrawalsMinor / 100,
     };
   },
 

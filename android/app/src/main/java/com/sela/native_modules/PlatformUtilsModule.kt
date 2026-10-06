@@ -16,6 +16,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -449,5 +450,488 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
   override fun invalidate() {
     super.invalidate()
     // Nothing to clean up — no threads or receivers held.
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // v25 (round-32 #3): the A4 PDF statement (كشف المصروفات والسحوبات)
+  // + share + system print. Android's native PdfDocument + the
+  // embedded Tajawal font render RTL Arabic perfectly (Paint does
+  // the shaping) — no third-party PDF dependency needed.
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Renders an A4 statement PDF from a JSON payload (built in JS by
+   * CashService.statementForPdf):
+   *   {
+   *     "storeName": "…", "title": "…", "periodLabel": "…",
+   *     "generatedAt": "…",
+   *     "summary": [ {"label":"مصروفات","value":"120.00 ₪"}, … ],
+   *     "categories": [ {"name":"كهرباء","count":2,"total":"80.00 ₪"}, … ],
+   *     "rows": [ {"ref":"EXP-…","kind":"مصروف","category":"…",
+   *                "note":"…","amount":"-40.00 ₪","date":"…"} ],
+   *     "footer": "…"
+   *   }
+   * Saved into Downloads/SmartVisionPOS via MediaStore (API 29+) or
+   * legacy path; resolves with the readable location string.
+   */
+  @ReactMethod
+  fun createStatementPdf(fileName: String, payloadJson: String, promise: Promise) {
+    try {
+      val pdf = android.graphics.pdf.PdfDocument()
+      // A4 at 72dpi: 595 x 842 points.
+      val pageWidth = 595
+      val pageHeight = 842
+      val margin = 40f
+
+      // Parse the payload.
+      val json = org.json.JSONObject(payloadJson)
+      val storeName = json.optString("storeName", "sela")
+      val title = json.optString("title", "كشف")
+      val periodLabel = json.optString("periodLabel", "")
+      val generatedAt = json.optString("generatedAt", "")
+      val footer = json.optString("footer", "تم إنشاؤه بواسطة تطبيق sela")
+
+      fun optArray(name: String): List<org.json.JSONObject> {
+        val out = ArrayList<org.json.JSONObject>()
+        val arr = json.optJSONArray(name) ?: return out
+        for (i in 0 until arr.length()) {
+          out.add(arr.getJSONObject(i))
+        }
+        return out
+      }
+      val summary = optArray("summary")
+      val categories = optArray("categories")
+      val rows = optArray("rows")
+
+      // Fonts — the app bundles Tajawal for its Arabic identity.
+      val regular = loadTajawal(reactContext, "Tajawal-Regular.ttf")
+      val bold = loadTajawal(reactContext, "Tajawal-Bold.ttf")
+
+      var page = pdf.startPage(
+        android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
+      )
+      var canvas = page.canvas
+      var pageNo = 1
+      var y = 0f
+
+      fun text(
+        value: String,
+        x: Float,
+        cy: Float,
+        paint: android.graphics.Paint,
+        align: android.graphics.Paint.Align = android.graphics.Paint.Align.RIGHT
+      ) {
+        paint.textAlign = align
+        canvas.drawText(value, x, cy, paint)
+      }
+
+      fun newPage() {
+        pdf.finishPage(page)
+        pageNo += 1
+        page = pdf.startPage(
+          android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNo).create()
+        )
+        canvas = page.canvas
+        y = margin + 18f
+        // Page header on continuation pages.
+        val headPaint = android.graphics.Paint(bold).apply {
+          textSize = 10f
+          color = android.graphics.Color.GRAY
+          isAntiAlias = true
+        }
+        text("$storeName — $title (تابع)", pageWidth - margin, y, headPaint)
+        text("صفحة $pageNo", margin, y, headPaint, android.graphics.Paint.Align.LEFT)
+        y += 26f
+      }
+
+      fun ensureSpace(needed: Float) {
+        if (y + needed > pageHeight - margin - 24f) {
+          newPage()
+        }
+      }
+
+      // ── Title block ──
+      val titlePaint = android.graphics.Paint(bold).apply {
+        textSize = 22f
+        color = android.graphics.Color.BLACK
+        isAntiAlias = true
+      }
+      val subPaint = android.graphics.Paint(regular).apply {
+        textSize = 12f
+        color = android.graphics.Color.DKGRAY
+        isAntiAlias = true
+      }
+      val cellPaint = android.graphics.Paint(regular).apply {
+        textSize = 11f
+        color = android.graphics.Color.BLACK
+        isAntiAlias = true
+      }
+      val cellBold = android.graphics.Paint(bold).apply {
+        textSize = 11f
+        color = android.graphics.Color.BLACK
+        isAntiAlias = true
+      }
+      val accentPaint = android.graphics.Paint(bold).apply {
+        textSize = 16f
+        color = android.graphics.Color.rgb(0xF9, 0x73, 0x16)
+        isAntiAlias = true
+      }
+      val linePaint = android.graphics.Paint().apply {
+        strokeWidth = 1f
+        color = android.graphics.Color.rgb(0xCC, 0xCC, 0xCC)
+      }
+      val headerBgPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.rgb(0xF3, 0xF4, 0xF6)
+      }
+
+      y = margin + 24f
+      text(storeName, pageWidth - margin, y, titlePaint)
+      y += 30f
+      text(title, pageWidth - margin, y, accentPaint)
+      y += 22f
+      text("الفترة: $periodLabel", pageWidth - margin, y, subPaint)
+      text("أُنشئ في: $generatedAt", pageWidth - margin, y + 14f, subPaint)
+      y += 44f
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 24f
+
+      // ── Summary box (2 columns of label → value rows) ──
+      if (summary.isNotEmpty()) {
+        text("الإجماليات", pageWidth - margin, y, cellBold)
+        y += 20f
+        var col = 0
+        val colW = (pageWidth - 2 * margin) / 2f
+        for (item in summary) {
+          val label = item.optString("label", "")
+          val value = item.optString("value", "")
+          val x = pageWidth - margin - col * colW
+          text(label, x, y, cellPaint)
+          text(value, x - colW + 90f, y, cellBold, android.graphics.Paint.Align.LEFT)
+          col += 1
+          if (col >= 2) {
+            col = 0
+            y += 20f
+          }
+        }
+        if (col != 0) {
+          y += 20f
+        }
+        y += 8f
+        canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+        y += 24f
+      }
+
+      // ── Category breakdown ──
+      if (categories.isNotEmpty()) {
+        text("حسب الفئة", pageWidth - margin, y, cellBold)
+        y += 20f
+        for (cat in categories) {
+          ensureSpace(18f)
+          val name = cat.optString("name", "")
+          val count = cat.optString("count", "0")
+          val total = cat.optString("total", "")
+          text(name, pageWidth - margin, y, cellPaint)
+          text("$count عملية", pageWidth - margin - 240f, y, cellPaint, android.graphics.Paint.Align.LEFT)
+          text(total, margin + 10f, y, cellBold, android.graphics.Paint.Align.LEFT)
+          y += 18f
+        }
+        y += 8f
+        canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+        y += 24f
+      }
+
+      // ── Movements table ──
+      text("الحركات (${rows.size})", pageWidth - margin, y, cellBold)
+      y += 20f
+      // Column layout (RTL): التاريخ | المرجع | النوع | الفئة | الملاحظة | المبلغ
+      val colDate = pageWidth - margin
+      val colRef = colDate - 92f
+      val colKind = colRef - 92f
+      val colCat = colKind - 66f
+      val colNote = colCat - 150f
+      val colAmount = margin + 10f
+      // Header row with a light background.
+      canvas.drawRect(margin, y - 13f, pageWidth - margin, y + 6f, headerBgPaint)
+      text("التاريخ", colDate, y, cellBold)
+      text("المرجع", colRef, y, cellBold)
+      text("النوع", colKind, y, cellBold)
+      text("الفئة", colCat, y, cellBold)
+      text("ملاحظة", colNote, y, cellBold)
+      text("المبلغ (₪)", colAmount, y, cellBold, android.graphics.Paint.Align.LEFT)
+      y += 24f
+      for (row in rows) {
+        ensureSpace(18f)
+        val date = row.optString("date", "")
+        val ref = row.optString("ref", "")
+        val kind = row.optString("kind", "")
+        val category = row.optString("category", "")
+        val note = row.optString("note", "")
+        val amount = row.optString("amount", "")
+        text(date.take(16), colDate, y, cellPaint)
+        text(ref, colRef, y, cellPaint)
+        text(kind, colKind, y, cellPaint)
+        text(category.take(14), colCat, y, cellPaint)
+        text(note.take(24), colNote, y, cellPaint)
+        text(amount, colAmount, y, cellBold, android.graphics.Paint.Align.LEFT)
+        y += 18f
+      }
+
+      // ── Footer on the last page ──
+      y += 14f
+      ensureSpace(30f)
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 20f
+      val footPaint = android.graphics.Paint(regular).apply {
+        textSize = 9f
+        color = android.graphics.Color.GRAY
+        isAntiAlias = true
+      }
+      text(footer, pageWidth - margin, y, footPaint)
+      text("صفحة $pageNo", margin, y, footPaint, android.graphics.Paint.Align.LEFT)
+
+      pdf.finishPage(page)
+
+      // ── Save via MediaStore (or legacy path) ──
+      val bytes = ByteArrayOutputStream().use { stream ->
+        pdf.writeTo(stream)
+        pdf.close()
+        stream.toByteArray()
+      }
+      val displayName = sanitizeFileName(fileName)
+      val resultPath: String
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = reactContext.contentResolver
+        val values = ContentValues().apply {
+          put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+          put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+          put(
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            Environment.DIRECTORY_DOWNLOADS + "/" + EXPORT_DIR_NAME
+          )
+        }
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(collection, values)
+          ?: throw IllegalStateException("فشل إنشاء ملف الكشف")
+        resolver.openOutputStream(uri)?.use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        } ?: throw IllegalStateException("تعذّر فتح ملف الكشف للكتابة")
+        resultPath = "Downloads/$EXPORT_DIR_NAME/$displayName"
+      } else {
+        @Suppress("DEPRECATION")
+        val downloadsDir =
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val targetDir = File(downloadsDir, EXPORT_DIR_NAME)
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+          throw IllegalStateException("تعذّر إنشاء مجلد التصدير")
+        }
+        val targetFile = File(targetDir, displayName)
+        FileOutputStream(targetFile).use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        }
+        resultPath = targetFile.absolutePath
+      }
+
+      val activity = currentActivity
+      val handler = android.os.Handler((activity ?: reactContext).mainLooper)
+      handler.post {
+        try {
+          Toast.makeText(
+            reactContext,
+            "تم حفظ كشف PDF في: $resultPath",
+            Toast.LENGTH_LONG
+          ).show()
+        } catch (ignored: Exception) {
+          // Cosmetic only.
+        }
+      }
+
+      promise.resolve(resultPath)
+    } catch (t: Throwable) {
+      promise.reject("PDF_FAILED", "فشل إنشاء كشف PDF: ${t.message}")
+    }
+  }
+
+  /** Opens the system share sheet for a saved file in the export
+   *  folder (WhatsApp / email / any PDF printer app the merchant
+   *  has). On Android 10+ the file lives in MediaStore — we look it
+   *  up by display name in our export folder. */
+  @ReactMethod
+  fun shareExportedPdf(fileName: String, title: String, promise: Promise) {
+    try {
+      val activity = currentActivity
+      if (activity == null) {
+        promise.reject("NO_ACTIVITY", "التطبيق غير نشط — حاول مرة أخرى")
+        return
+      }
+      val displayName = sanitizeFileName(fileName)
+      val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        reactContext.contentResolver.query(
+          collection,
+          arrayOf(MediaStore.MediaColumns._ID),
+          "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+          arrayOf(displayName, Environment.DIRECTORY_DOWNLOADS + "/" + EXPORT_DIR_NAME + "/"),
+          null
+        )?.use { cursor ->
+          if (cursor.moveToFirst()) {
+            android.content.ContentUris.withAppendedId(collection, cursor.getLong(0))
+          } else {
+            null
+          }
+        }
+      } else {
+        @Suppress("DEPRECATION")
+        val legacy = File(
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+          "$EXPORT_DIR_NAME/$displayName"
+        )
+        if (legacy.exists()) {
+          androidx.core.content.FileProvider.getUriForFile(
+            reactContext,
+            reactContext.packageName + ".fileprovider",
+            legacy
+          )
+        } else {
+          null
+        }
+      }
+      if (uri == null) {
+        promise.reject("NOT_FOUND", "لم يُعثر على الملف — أنشئ الكشف أولاً")
+        return
+      }
+      val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/pdf"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_TITLE, title)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+      activity.startActivity(
+        Intent.createChooser(intent, title)
+      )
+      promise.resolve(true)
+    } catch (t: Throwable) {
+      promise.reject("SHARE_FAILED", "تعذّرت مشاركة الملف: ${t.message}")
+    }
+  }
+
+  /** Prints a saved export-folder PDF through Android's system
+   *  print framework (PrintManager) — works with every printer app
+   *  the merchant has configured (cloud / USB / Wi-Fi). */
+  @ReactMethod
+  fun printExportedPdf(fileName: String, jobName: String, promise: Promise) {
+    try {
+      val activity = currentActivity
+      if (activity == null) {
+        promise.reject("NO_ACTIVITY", "التطبيق غير نشط — حاول مرة أخرى")
+        return
+      }
+      val displayName = sanitizeFileName(fileName)
+      val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        reactContext.contentResolver.query(
+          collection,
+          arrayOf(MediaStore.MediaColumns._ID),
+          "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+          arrayOf(displayName, Environment.DIRECTORY_DOWNLOADS + "/" + EXPORT_DIR_NAME + "/"),
+          null
+        )?.use { cursor ->
+          if (cursor.moveToFirst()) {
+            android.content.ContentUris.withAppendedId(collection, cursor.getLong(0))
+          } else {
+            null
+          }
+        }
+      } else {
+        null
+      }
+      val fileDescriptor = if (uri != null) {
+        reactContext.contentResolver.openFileDescriptor(uri, "r")
+      } else {
+        @Suppress("DEPRECATION")
+        val legacy = File(
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+          "$EXPORT_DIR_NAME/$displayName"
+        )
+        if (legacy.exists()) {
+          android.os.ParcelFileDescriptor.open(
+            legacy, android.os.ParcelFileDescriptor.MODE_READ_ONLY
+          )
+        } else {
+          null
+        }
+      }
+      if (fileDescriptor == null) {
+        promise.reject("NOT_FOUND", "لم يُعثر على الملف — أنشئ الكشف أولاً")
+        return
+      }
+      val fd = fileDescriptor
+      val printAdapter = object : android.print.PrintDocumentAdapter() {
+        override fun onLayout(
+          oldAttributes: android.print.PrintAttributes?,
+          newAttributes: android.print.PrintAttributes,
+          cancellationSignal: android.os.CancellationSignal?,
+          callback: LayoutResultCallback,
+          extras: android.os.Bundle?
+        ) {
+          if (cancellationSignal?.isCanceled == true) {
+            callback.onLayoutCancelled()
+            return
+          }
+          val info = android.print.PrintDocumentInfo.Builder(displayName)
+            .setContentType(android.print.PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+            .build()
+          callback.onLayoutFinished(info, true)
+        }
+
+        override fun onWrite(
+          pages: Array<out android.print.PageRange>?,
+          destination: android.os.ParcelFileDescriptor,
+          cancellationSignal: android.os.CancellationSignal?,
+          callback: WriteResultCallback
+        ) {
+          try {
+            java.io.FileInputStream(fd.fileDescriptor).use { input ->
+              java.io.FileOutputStream(destination.fileDescriptor).use { output ->
+                input.copyTo(output)
+                output.flush()
+              }
+            }
+            callback.onWriteFinished(arrayOf(android.print.PageRange.ALL_PAGES))
+          } catch (t: Throwable) {
+            callback.onWriteFailed(t.message)
+          } finally {
+            try {
+              fd.close()
+            } catch (ignored: Exception) {
+            }
+          }
+        }
+      }
+      val printManager = activity.getSystemService(android.content.Context.PRINT_SERVICE)
+        as android.print.PrintManager
+      printManager.print(jobName, printAdapter, android.print.PrintAttributes.Builder().build())
+      promise.resolve(true)
+    } catch (t: Throwable) {
+      promise.reject("PRINT_FAILED", "تعذّر فتح الطباعة: ${t.message}")
+    }
+  }
+
+  /** Loads a Tajawal TTF from the app's bundled assets — the
+   *  fonts ship uncompressed in assets/fonts (aaptOptions
+   *  noCompress keeps them loadable by Typeface). */
+  private fun loadTajawal(
+    context: ReactApplicationContext,
+    fileName: String
+  ): android.graphics.Typeface {
+    return try {
+      android.graphics.Typeface.createFromAsset(context.assets, "fonts/$fileName")
+    } catch (t: Throwable) {
+      android.graphics.Typeface.DEFAULT
+    }
   }
 }

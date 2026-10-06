@@ -36,6 +36,7 @@ import {logDiag} from '../core/diagnostics';
 import {buildVoucherReceiptJob} from './printer/voucherReceipt';
 import {ThermalPrinterService} from './printer/ThermalPrinterService';
 import {VouchersRepo} from './sila/VouchersRepo';
+import {classifyCampaignKind} from './sila/campaignKind';
 import {
   silaRedeemVoucher,
   SilaApiError,
@@ -391,7 +392,17 @@ export const VoucherService = {
       //     the cashier exactly what happened and where the code
       //     should have gone. The books never diverge from صِلة.
       const mode = options.mode ?? (options.cart != null ? 'cart' : 'parcel');
-      if (mode === 'parcel' && result.kind === 'voucher') {
+      // v25 (round-32 #2): the SAME title-first classifier the button
+      // uses — if the institution titled the campaign «طرد …» the code
+      // is a parcel no matter what the kind field said, and a
+      // «قسيمة شرائية _ …» title is a purchase coupon the same way
+      // (the merchant's round-32 rule). One classifier, one truth,
+      // everywhere.
+      const effectiveKind = classifyCampaignKind(
+        result.kind,
+        result.campaign_name,
+      );
+      if (mode === 'parcel' && effectiveKind === 'voucher') {
         await bookRedemption(row, result);
         logDiag(
           'sila',
@@ -404,7 +415,7 @@ export const VoucherService = {
           false,
         );
       }
-      if (mode === 'cart' && result.kind === 'parcel') {
+      if (mode === 'cart' && effectiveKind === 'parcel') {
         await bookRedemption(row, result);
         logDiag(
           'sila',

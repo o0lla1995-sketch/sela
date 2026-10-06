@@ -39,6 +39,7 @@ import {
 import {SilaScreen} from '../screens/sila/SilaScreen';
 import {LocalDebtsScreen} from '../screens/debts/LocalDebtsScreen';
 import {SecuritySettingsScreen} from '../screens/settings/SecuritySettingsScreen';
+import {CashMovementsScreen} from '../screens/cash/CashMovementsScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -59,6 +60,9 @@ export type RootStackParamList = {
   LocalDebts: undefined;
   /** v13 (round-19 #2): app-lock setup (fingerprint + 4-digit PIN). */
   Security: undefined;
+  /** v25 (round-32 #3): الخزينة والمصروفات — the cash movements
+   *  ledger (expenses / withdrawals / deposits + PDF statement). */
+  CashMovements: undefined;
 };
 
 export type MainTabParamList = {
@@ -188,6 +192,8 @@ export function RootNavigator() {
         <Stack.Screen name="Sila" component={SilaScreen} />
         <Stack.Screen name="LocalDebts" component={LocalDebtsScreen} />
         <Stack.Screen name="Security" component={SecuritySettingsScreen} />
+        {/* v25 (round-32 #3): الخزينة والمصروفات — from Reports. */}
+        <Stack.Screen name="CashMovements" component={CashMovementsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

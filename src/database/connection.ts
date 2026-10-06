@@ -1145,6 +1145,47 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 15;
   }
 
+  if (version < 16) {
+    // ── v25 (round-32 #3): نظام المصروفات والسحب من الخزينة ──────
+    // The cash-movements ledger — the Loyverse/Square cash-drawer
+    // discipline: every shekel that leaves or enters the drawer
+    // outside a sale is DOCUMENTED with its own numbered reference,
+    // its kind, its category and (for secured withdrawals) the
+    // authorization method used:
+    //   • expense     (EXP-000001) — مصروف تشغيلي (كهرباء، إيجار…)
+    //   • withdrawal  (WD-000001)  — سحب رصيد من الخزينة (تأمين: بصمة/PIN)
+    //   • deposit     (DEP-000001) — إيداع نقدي إلى الخزينة
+    // Rows are IMMUTABLE by design (audit trail — no UPDATE/DELETE
+    // APIs exist on the repo); corrections are counter-entries.
+    // The treasury snapshot subtracts expenses + withdrawals and adds
+    // deposits back, so «النقد المتوقع بالخزينة» always matches the
+    // drawer's physical reality.
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS cash_movements (
+        local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ref TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('expense','withdrawal','deposit')),
+        category TEXT NOT NULL DEFAULT 'أخرى',
+        note TEXT,
+        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+        auth_method TEXT NOT NULL DEFAULT 'none'
+          CHECK (auth_method IN ('fingerprint','pin','none')),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_cash_mov_kind_date ON cash_movements(kind, created_at)',
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_cash_mov_date ON cash_movements(created_at)',
+    );
+    logDiag(
+      'db',
+      'ترحيل v16: نظام المصروفات والسحب من الخزينة (سجل الحركات المالية EXP/WD/DEP)',
+    );
+    version = 16;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -1234,8 +1275,9 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM campaign_settlements');
   await database.execute('DELETE FROM campaign_debts');
   await database.execute('DELETE FROM voucher_redemptions');
+  await database.execute('DELETE FROM cash_movements');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements','cash_movements')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

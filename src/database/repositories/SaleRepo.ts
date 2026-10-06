@@ -736,6 +736,28 @@ export const SaleRepo = {
     return row ? rowToSale(row) : null;
   },
 
+  /** v25 (round-32 #4): the EXACT match by invoice number — the
+   *  scan-to-open path. The printed receipt's CODE128 barcode
+   *  carries the number verbatim (INV-/INV-D/INV-L/INV-V/RET-), so
+   *  one indexed equality is all the lookup needs (a LIKE would
+   *  risk opening the WRONG invoice on partial matches). */
+  async byInvoiceNumber(invoiceNumber: string): Promise<SaleRecord | null> {
+    const trimmed = invoiceNumber.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    try {
+      const result = await getDb().execute(
+        'SELECT * FROM sales WHERE invoice_number = ? LIMIT 1',
+        [trimmed],
+      );
+      const row = result.rows?._array?.[0];
+      return row ? rowToSale(row) : null;
+    } catch {
+      return null;
+    }
+  },
+
   async countAll(): Promise<number> {
     const result = await getDb().execute('SELECT COUNT(*) AS cnt FROM sales');
     const row = result.rows?._array?.[0] as {cnt?: number} | undefined;

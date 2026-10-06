@@ -693,3 +693,47 @@ export function stockStateOf(
   const threshold = product.low_stock_threshold ?? defaultThreshold;
   return product.stock_quantity <= threshold ? 'low' : 'ok';
 }
+
+// ────────────────────────────────────────────────────────────────
+// v25 (round-32 #3): نظام المصروفات والسحب من الخزينة — the cash
+// movements ledger (Loyverse/Square cash-drawer discipline). Every
+// shekel that leaves or enters the drawer outside a sale carries a
+// numbered reference, a kind, a category and the authorization
+// method used at entry time. Rows are IMMUTABLE (audit trail).
+// ────────────────────────────────────────────────────────────────
+
+export type CashMovementKind = 'expense' | 'withdrawal' | 'deposit';
+
+/** How the (secured) action was authorized when it was recorded. */
+export type CashAuthMethod = 'fingerprint' | 'pin' | 'none';
+
+export interface CashMovementRecord {
+  local_id: number;
+  /** EXP-000001 | WD-000001 | DEP-000001 — its own daily series. */
+  ref: string;
+  kind: CashMovementKind;
+  category: string;
+  note: string | null;
+  amount_minor: number;
+  auth_method: CashAuthMethod;
+  created_at: string;
+}
+
+/** Period totals for the statement + the reports section. */
+export interface CashMovementTotals {
+  expensesMinor: number;
+  withdrawalsMinor: number;
+  depositsMinor: number;
+  expensesCount: number;
+  withdrawalsCount: number;
+  depositsCount: number;
+  /** +deposits − expenses − withdrawals (minor). */
+  netMinor: number;
+}
+
+/** Category breakdown row for the PDF statement. */
+export interface CashCategoryTotal {
+  category: string;
+  count: number;
+  totalMinor: number;
+}

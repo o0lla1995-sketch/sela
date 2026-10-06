@@ -121,9 +121,10 @@ export function buildReturnReceiptJob(
     .align(1)
     .bold(true)
     .textLine(LABELS.thanks)
-    .bold(false)
-    .feed(2)
-    .cut();
+    .bold(false);
+  // v25 (round-32 #4): the RETURN receipt's own barcode — scanning
+  //  it opens the RET row (its lines/history) directly.
+  b.align(1).barcode('CODE128', data.ret.return_number, 60).feed(2).cut();
 
   return b.build();
 }

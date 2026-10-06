@@ -15,8 +15,12 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
+  Alert,
+  Animated,
   BackHandler,
   Clipboard,
+  Dimensions,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -58,6 +62,11 @@ import {
   useThemeColors,
 } from '../../core/theme';
 import {formatDateTime, formatMoney, formatQty} from '../../core/format';
+import {
+  cameraPermissionMessage,
+  ensureCameraPermission,
+  scanBarcode,
+} from '../../services/vision/scanFlow';
 import type {
   ReturnLineInput,
   SaleItemRecord,
@@ -107,6 +116,7 @@ export function InvoicesScreen() {
   const c = useThemeColors();
   const styles = useStyles();
   const navigation = useNavigation<any>();
+  const toast = useToastStore(state => state.show);
 
   const [rows, setRows] = useState<InvoiceRow[]>([]);
   const [search, setSearch] = useState('');
@@ -204,12 +214,73 @@ export function InvoicesScreen() {
     setSearch(query);
   }, []);
 
+  /** v25 (round-32 #4): scan-to-open — the receipt's CODE128
+   *  barcode carries the invoice number; one native scan looks
+   *  the row up EXACTLY and opens its detail screen instantly. */
+  const [scanBusy, setScanBusy] = useState(false);
+  const scanInvoice = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    const permission = await ensureCameraPermission();
+    if (permission !== 'granted') {
+      Alert.alert('إذن الكاميرا مطلوب', cameraPermissionMessage(permission), [
+        {text: 'إغلاق', style: 'cancel'},
+        {
+          text: 'فتح الإعدادات',
+          onPress: () => {
+            void Linking.openSettings();
+          },
+        },
+      ]);
+      return;
+    }
+    setScanBusy(true);
+    try {
+      const code = await scanBarcode();
+      if (code == null) {
+        return; // closed without scanning.
+      }
+      const sale = await SaleRepo.byInvoiceNumber(code);
+      if (sale == null) {
+        toast(
+          `لا توجد فاتورة بهذا الباركود (${code}) — الباركود يجب أن يكون من إيصال طبعه هذا المتجر`,
+          'error',
+          4500,
+        );
+        return;
+      }
+      navigation.navigate('InvoiceDetail', {saleId: sale.id});
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل مسح الباركود',
+        'error',
+      );
+    } finally {
+      setScanBusy(false);
+    }
+  }, [scanBusy, navigation, toast]);
+
   return (
     <View style={styles.screen}>
       <AppHeader
         title="الفواتير"
         subtitle={`${rows.length} فاتورة معروضة`}
         showBack
+        right={
+          <TouchableOpacity
+            style={styles.scanChip}
+            onPress={() => void scanInvoice()}
+            disabled={scanBusy}
+            activeOpacity={0.7}>
+            {scanBusy ? (
+              <ActivityIndicator size="small" color={c.accent} />
+            ) : (
+              <Icon name="barcode" size={16} color={c.accent} />
+            )}
+            <Text style={styles.scanChipText}>قارئ الباركود</Text>
+          </TouchableOpacity>
+        }
       />
       <View style={styles.content}>
         <SearchBar
@@ -674,14 +745,18 @@ export function InvoiceDetailScreen() {
             {/* v23 (round-29 #2): إرجاع أصناف — available on every
                 real invoice (cash / دين صلة / دين المتجر) until
                 everything is returned. Voucher invoices (INV-V) and
-                return receipts (RET-) never show it. */}
+                return receipts (RET-) never show it.
+                v25 (round-32 #1): shrunk to a compact icon+word
+                chip — the wide AppButton squeezed the header on
+                this ROM's narrow screens. */}
             {canReturn ? (
-              <AppButton
-                small
-                title="إرجاع أصناف"
-                icon="undo"
+              <TouchableOpacity
+                style={styles.retChip}
                 onPress={() => setReturnOpen(true)}
-              />
+                activeOpacity={0.7}>
+                <Icon name="undo" size={14} color={c.warning} />
+                <Text style={styles.retChipText}>إرجاع</Text>
+              </TouchableOpacity>
             ) : null}
             <AppButton
               small
@@ -1219,6 +1294,16 @@ function ReturnSheet({
   const toast = useToastStore(state => state.show);
   const settings = useSettingsStore(state => state.settings);
 
+  // v25 (round-32 #1): a STABLE height + a soft fade/slide entrance.
+  // The old sheet opened with maxHeight and a tiny spinner, then
+  // JUMPED to the full-height list in one frame the moment the
+  // (fast, local) prepareReturn resolved — on this ROM that read as
+  // TWO windows flashing («نافذة تظهر لحظة ثم تغطيها نافذة الإرجاع
+  // قبل رؤيتها»). A fixed height means loading → list is ONE
+  // window whose CONTENT changes, and the 140ms entrance removes
+  // the abrupt flash entirely.
+  const entrance = useRef(new Animated.Value(0)).current;
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1399,6 +1484,20 @@ function ReturnSheet({
     return () => sub.remove();
   }, [visible, busy, onClose]);
 
+  // v25 (round-32 #1): ONE soft entrance animation (fade + slight
+  // rise) — replaces the instant mount jump.
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    entrance.setValue(0);
+    Animated.timing(entrance, {
+      toValue: 1,
+      duration: 150,
+      useNativeDriver: true,
+    }).start();
+  }, [visible, entrance]);
+
   // v24 (round-31 #1): INLINE absolute overlay — NEVER a RN Modal
   // (a Modal rendered EMPTY/BLACK on this ROM right after the native
   // scanner closes — the exact «النافذة فارغة لا تحتوي على أصناف»
@@ -1408,8 +1507,14 @@ function ReturnSheet({
     return null;
   }
 
+  const sheetHeight = Math.round(Dimensions.get('window').height * 0.72);
+
   return (
-    <View style={retStyles(c).backdrop}>
+    <Animated.View
+      style={[
+        retStyles(c).backdrop,
+        {opacity: entrance},
+      ]}>
       <Pressable
         style={{flex: 1}}
         onPress={() => {
@@ -1418,28 +1523,43 @@ function ReturnSheet({
           }
         }}
       />
-      <Pressable
-        style={retStyles(c).sheet}
-        onPress={() => undefined}
-        disabled={busy}>
-        {/* ── Sheet header ── */}
-        <View style={retStyles(c).head}>
-          <View style={retStyles(c).headIcon}>
-            <Icon name="undo" size={20} color={c.warning} />
+      <Animated.View
+        style={[
+          retStyles(c).sheet,
+          {height: sheetHeight},
+          {
+            transform: [
+              {
+                translateY: entrance.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [26, 0],
+                }),
+              },
+            ],
+          },
+        ]}>
+        <Pressable
+          style={{flex: 1}}
+          onPress={() => undefined}
+          disabled={busy}>
+          {/* ── Sheet header ── */}
+          <View style={retStyles(c).head}>
+            <View style={retStyles(c).headIcon}>
+              <Icon name="undo" size={20} color={c.warning} />
+            </View>
+            <View style={{flex: 1}}>
+              <Text style={retStyles(c).headTitle}>إرجاع أصناف للفاتورة</Text>
+              <Text style={retStyles(c).headSub}>
+                اختر الكميات المُرجعة — تُستعاد للمخزون فوراً
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={onClose}
+              style={retStyles(c).closeBtn}
+              disabled={busy}>
+              <Icon name="x" size={16} color={c.textDim} />
+            </TouchableOpacity>
           </View>
-          <View style={{flex: 1}}>
-            <Text style={retStyles(c).headTitle}>إرجاع أصناف للفاتورة</Text>
-            <Text style={retStyles(c).headSub}>
-              اختر الكميات المُرجعة — تُستعاد للمخزون فوراً
-            </Text>
-          </View>
-          <TouchableOpacity
-            onPress={onClose}
-            style={retStyles(c).closeBtn}
-            disabled={busy}>
-            <Icon name="x" size={16} color={c.textDim} />
-          </TouchableOpacity>
-        </View>
 
         {loading ? (
           <View style={retStyles(c).centerBox}>
@@ -1588,8 +1708,9 @@ function ReturnSheet({
             </View>
           </>
         )}
-      </Pressable>
-    </View>
+        </Pressable>
+      </Animated.View>
+    </Animated.View>
   );
 }
 
@@ -1606,8 +1727,12 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
       zIndex: 70,
       elevation: 70,
     },
+    // v25 (round-32 #1): FIXED height (set inline at render time —
+    // 72% of the window) instead of maxHeight — the loading spinner,
+    // the error box and the full list now share ONE stable frame, so
+    // the sheet never "jumps" from small to tall (the double-window
+    // flash on this ROM).
     sheet: {
-      maxHeight: '86%',
       backgroundColor: c.bg,
       borderTopLeftRadius: 22,
       borderTopRightRadius: 22,
@@ -1616,6 +1741,7 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
       paddingHorizontal: spacing.lg,
       borderWidth: 1,
       borderColor: c.borderSoft,
+      overflow: 'hidden',
     },
     head: {
       flexDirection: 'row',
@@ -1791,6 +1917,23 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
 
 const useStyles = makeStyles(c =>
   StyleSheet.create({
+    // v25 (round-32 #4): the scan-to-open chip in the header.
+    scanChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      minHeight: 38,
+      paddingHorizontal: spacing.md,
+      borderRadius: radius.sm,
+      backgroundColor: c.accentSofter,
+      borderWidth: 1,
+      borderColor: c.accent,
+    },
+    scanChipText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
     screen: {flex: 1, backgroundColor: c.bg},
     content: {flex: 1, padding: spacing.lg, gap: spacing.md},
     list: {gap: spacing.sm, paddingBottom: spacing.xl},
@@ -2019,6 +2162,24 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.black,
       fontSize: typography.body,
       fontVariant: ['tabular-nums'],
+    },
+    // v25 (round-32 #1): the compact return chip (icon + word) that
+    // replaced the wide AppButton in the detail header.
+    retChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      minHeight: 38,
+      paddingHorizontal: spacing.md,
+      borderRadius: radius.sm,
+      backgroundColor: c.warningSoft,
+      borderWidth: 1,
+      borderColor: c.warning,
+    },
+    retChipText: {
+      color: c.warning,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
     detailMeta: {
       color: c.textDim,

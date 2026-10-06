@@ -118,9 +118,14 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
     .align(1)
     .bold(true)
     .textLine(LABELS.thanks)
-    .bold(false)
-    .feed(3)
-    .cut();
+    .bold(false);
+
+  // ── v25 (round-32 #4): the INVOICE barcode — CODE128 carrying
+  //  the invoice number itself, so the merchant can scan ANY
+  //  printed receipt from the invoices center's قارئ الباركود and
+  //  the exact invoice opens instantly (returns, reprints, debt
+  //  collection). HRI off; the number is already printed above.
+  b.align(1).barcode('CODE128', data.sale.invoice_number, 60).feed(3).cut();
 
   return b.build();
 }

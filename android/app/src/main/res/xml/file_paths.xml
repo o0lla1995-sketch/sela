@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v25 (round-32 #3): shared export paths — the Downloads/SmartVisionPOS
+     legacy folder (API < 29) used by the PDF statement share/print. -->
+<paths>
+    <external-path name="downloads_export" path="Download/SmartVisionPOS/" />
+</paths>
