@@ -55,7 +55,29 @@ export function LicenseGate({children}: {children: React.ReactNode}) {
         appStateRef.current = next;
       },
     );
-    return () => subscription.remove();
+
+    // 3. v23.0.1: PERIODIC checks while the app stays open. A POS at a
+    //    store can stay foregrounded for DAYS with no AppState change,
+    //    so mount+foreground alone never re-checked expiry/revocation.
+    //    The offline evaluate() is cheap → every 5 minutes; the online
+    //    heartbeat is internally throttled to ≤1/hour → every 20
+    //    minutes is plenty and never stacks extra server load.
+    const offlineTimer = setInterval(() => {
+      if (AppState.currentState === 'active') {
+        void refresh();
+      }
+    }, 5 * 60 * 1000);
+    const onlineTimer = setInterval(() => {
+      if (AppState.currentState === 'active') {
+        void verifyOnline();
+      }
+    }, 20 * 60 * 1000);
+
+    return () => {
+      subscription.remove();
+      clearInterval(offlineTimer);
+      clearInterval(onlineTimer);
+    };
   }, [refresh, verifyOnline]);
 
   if (status == null) {

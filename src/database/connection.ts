@@ -158,7 +158,12 @@ const DDL_STATEMENTS: string[] = [
   'CREATE INDEX IF NOT EXISTS idx_sale_returns_created ON sale_returns(created_at)',
   'CREATE INDEX IF NOT EXISTS idx_sri_return ON sale_return_items(return_id)',
   'CREATE INDEX IF NOT EXISTS idx_sri_sale_item ON sale_return_items(sale_item_id)',
-  'CREATE INDEX IF NOT EXISTS idx_sales_return_kind ON sales(return_kind)',
+  // v23.0.1 FIX: idx_sales_return_kind was created HERE — before
+  // migrations — so upgrading any pre-v23 database (whose sales
+  // table lacks return_kind until migration v15 ALTERs it in)
+  // crashed at startup with «no such column: return_kind». It is
+  // now created ONLY inside migration v15, after the column is
+  // guaranteed. (Same bug class as the campaign_debts fixes.)
   'CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)',
   'CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)',
   'CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)',
@@ -348,6 +353,10 @@ const DDL_STATEMENTS: string[] = [
     last_redemption_at TEXT,
     last_settlement_at TEXT,
     updated_at TEXT,
+    -- v21: the legacy activation switch — kept for migration v12/v13
+    -- healing and for reads upgraded from old shapes; new writes go
+    -- through store_state below.
+    active_in_store INTEGER NOT NULL DEFAULT 0,
     -- v22 (round-28 #4): the campaign lifecycle in this store —
     -- 'available' (feed-discovered, not activated yet) → 'active'
     -- (the merchant activated it; one-way) → 'completed' (the
@@ -356,10 +365,13 @@ const DDL_STATEMENTS: string[] = [
     store_state TEXT NOT NULL DEFAULT 'available'
       CHECK (store_state IN ('available','active','completed'))
   )`,
-  // v22 (round-28 #4): the lifecycle index — accounting reads the
-  // ACTIVATED campaigns (active + completed); the POS cart's قسيمة
-  // button reads the ACTIVE ones only.
-  `CREATE INDEX IF NOT EXISTS idx_cdebts_store_state ON campaign_debts(store_state, due_minor DESC)`,
+  // v23.0.1 FIX: idx_cdebts_store_state was created HERE — before
+  // migrations run — so upgrading a v20/v21 database (whose
+  // campaign_debts lacks store_state until migration v14) crashed
+  // at startup with «no such column: store_state». Index creation
+  // now lives ONLY in migration v14, after the column is guaranteed.
+  // The same class of bug produced the v23 «no such column:
+  // active_in_store» crash loop (see migration v12 fix below).
   // v20 POS-side mirror of the server's settlements[] feed (§4.2) —
   // feeds the period reports («تحصيلات الحملات بالفترة») and the
   // treasury (confirmed = money actually received).
@@ -898,6 +910,26 @@ async function applyMigrations(database: DB): Promise<void> {
         active_in_store INTEGER NOT NULL DEFAULT 0
       )`,
     );
+    // v23.0.1 FIX (THE startup crash «no such column: active_in_store»):
+    // the fresh DDL at the top of this file runs BEFORE migrations at
+    // EVERY startup and — in v23 — created campaign_debts WITHOUT
+    // active_in_store, so the CREATE TABLE above was a no-op and the
+    // index below crashed every fresh/cleared/pre-v20 install in a
+    // loop (the in-app «مسح البيانات» advice made the loop permanent).
+    // Self-heal now: pragma-check the column, ALTER it in when missing
+    // (this also repairs databases already stuck in the crash loop),
+    // THEN create the index.
+    const v12Cols = await database.execute(
+      'PRAGMA table_info(campaign_debts)',
+    );
+    const v12HasActive = (v12Cols.rows?._array ?? []).some(
+      row => String((row as {name?: unknown}).name ?? '') === 'active_in_store',
+    );
+    if (!v12HasActive) {
+      await database.execute(
+        'ALTER TABLE campaign_debts ADD COLUMN active_in_store INTEGER NOT NULL DEFAULT 0',
+      );
+    }
     await database.execute(
       'CREATE INDEX IF NOT EXISTS idx_cdebts_active ON campaign_debts(active_in_store, due_minor DESC)',
     );
@@ -1033,6 +1065,16 @@ async function applyMigrations(database: DB): Promise<void> {
       await database.execute(
         'ALTER TABLE sales ADD COLUMN returned_minor REAL NOT NULL DEFAULT 0',
       );
+    }
+    // v23.0.1: return_kind is checked INDEPENDENTLY — a crash between
+    // the two ALTERs must not leave a half-migrated sales table whose
+    // return_kind is missing forever (the index below would crash).
+    const salesCols2 = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sales') WHERE name = 'return_kind'",
+    );
+    const hasReturnKind =
+      (salesCols2.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasReturnKind) {
       await database.execute(`ALTER TABLE sales ADD COLUMN return_kind TEXT`);
     }
     await database.execute(
