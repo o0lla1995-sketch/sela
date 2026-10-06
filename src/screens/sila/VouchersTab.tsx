@@ -1,23 +1,22 @@
 /**
- * v21 — VouchersTab: the «القسائم» tab of the Sila screen
+ * v22 — VouchersTab: the «القسائم» tab of the Sila screen
  * (SILA_POS_VOUCHERS_API §7.2 — شاشة «مستحقات الحملات»).
  * ─────────────────────────────────────────────────────────────────
- * • The headline: المستحق لك من كل الحملات — v21: ACTIVE-IN-STORE
- *   campaigns only (round-27 #1: the merchant decides which campaigns
- *   he is committed to in HIS store; everything else mirrors from the
- *   server but never counts).
- * • Per ACTIVE campaign: المصروف / المستلم / المستحق + the state
- *   badge (لا شيء = رمادية، جزئية = ذهبية، كاملة = خضراء) + آخر
- *   تسوية + a switch to disable it in this store.
- * • «حملات متاحة غير مفعّلة»: campaigns the store is contracted in
- *   (from the settlements feed) that the merchant has NOT enabled —
- *   shown name-only with a clear «فعّلها في متجرك» button; enabling
- *   runs a FULL settlements refresh so the just-enabled campaign's
- *   balances and settlements enter the books immediately.
- * • صرف قسيمة — the standalone redemption sheet (parcel campaigns /
- *   untracked goods; the POS checkout covers cart-tied redemptions).
- * • سجل الصرف — paged history with state filter + reprint.
- * • زامن الآن — the settlements light sync (§6) + pending retries.
+ * Two sub-views (round-28 #4: «سهولة في عرض أقسام صفحة القسائم
+ * ويمكن فيها التعامل مع كمية كبيرة من البيانات»):
+ * • «الحملات» — the campaigns book in three COLLAPSIBLE sections
+ *   with live counts (فعّالة / مكتملة / متاحة) + a name search:
+ *   - فعّالة: figures + «إنهاء الحملة (مكتملة)» — the v21 disable
+ *     switch is GONE: the lifecycle is one-way (available → active
+ *     → completed), no double activation, no deactivation.
+ *   - مكتملة: read-only, «تبقى محفوظة كما هي» — data AND standing
+ *     dues stay in the books; only the POS cart button drops them.
+ *   - متاحة غير مفعّلة: activate buttons (SQL-guarded, once).
+ * • «سجل الصرف» — paged history + state filter + full-text search
+ *   (receipt / reference / campaign / code) + the needs-top-up note
+ *   for redemptions whose goods sale is still pending.
+ * The headline: المستحق لك — the ACTIVATED campaigns (active +
+ * completed); «صرف قسيمة» standalone entry; «زامن الآن» (§6).
  */
 import React, {useCallback, useEffect, useState} from 'react';
 import {
@@ -25,6 +24,7 @@ import {
   Alert,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -34,6 +34,7 @@ import {
   Card,
   EmptyState,
   SectionTitle,
+  Segmented,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {
@@ -55,6 +56,16 @@ import type {CampaignDebtRow, VoucherRedemptionRow} from '../../core/types';
 import type {ReceiptSettings} from '../../services/printer/receipt';
 
 const PAGE_SIZE = 20;
+/** v22 (round-28 #4): how many campaign cards render while a
+ * section is collapsed — large books stay scannable. */
+const CAMPAIGN_PREVIEW = 4;
+
+type VouchersView = 'campaigns' | 'history';
+
+const VIEW_OPTIONS: {value: VouchersView; label: string}[] = [
+  {value: 'campaigns', label: 'الحملات'},
+  {value: 'history', label: 'سجل الصرف'},
+];
 
 type RedemptionFilter = 'all' | 'ok' | 'pending' | 'failed';
 
@@ -83,13 +94,19 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
   const c = useThemeColors();
   const toast = useToastStore(state => state.show);
 
+  const [view, setView] = useState<VouchersView>('campaigns');
   const [campaigns, setCampaigns] = useState<CampaignDebtRow[]>([]);
   const [totals, setTotals] = useState<Awaited<
     ReturnType<typeof VouchersRepo.campaignsTotals>
   > | null>(null);
+  const [campaignSearch, setCampaignSearch] = useState('');
+  const [showAllActive, setShowAllActive] = useState(false);
+  const [completedOpen, setCompletedOpen] = useState(false);
+  const [availableOpen, setAvailableOpen] = useState(false);
   const [redemptions, setRedemptions] = useState<VoucherRedemptionRow[]>([]);
   const [redemptionsTotal, setRedemptionsTotal] = useState(0);
   const [filter, setFilter] = useState<RedemptionFilter>('all');
+  const [historySearch, setHistorySearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -128,6 +145,29 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
     }
   }, [sheetOpen, loadAll]);
 
+  // v22: the history search — debounced reload of page 0.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const stateFilter = filter === 'all' ? undefined : filter;
+      void Promise.all([
+        VouchersRepo.recent(
+          PAGE_SIZE,
+          0,
+          stateFilter,
+          historySearch.trim() || undefined,
+        ),
+        VouchersRepo.redemptionsCount(
+          stateFilter,
+          historySearch.trim() || undefined,
+        ),
+      ]).then(([rows, count]) => {
+        setRedemptions(rows);
+        setRedemptionsTotal(count);
+      });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [historySearch, filter]);
+
   const loadMore = useCallback(async () => {
     if (loadingMore || redemptions.length >= redemptionsTotal) {
       return;
@@ -139,6 +179,7 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
         PAGE_SIZE,
         redemptions.length,
         stateFilter,
+        historySearch.trim() || undefined,
       );
       setRedemptions(previous => {
         const seen = new Set(previous.map(row => row.local_id));
@@ -149,24 +190,10 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, redemptions.length, redemptionsTotal, filter]);
+  }, [loadingMore, redemptions.length, redemptionsTotal, filter, historySearch]);
 
   const applyFilter = useCallback(async (next: RedemptionFilter) => {
     setFilter(next);
-    setLoadingMore(true);
-    try {
-      const stateFilter = next === 'all' ? undefined : next;
-      const [rows, count] = await Promise.all([
-        VouchersRepo.recent(PAGE_SIZE, 0, stateFilter),
-        VouchersRepo.redemptionsCount(stateFilter),
-      ]);
-      setRedemptions(rows);
-      setRedemptionsTotal(count);
-    } catch {
-      // quiet
-    } finally {
-      setLoadingMore(false);
-    }
   }, []);
 
   const syncNow = useCallback(async () => {
@@ -183,18 +210,28 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
     }
   }, [loadAll, toast]);
 
-  /** v21 (round-27 #1): ENABLE a campaign in this store — its dues and
-   *  settlements start counting. A FULL settlements refresh (no
-   *  updated_since cursor) follows immediately so the server's whole
-   *  truth for this campaign lands in the books at once (its
-   *  settlements were skipped while it was inactive). */
-  const enableCampaign = useCallback(
+  /** v22 (round-28 #4): ACTIVATE a campaign in this store — one-way
+   *  and SQL-guarded: an already-active/completed campaign can never
+   *  be activated twice (the repo rejects the move). A FULL
+   *  settlements refresh follows immediately so the server's whole
+   *  truth for this campaign lands in the books at once. */
+  const activateCampaign = useCallback(
     async (campaign: CampaignDebtRow) => {
       setToggling(campaign.campaign_id);
       try {
-        await VouchersRepo.setCampaignActive(campaign.campaign_id, true);
+        const changed = await VouchersRepo.activateCampaign(
+          campaign.campaign_id,
+        );
+        if (!changed) {
+          toast(
+            'هذه الحملة مفعّلة أصلاً — لا يمكن تفعيلها مرتين',
+            'info',
+          );
+          await loadAll();
+          return;
+        }
         await SilaSync.refreshVouchersFull();
-        // Keep the POS cart's قسيمة button in sync with the switch.
+        // Keep the POS cart's قسيمة button in sync with the lifecycle.
         await useSilaStore.getState().refreshActiveCampaigns();
         await loadAll();
         toast(
@@ -213,32 +250,28 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
     [loadAll, toast],
   );
 
-  /** v21 (round-27 #1): DISABLE — the campaign keeps mirroring from the
-   *  server but NOTHING counts in totals/reports until re-enabled.
-   *  Confirmed first (the headline number drops by its due). */
-  const disableCampaign = useCallback(
+  /** v22 (round-28 #4): COMPLETE a campaign — the ONLY way an active
+   *  campaign leaves the active list (no deactivation, one-way).
+   *  Its data and standing dues stay in the books exactly as they
+   *  were; only the POS cart's قسيمة button stops counting it. */
+  const completeCampaign = useCallback(
     (campaign: CampaignDebtRow) => {
       Alert.alert(
-        'تعطيل الحملة في متجرك',
-        `لن تُحتسب مستحقات حملة «${campaign.campaign_name}» ولا تسوياتها في دفاترك وتقاريرك حتى تعيد تفعيلها، وزر القسيمة في السلة يخفي إن لم تبق حملة فعالة أخرى.\nهل أنت متأكد؟`,
+        'إنهاء الحملة (مكتملة)',
+        `ستصبح حملة «${campaign.campaign_name}» مكتملة في متجرك:\n• يختفي زر القسيمة الخاص بها من سلة البيع\n• تبقى بياناتها ومستحقاتها القائمة محفوظة كما هي في دفاترك\n• لا يمكن التراجع أو إعادة التفعيل\nهل أنت متأكد؟`,
         [
           {text: 'تراجع', style: 'cancel'},
           {
-            text: 'تعطيل الحملة',
+            text: 'إنهاء الحملة',
             style: 'destructive',
             onPress: async () => {
               setToggling(campaign.campaign_id);
               try {
-                await VouchersRepo.setCampaignActive(
-                  campaign.campaign_id,
-                  false,
-                );
-                // Keep the POS cart's قسيمة button in sync with the
-                // switch (it hides when no active campaign remains).
+                await VouchersRepo.completeCampaign(campaign.campaign_id);
                 await useSilaStore.getState().refreshActiveCampaigns();
                 await loadAll();
                 toast(
-                  `عُطّلت حملة «${campaign.campaign_name}» — لن تُحتسب مستحقاتها حتى إعادة التفعيل`,
+                  `أُنهيت حملة «${campaign.campaign_name}» — بياناتها ومستحقاتها القائمة تبقى محفوظة كما هي`,
                   'info',
                   4500,
                 );
@@ -246,7 +279,7 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
                 const message =
                   error instanceof Error
                     ? error.message
-                    : 'تعذر تعطيل الحملة';
+                    : 'تعذر إنهاء الحملة';
                 toast(message, 'error');
               } finally {
                 setToggling(null);
@@ -279,10 +312,110 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
     [receiptSettings, toast],
   );
 
-  // v21: the merchant's own switch splits the list — ACTIVE campaigns
-  // are the books; INACTIVE ones are offers the merchant may enable.
-  const activeCampaigns = campaigns.filter(row => row.active_in_store);
-  const inactiveCampaigns = campaigns.filter(row => !row.active_in_store);
+  // v22 (round-28 #4): the lifecycle splits the list — ACTIVE are
+  // the live books, COMPLETED keep their standing dues as they were,
+  // AVAILABLE are offers the merchant may still activate (once).
+  const needle = campaignSearch.trim();
+  const matchingCampaigns = needle
+    ? campaigns.filter(row => row.campaign_name.includes(needle))
+    : campaigns;
+  const activeCampaigns = matchingCampaigns.filter(
+    row => row.store_state === 'active',
+  );
+  const completedCampaigns = matchingCampaigns.filter(
+    row => row.store_state === 'completed',
+  );
+  const availableCampaigns = matchingCampaigns.filter(
+    row => row.store_state === 'available',
+  );
+  const activePreview = showAllActive
+    ? activeCampaigns
+    : activeCampaigns.slice(0, CAMPAIGN_PREVIEW);
+
+  const renderCampaignCard = (campaign: CampaignDebtRow) => {
+    const badge = STATE_BADGE[campaign.settlement_state] ?? STATE_BADGE.none;
+    const busy = toggling === campaign.campaign_id;
+    const completed = campaign.store_state === 'completed';
+    return (
+      <Card
+        key={`${campaign.store_state}-${campaign.campaign_id}`}
+        style={styles.campaignCard}>
+        <View style={styles.campaignHead}>
+          <View style={{flex: 1}}>
+            <Text style={styles.campaignName} numberOfLines={1}>
+              {campaign.campaign_name}
+            </Text>
+            <Text style={styles.campaignMeta}>
+              {campaign.kind === 'parcel' ? 'طرد' : 'قسيمة'} ·{' '}
+              {campaign.redeemed_count} عملية صرف
+              {campaign.ends_at
+                ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
+                : ''}
+            </Text>
+          </View>
+          {completed ? (
+            <Badge label="مكتملة" tone="success" />
+          ) : (
+            <Badge label={badge.label} tone={badge.tone} />
+          )}
+        </View>
+        <View style={styles.campaignGrid}>
+          <View style={styles.campaignCell}>
+            <Text style={styles.campaignValue}>
+              {formatMoney(campaign.redeemed_value_minor / 100)}
+            </Text>
+            <Text style={styles.campaignValueLabel}>مصروف</Text>
+          </View>
+          <View style={styles.campaignCell}>
+            <Text style={[styles.campaignValue, {color: c.success}]}>
+              {formatMoney(campaign.settled_minor / 100)}
+            </Text>
+            <Text style={styles.campaignValueLabel}>مستلم</Text>
+          </View>
+          <View
+            style={[
+              styles.campaignCell,
+              campaign.due_minor > 0 && styles.campaignCellDue,
+            ]}>
+            <Text
+              style={[
+                styles.campaignValue,
+                campaign.due_minor > 0 && {color: c.warning},
+              ]}>
+              {formatMoney(campaign.due_minor / 100)}
+            </Text>
+            <Text style={styles.campaignValueLabel}>المستحق لك</Text>
+          </View>
+        </View>
+        {completed ? (
+          <Text style={styles.campaignFullText}>
+            ✓ مكتملة — بياناتها ومستحقاتها القائمة تبقى محفوظة كما هي في
+            دفاترك، وزر القسيمة اختفى من سلة البيع
+          </Text>
+        ) : campaign.settlement_state === 'full' ? (
+          <Text style={styles.campaignFullText}>
+            ✓ مسدَّدة كاملة — استُوفي حقك بالكامل (يبقى السجل للمراجعة)
+          </Text>
+        ) : null}
+        {!completed ? (
+          <TouchableOpacity
+            style={styles.completeBtn}
+            onPress={() => completeCampaign(campaign)}
+            disabled={busy}
+            activeOpacity={0.8}>
+            {busy ? (
+              <ActivityIndicator size="small" color={c.warning} />
+            ) : (
+              <Icon name="checkCircle" size={14} color={c.warning} />
+            )}
+            <Text style={styles.completeBtnText}>
+              إنهاء الحملة (مكتملة) — لا يمكن التراجع
+            </Text>
+          </TouchableOpacity>
+        ) : null}
+      </Card>
+    );
+  };
 
   return (
     <>
@@ -298,15 +431,16 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
         />
       </View>
 
-      {/* ── The headline (§7.2): what the institutions owe you — v21:
-          ACTIVE-IN-STORE campaigns only. ── */}
+      {/* ── The headline (§7.2): what the institutions owe you — v22:
+          the ACTIVATED campaigns (active + completed — a completed
+          campaign's standing dues stay in the books as they were). ── */}
       <Card style={styles.dueHero}>
         <View style={styles.dueHeroRow}>
           <View style={styles.dueHeroIcon}>
             <Icon name="ticket" size={22} color={c.accent} />
           </View>
           <View style={{flex: 1}}>
-            <Text style={styles.dueHeroLabel}>المستحق لك من الحملات الفعّالة</Text>
+            <Text style={styles.dueHeroLabel}>المستحق لك من الحملات</Text>
             <Text style={[styles.dueHeroValue, {color: c.accent}]}>
               {formatMoney((totals?.dueMinor ?? 0) / 100)}
             </Text>
@@ -314,9 +448,10 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
         </View>
         <View style={styles.dueMetaRow}>
           <Text style={styles.dueMetaText}>
-            فعّالة: {totals?.campaignsCount ?? 0} · مصروف:{' '}
-            {formatMoney((totals?.redeemedMinor ?? 0) / 100)} · مستلم مؤكد:{' '}
-            {formatMoney((totals?.settledConfirmedMinor ?? 0) / 100)}
+            فعّالة: {totals?.activeCount ?? 0} · مكتملة:{' '}
+            {totals?.completedCount ?? 0} · مصروف:{' '}
+            {formatMoney((totals?.redeemedMinor ?? 0) / 100)} · مستلم:{' '}
+            {formatMoney((totals?.settledMinorTotal ?? 0) / 100)}
           </Text>
           {lastSyncAt ? (
             <Text style={styles.dueMetaTime}>
@@ -349,238 +484,273 @@ export function VouchersTab({receiptSettings, printerConnected}: Props) {
         />
       </Card>
 
-      {/* ── مستحقات الحملات الفعّالة (§7.2) ── */}
-      <SectionTitle
-        title="مستحقات الحملات الفعّالة"
-        hint="الحملات المفعّلة في متجرك — المطالبة على المؤسسة حتى التسوية"
+      {/* v22 (round-28 #4): the two sub-views — the campaigns book
+          and the redemption history, so huge lists never mix. */}
+      <Segmented
+        value={view}
+        onChange={setView}
+        options={VIEW_OPTIONS}
       />
-      {activeCampaigns.length === 0 && !loading ? (
-        <EmptyState
-          icon="ticket"
-          title="لا توجد حملات فعّالة"
-          subtitle="فعّل حملة من قسم «حملات متاحة» بالأسفل حتى تُحتسب مستحقاتها وتسوياتها في متجرك"
-        />
-      ) : (
-        activeCampaigns.map(campaign => {
-          const badge =
-            STATE_BADGE[campaign.settlement_state] ?? STATE_BADGE.none;
-          const busy = toggling === campaign.campaign_id;
-          return (
-            <Card key={campaign.campaign_id} style={styles.campaignCard}>
-              <View style={styles.campaignHead}>
-                <View style={{flex: 1}}>
-                  <Text style={styles.campaignName} numberOfLines={1}>
-                    {campaign.campaign_name}
+
+      {view === 'campaigns' ? (
+        <>
+          {/* Campaign name search (client-side, live). */}
+          <TextInput
+            style={styles.searchBox}
+            value={campaignSearch}
+            onChangeText={setCampaignSearch}
+            placeholder="ابحث باسم الحملة…"
+            placeholderTextColor={c.textFaint}
+          />
+
+          {/* ── الحملات الفعّالة ── */}
+          <SectionTitle
+            title={`الحملات الفعّالة${activeCampaigns.length > 0 ? ` (${activeCampaigns.length})` : ''}`}
+            hint="المفعّلة في متجرك — المطالبة على المؤسسة حتى التسوية، وإنهاؤها لا يُلغي مستحقاتها"
+          />
+          {activeCampaigns.length === 0 && !loading ? (
+            <EmptyState
+              icon="ticket"
+              title={needle ? 'لا حملات مطابقة لبحثك' : 'لا توجد حملات فعّالة'}
+              subtitle={
+                needle
+                  ? 'جرّب اسماً آخر أو أمسح البحث'
+                  : 'فعّل حملة من قسم «حملات متاحة» بالأسفل حتى تُحتسب مستحقاتها وتسوياتها في متجرك'
+              }
+            />
+          ) : (
+            <>
+              {activePreview.map(renderCampaignCard)}
+              {activeCampaigns.length > CAMPAIGN_PREVIEW ? (
+                <TouchableOpacity
+                  style={styles.moreBtn}
+                  onPress={() => setShowAllActive(previous => !previous)}
+                  activeOpacity={0.8}>
+                  <Text style={styles.moreText}>
+                    {showAllActive
+                      ? 'عرض أقل'
+                      : `عرض كل الفعّالة (${activeCampaigns.length})`}
                   </Text>
-                  <Text style={styles.campaignMeta}>
-                    {campaign.kind === 'parcel' ? 'طرد' : 'قسيمة'} ·{' '}
-                    {campaign.redeemed_count} عملية صرف
-                    {campaign.ends_at
-                      ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
-                      : ''}
-                  </Text>
-                </View>
-                <Badge label={badge.label} tone={badge.tone} />
-              </View>
-              <View style={styles.campaignGrid}>
-                <View style={styles.campaignCell}>
-                  <Text style={styles.campaignValue}>
-                    {formatMoney(campaign.redeemed_value_minor / 100)}
-                  </Text>
-                  <Text style={styles.campaignValueLabel}>مصروف</Text>
-                </View>
-                <View style={styles.campaignCell}>
-                  <Text style={[styles.campaignValue, {color: c.success}]}>
-                    {formatMoney(campaign.settled_minor / 100)}
-                  </Text>
-                  <Text style={styles.campaignValueLabel}>مستلم</Text>
-                </View>
-                <View
-                  style={[
-                    styles.campaignCell,
-                    campaign.due_minor > 0 && styles.campaignCellDue,
-                  ]}>
-                  <Text
-                    style={[
-                      styles.campaignValue,
-                      campaign.due_minor > 0 && {color: c.warning},
-                    ]}>
-                    {formatMoney(campaign.due_minor / 100)}
-                  </Text>
-                  <Text style={styles.campaignValueLabel}>المستحق لك</Text>
-                </View>
-              </View>
-              {campaign.settlement_state === 'full' ? (
-                <Text style={styles.campaignFullText}>
-                  ✓ مسدَّدة كاملة — استُوفي حقك بالكامل (يبقى السجل للمراجعة)
-                </Text>
+                </TouchableOpacity>
               ) : null}
-              {/* v21 (round-27 #1): the merchant's switch. */}
+            </>
+          )}
+
+          {/* ── الحملات المكتملة (round-28 #4) — collapsed by default
+              so a long history never buries the live books. ── */}
+          {completedCampaigns.length > 0 ? (
+            <>
               <TouchableOpacity
-                style={styles.disableBtn}
-                onPress={() => disableCampaign(campaign)}
-                disabled={busy}
+                style={styles.sectionToggle}
+                onPress={() => setCompletedOpen(previous => !previous)}
                 activeOpacity={0.8}>
-                {busy ? (
-                  <ActivityIndicator size="small" color={c.danger} />
-                ) : (
-                  <Icon name="pause" size={14} color={c.danger} />
-                )}
-                <Text style={styles.disableBtnText}>
-                  تعطيل الحملة في هذا المتجر
+                <Icon
+                  name={completedOpen ? 'chevronDown' : 'chevronLeft'}
+                  size={15}
+                  color={c.textDim}
+                />
+                <Text style={styles.sectionToggleTitle}>
+                  الحملات المكتملة ({completedCampaigns.length})
+                </Text>
+                <Text style={styles.sectionToggleHint}>
+                  محفوظة كما هي — مستحقاتها القائمة باقية في الدفاتر
                 </Text>
               </TouchableOpacity>
-            </Card>
-          );
-        })
-      )}
+              {completedOpen ? (
+                completedCampaigns.map(renderCampaignCard)
+              ) : null}
+            </>
+          ) : null}
 
-      {/* ── حملات متاحة غير مفعّلة (round-27 #1) ── */}
-      {inactiveCampaigns.length > 0 ? (
+          {/* ── حملات متاحة غير مفعّلة ── */}
+          {availableCampaigns.length > 0 ? (
+            <>
+              <TouchableOpacity
+                style={styles.sectionToggle}
+                onPress={() => setAvailableOpen(previous => !previous)}
+                activeOpacity={0.8}>
+                <Icon
+                  name={availableOpen ? 'chevronDown' : 'chevronLeft'}
+                  size={15}
+                  color={c.textDim}
+                />
+                <Text style={styles.sectionToggleTitle}>
+                  حملات متاحة غير مفعّلة ({availableCampaigns.length})
+                </Text>
+                <Text style={styles.sectionToggleHint}>
+                  متجرك متعاقد فيها عبر صِلة — فعّلها لتُحتسب
+                </Text>
+              </TouchableOpacity>
+              {availableOpen ? (
+                availableCampaigns.map(campaign => {
+                  const busy = toggling === campaign.campaign_id;
+                  return (
+                    <Card
+                      key={`off-${campaign.campaign_id}`}
+                      style={styles.offerCard}>
+                      <View style={styles.campaignHead}>
+                        <View style={styles.offerIcon}>
+                          <Icon name="ticket" size={17} color={c.textDim} />
+                        </View>
+                        <View style={{flex: 1}}>
+                          <Text style={styles.offerName} numberOfLines={1}>
+                            {campaign.campaign_name}
+                          </Text>
+                          <Text style={styles.campaignMeta}>
+                            {campaign.kind === 'parcel' ? 'طرد' : 'قسيمة'}
+                            {campaign.merchant_status === 'accepted'
+                              ? ' · متعاقد فيها'
+                              : ''}
+                            {campaign.ends_at
+                              ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
+                              : ''}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={styles.offerHint}>
+                        لن يُحتسب أي شيء من مستحقات وتسويات هذه الحملة في
+                        متجرك حتى تفعيلها — وبعد التفعيل تُضاف مستحقاتها كدين
+                        على المؤسسة حتى التسوية تماماً كديون صِلة. التفعيل لا
+                        يتكرر ولا يمكن التراجع عنه إلا بإنهاء الحملة.
+                      </Text>
+                      <AppButton
+                        title="تفعيل الحملة في متجري"
+                        icon="check"
+                        small
+                        onPress={() => void activateCampaign(campaign)}
+                        loading={busy}
+                      />
+                    </Card>
+                  );
+                })
+              ) : null}
+            </>
+          ) : null}
+        </>
+      ) : (
         <>
-          <SectionTitle
-            title="حملات متاحة غير مفعّلة"
-            hint="متجرك متعاقد فيها عبر صِلة — لا تُحتسب مستحقاتها ولا تسوياتها حتى تفعّلها بنفسك"
+          {/* ── سجل الصرف — search + filters + paged list ── */}
+          <TextInput
+            style={styles.searchBox}
+            value={historySearch}
+            onChangeText={setHistorySearch}
+            placeholder="ابحث برقم الإيصال أو المرجع أو الحملة أو الكود…"
+            placeholderTextColor={c.textFaint}
           />
-          {inactiveCampaigns.map(campaign => {
-            const busy = toggling === campaign.campaign_id;
-            return (
-              <Card key={`off-${campaign.campaign_id}`} style={styles.offerCard}>
-                <View style={styles.campaignHead}>
-                  <View style={styles.offerIcon}>
-                    <Icon name="ticket" size={17} color={c.textDim} />
+          <View style={styles.filterRow}>
+            {REDEMPTION_FILTERS.map(item => (
+              <TouchableOpacity
+                key={item.value}
+                style={[
+                  styles.filterChip,
+                  filter === item.value && styles.filterChipActive,
+                ]}
+                onPress={() => void applyFilter(item.value)}
+                activeOpacity={0.8}>
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    filter === item.value && {color: c.onAccent},
+                  ]}>
+                  {item.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {redemptions.length === 0 && !loading ? (
+            <EmptyState
+              icon="ticket"
+              title="لا توجد عمليات صرف"
+              subtitle={
+                historySearch.trim()
+                  ? 'لا نتائج مطابقة لبحثك — جرّب كلمة أخرى'
+                  : 'كل قسيمة تصرفها تُسجَّل هنا مع مرجعها الرسمي وحالتها'
+              }
+            />
+          ) : (
+            redemptions.map(row => {
+              /** v22 (round-28 #1): a cart-tied redemption whose goods
+               *  sale is still pending — the cart was smaller than the
+               *  voucher and the handover waits for the top-up. */
+              const awaitingGoods =
+                row.state === 'ok' &&
+                row.cart_json != null &&
+                row.sale_id == null;
+              return (
+                <TouchableOpacity
+                  key={row.local_id}
+                  style={styles.historyRow}
+                  onPress={() => void reprint(row)}
+                  disabled={!printerConnected}
+                  activeOpacity={0.8}>
+                  <View style={styles.historyIcon}>
+                    <Icon
+                      name={
+                        row.state === 'ok'
+                          ? 'checkCircle'
+                          : row.state === 'pending'
+                          ? 'clock'
+                          : 'alert'
+                      }
+                      size={19}
+                      color={
+                        row.state === 'ok'
+                          ? c.success
+                          : row.state === 'pending'
+                          ? c.warning
+                          : c.danger
+                      }
+                    />
                   </View>
                   <View style={{flex: 1}}>
-                    <Text style={styles.offerName} numberOfLines={1}>
-                      {campaign.campaign_name}
+                    <Text style={styles.historyTitle}>
+                      {row.state === 'ok'
+                        ? `${formatMoney(row.value_minor / 100)} — ${
+                            row.campaign_name ?? 'حملة'
+                          }`
+                        : row.state === 'pending'
+                        ? 'بانتظار الاتصال…'
+                        : row.error_message ?? 'فشل الصرف'}
                     </Text>
-                    <Text style={styles.campaignMeta}>
-                      {campaign.kind === 'parcel' ? 'طرد' : 'قسيمة'}
-                      {campaign.merchant_status === 'accepted'
-                        ? ' · متعاقد فيها'
-                        : ''}
-                      {campaign.ends_at
-                        ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
+                    <Text style={styles.historyMeta} numberOfLines={1}>
+                      {row.pos_receipt_ref ?? '—'}
+                      {row.reference_code ? ` · ${row.reference_code}` : ''}
+                      {row.counter_extra_minor > 0
+                        ? ` · فرق نقدي ${formatMoney(row.counter_extra_minor / 100)}`
                         : ''}
                     </Text>
+                    {awaitingGoods ? (
+                      <Text style={styles.awaitingGoodsText}>
+                        بانتظار إكمال السلة — كانت أقل من قيمة القسيمة، أكملها
+                        من شاشة البيع وسجّل البضاعة
+                      </Text>
+                    ) : null}
                   </View>
-                </View>
-                <Text style={styles.offerHint}>
-                  لن يُحتسب أي شيء من مستحقات وتسويات هذه الحملة في متجرك حتى
-                  تفعيلها — وبعد التفعيل تُضاف مستحقاتها كدين على المؤسسة حتى
-                  التسوية تماماً كديون صِلة.
-                </Text>
-                <AppButton
-                  title="تفعيل الحملة في متجري"
-                  icon="check"
-                  small
-                  onPress={() => void enableCampaign(campaign)}
-                  loading={busy}
-                />
-              </Card>
-            );
-          })}
-        </>
-      ) : null}
-
-      {/* ── سجل الصرف ── */}
-      <SectionTitle
-        title="سجل الصرف"
-        hint="كل محاولة صرف بحالتها — المعلّقة تُعاد تلقائياً بنفس مفتاحها"
-      />
-      <View style={styles.filterRow}>
-        {REDEMPTION_FILTERS.map(item => (
-          <TouchableOpacity
-            key={item.value}
-            style={[
-              styles.filterChip,
-              filter === item.value && styles.filterChipActive,
-            ]}
-            onPress={() => void applyFilter(item.value)}
-            activeOpacity={0.8}>
-            <Text
-              style={[
-                styles.filterChipText,
-                filter === item.value && {color: c.onAccent},
-              ]}>
-              {item.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      {redemptions.length === 0 && !loading ? (
-        <EmptyState
-          icon="ticket"
-          title="لا توجد عمليات صرف"
-          subtitle="كل قسيمة تصرفها تُسجَّل هنا مع مرجعها الرسمي وحالتها"
-        />
-      ) : (
-        redemptions.map(row => (
-          <TouchableOpacity
-            key={row.local_id}
-            style={styles.historyRow}
-            onPress={() => void reprint(row)}
-            disabled={!printerConnected}
-            activeOpacity={0.8}>
-            <View style={styles.historyIcon}>
-              <Icon
-                name={
-                  row.state === 'ok'
-                    ? 'checkCircle'
-                    : row.state === 'pending'
-                    ? 'clock'
-                    : 'alert'
-                }
-                size={19}
-                color={
-                  row.state === 'ok'
-                    ? c.success
-                    : row.state === 'pending'
-                    ? c.warning
-                    : c.danger
-                }
-              />
-            </View>
-            <View style={{flex: 1}}>
-              <Text style={styles.historyTitle}>
-                {row.state === 'ok'
-                  ? `${formatMoney(row.value_minor / 100)} — ${
-                      row.campaign_name ?? 'حملة'
-                    }`
-                  : row.state === 'pending'
-                  ? 'بانتظار الاتصال…'
-                  : row.error_message ?? 'فشل الصرف'}
-              </Text>
-              <Text style={styles.historyMeta} numberOfLines={1}>
-                {row.pos_receipt_ref ?? '—'}
-                {row.reference_code ? ` · ${row.reference_code}` : ''}
-                {row.counter_extra_minor > 0
-                  ? ` · فرق نقدي ${formatMoney(row.counter_extra_minor / 100)}`
-                  : ''}
-              </Text>
-            </View>
-            {printerConnected ? (
-              <Icon name="printer" size={16} color={c.textFaint} />
-            ) : null}
-          </TouchableOpacity>
-        ))
-      )}
-      {redemptions.length < redemptionsTotal ? (
-        <TouchableOpacity
-          style={styles.moreBtn}
-          onPress={() => void loadMore()}
-          disabled={loadingMore}
-          activeOpacity={0.8}>
-          {loadingMore ? (
-            <ActivityIndicator size="small" color={c.accent} />
-          ) : (
-            <Text style={styles.moreText}>
-              عرض المزيد ({redemptions.length} من {redemptionsTotal})
-            </Text>
+                  {printerConnected ? (
+                    <Icon name="printer" size={16} color={c.textFaint} />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })
           )}
-        </TouchableOpacity>
-      ) : null}
+          {redemptions.length < redemptionsTotal ? (
+            <TouchableOpacity
+              style={styles.moreBtn}
+              onPress={() => void loadMore()}
+              disabled={loadingMore}
+              activeOpacity={0.8}>
+              {loadingMore ? (
+                <ActivityIndicator size="small" color={c.accent} />
+              ) : (
+                <Text style={styles.moreText}>
+                  عرض المزيد ({redemptions.length} من {redemptionsTotal})
+                </Text>
+              )}
+            </TouchableOpacity>
+          ) : null}
+        </>
+      )}
 
       {/* The standalone redemption sheet (no cart — parcels etc.). */}
       <VoucherRedeemSheet
@@ -660,6 +830,39 @@ const styles = StyleSheet.create({
     fontSize: typography.micro,
     lineHeight: 15,
   },
+  /** v22 (round-28 #4): the campaign/history search boxes. */
+  searchBox: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: radius.sm,
+    color: '#F5F5F7',
+    fontFamily: fonts.bold,
+    fontSize: typography.small,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+  },
+  /** v22 (round-28 #4): the collapsible section header. */
+  sectionToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: spacing.xs + 2,
+    flexWrap: 'wrap',
+  },
+  sectionToggleTitle: {
+    color: '#F5F5F7',
+    fontFamily: fonts.black,
+    fontSize: typography.small,
+  },
+  sectionToggleHint: {
+    flex: 1,
+    color: '#8E8E9A',
+    fontFamily: fonts.regular,
+    fontSize: typography.micro,
+    textAlign: 'left',
+    minWidth: 120,
+  },
   campaignCard: {
     gap: spacing.sm,
   },
@@ -709,8 +912,9 @@ const styles = StyleSheet.create({
     fontFamily: fonts.regular,
     fontSize: typography.micro,
   },
-  /** v21 (round-27 #1): the in-store switch row on an active campaign. */
-  disableBtn: {
+  /** v22 (round-28 #4): the one-way «complete campaign» button —
+   *  replaces the v21 disable switch (deactivation is gone). */
+  completeBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -718,15 +922,15 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs + 2,
     borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: 'rgba(239,68,68,0.30)',
-    backgroundColor: 'rgba(239,68,68,0.06)',
+    borderColor: 'rgba(245,158,11,0.35)',
+    backgroundColor: 'rgba(245,158,11,0.07)',
   },
-  disableBtnText: {
-    color: '#F87171',
+  completeBtnText: {
+    color: '#FCD34D',
     fontFamily: fonts.bold,
     fontSize: typography.micro + 1,
   },
-  /** v21 (round-27 #1): the AVAILABLE (not enabled) campaign card. */
+  /** The AVAILABLE (not activated) campaign card. */
   offerCard: {
     gap: spacing.sm,
   },
@@ -800,6 +1004,14 @@ const styles = StyleSheet.create({
     fontFamily: fonts.regular,
     fontSize: typography.micro,
     marginTop: 2,
+  },
+  /** v22 (round-28 #1): the needs-top-up note on a history row. */
+  awaitingGoodsText: {
+    color: '#FCD34D',
+    fontFamily: fonts.bold,
+    fontSize: typography.micro,
+    marginTop: 3,
+    lineHeight: 14,
   },
   moreBtn: {
     alignItems: 'center',

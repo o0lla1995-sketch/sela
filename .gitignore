@@ -72,3 +72,8 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# v22 (round-28 #6): the Play release key — NEVER commit these.
+android/keystore.properties
+android/app/*.keystore
+!android/app/debug.keystore

@@ -289,16 +289,18 @@ const DDL_STATEMENTS: string[] = [
     last_redemption_at TEXT,
     last_settlement_at TEXT,
     updated_at TEXT,
-    active_in_store INTEGER NOT NULL DEFAULT 0
+    -- v22 (round-28 #4): the campaign lifecycle in this store —
+    -- 'available' (feed-discovered, not activated yet) → 'active'
+    -- (the merchant activated it; one-way) → 'completed' (the
+    -- merchant closed it; one-way, data preserved as is). There is
+    -- NO way back: no double activation, no deactivation.
+    store_state TEXT NOT NULL DEFAULT 'available'
+      CHECK (store_state IN ('available','active','completed'))
   )`,
-  // v21 (round-27 #1): active_in_store — the merchant's own switch.
-  // ONLY campaigns the merchant marked ACTIVE IN THIS STORE count
-  // in the dues/settlements books, the totals and the reports. A
-  // campaign that arrives from the settlements feed starts INACTIVE
-  // (0); a real redemption flips it to 1 (the store is committed —
-  // the server already booked the claim) and the merchant can
-  // toggle it from the القسائم tab.
-  `CREATE INDEX IF NOT EXISTS idx_cdebts_active ON campaign_debts(active_in_store, due_minor DESC)`,
+  // v22 (round-28 #4): the lifecycle index — accounting reads the
+  // ACTIVATED campaigns (active + completed); the POS cart's قسيمة
+  // button reads the ACTIVE ones only.
+  `CREATE INDEX IF NOT EXISTS idx_cdebts_store_state ON campaign_debts(store_state, due_minor DESC)`,
   // v20 POS-side mirror of the server's settlements[] feed (§4.2) —
   // feeds the period reports («تحصيلات الحملات بالفترة») and the
   // treasury (confirmed = money actually received).
@@ -901,6 +903,47 @@ async function applyMigrations(database: DB): Promise<void> {
       'ترحيل v13: مفتاح «فعّالة بالمتجر» لحملات القسائم — تُحتسب المستحقات للحملات المفعّلة فقط',
     );
     version = 13;
+  }
+
+  if (version < 14) {
+    // v22 (round-28 #4): the campaign lifecycle replaces the old
+    // on/off switch — a campaign moves available → active →
+    // completed and NEVER backwards. Activation is one-way (no
+    // double activation, no deactivation — only «مكتملة»), and a
+    // completed campaign keeps its data AND its standing dues in
+    // the books exactly as they were. Fresh DDL above covers new
+    // installs; this heals v13 installs (active_in_store 1 →
+    // 'active') and any pre-v13 stragglers (redemptions → 'active').
+    const columns = await database.execute(
+      "PRAGMA table_info(campaign_debts)",
+    );
+    const names = (columns.rows?._array ?? []).map(
+      row => String((row as {name?: unknown}).name ?? ''),
+    );
+    if (!names.includes('store_state')) {
+      await database.execute(
+        `ALTER TABLE campaign_debts ADD COLUMN store_state TEXT NOT NULL DEFAULT 'available'`,
+      );
+      // v13 switch ON → 'active'. A v13 row with the switch OFF but
+      // real OK redemptions at this store is already 'active' by the
+      // v13 auto-activation — belt and braces for restored backups.
+      await database.execute(
+        `UPDATE campaign_debts SET store_state = 'active'
+         WHERE active_in_store = 1
+            OR campaign_id IN (
+              SELECT DISTINCT campaign_id FROM voucher_redemptions
+              WHERE state = 'ok' AND campaign_id IS NOT NULL
+            )`,
+      );
+    }
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_cdebts_store_state ON campaign_debts(store_state, due_minor DESC)',
+    );
+    logDiag(
+      'db',
+      'ترحيل v14: دورة حياة الحملات (متاحة → مفعّلة → مكتملة) — لا تفعيل مرتين ولا تعطيل، والمكتملة تبقى محفوظة كما هي',
+    );
+    version = 14;
   }
 
   if (version !== storedVersion) {

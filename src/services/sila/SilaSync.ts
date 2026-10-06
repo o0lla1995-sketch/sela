@@ -460,10 +460,12 @@ async function settlementsSyncCycle(full = false): Promise<void> {
     );
     for (const server of feed.campaigns ?? []) {
       const before = await VouchersRepo.upsertCampaignFromFeed(server);
-      // v21 (round-27 #1): the merchant's switch decides what counts.
-      const campaignActive =
-        before == null ? false : before.active_in_store === true;
-      if (!campaignActive) {
+      // v22 (round-28 #4): the merchant's lifecycle decides what
+      // counts — ACTIVATED campaigns (active + completed) mirror
+      // their settlements and notify; 'available' ones stay silent.
+      const campaignActivated =
+        before == null ? false : before.store_state !== 'available';
+      if (!campaignActivated) {
         continue; // mirrored, but its settlements/notifications don't count.
       }
       const freshSettlements = await VouchersRepo.upsertSettlements(

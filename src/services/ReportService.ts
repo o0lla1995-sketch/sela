@@ -74,10 +74,14 @@ export interface CashDebtsBundle {
   voucherGoodsAmount: number;
   /** v20: الفرق النقدي الذي دفعه المستحق بالكاشير (سلة > قسيمة). */
   voucherCounterExtraAmount: number;
-  /** v20: تسويات الحملات المؤكّدة المستلمة بالفترة — المال الذي
-   *  وصل فعلاً من المؤسسات (الباقي «بانتظار تأكيد الاستلام»). */
+  /** v20: تسويات الحملات المستلمة بالفترة — المال الذي وصلك من
+   *  المؤسسات (خادم صلة هو المرجع: pending + confirmed، ما لم
+   *  تُلغَ/تُنازع). v22 (round-28 #2): هذا هو «المستلم» نفسه
+   *  الذي تراه في بطاقة كل حملة — يدخل النقد المحصّل بالفترة. */
   campaignSettlementsAmount: number;
-  /** v20: المستحق الآن من كل الحملات (لقطة الخادم). */
+  /** v20: المستحق الآن من الحملات (لقطة الخادم). v22 (round-28
+   *  #2): يدخل ضمن «الدين القائم الآن» في صفحة التقارير — دين
+   *  على المؤسسات حتى التسوية، تماماً كديون الزبائن. */
   campaignDueMinor: number;
 }
 
@@ -179,7 +183,7 @@ export const ReportService = {
       debtQueueTotals,
       voucherSales,
       voucherGoods,
-      voucherSettlements,
+      voucherSettlementsReceived,
       campaignTotals,
     ] = await Promise.all([
       ReportRepo.summary(range),
@@ -200,7 +204,10 @@ export const ReportService = {
       // goods as INV-V invoices, confirmed settlements as receipts).
       VouchersRepo.okInRange(range.from, range.to),
       ReportRepo.voucherSalesSummary(range),
-      VouchersRepo.settlementsConfirmedInRange(range.from, range.to),
+      // v22 (round-28 #2): the RECEIVED settlements of the period
+      // (server truth: pending + confirmed) — «المستلم» الذي يدخل
+      // النقد المحصّل بالفترة.
+      VouchersRepo.settlementsReceivedInRange(range.from, range.to),
       VouchersRepo.campaignsTotals(),
     ]);
 
@@ -217,12 +224,16 @@ export const ReportService = {
       debtSales.amount -
       voucherGoods.goodsAmount +
       voucherSales.counterExtraMinor / 100;
+    // v22 (round-28 #2): the period's collected cash includes the
+    // campaign settlements RECEIVED in the period (المستلم من
+    // المؤسسات) — the user's rule: «المستحق في النقد المحصل
+    // بالفترة».
     const collections =
       (silaPayments.minor +
         localPayments.minor +
         appCollections.minor +
         creditCovered +
-        voucherSettlements.minor) /
+        voucherSettlementsReceived.minor) /
       100;
 
     return {
@@ -259,7 +270,7 @@ export const ReportService = {
         voucherSalesAmount: voucherSales.valueMinor / 100,
         voucherGoodsAmount: voucherGoods.goodsAmount,
         voucherCounterExtraAmount: voucherSales.counterExtraMinor / 100,
-        campaignSettlementsAmount: voucherSettlements.minor / 100,
+        campaignSettlementsAmount: voucherSettlementsReceived.minor / 100,
         campaignDueMinor: campaignTotals.dueMinor,
       },
     };
@@ -302,12 +313,16 @@ export const ReportService = {
       (await SilaRepo.creditCoveredInRange('2000-01-01', '2999-12-31')) / 100;
     // v20: voucher goods left the store inside revenue but only the
     // counter-extra entered the drawer — the claim part arrives with
-    // the CONFIRMED campaign settlements (server snapshot truth).
+    // the campaign settlements (server snapshot truth).
+    // v22 (round-28 #2): «المستلم» = settled_minor (الخادم هو
+    // المرجع — يشمل ما بانتظار تأكيد استلامك، وتظهر لك لقطة
+    // الفارق في صفحة القسائم) — يدخل النقد بالخزينة، والمستحق
+    // المتبقي (due) يبقى ديناً قائماً على المؤسسات.
     const voucherSalesAllTime = voucherGoodsAllTime.goodsAmount;
     const voucherCounterExtraAllTime =
       voucherRedemptionsAllTime.counterExtraMinor / 100;
     const campaignSettlementsAllTime =
-      campaignTotals.settledConfirmedMinor / 100;
+      campaignTotals.settledMinorTotal / 100;
     return {
       revenueAllTime,
       creditSalesAllTime,

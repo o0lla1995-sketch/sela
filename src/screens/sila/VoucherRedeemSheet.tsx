@@ -65,8 +65,21 @@ interface Props {
   cart: VoucherCartContext | null;
   receiptSettings: ReceiptSettings;
   printerConnected: boolean;
-  /** Fired once on success (the POS clears its cart here). */
+  /** Fired once on success (the POS clears its cart here) — NOT
+   *  fired on the needs-top-up path (the cart must be preserved
+   *  and topped up). */
   onRedeemed?: (success: VoucherRedeemSuccess) => void;
+  /** v22 (round-28 #1): fired when the voucher turned out BIGGER
+   *  than the cart — the redemption is booked server-side but no
+   *  goods may be handed over; the POS shows the pending-voucher
+   *  banner and the cashier completes after topping the cart up. */
+  onNeedsTopUp?: (info: {
+    localId: number;
+    valueMinor: number;
+    campaignName: string;
+    shortfallMinor: number;
+    receiptRef: string;
+  }) => void;
 }
 
 type Step =
@@ -87,6 +100,7 @@ export function VoucherRedeemSheet({
   receiptSettings,
   printerConnected,
   onRedeemed,
+  onNeedsTopUp,
 }: Props) {
   const c = useThemeColors();
   const toast = useToastStore(state => state.show);
@@ -96,19 +110,40 @@ export function VoucherRedeemSheet({
   const [manualCode, setManualCode] = useState('');
   const [scanBusy, setScanBusy] = useState(false);
 
-  // Hardware back closes the sheet (except mid-call).
+  /** v22 (round-28 #1): the blocked handover — tell the POS (the
+   *  banner + the deferred completion) and close the sheet. */
+  const handleNeedsTopUp = useCallback(
+    (data: VoucherRedeemSuccess) => {
+      onNeedsTopUp?.({
+        localId: data.localId,
+        valueMinor: data.result.value_minor,
+        campaignName: data.result.campaign_name,
+        shortfallMinor: data.shortfallMinor,
+        receiptRef: data.receiptRef,
+      });
+      onClose();
+    },
+    [onNeedsTopUp, onClose],
+  );
+
+  // Hardware back closes the sheet (except mid-call; a blocked
+  // handover routes through the POS banner instead of vanishing).
   useEffect(() => {
     if (!visible) {
       return;
     }
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (step.phase !== 'calling') {
-        onClose();
+        if (step.phase === 'success' && step.data.needsTopUp) {
+          handleNeedsTopUp(step.data);
+        } else {
+          onClose();
+        }
       }
       return true;
     });
     return () => sub.remove();
-  }, [visible, step.phase, onClose]);
+  }, [visible, step, onClose, handleNeedsTopUp]);
 
   // Reset when reopened.
   useEffect(() => {
@@ -148,7 +183,12 @@ export function VoucherRedeemSheet({
             toast(`تم الصرف لكن الطباعة فشلت: ${message}`, 'error'),
         });
         setStep({phase: 'success', data: success});
-        onRedeemed?.(success);
+        // v22 (round-28 #1): the needs-top-up path keeps the cart —
+        // onRedeemed (which clears it) fires on the COMPLETED path
+        // only; the blocked path waits for the banner's completion.
+        if (!success.needsTopUp) {
+          onRedeemed?.(success);
+        }
       } catch (error) {
         if (error instanceof VoucherRedeemError) {
           setStep({
@@ -237,7 +277,11 @@ export function VoucherRedeemSheet({
         activeOpacity={1}
         onPress={() => {
           if (step.phase !== 'calling') {
-            onClose();
+            if (step.phase === 'success' && step.data.needsTopUp) {
+              handleNeedsTopUp(step.data);
+            } else {
+              onClose();
+            }
           }
         }}
       />
@@ -269,7 +313,8 @@ export function VoucherRedeemSheet({
               </Text>
             </View>
             <Text style={styles.cartRule}>
-              شرط الصرف: قيمة السلة يجب أن تساوي قيمة القسيمة بالضبط
+              شرط الصرف: قيمة السلة يجب ألا تقل عن قيمة القسيمة — إن كانت
+              القسيمة أكبر من السلة لن يكتمل التسليم قبل إكمالها
             </Text>
             <Text style={styles.cartHint}>
               تُخصم الكميات من المخزون بعد نجاح الصرف — لا قبل ذلك
@@ -361,131 +406,166 @@ export function VoucherRedeemSheet({
 
         {/* ── SUCCESS ── */}
         {step.phase === 'success' ? (
-          <View style={styles.stateBox}>
-            <View style={[styles.stateIcon, {backgroundColor: c.successSoft}]}>
-              <Icon name="checkCircle" size={34} color={c.success} />
-            </View>
-            <Text style={[styles.stateTitle, {color: c.success}]}>
-              صُرفت القسيمة — {formatMoney(step.data.result.value_minor / 100)}
-            </Text>
-            <Text style={styles.stateText}>
-              حملة «{step.data.result.campaign_name}» · المرجع الرسمي{' '}
-              {step.data.result.reference_code}
-            </Text>
-            {step.data.result.beneficiary_last4 ? (
-              <Text style={styles.stateMeta}>
-                هوية المستحق: ****{step.data.result.beneficiary_last4}
+          step.data.needsTopUp ? (
+            /* v22 (round-28 #1): the voucher is BIGGER than the cart
+               — the redemption is booked server-side (the claim on
+               the institution exists) but the handover is BLOCKED:
+               no sale, no receipt, no goods. The cashier tops the
+               cart up and completes from the POS banner. */
+            <View style={styles.stateBox}>
+              <View style={[styles.stateIcon, {backgroundColor: c.dangerSoft}]}>
+                <Icon name="alert" size={30} color={c.danger} />
+              </View>
+              <Text style={[styles.stateTitle, {color: c.danger}]}>
+                القسيمة أكبر من السلة — لا يمكن التسليم
               </Text>
-            ) : null}
-
-            {/* v21 (round-27 #2): the EXACT-MATCH rule. The voucher's
-                value is only known AFTER the server answers (the code
-                carries no amount), so the enforcement lands here: a
-                cart that does not equal the voucher EXACTLY is shown
-                as a bold warning and the cashier must ACKNOWLEDGE the
-                difference before the goods are handed over — a clean
-                match gets the plain «تم» button. */}
-            {cartMinor != null ? (
-              cartMinor === step.data.result.value_minor ? (
-                <View style={styles.matchBox}>
-                  <Icon name="checkCircle" size={15} color={c.success} />
-                  <Text style={styles.matchText}>
-                    قيمة السلة تساوي قيمة القسيمة بالضبط — صرف سليم
-                  </Text>
-                </View>
-              ) : (
-                <View style={styles.mismatchBox}>
-                  <Icon name="alert" size={16} color={c.warning} />
-                  <Text style={styles.mismatchTitle}>
-                    تنبيه: قيمة السلة لا تساوي قيمة القسيمة بالضبط
-                  </Text>
-                  <Text style={styles.mismatchText}>
-                    {step.data.counterExtraMinor > 0
-                      ? `قيمة السلة أكبر من القسيمة بمقدار ${formatMoney(
-                          step.data.counterExtraMinor / 100,
-                        )} — يجب استلام هذا الفرق نقداً من المستحق قبل تسليم البضاعة`
-                      : `قيمة القسيمة أكبر من السلة بمقدار ${formatMoney(
-                          step.data.surplusMinor / 100,
-                        )} — سيُضاف هذا الفرق إلى مطالبتك على المؤسسة ضمن تسوية الحملة`}
-                  </Text>
-                </View>
-              )
-            ) : null}
-
-            {/* The decomposition (requirement: clear split) */}
-            {cartMinor != null ? (
-              <View style={styles.decompBox}>
+              <View style={styles.blockedBox}>
                 <View style={styles.decompRow}>
-                  <Text style={styles.decompLabel}>قيمة البضاعة (السلة)</Text>
-                  <Text style={styles.decompValue}>
-                    {formatMoney((cartMinor ?? 0) / 100)}
-                  </Text>
-                </View>
-                {step.data.counterExtraMinor > 0 ? (
-                  <View style={styles.decompRow}>
-                    <Text style={[styles.decompLabel, {color: c.warning}]}>
-                      الفرق نقداً عند الكاشير
-                    </Text>
-                    <Text style={[styles.decompValue, {color: c.warning}]}>
-                      {formatMoney(step.data.counterExtraMinor / 100)}
-                    </Text>
-                  </View>
-                ) : null}
-                {step.data.surplusMinor > 0 ? (
-                  <View style={styles.decompRow}>
-                    <Text style={[styles.decompLabel, {color: c.info}]}>
-                      فرق القسيمة (ضمن تسوية الحملة)
-                    </Text>
-                    <Text style={[styles.decompValue, {color: c.info}]}>
-                      {formatMoney(step.data.surplusMinor / 100)}
-                    </Text>
-                  </View>
-                ) : null}
-                <View style={[styles.decompRow, styles.decompRowTotal]}>
-                  <Text style={styles.decompLabelTotal}>قيمة القسيمة</Text>
-                  <Text style={styles.decompValueTotal}>
+                  <Text style={styles.decompLabel}>قيمة القسيمة</Text>
+                  <Text style={[styles.decompValue, {color: c.danger}]}>
                     {formatMoney(step.data.result.value_minor / 100)}
                   </Text>
                 </View>
+                <View style={styles.decompRow}>
+                  <Text style={styles.decompLabel}>قيمة السلة الحالية</Text>
+                  <Text style={styles.decompValue}>
+                    {formatMoney((step.data.cartMinor ?? 0) / 100)}
+                  </Text>
+                </View>
+                <View style={[styles.decompRow, styles.decompRowTotal]}>
+                  <Text style={styles.decompLabelTotal}>
+                    البضاعة الناقصة (أضفها للسلة)
+                  </Text>
+                  <Text style={[styles.decompValueTotal, {color: c.warning}]}>
+                    {formatMoney(step.data.shortfallMinor / 100)}
+                  </Text>
+                </View>
               </View>
-            ) : null}
-
-            <Text style={styles.stateMeta}>
-              الإيصال: {step.data.receiptRef} — سُجّلت مطالبتك على المؤسسة في
-              دفتر الحملات
-            </Text>
-
-            <View style={styles.actionsRow}>
+              <Text style={styles.stateText}>
+                الصرف محجوز باسم متجرك على خادم صِلة — لا تُسلَّم البضاعة
+                ولا يُطبع الإيصال قبل أن تُكمل السلة إلى قيمة القسيمة على
+                الأقل، ثم تُتمّ العملية من شاشة البيع.
+              </Text>
+              <Text style={styles.stateMeta}>
+                حملة «{step.data.result.campaign_name}» · المرجع الرسمي{' '}
+                {step.data.result.reference_code} · الإيصال{' '}
+                {step.data.receiptRef}
+              </Text>
               <AppButton
-                title="طباعة الإيصال"
-                variant="secondary"
-                onPress={() => void reprint()}
-                disabled={!printerConnected}
-                style={{flex: 1}}
-              />
-              {/* v21 (round-27 #2): the closing button SPELLS OUT the
-                  acknowledged difference — the cashier can't hand the
-                  goods over without reading it. */}
-              <AppButton
-                title={
-                  cartMinor != null &&
-                  cartMinor !== step.data.result.value_minor
-                    ? step.data.counterExtraMinor > 0
-                      ? 'استلمت الفرق نقداً — تسليم البضاعة'
-                      : 'إتمام — الفرق ضمن مطالبة المؤسسة'
-                    : 'تم — تسليم البضاعة'
-                }
-                variant={
-                  cartMinor != null &&
-                  cartMinor !== step.data.result.value_minor
-                    ? 'primary'
-                    : 'success'
-                }
-                onPress={onClose}
-                style={{flex: 1}}
+                title="تعديل السلة — العودة إلى شاشة البيع"
+                variant="primary"
+                onPress={() => handleNeedsTopUp(step.data)}
               />
             </View>
-          </View>
+          ) : (
+            <View style={styles.stateBox}>
+              <View style={[styles.stateIcon, {backgroundColor: c.successSoft}]}>
+                <Icon name="checkCircle" size={34} color={c.success} />
+              </View>
+              <Text style={[styles.stateTitle, {color: c.success}]}>
+                صُرفت القسيمة — {formatMoney(step.data.result.value_minor / 100)}
+              </Text>
+              <Text style={styles.stateText}>
+                حملة «{step.data.result.campaign_name}» · المرجع الرسمي{' '}
+                {step.data.result.reference_code}
+              </Text>
+              {step.data.result.beneficiary_last4 ? (
+                <Text style={styles.stateMeta}>
+                  هوية المستحق: ****{step.data.result.beneficiary_last4}
+                </Text>
+              ) : null}
+
+              {/* v22 (round-28 #1): the redemption rule — the cart
+                  must NOT be smaller than the voucher (blocked above
+                  before any handover). An EXACT match is the clean
+                  case; a BIGGER cart means the beneficiary pays the
+                  difference in cash at the counter before the goods
+                  are handed over. */}
+              {cartMinor != null ? (
+                cartMinor === step.data.result.value_minor ? (
+                  <View style={styles.matchBox}>
+                    <Icon name="checkCircle" size={15} color={c.success} />
+                    <Text style={styles.matchText}>
+                      قيمة السلة تساوي قيمة القسيمة — صرف سليم
+                    </Text>
+                  </View>
+                ) : step.data.counterExtraMinor > 0 ? (
+                  <View style={styles.mismatchBox}>
+                    <Icon name="alert" size={16} color={c.warning} />
+                    <Text style={styles.mismatchTitle}>
+                      قيمة السلة أكبر من القسيمة
+                    </Text>
+                    <Text style={styles.mismatchText}>
+                      الفرق {formatMoney(step.data.counterExtraMinor / 100)} —
+                      يجب استلامه نقداً من المستحق قبل تسليم البضاعة
+                    </Text>
+                  </View>
+                ) : null
+              ) : null}
+
+              {/* The decomposition (requirement: clear split) */}
+              {cartMinor != null ? (
+                <View style={styles.decompBox}>
+                  <View style={styles.decompRow}>
+                    <Text style={styles.decompLabel}>قيمة البضاعة (السلة)</Text>
+                    <Text style={styles.decompValue}>
+                      {formatMoney((cartMinor ?? 0) / 100)}
+                    </Text>
+                  </View>
+                  {step.data.counterExtraMinor > 0 ? (
+                    <View style={styles.decompRow}>
+                      <Text style={[styles.decompLabel, {color: c.warning}]}>
+                        الفرق نقداً عند الكاشير
+                      </Text>
+                      <Text style={[styles.decompValue, {color: c.warning}]}>
+                        {formatMoney(step.data.counterExtraMinor / 100)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  <View style={[styles.decompRow, styles.decompRowTotal]}>
+                    <Text style={styles.decompLabelTotal}>قيمة القسيمة</Text>
+                    <Text style={styles.decompValueTotal}>
+                      {formatMoney(step.data.result.value_minor / 100)}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+
+              <Text style={styles.stateMeta}>
+                الإيصال: {step.data.receiptRef} — سُجّلت مطالبتك على المؤسسة في
+                دفتر الحملات
+              </Text>
+
+              <View style={styles.actionsRow}>
+                <AppButton
+                  title="طباعة الإيصال"
+                  variant="secondary"
+                  onPress={() => void reprint()}
+                  disabled={!printerConnected}
+                  style={{flex: 1}}
+                />
+                {/* v22 (round-28 #1): the closing button SPELLS OUT
+                    the acknowledged difference — the cashier can't
+                    hand the goods over without reading it. */}
+                <AppButton
+                  title={
+                    cartMinor != null &&
+                    cartMinor !== step.data.result.value_minor
+                      ? 'استلمت الفرق نقداً — تسليم البضاعة'
+                      : 'تم — تسليم البضاعة'
+                  }
+                  variant={
+                    cartMinor != null &&
+                    cartMinor !== step.data.result.value_minor
+                      ? 'primary'
+                      : 'success'
+                  }
+                  onPress={onClose}
+                  style={{flex: 1}}
+                />
+              </View>
+            </View>
+          )
         ) : null}
 
         {/* ── ERROR / PENDING ── */}
@@ -703,6 +783,16 @@ const styles = StyleSheet.create({
     fontSize: typography.micro + 1,
     textAlign: 'center',
     lineHeight: 16,
+  },
+  /** v22 (round-28 #1): the blocked-handover breakdown box. */
+  blockedBox: {
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(239,68,68,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.30)',
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+    gap: 6,
   },
   scanBtn: {
     flexDirection: 'row',

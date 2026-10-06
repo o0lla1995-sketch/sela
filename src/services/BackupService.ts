@@ -286,6 +286,10 @@ interface BackupFile {
     merchant_status: string | null;
     starts_at: string | null;
     ends_at: string | null;
+    /** v22 (round-28 #4): the in-store lifecycle — restored EXACTLY
+     *  as it was (available/active/completed): «في النسخة
+     *  الاحتياطية تسترجع حالة الحملة كما هي». */
+    store_state?: 'available' | 'active' | 'completed';
     redeemed_count: number;
     redeemed_value_minor: number;
     settled_minor: number;
@@ -439,10 +443,11 @@ export const BackupService = {
       db
         .execute(
           `SELECT campaign_id, campaign_name, kind, campaign_status,
-                merchant_status, starts_at, ends_at, redeemed_count,
-                redeemed_value_minor, settled_minor, settled_pending_minor,
-                settled_confirmed_minor, due_minor, settlement_state,
-                last_redemption_at, last_settlement_at, updated_at
+                merchant_status, starts_at, ends_at, store_state,
+                redeemed_count, redeemed_value_minor, settled_minor,
+                settled_pending_minor, settled_confirmed_minor, due_minor,
+                settlement_state, last_redemption_at, last_settlement_at,
+                updated_at
          FROM campaign_debts`,
         )
         .catch(() => ({rows: {_array: []}})),
@@ -735,6 +740,12 @@ export const BackupService = {
           row.merchant_status == null ? null : String(row.merchant_status),
         starts_at: row.starts_at == null ? null : String(row.starts_at),
         ends_at: row.ends_at == null ? null : String(row.ends_at),
+        // v22 (round-28 #4): the lifecycle state rides along so a
+        // restore never resets an activated/completed campaign.
+        store_state:
+          row.store_state === 'active' || row.store_state === 'completed'
+            ? row.store_state
+            : 'available',
         redeemed_count: Number(row.redeemed_count ?? 0),
         redeemed_value_minor: Number(row.redeemed_value_minor ?? 0),
         settled_minor: Number(row.settled_minor ?? 0),
@@ -1494,11 +1505,12 @@ export const BackupService = {
           await tx.execute(
             `INSERT INTO campaign_debts (
               campaign_id, campaign_name, kind, campaign_status,
-              merchant_status, starts_at, ends_at, redeemed_count,
-              redeemed_value_minor, settled_minor, settled_pending_minor,
-              settled_confirmed_minor, due_minor, settlement_state,
-              last_redemption_at, last_settlement_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              merchant_status, starts_at, ends_at, store_state,
+              redeemed_count, redeemed_value_minor, settled_minor,
+              settled_pending_minor, settled_confirmed_minor, due_minor,
+              settlement_state, last_redemption_at, last_settlement_at,
+              updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               campaign.campaign_id,
               campaign.campaign_name,
@@ -1507,6 +1519,13 @@ export const BackupService = {
               campaign.merchant_status ?? null,
               campaign.starts_at ?? null,
               campaign.ends_at ?? null,
+              // v22 (round-28 #4): the lifecycle state restores
+              // EXACTLY as it was backed up (default: available
+              // for pre-v22 backups).
+              campaign.store_state === 'active' ||
+              campaign.store_state === 'completed'
+                ? campaign.store_state
+                : 'available',
               Number(campaign.redeemed_count ?? 0),
               Number(campaign.redeemed_value_minor ?? 0),
               Number(campaign.settled_minor ?? 0),

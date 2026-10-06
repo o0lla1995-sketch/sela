@@ -45,6 +45,10 @@ import {usePrinterStore} from '../stores/printerStore';
 import {useToastStore} from '../stores/toastStore';
 import {useSilaStore} from '../stores/silaStore';
 import {InvoiceService} from '../services/InvoiceService';
+import {
+  VoucherService,
+  VoucherRedeemError,
+} from '../services/VoucherService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {SilaRepo} from '../services/sila/SilaRepo';
@@ -249,6 +253,20 @@ export function PosScreen() {
   // v20: the voucher redemption sheet — «صرف قسيمة صلة» from the
   // checkout row (cart-tied: the goods become the INV-V sale).
   const [voucherSheet, setVoucherSheet] = useState(false);
+  /** v22 (round-28 #1): voucher redemptions the server ACCEPTED but
+   *  whose cart was SMALLER than the voucher — the handover is
+   *  blocked until the cashier tops the cart up (to the voucher
+   *  value at least) and completes from the banner. */
+  const [pendingVouchers, setPendingVouchers] = useState<
+    {
+      localId: number;
+      valueMinor: number;
+      campaignName: string;
+      shortfallMinor: number;
+      receiptRef: string;
+    }[]
+  >([]);
+  const [voucherBusy, setVoucherBusy] = useState(false);
   const [customerPicker, setCustomerPicker] = useState(false);
   const [pickerCustomers, setPickerCustomers] = useState<SilaCustomer[]>([]);
   const [pickerQuery, setPickerQuery] = useState('');
@@ -285,6 +303,112 @@ export function PosScreen() {
     });
     return unsubscribe;
   }, [navigation]);
+
+  /** v22 (round-28 #1): completes a blocked (needs-top-up) voucher
+   *  redemption — the server already redeemed it, the cashier has
+   *  now topped the cart up: create the INV-V goods sale from the
+   *  CURRENT cart, print, clear and drop the banner. The service
+   *  re-verifies the cart ≥ voucher rule before booking. */
+  const completePendingVoucher = useCallback(
+    async (info: {
+      localId: number;
+      valueMinor: number;
+      campaignName: string;
+    }) => {
+      if (busy || debtBusy || voucherBusy) {
+        return;
+      }
+      const totalMinor = Math.round(totals.total * 100);
+      if (lines.length === 0 || totalMinor < info.valueMinor) {
+        toast(
+          `أضف بضاعة بفارق ${((info.valueMinor - totalMinor) / 100).toFixed(
+            2,
+          )} ₪ على الأقل — السلة يجب ألا تقل عن قيمة القسيمة`,
+          'error',
+          4500,
+        );
+        return;
+      }
+      setVoucherBusy(true);
+      try {
+        await VoucherService.completeCartRedemption(
+          info.localId,
+          {lines, discount, pricingMode},
+          printerStatus === 'connected',
+          {
+            storeName: settings.storeName,
+            storePhone: settings.storePhone,
+            footerMessage: settings.footerMessage,
+            storeLogoPath: settings.storeLogoPath,
+            paperWidth: settings.paperWidth,
+            codepage: settings.codepage,
+            showProfit: settings.showProfitOnReceipt,
+          },
+          message => toast(`اكتمل الصرف لكن الطباعة فشلت: ${message}`, 'error'),
+        );
+        setPendingVouchers(previous =>
+          previous.filter(item => item.localId !== info.localId),
+        );
+        clear();
+        setDiscountText('');
+        void refreshCatalog();
+        void useSilaStore.getState().refreshActiveCampaigns();
+        toast(
+          `اكتمل صرف قسيمة «${info.campaignName}» وسُلّمت البضاعة`,
+          'success',
+        );
+      } catch (error) {
+        if (error instanceof VoucherRedeemError) {
+          toast(error.message, 'error', 4500);
+        } else {
+          toast(
+            error instanceof Error ? error.message : 'تعذر إتمام الصرف',
+            'error',
+          );
+        }
+      } finally {
+        setVoucherBusy(false);
+      }
+    },
+    [
+      busy,
+      debtBusy,
+      voucherBusy,
+      totals,
+      lines,
+      discount,
+      pricingMode,
+      printerStatus,
+      settings,
+      clear,
+      refreshCatalog,
+      toast,
+    ],
+  );
+
+  /** v22 (round-28 #1): drop a blocked redemption's banner — the
+   *  claim stays recorded in دفتر الحملات (the server redeemed the
+   *  voucher); the merchant completes the handover manually. */
+  const dismissPendingVoucher = useCallback(
+    (localId: number) => {
+      Alert.alert(
+        'إلغاء إتمام القسيمة',
+        'القسيمة مصروفة على خادم صلة ومطالبتك على المؤسسة محفوظة في دفتر الحملات، لكن لن تُسجّل فاتورة بضاعة لها. هل أنت متأكد؟',
+        [
+          {text: 'تراجع', style: 'cancel'},
+          {
+            text: 'إلغاء الإتمام',
+            style: 'destructive',
+            onPress: () =>
+              setPendingVouchers(previous =>
+                previous.filter(item => item.localId !== localId),
+              ),
+          },
+        ],
+      );
+    },
+    [],
+  );
 
   // v8.2: a sale that empties the cart also folds the expanded view
   // back down — the grid must return for the next customer.
@@ -2189,6 +2313,60 @@ export function PosScreen() {
                   <MoneyText value={totals.total} big />
                 </View>
 
+                {/* v22 (round-28 #1): blocked voucher handovers — the
+                    server redeemed the voucher but the cart was
+                    smaller than its value; no goods until the cart is
+                    topped up and completed here. */}
+                {pendingVouchers.map(pending => {
+                  const totalMinor = Math.round(totals.total * 100);
+                  const remaining = Math.max(0, pending.valueMinor - totalMinor);
+                  const ready = lines.length > 0 && remaining === 0;
+                  return (
+                    <View key={pending.localId} style={styles.pendingVoucherBox}>
+                      <View style={styles.pendingVoucherHead}>
+                        <Icon name="ticket" size={15} color={c.warning} />
+                        <Text style={styles.pendingVoucherTitle} numberOfLines={1}>
+                          قسيمة «{pending.campaignName}» بانتظار إكمال السلة
+                        </Text>
+                        <TouchableOpacity
+                          onPress={() => dismissPendingVoucher(pending.localId)}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                          <Icon name="x" size={14} color={c.textFaint} />
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={styles.pendingVoucherMeta}>
+                        قيمة القسيمة {formatMoney(pending.valueMinor / 100)} ·
+                        السلة الآن {formatMoney(totals.total)} · الإيصال{' '}
+                        {pending.receiptRef}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.pendingVoucherHint,
+                          ready ? {color: c.success} : null,
+                        ]}>
+                        {ready
+                          ? 'السلة غطّت قيمة القسيمة — اضغط إتمام الصرف لتسليم البضاعة'
+                          : `أضف بضاعة بفارق ${formatMoney(
+                              remaining / 100,
+                            )} على الأقل حتى تكتمل السلة`}
+                      </Text>
+                      <View style={styles.pendingVoucherActions}>
+                        <AppButton
+                          title="إتمام الصرف وتسليم البضاعة"
+                          small
+                          variant={ready ? 'primary' : 'secondary'}
+                          disabled={!ready || busy || debtBusy || voucherBusy}
+                          loading={voucherBusy}
+                          onPress={() =>
+                            void completePendingVoucher(pending)
+                          }
+                          style={{flex: 1}}
+                        />
+                      </View>
+                    </View>
+                  );
+                })}
+
                 <View style={styles.checkoutRow}>
                   {/* v11 (round-17 #1): ONE dual-mode sell button — the
                     printer icon appears ONLY when a printer is live,
@@ -2401,6 +2579,15 @@ export function PosScreen() {
           setDiscountText('');
           void refreshCatalog();
           void useSilaStore.getState().refreshActiveCampaigns();
+        }}
+        onNeedsTopUp={info => {
+          // v22 (round-28 #1): voucher > cart — keep the cart, show
+          // the banner, complete after the cashier tops the cart up.
+          setPendingVouchers(previous =>
+            previous.some(item => item.localId === info.localId)
+              ? previous
+              : [...previous, info],
+          );
         }}
       />
 
@@ -3592,6 +3779,42 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.small,
       marginTop: 2,
+    },
+    // v22 (round-28 #1): the blocked voucher handover banner — a
+    // voucher the server redeemed whose cart was smaller than its
+    // value; the handover waits here until the cart is topped up.
+    pendingVoucherBox: {
+      backgroundColor: 'rgba(245,158,11,0.10)',
+      borderWidth: 1,
+      borderColor: 'rgba(245,158,11,0.45)',
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      gap: 6,
+    },
+    pendingVoucherHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    pendingVoucherTitle: {
+      flex: 1,
+      color: '#FCD34D',
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    pendingVoucherMeta: {
+      color: '#C9C9D4',
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+    },
+    pendingVoucherHint: {
+      color: '#FDBA74',
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+      lineHeight: 15,
+    },
+    pendingVoucherActions: {
+      flexDirection: 'row',
     },
     checkoutRow: {
       flexDirection: 'row',

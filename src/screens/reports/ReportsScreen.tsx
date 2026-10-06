@@ -271,13 +271,13 @@ export function ReportsScreen() {
                         {formatMoney(cash?.prepaidAmount ?? 0)}
                       </Text>
                     </View>
-                    {/* v20: money actually received from institutions
-                        (confirmed settlements only — pending ones wait
-                        for the merchant's receipt confirmation). */}
+                    {/* v22 (round-28 #2): money received from the
+                        campaign institutions in the range — «المستلم»
+                        (server truth: pending + confirmed). */}
                     {(cash?.campaignSettlementsAmount ?? 0) > 0 ? (
                       <View style={styles.rowLine}>
                         <Text style={styles.rowLabel}>
-                          منها: تسويات الحملات (قسائم مؤكّدة)
+                          منها: مستلم من حملات القسائم (المؤسسات)
                         </Text>
                         <Text style={[styles.rowValue, {color: c.success}]}>
                           {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
@@ -353,7 +353,7 @@ export function ReportsScreen() {
                     ) : null}
                     <View style={styles.rowLine}>
                       <Text style={styles.rowLabel}>
-                        تسويات مؤكّدة وصلت بالفترة
+                        مستلم تسويات الحملات بالفترة
                       </Text>
                       <Text style={styles.rowValue}>
                         {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
@@ -362,7 +362,7 @@ export function ReportsScreen() {
                     {(cash?.campaignDueMinor ?? 0) > 0 ? (
                       <View style={styles.rowLine}>
                         <Text style={styles.rowLabel}>
-                          المستحق الآن من الحملات الفعّالة (دين على المؤسسات)
+                          المستحق الآن من الحملات المفعّلة (دين على المؤسسات)
                         </Text>
                         <Text style={[styles.rowValue, {color: c.warning}]}>
                           {formatMoney((cash?.campaignDueMinor ?? 0) / 100)}
@@ -389,12 +389,18 @@ export function ReportsScreen() {
                   <Text style={styles.outstandingValue}>
                     {formatMoney(
                       ((cash?.localOutstandingMinor ?? 0) +
-                        (paired ? cash?.silaOutstandingMinor ?? 0 : 0)) /
+                        (paired ? cash?.silaOutstandingMinor ?? 0 : 0) +
+                        (cash?.campaignDueMinor ?? 0)) /
                         100,
                     )}
                   </Text>
                   <Text style={styles.outstandingMeta}>
-                    {paired
+                    {(cash?.campaignDueMinor ?? 0) > 0
+                      ? paired
+                        ? `${(cash?.localDebtorsCount ?? 0) +
+                            (cash?.silaDebtorsCount ?? 0)} زبون + مستحقات الحملات — دفتر المتجر + صِلة + المؤسسات`
+                        : `${cash?.localDebtorsCount ?? 0} زبون + مستحقات الحملات — دفتر المتجر + المؤسسات`
+                      : paired
                       ? `${
                           (cash?.localDebtorsCount ?? 0) +
                           (cash?.silaDebtorsCount ?? 0)

@@ -576,14 +576,19 @@ export interface CampaignDebtRow {
   last_redemption_at: string | null;
   last_settlement_at: string | null;
   updated_at: string | null;
-  /** v21 (round-27 #1): the merchant's own switch — ONLY campaigns
-   *  marked active in THIS store count in the dues/settlements books,
-   *  the headline totals and the reports. Feed-discovered campaigns
-   *  start inactive; a real redemption flips the campaign active (the
-   *  store is already committed server-side) and the merchant can
-   *  toggle it any time from the القسائم tab. */
-  active_in_store: boolean;
+  /** v22 (round-28 #4): the campaign lifecycle in this store —
+   *  'available' → 'active' → 'completed', one-way only:
+   *  no double activation (an active campaign can't be activated
+   *  again), no deactivation (the old v13 switch is gone) — an
+   *  active campaign can only be marked COMPLETED, and a completed
+   *  campaign keeps its data and its standing dues in the books
+   *  exactly as they were. The state survives feed re-syncs, Sila
+   *  unlink/relink and backup restore untouched. */
+  store_state: CampaignStoreState;
 }
+
+/** v22 (round-28 #4): the in-store campaign lifecycle states. */
+export type CampaignStoreState = 'available' | 'active' | 'completed';
 
 /** v20: one institution settlement mirrored from the server's
  *  settlements[] feed (§4.2) — the period reports read these rows

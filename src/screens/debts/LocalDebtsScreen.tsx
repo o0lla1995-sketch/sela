@@ -985,8 +985,7 @@ export function LocalDebtsScreen() {
                 }
                 activeOpacity={0.8}>
                 <Text style={styles.payQuickText}>
-                  السداد الكامل ({formatMoney(detail.outstandingMinor / 100)}{' '}
-                  ₪)
+                  السداد الكامل ({formatMoney(detail.outstandingMinor / 100)})
                 </Text>
               </TouchableOpacity>
             ) : null}

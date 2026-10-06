@@ -173,8 +173,22 @@ export interface VoucherRedeemSuccess {
   cartMinor: number | null;
   /** Cash the beneficiary paid at the counter (cart > voucher). */
   counterExtraMinor: number;
-  /** Surplus the store claims from the institution (voucher > cart). */
+  /** v22 (round-28 #1): always 0 now — a voucher bigger than the
+   *  cart is NEVER completed with a surplus claim; see needsTopUp.
+   *  Kept for receipt/report compatibility. */
   surplusMinor: number;
+  /** v22 (round-28 #1): TRUE when the cart was SMALLER than the
+   *  voucher. The redemption IS booked server-side (the claim on
+   *  the institution exists and the campaign books are mirrored),
+   *  but NO INV-V sale was created and NO goods may be handed
+   *  over — the cashier must top the cart up to at least the
+   *  voucher value and complete the handover from the POS banner
+   *  (completeCartRedemption). */
+  needsTopUp: boolean;
+  /** The shortfall (₪ minor) the cart is missing vs the voucher. */
+  shortfallMinor: number;
+  /** The redemption row's local id (for the deferred completion). */
+  localId: number;
 }
 
 export interface RedeemVoucherOptions {
@@ -206,64 +220,24 @@ export class VoucherRedeemError extends Error {
 
 // ── The booking step (shared by the live path + the sync engine) ──
 
-async function bookSuccess(
+/** v22 (round-28 #1): books the REDEMPTION itself — the row goes
+ *  'ok' with the server's facts and the campaign claim mirror is
+ *  written (applyRedeemSnapshot). NO goods sale is created here;
+ *  the sale is a separate, explicitly-confirmed step so a cart
+ *  smaller than the voucher can never complete as a sale. */
+async function bookRedemption(
   row: VoucherRedemptionRow,
   result: SilaVoucherRedeemResult,
-): Promise<{sale: SaleRecord | null; items: SaleItemRecord[]}> {
+): Promise<void> {
   const snapshot = parseSnapshot(row.cart_json);
   const totalMinor = cartTotalMinor(snapshot);
   const counterExtra = Math.max(0, totalMinor - result.value_minor);
 
   // 1) Book the redemption row (idempotent — a replay after a crash
   //    returns false and the sale is NOT created twice).
-  const booked = await VouchersRepo.markRedeemed(
-    row.local_id,
-    result,
-    counterExtra,
-  );
+  await VouchersRepo.markRedeemed(row.local_id, result, counterExtra);
 
-  // 2) Create the INV-V sale from the snapshot (cart-tied only) —
-  //    plain sale + items + stock decrements, exactly like a cash
-  //    sale; the claim on the institution lives in campaign_debts.
-  let sale: SaleRecord | null = null;
-  let items: SaleItemRecord[] = [];
-  if (booked && snapshot != null) {
-    try {
-      const created = await SaleRepo.createSale({
-        invoiceNumber: row.pos_receipt_ref ?? '',
-        lines: snapshot.lines,
-        discount: snapshot.discount,
-        paymentType: snapshot.pricingMode,
-      });
-      sale = created.sale;
-      items = created.items;
-      await VouchersRepo.attachSale(row.local_id, created.sale.id);
-    } catch (error) {
-      // The redemption itself SUCCEEDED server-side — a local sale
-      // failure (e.g. stock drift) must never hide that truth. The
-      // row stays ok; the merchant resolves stock via a stocktake.
-      const message = error instanceof Error ? error.message : String(error);
-      logDiag(
-        'sila',
-        `صُرفت القسيمة ${result.reference_code} لكن إنشاء فاتورة البضاعة فشل: ${message}`,
-        'warn',
-      );
-    }
-  } else if (!booked) {
-    // A replay whose sale already exists — load it for the receipt.
-    const fresh = await VouchersRepo.byId(row.local_id);
-    if (fresh?.sale_id != null) {
-      try {
-        items = await SaleRepo.getItemsForSale(fresh.sale_id);
-        const recent = await SaleRepo.listRecent(500);
-        sale = recent.find(entry => entry.id === fresh.sale_id) ?? null;
-      } catch {
-        // Receipt without items is acceptable.
-      }
-    }
-  }
-
-  // 3) Mirror the campaign snapshot from the SERVER answer (§4.1 —
+  // 2) Mirror the campaign snapshot from the SERVER answer (§4.1 —
   //    write it straight into campaign_debts; never compute).
   await VouchersRepo.applyRedeemSnapshot(
     result.campaign_id,
@@ -272,13 +246,78 @@ async function bookSuccess(
     result.settlement,
   );
 
-  // v21 (round-27 #6): the redemption may have ACTIVATED a campaign
-  // (first redemption at this store flips its switch on) — keep the
-  // POS cart's قسيمة button counter truthful. Fire-and-forget.
+  // v21 (round-27 #6) / v22 (round-28 #4): the redemption may have
+  // ACTIVATED a campaign (a real redemption at this store commits
+  // it) — keep the POS cart's قسيمة button counter truthful.
   try {
     void useSilaStore.getState().refreshActiveCampaigns();
   } catch {
     // Store not ready (fresh boot race) — the focus listener recovers.
+  }
+}
+
+/** Creates the INV-V goods sale from a cart (cart-tied only) —
+ *  plain sale + items + stock decrements, exactly like a cash sale;
+ *  the claim on the institution lives in campaign_debts. A LOCAL
+ *  sale failure never hides the server-side redemption truth. */
+async function createGoodsSale(
+  row: VoucherRedemptionRow,
+  lines: CartLine[],
+  discount: number,
+  pricingMode: PricingMode,
+): Promise<{sale: SaleRecord | null; items: SaleItemRecord[]}> {
+  try {
+    const created = await SaleRepo.createSale({
+      invoiceNumber: row.pos_receipt_ref ?? '',
+      lines,
+      discount,
+      paymentType: pricingMode,
+    });
+    await VouchersRepo.attachSale(row.local_id, created.sale.id);
+    return {sale: created.sale, items: created.items};
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logDiag(
+      'sila',
+      `صُرفت القسيمة ${row.pos_receipt_ref ?? ''} لكن إنشاء فاتورة البضاعة فشل: ${message}`,
+      'warn',
+    );
+    return {sale: null, items: []};
+  }
+}
+
+async function bookSuccess(
+  row: VoucherRedemptionRow,
+  result: SilaVoucherRedeemResult,
+): Promise<{sale: SaleRecord | null; items: SaleItemRecord[]}> {
+  // 1) The redemption + the campaign claim mirror (v22 split).
+  await bookRedemption(row, result);
+
+  // 2) The INV-V sale from the stored snapshot (cart-tied only).
+  let sale: SaleRecord | null = null;
+  let items: SaleItemRecord[] = [];
+  const snapshot = parseSnapshot(row.cart_json);
+  if (snapshot != null) {
+    const booked = await VouchersRepo.byId(row.local_id);
+    if (booked?.sale_id == null) {
+      const created = await createGoodsSale(
+        row,
+        snapshot.lines,
+        snapshot.discount,
+        snapshot.pricingMode,
+      );
+      sale = created.sale;
+      items = created.items;
+    } else {
+      // A replay whose sale already exists — load it for the receipt.
+      try {
+        items = await SaleRepo.getItemsForSale(booked.sale_id);
+        const recent = await SaleRepo.listRecent(500);
+        sale = recent.find(entry => entry.id === booked.sale_id) ?? null;
+      } catch {
+        // Receipt without items is acceptable.
+      }
+    }
   }
 
   return {sale, items};
@@ -330,11 +369,41 @@ export const VoucherService = {
         APP_VERSION,
       );
 
-      const {sale, items} = await bookSuccess(row, result);
       const snapshot = parseSnapshot(row.cart_json);
       const totalMinor = cartTotalMinor(snapshot);
+
+      // v22 (round-28 #1): THE redemption rule — a voucher BIGGER
+      // than the cart is never completed. The server call is atomic
+      // and the voucher is consumed the moment it answers (there is
+      // no validation endpoint in the API), so the enforcement lands
+      // here: the redemption + the claim on the institution are
+      // booked (server truth), but NO sale is created, NOTHING is
+      // printed and NO goods may be handed over. The cashier tops
+      // the cart up and completes from the POS banner
+      // (completeCartRedemption).
+      if (snapshot != null && totalMinor < result.value_minor) {
+        await bookRedemption(row, result);
+        logDiag(
+          'sila',
+          `قسيمة ${result.reference_code} بقيمة ${result.value_minor / 100} ₪ أكبر من السلة (${totalMinor / 100} ₪) — حُجز الصرف ولا يُسلَّم حتى تكملة السلة بفارق ${(result.value_minor - totalMinor) / 100} ₪`,
+          'warn',
+        );
+        return {
+          result,
+          receiptRef,
+          sale: null,
+          items: [],
+          cartMinor: totalMinor,
+          counterExtraMinor: 0,
+          surplusMinor: 0,
+          needsTopUp: true,
+          shortfallMinor: result.value_minor - totalMinor,
+          localId: row.local_id,
+        };
+      }
+
+      const {sale, items} = await bookSuccess(row, result);
       const counterExtra = Math.max(0, totalMinor - result.value_minor);
-      const surplus = Math.max(0, result.value_minor - totalMinor);
 
       if (options.print) {
         try {
@@ -386,7 +455,10 @@ export const VoucherService = {
         items,
         cartMinor: snapshot ? totalMinor : null,
         counterExtraMinor: counterExtra,
-        surplusMinor: surplus,
+        surplusMinor: 0,
+        needsTopUp: false,
+        shortfallMinor: 0,
+        localId: row.local_id,
       };
     } catch (error) {
       if (error instanceof SilaApiError) {
@@ -418,6 +490,143 @@ export const VoucherService = {
       await VouchersRepo.markRetry(row.local_id);
       throw new VoucherRedeemError(`تعذر صرف القسيمة: ${message}`, false, true);
     }
+  },
+
+  /**
+   * v22 (round-28 #1): completes a NEEDS-TOP-UP redemption — the
+   * server already redeemed the voucher (the claim exists), the
+   * cashier has now topped the cart up to at least the voucher
+   * value, and the goods sale + receipt land HERE. Idempotent: a
+   * redemption whose sale already exists just returns it. Throws
+   * VoucherRedeemError (permanent) while the cart is still short.
+   */
+  async completeCartRedemption(
+    localId: number,
+    cart: {
+      lines: CartLine[];
+      discount: number;
+      pricingMode: PricingMode;
+    },
+    print: boolean,
+    receiptSettings: ReceiptSettings,
+    onPrintError?: (message: string) => void,
+  ): Promise<VoucherRedeemSuccess> {
+    const row = await VouchersRepo.byId(localId);
+    if (row == null) {
+      throw new VoucherRedeemError(
+        'لم يُعثر على عملية الصرف المعلّقة — راجع سجل الصرف في صفحة القسائم',
+        true,
+        false,
+      );
+    }
+    if (row.state !== 'ok') {
+      throw new VoucherRedeemError(
+        'هذه القسيمة لم تُحسم بعد — لا يمكن إتمام التسليم قبل نجاح الصرف',
+        true,
+        false,
+      );
+    }
+
+    const subtotal = cart.lines.reduce(
+      (sum, line) => sum + line.unitPrice * line.quantity,
+      0,
+    );
+    const discount = Math.min(Math.max(cart.discount, 0), subtotal);
+    const totalMinor = Math.round((subtotal - discount) * 100);
+    if (totalMinor < row.value_minor) {
+      throw new VoucherRedeemError(
+        `قيمة السلة ما زالت أقل من قيمة القسيمة — أضف بضاعة بفارق ${(
+          (row.value_minor - totalMinor) /
+          100
+        ).toFixed(2)} ₪ على الأقل ثم أعد المحاولة`,
+        true,
+        false,
+      );
+    }
+    const counterExtra = totalMinor - row.value_minor;
+    await VouchersRepo.updateCounterExtra(localId, counterExtra);
+
+    // Idempotent — create the goods sale only once.
+    let sale: SaleRecord | null = null;
+    let items: SaleItemRecord[] = [];
+    if (row.sale_id == null) {
+      const created = await createGoodsSale(
+        row,
+        cart.lines,
+        cart.discount,
+        cart.pricingMode,
+      );
+      sale = created.sale;
+      items = created.items;
+    } else {
+      try {
+        items = await SaleRepo.getItemsForSale(row.sale_id);
+        const recent = await SaleRepo.listRecent(500);
+        sale = recent.find(entry => entry.id === row.sale_id) ?? null;
+      } catch {
+        // Receipt without items is acceptable.
+      }
+    }
+
+    if (print) {
+      try {
+        const names = new Map<number, string>();
+        for (const line of cart.lines) {
+          names.set(line.productId, line.name);
+        }
+        const job = buildVoucherReceiptJob(
+          {
+            receiptRef: row.pos_receipt_ref ?? '',
+            redeemedAt: row.redeemed_at,
+            campaignName: row.campaign_name ?? 'حملة صلة',
+            beneficiaryLast4: row.beneficiary_last4,
+            valueMinor: row.value_minor,
+            referenceCode: row.reference_code,
+            sale,
+            items,
+            productNameById: names,
+          },
+          receiptSettings,
+        );
+        await ThermalPrinterService.printJob(job);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        logDiag('sila', `اكتمل الصرف لكن الطباعة فشلت: ${message}`, 'warn');
+        onPrintError?.(message);
+      }
+    }
+
+    return {
+      result: {
+        ok: true,
+        reference_code: row.reference_code ?? '',
+        voucher_id: row.voucher_id ?? '',
+        value_minor: row.value_minor,
+        currency: 'ILS',
+        kind: row.campaign_kind ?? 'voucher',
+        campaign_id: row.campaign_id ?? '',
+        campaign_name: row.campaign_name ?? 'حملة صلة',
+        beneficiary_last4: row.beneficiary_last4,
+        merchant_name: '',
+        redeemed_at: row.redeemed_at,
+        settlement: {
+          redeemed_value_minor: 0,
+          settled_minor: 0,
+          due_minor: 0,
+          state: 'none',
+        },
+      },
+      receiptRef: row.pos_receipt_ref ?? '',
+      sale,
+      items,
+      cartMinor: totalMinor,
+      counterExtraMinor: counterExtra,
+      surplusMinor: 0,
+      needsTopUp: false,
+      shortfallMinor: 0,
+      localId,
+    };
   },
 
   /**

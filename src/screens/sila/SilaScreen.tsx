@@ -164,9 +164,15 @@ export function SilaScreen() {
   const [payBusy, setPayBusy] = useState(false);
 
   // ── v20: the campaigns headline (Σ server-stated dues) shown on
-  // the overview — the §4.2 indicator the merchant should see. ──
+  // the overview — the §4.2 indicator the merchant should see.
+  // v22 (round-28 #3): the overview card now carries BOTH campaign
+  // figures — what was added to the standing debt (المستحق) and
+  // what was added to the treasury (المستلم). ──
   const [campaignDueMinor, setCampaignDueMinor] = useState(0);
+  const [campaignSettledMinor, setCampaignSettledMinor] = useState(0);
   const [campaignCount, setCampaignCount] = useState(0);
+  const [campaignActiveCount, setCampaignActiveCount] = useState(0);
+  const [campaignCompletedCount, setCampaignCompletedCount] = useState(0);
 
   // ── data loading ───────────────────────────────────────────────
 
@@ -252,7 +258,10 @@ export function SilaScreen() {
         queuePendingMinor: queueTotals.pendingMinor,
       });
       setCampaignDueMinor(campaignTotals.dueMinor);
+      setCampaignSettledMinor(campaignTotals.settledMinorTotal);
       setCampaignCount(campaignTotals.campaignsCount);
+      setCampaignActiveCount(campaignTotals.activeCount);
+      setCampaignCompletedCount(campaignTotals.completedCount);
       await refreshCounts();
       await loadDebtsPage(debtFilter, debtSearch);
     } catch {
@@ -771,31 +780,65 @@ export function SilaScreen() {
         </Card>
       ) : null}
 
-      {/* v20: the campaigns headline — المستحق لك من المؤسسات (§4.2).
-          Appears once the store has any campaign activity; tapping
-          it jumps to the القسائم tab. */}
+      {/* v22 (round-28 #3): the campaigns OVERVIEW card — the two
+          figures the merchant asked for on نظرة عامة: what the
+          activated campaigns ADDED to the standing debt (المستحق —
+          a claim on the institutions until settled) and what they
+          ADDED to the treasury (المستلم — the settled money that
+          arrived). Tapping jumps to the القسائم tab. */}
       {campaignCount > 0 ? (
         <TouchableOpacity
-          style={styles.campaignsRow}
           activeOpacity={0.8}
           onPress={() => setTab('vouchers')}>
-          <View style={styles.campaignsIcon}>
-            <Icon name="ticket" size={19} color={c.accent} />
-          </View>
-          <View style={{flex: 1}}>
-            <Text style={styles.campaignsLabel}>مستحقات الحملات الفعّالة (قسائم)</Text>
-            <Text style={styles.campaignsMeta}>
-              {campaignCount} حملة فعّالة بالمتجر · اضغط للتفعيل والصرف
+          <Card style={styles.campaignsCard}>
+            <View style={styles.campaignsHeadRow}>
+              <View style={styles.campaignsIcon}>
+                <Icon name="ticket" size={19} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.campaignsLabel}>
+                  حملات القسائم — نظرة عامة
+                </Text>
+                <Text style={styles.campaignsMeta}>
+                  فعّالة: {campaignActiveCount}
+                  {campaignCompletedCount > 0
+                    ? ` · مكتملة: ${campaignCompletedCount}`
+                    : ''}
+                  {' · اضغط للتفعيل والصرف والسجل'}
+                </Text>
+              </View>
+              <Icon name="chevronLeft" size={16} color={c.textFaint} />
+            </View>
+            <View style={styles.campaignsStatGrid}>
+              <View style={styles.campaignsStatCell}>
+                <Text
+                  style={[
+                    styles.campaignsStatValue,
+                    campaignDueMinor > 0
+                      ? {color: c.warning}
+                      : {color: c.success},
+                  ]}>
+                  {formatMoney(campaignDueMinor / 100)}
+                </Text>
+                <Text style={styles.campaignsStatLabel}>
+                  أُضيف إلى الدين القائم (مستحق الحملات على المؤسسات)
+                </Text>
+              </View>
+              <View style={styles.campaignsStatDivider} />
+              <View style={styles.campaignsStatCell}>
+                <Text style={[styles.campaignsStatValue, {color: c.success}]}>
+                  {formatMoney(campaignSettledMinor / 100)}
+                </Text>
+                <Text style={styles.campaignsStatLabel}>
+                  أُضيف إلى النقد بالخزينة (مستلم من المؤسسات)
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.campaignsFootNote}>
+              المستحق دينٌ قائم على المؤسسات حتى تسويته، والمستلم دخل خزينتك —
+              تماماً كديون الزبائن وتحصيلاتها.
             </Text>
-          </View>
-          <Text
-            style={[
-              styles.campaignsValue,
-              campaignDueMinor > 0 ? {color: c.warning} : {color: c.success},
-            ]}>
-            {formatMoney(campaignDueMinor / 100)}
-          </Text>
-          <Icon name="chevronLeft" size={16} color={c.textFaint} />
+          </Card>
         </TouchableOpacity>
       ) : null}
 
@@ -994,7 +1037,7 @@ export function SilaScreen() {
                     <View style={styles.splitRow}>
                       <Text style={styles.splitLabel}>منها فواتير متجري</Text>
                       <Text style={[styles.splitValue, {color: c.accent}]}>
-                        {formatMoney(customer.pos_outstanding_minor / 100)} ₪
+                        {formatMoney(customer.pos_outstanding_minor / 100)}
                       </Text>
                     </View>
                   ) : null}
@@ -1002,7 +1045,7 @@ export function SilaScreen() {
                     <View style={styles.splitRow}>
                       <Text style={styles.splitLabel}>منها من تطبيق صِلة</Text>
                       <Text style={[styles.splitValue, {color: c.info}]}>
-                        {formatMoney(customer.app_outstanding_minor / 100)} ₪
+                        {formatMoney(customer.app_outstanding_minor / 100)}
                       </Text>
                     </View>
                   ) : null}
@@ -1649,18 +1692,16 @@ const useStyles = makeStyles(c =>
       gap: spacing.sm,
       backgroundColor: c.surface,
     },
-    /** v20: the campaigns headline row on the overview tab. */
-    campaignsRow: {
+    /** v22 (round-28 #3): the campaigns OVERVIEW card — what the
+     *  activated campaigns added to the standing debt and to the
+     *  treasury, in one glance. */
+    campaignsCard: {
+      gap: spacing.sm,
+    },
+    campaignsHeadRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
-      backgroundColor: c.surface,
-      borderRadius: radius.md,
-      padding: spacing.md,
-      borderWidth: 1,
-      borderColor: c.border,
-      borderRightWidth: 3,
-      borderRightColor: c.accent,
     },
     campaignsIcon: {
       width: 40,
@@ -1681,10 +1722,40 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro,
       marginTop: 2,
     },
-    campaignsValue: {
+    campaignsStatGrid: {
+      flexDirection: 'row',
+      alignItems: 'stretch',
+      gap: spacing.sm,
+    },
+    campaignsStatCell: {
+      flex: 1,
+      backgroundColor: 'rgba(255,255,255,0.03)',
+      borderRadius: radius.sm,
+      padding: spacing.sm,
+      alignItems: 'center',
+      gap: 4,
+    },
+    campaignsStatDivider: {
+      width: 1,
+      backgroundColor: c.border,
+    },
+    campaignsStatValue: {
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: typography.body,
+      fontSize: typography.body + 2,
+    },
+    campaignsStatLabel: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      textAlign: 'center',
+      lineHeight: 14,
+    },
+    campaignsFootNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      lineHeight: 15,
     },
     infoText: {
       flex: 1,

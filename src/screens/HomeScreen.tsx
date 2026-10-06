@@ -191,7 +191,17 @@ export function HomeScreen() {
   const silaOutstandingShekels = paired
     ? (silaDebt?.outstandingMinor ?? 0) / 100
     : 0;
-  const debtTotal = localOutstandingShekels + silaOutstandingShekels;
+  // v22 (round-28 #2): the standing debt now includes the campaign
+  //  claims — «يتم اضافة قيمة المستحق للحملة في الدين القائم» —
+  //  the institutions owe the store for every redeemed voucher of
+  //  its ACTIVATED campaigns (active + completed; the completed
+  //  ones keep their standing dues in the books as they were). The
+  //  data is local (survives unlink), so it counts regardless of
+  //  the live pairing.
+  const campaignDueShekels = treasury?.campaignDueAllTime ?? 0;
+  const campaignsActiveCount = treasury?.campaignsActiveCount ?? 0;
+  const debtTotal =
+    localOutstandingShekels + silaOutstandingShekels + campaignDueShekels;
   const debtorsTotal =
     (localBook?.debtorsCount ?? 0) + (paired ? silaDebt?.debtorsCount ?? 0 : 0);
   // Treasury breakdown (all-time sources of the cash number).
@@ -210,11 +220,6 @@ export function HomeScreen() {
     (treasury?.prepaidCoveredAllTime ?? 0) +
     (treasury?.campaignSettlementsAllTime ?? 0);
   const campaignSettlementsShekels = treasury?.campaignSettlementsAllTime ?? 0;
-  // v21 (round-27 #3): the standing campaign claim — a DEBT the
-  //  institutions owe this store until settled (then it becomes
-  //  received cash), exactly like the صِلة and local-book debts.
-  const campaignDueShekels = treasury?.campaignDueAllTime ?? 0;
-  const campaignsActiveCount = treasury?.campaignsActiveCount ?? 0;
   const viaSilaShekels =
     (treasury?.cashierCollectionsAllTime ?? 0) +
     (treasury?.appCollectionsAllTime ?? 0) +
@@ -352,7 +357,11 @@ export function HomeScreen() {
               </Text>
               <Text style={styles.moneyMeta}>
                 {debtTotal > 0
-                  ? `${debtorsTotal} زبون مدين لك`
+                  ? `${debtorsTotal} زبون مدين${
+                      campaignDueShekels > 0
+                        ? ` + مطالبات ${campaignsActiveCount} حملة`
+                        : ''
+                    }`
                   : 'لا ديون قائمة'}
               </Text>
             </View>
@@ -384,12 +393,14 @@ export function HomeScreen() {
                 </Text>
               </View>
             ) : null}
-            {/* v20: money received from the campaign institutions
-                (confirmed settlements — Σ the server's snapshot). */}
+            {/* v22 (round-28 #2): money received from the campaign
+                institutions («قيمة المستلم في النقد بالخزينة») —
+                server-truth settled amounts of the ACTIVATED
+                campaigns. */}
             {campaignSettlementsShekels > 0 ? (
               <View style={styles.breakdownRow}>
                 <Text style={styles.breakdownLabel}>
-                  منها: تسويات الحملات (قسائم شرائية)
+                  منها: مستلم من حملات القسائم (المؤسسات)
                 </Text>
                 <Text style={[styles.breakdownValue, {color: c.info}]}>
                   {formatMoney(campaignSettlementsShekels)}
@@ -413,17 +424,17 @@ export function HomeScreen() {
                 </Text>
               </View>
             ) : null}
-            {/* v21 (round-27 #3): the campaign claim as a STANDING
-                DEBT on the institutions — the vouchers were redeemed
-                (goods out), the money is owed until each settlement
-                arrives and turns into collected cash. Active-in-store
-                campaigns only, exactly like the dues headline. */}
+            {/* v22 (round-28 #2): the campaign dues ARE part of the
+                standing debt above («قيمة المستحق للحملة في الدين
+                القائم») — a debt on the institutions until each
+                settlement turns it into collected cash. ACTIVATED
+                campaigns only (active + completed). */}
             {campaignDueShekels > 0 ? (
               <View style={styles.breakdownRow}>
                 <Text style={styles.breakdownLabel}>
-                  من الدين: مطالبات الحملات (قسائم — على المؤسسات)
+                  من الدين: مستحقات الحملات (قسائم — على المؤسسات)
                   {campaignsActiveCount > 1
-                    ? ` — ${campaignsActiveCount} حملة فعّالة`
+                    ? ` — ${campaignsActiveCount} حملة`
                     : ''}
                 </Text>
                 <Text style={[styles.breakdownValue, {color: c.warning}]}>

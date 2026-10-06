@@ -21,6 +21,7 @@ import {logDiag} from '../../core/diagnostics';
 import type {
   CampaignDebtRow,
   CampaignSettlementRow,
+  CampaignStoreState,
   VoucherRedemptionRow,
 } from '../../core/types';
 import type {SilaCampaignServerRow, SilaVoucherRedeemResult} from './SilaApi';
@@ -72,7 +73,12 @@ function rowToCampaign(row: Record<string, unknown>): CampaignDebtRow {
     last_redemption_at: (row.last_redemption_at as string) ?? null,
     last_settlement_at: (row.last_settlement_at as string) ?? null,
     updated_at: (row.updated_at as string) ?? null,
-    active_in_store: Number(row.active_in_store ?? 0) === 1,
+    store_state:
+      row.store_state === 'completed'
+        ? 'completed'
+        : row.store_state === 'active'
+        ? 'active'
+        : 'available',
   };
 }
 
@@ -324,7 +330,9 @@ export const VouchersRepo = {
    *  redemptions in the right day.
    *  v21 (round-27 #1): ACTIVE-IN-STORE campaigns only — the sales
    *  of a campaign the merchant disabled no longer count in the
-   *  period reports (it is not committed to it in this store). */
+   *  period reports (it is not committed to it in this store).
+   *  v22 (round-28 #4): the accounting set is the ACTIVATED
+   *  campaigns (active + completed) — completed keeps counting. */
   async okInRange(
     from: string,
     to: string,
@@ -339,7 +347,8 @@ export const VouchersRepo = {
          WHERE vr.state = 'ok'
            AND EXISTS (
              SELECT 1 FROM campaign_debts cd
-             WHERE cd.campaign_id = vr.campaign_id AND cd.active_in_store = 1
+             WHERE cd.campaign_id = vr.campaign_id
+               AND cd.store_state IN ('active','completed')
            )
            AND date(vr.redeemed_at, 'localtime') >= ?
            AND date(vr.redeemed_at, 'localtime') <= ?`,
@@ -366,9 +375,11 @@ export const VouchersRepo = {
    *  snapshot (§4.1) — merges into whatever the settlements feed
    *  already knew (the redeem snapshot carries the four core
    *  figures; the feed's extra columns survive the merge).
-   *  v21 (round-27 #1): a REAL redemption is a commitment the صِلة
-   *  server already booked against this store — the campaign row is
-   *  written ACTIVE so the claim can never hide from the books. */
+   *  v22 (round-28 #4): a REAL redemption is a commitment the صلة
+   *  server already booked against this store — an 'available'
+   *  campaign becomes 'active' (the claim can never hide from the
+   *  books), but a COMPLETED campaign stays completed forever: the
+   *  one-way lifecycle is never walked backwards. */
   async applyRedeemSnapshot(
     campaignId: string,
     campaignName: string,
@@ -379,8 +390,8 @@ export const VouchersRepo = {
       `INSERT INTO campaign_debts (
         campaign_id, campaign_name, kind,
         redeemed_value_minor, settled_minor, due_minor, settlement_state,
-        last_redemption_at, updated_at, active_in_store
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 1)
+        last_redemption_at, updated_at, store_state
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'active')
       ON CONFLICT(campaign_id) DO UPDATE SET
         campaign_name = excluded.campaign_name,
         kind = COALESCE(NULLIF(excluded.kind, ''), campaign_debts.kind),
@@ -390,7 +401,9 @@ export const VouchersRepo = {
         settlement_state = excluded.settlement_state,
         last_redemption_at = excluded.last_redemption_at,
         updated_at = excluded.updated_at,
-        active_in_store = 1`,
+        store_state = CASE
+          WHEN campaign_debts.store_state = 'completed' THEN 'completed'
+          ELSE 'active' END`,
       [
         campaignId,
         campaignName,
@@ -408,10 +421,11 @@ export const VouchersRepo = {
    *  full picture including pending/confirmed split, period and
    *  merchant status. Returns the previous state so the caller can
    *  fire the partial→full notification (§6).
-   *  v21 (round-27 #1): a feed-discovered campaign starts INACTIVE
-   *  (active_in_store=0) — the merchant must consciously mark it
-   *  active in HIS store before its dues/settlements count in any
-   *  book; the UPDATE never touches the merchant's own switch. */
+   *  v22 (round-28 #4): a feed-discovered campaign starts
+   *  'available' — the merchant must consciously ACTIVATE it in his
+   *  store before it can be redeemed here; the UPDATE never touches
+   *  the merchant's lifecycle state (available/active/completed
+   *  survives every sync, relink and backup restore as is). */
   async upsertCampaignFromFeed(
     server: SilaCampaignServerRow,
   ): Promise<CampaignDebtRow | null> {
@@ -468,35 +482,60 @@ export const VouchersRepo = {
     return before ? rowToCampaign(before as Record<string, unknown>) : null;
   },
 
-  /** v21 (round-27 #1): the merchant's switch — marks a campaign
-   *  ACTIVE in this store (its dues/settlements start counting) or
-   *  INACTIVE (everything keeps mirroring from the server but NOTHING
-   *  counts in totals/reports until it is turned back on). */
-  async setCampaignActive(
-    campaignId: string,
-    active: boolean,
-  ): Promise<void> {
-    await getDb().execute(
-      'UPDATE campaign_debts SET active_in_store = ? WHERE campaign_id = ?',
-      [active ? 1 : 0, campaignId],
+  /** v22 (round-28 #4): ACTIVATE a campaign in this store —
+   *  ONE-WAY (available → active) and guarded at the SQL level:
+   *  an already-active/completed campaign can NEVER be activated
+   *  twice (returns false when the guard rejects the move). Once
+   *  active, its dues/settlements enter the books and the POS cart
+   *  shows the قسيمة button. */
+  async activateCampaign(campaignId: string): Promise<boolean> {
+    const result = await getDb().execute(
+      `UPDATE campaign_debts SET store_state = 'active'
+       WHERE campaign_id = ? AND store_state = 'available'`,
+      [campaignId],
     );
-    logDiag(
-      'sila',
-      active
-        ? `فُعّلت الحملة ${campaignId} في المتجر — تُحتسب مستحقاتها وتسوياتها`
-        : `عُطّلت الحملة ${campaignId} في المتجر — لن تُحتسب مستحقاتها حتى التفعيل`,
-    );
+    const changed = Number(result.rowsAffected ?? 0) > 0;
+    if (changed) {
+      logDiag(
+        'sila',
+        `فُعّلت الحملة ${campaignId} في المتجر — تُحتسب مستحقاتها وتسوياتها`,
+      );
+    }
+    return changed;
   },
 
-  /** v21 (round-27 #1): how many campaigns are ACTIVE in this store —
-   *  drives the POS cart's قسيمة button (round-27 #6: the button only
-   *  appears when an active campaign exists and the merchant is
-   *  contracted in it). */
+  /** v22 (round-28 #4): COMPLETE a campaign — ONE-WAY (active →
+   *  completed) and SQL-guarded (a completed campaign can't be
+   *  completed again; an available one can't jump to completed).
+   *  The row keeps mirroring the server and its standing dues stay
+   *  in the books exactly as they were («تبقى محفوظة كما هي») —
+   *  only the POS cart's قسيمة button stops counting it. */
+  async completeCampaign(campaignId: string): Promise<boolean> {
+    const result = await getDb().execute(
+      `UPDATE campaign_debts SET store_state = 'completed'
+       WHERE campaign_id = ? AND store_state = 'active'`,
+      [campaignId],
+    );
+    const changed = Number(result.rowsAffected ?? 0) > 0;
+    if (changed) {
+      logDiag(
+        'sila',
+        `أُنهيت الحملة ${campaignId} في المتجر (مكتملة) — بياناتها ومستحقاتها القائمة تبقى محفوظة كما هي، وزر القسيمة يختفي من سلة البيع`,
+      );
+    }
+    return changed;
+  },
+
+  /** v22 (round-28 #4): how many campaigns are ACTIVE in this store
+   *  — drives the POS cart's قسيمة button (the button only appears
+   *  when an active campaign exists and the merchant is contracted
+   *  in it). COMPLETED campaigns no longer show the button (round-28
+   *  #4: «عند وضعها مكتملة يختفي زر قسيمة من سلة البيع»). */
   async activeCampaignsCount(): Promise<number> {
     try {
       const result = await getDb().execute(
         `SELECT COUNT(*) AS cnt FROM campaign_debts
-         WHERE active_in_store = 1
+         WHERE store_state = 'active'
            AND COALESCE(campaign_status, 'active') = 'active'`,
       );
       const row = result.rows?._array?.[0] as {cnt?: number} | undefined;
@@ -506,30 +545,42 @@ export const VouchersRepo = {
     }
   },
 
-  /** The campaigns list for «مستحقات الحملات» — ACTIVE first
-   *  (unpaid first within each group), then the inactive ones the
-   *  merchant may still enable. */
+  /** The campaigns list for «مستحقات الحملات» — ACTIVE first, then
+   *  COMPLETED (their standing dues stay in the books), then the
+   *  AVAILABLE ones the merchant may still activate. Unpaid first
+   *  within each group. */
   async campaigns(): Promise<CampaignDebtRow[]> {
     const result = await getDb().execute(
       `SELECT * FROM campaign_debts
-       ORDER BY active_in_store DESC, due_minor DESC, updated_at DESC`,
+       ORDER BY CASE store_state
+                  WHEN 'active' THEN 0
+                  WHEN 'completed' THEN 1
+                  ELSE 2 END,
+                due_minor DESC, updated_at DESC`,
     );
     return (result.rows?._array ?? []).map(row =>
       rowToCampaign(row as Record<string, unknown>),
     );
   },
 
-  /** Σ server-stated dues — the merchant's headline number (§4.2
-   *  totals.due_minor mirrors this; computed from the mirrored
-   *  rows so it also works offline). v21 (round-27 #1): ACTIVE-IN-
-   *  STORE campaigns only — an inactive campaign's dues never enter
-   *  the books (the merchant is not committed to it in this store). */
+  /** Σ server-stated figures for the ACTIVATED campaigns (§4.2
+   *  totals.due_minor mirrors this; computed from the mirrored rows
+   *  so it also works offline). v22 (round-28 #2/#4): the accounting
+   *  set is 'active' + 'completed' — a completed campaign's standing
+   *  dues stay in the books exactly as they were, and only the POS
+   *  cart's قسيمة button drops it. 'available' campaigns never count
+   *  (the merchant is not committed to them in this store).
+   *  - dueMinor          → the part added to الدين القائم (المستحق).
+   *  - settledMinorTotal → the part added to النقد بالخزينة (المستلم). */
   async campaignsTotals(): Promise<{
     dueMinor: number;
     redeemedMinor: number;
+    settledMinorTotal: number;
     settledConfirmedMinor: number;
     settledPendingMinor: number;
     campaignsCount: number;
+    activeCount: number;
+    completedCount: number;
     fullCount: number;
   }> {
     try {
@@ -538,28 +589,37 @@ export const VouchersRepo = {
            COUNT(*) AS campaigns_count,
            COALESCE(SUM(due_minor), 0) AS due_minor,
            COALESCE(SUM(redeemed_value_minor), 0) AS redeemed_minor,
+           COALESCE(SUM(settled_minor), 0) AS settled_total,
            COALESCE(SUM(settled_confirmed_minor), 0) AS settled_confirmed,
            COALESCE(SUM(settled_pending_minor), 0) AS settled_pending,
+           SUM(CASE WHEN store_state = 'active' THEN 1 ELSE 0 END) AS active_count,
+           SUM(CASE WHEN store_state = 'completed' THEN 1 ELSE 0 END) AS completed_count,
            SUM(CASE WHEN settlement_state = 'full' THEN 1 ELSE 0 END) AS full_count
          FROM campaign_debts
-         WHERE active_in_store = 1`,
+         WHERE store_state IN ('active','completed')`,
       );
       const row = (result.rows?._array?.[0] ?? {}) as Record<string, unknown>;
       return {
         dueMinor: Number(row.due_minor ?? 0),
         redeemedMinor: Number(row.redeemed_minor ?? 0),
+        settledMinorTotal: Number(row.settled_total ?? 0),
         settledConfirmedMinor: Number(row.settled_confirmed ?? 0),
         settledPendingMinor: Number(row.settled_pending ?? 0),
         campaignsCount: Number(row.campaigns_count ?? 0),
+        activeCount: Number(row.active_count ?? 0),
+        completedCount: Number(row.completed_count ?? 0),
         fullCount: Number(row.full_count ?? 0),
       };
     } catch {
       return {
         dueMinor: 0,
         redeemedMinor: 0,
+        settledMinorTotal: 0,
         settledConfirmedMinor: 0,
         settledPendingMinor: 0,
         campaignsCount: 0,
+        activeCount: 0,
+        completedCount: 0,
         fullCount: 0,
       };
     }
@@ -629,7 +689,8 @@ export const VouchersRepo = {
    *  server's created_at is a UTC stamp — 'localtime' keeps the
    *  v19 after-midnight discipline.
    *  v21 (round-27 #1): ACTIVE-IN-STORE campaigns only — an
-   *  inactive campaign's settlements never enter the books. */
+   *  inactive campaign's settlements never enter the books.
+   *  v22 (round-28 #4): the ACTIVATED set (active + completed). */
   async settlementsConfirmedInRange(
     from: string,
     to: string,
@@ -641,7 +702,8 @@ export const VouchersRepo = {
          WHERE cs.status = 'confirmed'
            AND EXISTS (
              SELECT 1 FROM campaign_debts cd
-             WHERE cd.campaign_id = cs.campaign_id AND cd.active_in_store = 1
+             WHERE cd.campaign_id = cs.campaign_id
+               AND cd.store_state IN ('active','completed')
            )
            AND date(cs.created_at, 'localtime') >= ?
            AND date(cs.created_at, 'localtime') <= ?`,
@@ -657,15 +719,67 @@ export const VouchersRepo = {
     }
   },
 
+  /** v22 (round-28 #2): settlements RECEIVED in a local-date range
+   *  — «المستلم من الحملات بالفترة» — the server-truth settled
+   *  amount (pending + confirmed; cancelled/disputed excluded, the
+   *  server is the reference §6) that entered the treasury. Feeds
+   *  the reports' collected-cash figure exactly like the campaign
+   *  card's «مستلم» row. ACTIVATED campaigns only (active +
+   *  completed). */
+  async settlementsReceivedInRange(
+    from: string,
+    to: string,
+  ): Promise<{count: number; minor: number}> {
+    try {
+      const result = await getDb().execute(
+        `SELECT COUNT(*) AS cnt, COALESCE(SUM(cs.amount_minor), 0) AS minor
+         FROM campaign_settlements cs
+         WHERE cs.status NOT IN ('cancelled','disputed')
+           AND EXISTS (
+             SELECT 1 FROM campaign_debts cd
+             WHERE cd.campaign_id = cs.campaign_id
+               AND cd.store_state IN ('active','completed')
+           )
+           AND date(cs.created_at, 'localtime') >= ?
+           AND date(cs.created_at, 'localtime') <= ?`,
+        [from, to],
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        cnt?: number | null;
+        minor?: number | null;
+      };
+      return {count: Number(row.cnt ?? 0), minor: Number(row.minor ?? 0)};
+    } catch {
+      return {count: 0, minor: 0};
+    }
+  },
+
+  /** v22 (round-28 #1): updates the counter-extra figure on a
+   *  redemption row whose sale was booked AFTER the cashier topped
+   *  the cart up (the deferred completion path — the snapshot at
+   *  redeem time was smaller than the voucher). */
+  async updateCounterExtra(
+    localId: number,
+    counterExtraMinor: number,
+  ): Promise<void> {
+    await getDb().execute(
+      'UPDATE voucher_redemptions SET counter_extra_minor = ? WHERE local_id = ?',
+      [Math.max(0, counterExtraMinor), localId],
+    );
+  },
+
   /** Latest mirrored settlements across campaigns (for the screen).
-   *  v21 (round-27 #1): active-in-store campaigns only. */
+   *  v22 (round-28 #4): ACTIVATED campaigns only (active +
+   *  completed — a completed campaign's settlements still arrive
+   *  and still count). */
   async recentSettlements(limit: number): Promise<CampaignSettlementRow[]> {
     try {
       const result = await getDb().execute(
         `SELECT cs.* FROM campaign_settlements cs
          WHERE EXISTS (
            SELECT 1 FROM campaign_debts cd
-           WHERE cd.campaign_id = cs.campaign_id AND cd.active_in_store = 1
+           WHERE cd.campaign_id = cs.campaign_id
+             AND cd.store_state IN ('active','completed')
          )
          ORDER BY cs.created_at DESC LIMIT ?`,
         [limit],
