@@ -361,6 +361,36 @@ export const InvoiceService = {
           new Map<number, string>(
             options.lines.map(line => [line.productId, line.name]),
           );
+        // v21 (round-27 #6): the debt pair for the receipt — «قيمة
+        //  هذا الدين» + «إجمالي الديون على الزبون» (both books).
+        //  صِلة: cached server balance (which can't know this fresh
+        //  invoice yet) + this invoice's NET debt (amount − prepaid
+        //  coverage). Local: the LIVE outstanding after the sale
+        //  transaction (the INV-L row was created inside it, so the
+        //  new invoice is already included).
+        let silaThisDebtMinor: number | null = null;
+        let silaTotalDebtsMinor: number | null = null;
+        if (options.debt != null) {
+          silaThisDebtMinor = Math.max(
+            0,
+            options.debt.amountMinor - (options.debt.creditCoveredMinor ?? 0),
+          );
+          if (options.debt.customerId) {
+            const cached = await SilaRepo.findCustomer(
+              options.debt.customerId,
+            );
+            if (cached != null) {
+              silaTotalDebtsMinor =
+                Math.max(0, cached.outstanding_minor) + silaThisDebtMinor;
+            }
+          }
+        }
+        let localTotalDebtsMinor: number | null = null;
+        if (options.localDebt != null) {
+          localTotalDebtsMinor = await LocalDebtsRepo.outstandingFor(
+            options.localDebt.localCustomerId,
+          );
+        }
         const job =
           options.debt != null
             ? buildDebtReceiptJob(
@@ -373,6 +403,8 @@ export const InvoiceService = {
                   referenceCode: null,
                   mode: 'sila',
                   creditCoveredMinor: options.debt.creditCoveredMinor ?? 0,
+                  thisDebtMinor: silaThisDebtMinor,
+                  customerTotalDebtsMinor: silaTotalDebtsMinor,
                 },
                 options.receiptSettings,
               )
@@ -386,6 +418,8 @@ export const InvoiceService = {
                   customerPhoneLast4: options.localDebt.customerPhoneLast4,
                   referenceCode: null,
                   mode: 'local',
+                  thisDebtMinor: Math.round(result.sale.total_amount * 100),
+                  customerTotalDebtsMinor: localTotalDebtsMinor,
                 },
                 options.receiptSettings,
               )
@@ -446,6 +480,23 @@ export const InvoiceService = {
       // صِلة debt — the queue row carries the creditor + the
       // official POS-… reference once synced.
       const debt = await SilaRepo.byInvoiceRef(ref);
+      // v21 (round-27 #6): the debt pair. A SYNCED row is already
+      //  inside the cached server balance — the pending row's net
+      //  debt is added on top of it.
+      const silaThisDebt =
+        debt != null
+          ? Math.max(0, debt.amount_minor - debt.credit_covered_minor)
+          : Math.round(record.total_amount * 100);
+      let silaTotal: number | null = null;
+      if (debt?.customer_id) {
+        const cached = await SilaRepo.findCustomer(debt.customer_id);
+        if (cached != null) {
+          silaTotal =
+            debt.state === 'synced'
+              ? Math.max(0, cached.outstanding_minor)
+              : Math.max(0, cached.outstanding_minor) + silaThisDebt;
+        }
+      }
       const job = buildDebtReceiptJob(
         {
           sale: record,
@@ -456,6 +507,8 @@ export const InvoiceService = {
           referenceCode: debt?.reference_code ?? null,
           mode: 'sila',
           creditCoveredMinor: debt?.credit_covered_minor ?? 0,
+          thisDebtMinor: silaThisDebt,
+          customerTotalDebtsMinor: silaTotal,
         },
         receiptSettings,
       );
@@ -465,6 +518,12 @@ export const InvoiceService = {
     if (ref.startsWith('INV-L-')) {
       // دفتر المتجر debt — the local book carries the creditor.
       const local = await LocalDebtsRepo.creditorByInvoiceRef(ref);
+      // v21 (round-27 #6): the LIVE outstanding (includes this
+      //  invoice — its INV-L row was created with the sale).
+      const localTotal =
+        local?.localCustomerId != null
+          ? await LocalDebtsRepo.outstandingFor(local.localCustomerId)
+          : null;
       const job = buildDebtReceiptJob(
         {
           sale: record,
@@ -476,6 +535,8 @@ export const InvoiceService = {
             : null,
           referenceCode: null,
           mode: 'local',
+          thisDebtMinor: Math.round(record.total_amount * 100),
+          customerTotalDebtsMinor: localTotal,
         },
         receiptSettings,
       );
@@ -516,6 +577,22 @@ export const InvoiceService = {
         names.set(item.product_id, product?.name ?? `#${item.product_id}`);
       }
     }
+    // v21 (round-27 #6): the debt pair — synced rows are already in
+    //  the cached server balance; pending rows add their net debt.
+    const silaThisDebt = Math.max(
+      0,
+      debt.amount_minor - debt.credit_covered_minor,
+    );
+    let silaTotal: number | null = null;
+    if (debt.customer_id) {
+      const cached = await SilaRepo.findCustomer(debt.customer_id);
+      if (cached != null) {
+        silaTotal =
+          debt.state === 'synced'
+            ? Math.max(0, cached.outstanding_minor)
+            : Math.max(0, cached.outstanding_minor) + silaThisDebt;
+      }
+    }
     const job = buildDebtReceiptJob(
       {
         sale: record,
@@ -524,6 +601,10 @@ export const InvoiceService = {
         customerName: debt.customer_name ?? 'زبون صِلة',
         customerPhoneLast4: debt.customer_phone_last4,
         referenceCode: debt.reference_code,
+        mode: 'sila',
+        creditCoveredMinor: debt.credit_covered_minor,
+        thisDebtMinor: silaThisDebt,
+        customerTotalDebtsMinor: silaTotal,
       },
       receiptSettings,
     );

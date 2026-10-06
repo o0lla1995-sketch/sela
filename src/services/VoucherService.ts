@@ -272,6 +272,15 @@ async function bookSuccess(
     result.settlement,
   );
 
+  // v21 (round-27 #6): the redemption may have ACTIVATED a campaign
+  // (first redemption at this store flips its switch on) — keep the
+  // POS cart's قسيمة button counter truthful. Fire-and-forget.
+  try {
+    void useSilaStore.getState().refreshActiveCampaigns();
+  } catch {
+    // Store not ready (fresh boot race) — the focus listener recovers.
+  }
+
   return {sale, items};
 }
 

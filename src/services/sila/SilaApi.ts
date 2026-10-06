@@ -109,7 +109,26 @@ export function classifySilaError(
   if (status === 401) {
     return 'device';
   }
+  if (status === 403) {
+    // An unknown 403 is still a merchant-contract/permission issue —
+    // never a retry case.
+    return 'forbidden';
+  }
   if (PERMANENT_CODES.has(code) || VOUCHER_PERMANENT_CODES.has(code)) {
+    return 'permanent';
+  }
+  // v21 (round-27 #4 — the wrong-code redemption that hung forever):
+  // a 4xx answer whose body carried NO recognizable SILA code used to
+  // fall through here as transient (HTTP_404 / HTTP_400 …), so a
+  // wrong voucher code on a healthy connection left the redemption
+  // «pending — waiting for connectivity» forever. HTTP semantics fix
+  // it: 408 (timeout) and 429 (throttle) are the ONLY retryable 4xx —
+  // every other client error is permanent (retrying the same wrong
+  // code can never succeed), and 5xx stays transient.
+  if (status === 408 || status === 429) {
+    return 'transient';
+  }
+  if (status >= 400 && status < 500) {
     return 'permanent';
   }
   // 429 / 5xx / timeouts / network / leaked PG codes → retry later.
@@ -219,6 +238,16 @@ export function silaVoucherErrorAdvice(code: string): string {
     case 'VALIDATION_ERROR':
     case 'INVALID_JSON':
       return 'خطأ في بيانات الصرف — راجع الرمز أو تواصل مع الدعم';
+    // v21 (round-27 #4): an HTTP-level rejection with NO recognizable
+    // SILA code in the body (a bare 404 «Not Found» text page, a 400
+    // with an unexpected shape…) — almost always a wrong/unknown
+    // voucher code or payload. Cashier-ready wording, and NEVER a
+    // pending retry (classifySilaError already made it permanent).
+    case 'HTTP_400':
+    case 'HTTP_404':
+    case 'HTTP_405':
+    case 'HTTP_422':
+      return 'الكود غير صحيح أو القسيمة غير موجودة — تأكد من الكود العشريني أو أعد مسح رمز الـ QR';
     default:
       return 'تعذر صرف القسيمة — لا تُسلَّم البضاعة حتى تنجح العملية';
   }
@@ -262,7 +291,10 @@ async function silaFetch(
  *  v12 (round-18 #1): field-swap tolerant — when `error` is NOT a
  *  real SILA code (e.g. a leaked Postgres ERRCODE like "42501")
  *  but `message` IS one ("DEVICE_INVALID"), the real code is used
- *  so §11 classification stays correct. */
+ *  so §11 classification stays correct.
+ *  v21 (round-27 #4): a non-JSON body (a bare "Not Found" text
+ *  page) no longer leaves the default HTTP message — the body text
+ *  is surfaced so the merchant sees what the server actually said. */
 async function toApiError(response: Response): Promise<SilaApiError> {
   let code = `HTTP_${response.status}`;
   let message = `فشل الاتصال بخادم صِلة (${response.status})`;
@@ -282,7 +314,15 @@ async function toApiError(response: Response): Promise<SilaApiError> {
       }
     }
   } catch {
-    // Non-JSON body — keep the HTTP-level defaults.
+    // Non-JSON body — try to surface its text (trimmed, bounded).
+    try {
+      const text = (await response.text()).trim();
+      if (text.length > 0) {
+        message = `${message} — ${text.slice(0, 120)}`;
+      }
+    } catch {
+      // Body unreadable — keep the HTTP-level defaults.
+    }
   }
   return new SilaApiError(response.status, code, message);
 }

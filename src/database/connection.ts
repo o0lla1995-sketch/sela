@@ -288,8 +288,17 @@ const DDL_STATEMENTS: string[] = [
       CHECK (settlement_state IN ('none','partial','full')),
     last_redemption_at TEXT,
     last_settlement_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    active_in_store INTEGER NOT NULL DEFAULT 0
   )`,
+  // v21 (round-27 #1): active_in_store — the merchant's own switch.
+  // ONLY campaigns the merchant marked ACTIVE IN THIS STORE count
+  // in the dues/settlements books, the totals and the reports. A
+  // campaign that arrives from the settlements feed starts INACTIVE
+  // (0); a real redemption flips it to 1 (the store is committed —
+  // the server already booked the claim) and the merchant can
+  // toggle it from the القسائم tab.
+  `CREATE INDEX IF NOT EXISTS idx_cdebts_active ON campaign_debts(active_in_store, due_minor DESC)`,
   // v20 POS-side mirror of the server's settlements[] feed (§4.2) —
   // feeds the period reports («تحصيلات الحملات بالفترة») and the
   // treasury (confirmed = money actually received).
@@ -824,8 +833,12 @@ async function applyMigrations(database: DB): Promise<void> {
           CHECK (settlement_state IN ('none','partial','full')),
         last_redemption_at TEXT,
         last_settlement_at TEXT,
-        updated_at TEXT
+        updated_at TEXT,
+        active_in_store INTEGER NOT NULL DEFAULT 0
       )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_cdebts_active ON campaign_debts(active_in_store, due_minor DESC)',
     );
     await database.execute(
       `CREATE TABLE IF NOT EXISTS campaign_settlements (
@@ -853,6 +866,41 @@ async function applyMigrations(database: DB): Promise<void> {
       'ترحيل v12: القسائم الشرائية للحملات (صرف + مطالبات + تسويات)',
     );
     version = 12;
+  }
+
+  if (version < 13) {
+    // v21 (round-27 #1): the merchant's campaign switch — only
+    // campaigns marked active in THIS store count in the books.
+    // Fresh DDL above covers new installs; this heals older ones.
+    // Campaigns that already carry activity (a redemption landed at
+    // this store) start ACTIVE so nothing the store is already
+    // claiming disappears; feed-only rows start inactive.
+    const columns = await database.execute(
+      "PRAGMA table_info(campaign_debts)",
+    );
+    const hasActiveColumn = (columns.rows?._array ?? []).some(
+      row => String((row as {name?: unknown}).name ?? '') === 'active_in_store',
+    );
+    if (!hasActiveColumn) {
+      await database.execute(
+        'ALTER TABLE campaign_debts ADD COLUMN active_in_store INTEGER NOT NULL DEFAULT 0',
+      );
+      await database.execute(
+        `UPDATE campaign_debts SET active_in_store = 1
+         WHERE campaign_id IN (
+           SELECT DISTINCT campaign_id FROM voucher_redemptions
+           WHERE state = 'ok' AND campaign_id IS NOT NULL
+         )`,
+      );
+    }
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_cdebts_active ON campaign_debts(active_in_store, due_minor DESC)',
+    );
+    logDiag(
+      'db',
+      'ترحيل v13: مفتاح «فعّالة بالمتجر» لحملات القسائم — تُحتسب المستحقات للحملات المفعّلة فقط',
+    );
+    version = 13;
   }
 
   if (version !== storedVersion) {

@@ -9,6 +9,7 @@ import {create} from 'zustand';
 import {getJson, setJson, KEYS, deleteKey} from '../storage/storage';
 import {logDiag} from '../core/diagnostics';
 import {SilaRepo} from '../services/sila/SilaRepo';
+import {VouchersRepo} from '../services/sila/VouchersRepo';
 import type {SilaPairing} from '../core/types';
 
 export type SilaSyncState =
@@ -29,11 +30,16 @@ interface SilaState {
   lastSyncMessage: string | null;
   /** True while a pairing request is in flight. */
   pairingBusy: boolean;
+  /** v21 (round-27 #6): how many voucher campaigns are ACTIVE in
+   *  this store — the POS cart's قسيمة button appears only when this
+   *  is > 0 (an active campaign the merchant is contracted in). */
+  activeCampaigns: number;
 
   load: () => void;
   setPairing: (pairing: SilaPairing) => void;
   clearPairing: () => void;
   refreshCounts: () => Promise<void>;
+  refreshActiveCampaigns: () => Promise<void>;
   setSyncState: (
     state: SilaSyncState,
     message?: string | null,
@@ -59,18 +65,21 @@ export const useSilaStore = create<SilaState>((set, get) => ({
   lastSyncAt: null,
   lastSyncMessage: null,
   pairingBusy: false,
+  activeCampaigns: 0,
 
   load: () => {
     const pairing = getJson<SilaPairing | null>(KEYS.silaPairing, null);
     set({pairing});
     if (pairing != null) {
       void get().refreshCounts();
+      void get().refreshActiveCampaigns();
     }
   },
 
   setPairing: pairing => {
     persistPairing(pairing);
     set({pairing, syncState: 'idle', lastSyncMessage: null});
+    void get().refreshActiveCampaigns();
     logDiag('sila', `تم ربط حساب التاجر: ${pairing.merchantName}`);
   },
 
@@ -80,6 +89,7 @@ export const useSilaStore = create<SilaState>((set, get) => ({
       pairing: null,
       syncState: 'idle',
       lastSyncMessage: null,
+      activeCampaigns: 0,
     });
     logDiag('sila', 'تم فك ربط حساب صِلة من هذا الجهاز');
   },
@@ -91,6 +101,18 @@ export const useSilaStore = create<SilaState>((set, get) => ({
       failed: counts.failed,
       synced: counts.synced,
     });
+  },
+
+  /** v21 (round-27 #6): the active-campaign count for the cart's
+   *  قسيمة button. Quiet by design (a fresh install has no table
+   *  yet — 0 is the honest answer there). */
+  refreshActiveCampaigns: async () => {
+    try {
+      const count = await VouchersRepo.activeCampaignsCount();
+      set({activeCampaigns: count});
+    } catch {
+      set({activeCampaigns: 0});
+    }
   },
 
   setSyncState: (state, message = null, lastSyncAt = null) => {

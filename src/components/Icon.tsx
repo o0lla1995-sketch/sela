@@ -86,7 +86,9 @@ export type IconName =
   | 'mail'
   /** v20: قسيمة شرائية — a voucher/ticket (notched sides + value
    *  line). */
-  | 'ticket';
+  | 'ticket'
+  /** v21: pause — the «disable in this store» campaign switch. */
+  | 'pause';
 
 interface IconProps {
   name: IconName;
@@ -542,6 +544,13 @@ const P: Record<IconName, React.ReactNode> = {
     <G>
       <Path d="M10 14a4 4 0 0 0 6 .4l2.5-2.5a4 4 0 0 0-5.6-5.6L11.4 7.7" />
       <Path d="M14 10a4 4 0 0 0-6-.4L5.5 12.1a4 4 0 0 0 5.6 5.6l1.5-1.4" />
+    </G>
+  ),
+  /** v21: pause — the «disable in this store» campaign switch. */
+  pause: (
+    <G>
+      <Path d="M9.5 5.5v13" />
+      <Path d="M14.5 5.5v13" />
     </G>
   ),
 };

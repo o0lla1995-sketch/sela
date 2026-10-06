@@ -268,8 +268,24 @@ export function VoucherRedeemSheet({
                 {cart.itemsCount} قطعة — {formatMoney(cart.total)}
               </Text>
             </View>
+            <Text style={styles.cartRule}>
+              شرط الصرف: قيمة السلة يجب أن تساوي قيمة القسيمة بالضبط
+            </Text>
             <Text style={styles.cartHint}>
               تُخصم الكميات من المخزون بعد نجاح الصرف — لا قبل ذلك
+            </Text>
+          </View>
+        ) : null}
+
+        {/* ── Standalone note (no cart): a redemption commits the
+            campaign to this store's books (round-27 #1) ── */}
+        {cart == null && step.phase === 'input' ? (
+          <View style={styles.standaloneBox}>
+            <Icon name="info" size={14} color={c.info} />
+            <Text style={styles.standaloneText}>
+              الصرف المباشر (بدون سلة) مخصص لحملات الطرود والبضاعة غير
+              المسعّرة — إذا كانت الحملة غير مفعّلة في متجرك فسيُفعّلها هذا
+              الصرف تلقائياً لأنه التزام محسوب عليك في صِلة
             </Text>
           </View>
         ) : null}
@@ -362,6 +378,40 @@ export function VoucherRedeemSheet({
               </Text>
             ) : null}
 
+            {/* v21 (round-27 #2): the EXACT-MATCH rule. The voucher's
+                value is only known AFTER the server answers (the code
+                carries no amount), so the enforcement lands here: a
+                cart that does not equal the voucher EXACTLY is shown
+                as a bold warning and the cashier must ACKNOWLEDGE the
+                difference before the goods are handed over — a clean
+                match gets the plain «تم» button. */}
+            {cartMinor != null ? (
+              cartMinor === step.data.result.value_minor ? (
+                <View style={styles.matchBox}>
+                  <Icon name="checkCircle" size={15} color={c.success} />
+                  <Text style={styles.matchText}>
+                    قيمة السلة تساوي قيمة القسيمة بالضبط — صرف سليم
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.mismatchBox}>
+                  <Icon name="alert" size={16} color={c.warning} />
+                  <Text style={styles.mismatchTitle}>
+                    تنبيه: قيمة السلة لا تساوي قيمة القسيمة بالضبط
+                  </Text>
+                  <Text style={styles.mismatchText}>
+                    {step.data.counterExtraMinor > 0
+                      ? `قيمة السلة أكبر من القسيمة بمقدار ${formatMoney(
+                          step.data.counterExtraMinor / 100,
+                        )} — يجب استلام هذا الفرق نقداً من المستحق قبل تسليم البضاعة`
+                      : `قيمة القسيمة أكبر من السلة بمقدار ${formatMoney(
+                          step.data.surplusMinor / 100,
+                        )} — سيُضاف هذا الفرق إلى مطالبتك على المؤسسة ضمن تسوية الحملة`}
+                  </Text>
+                </View>
+              )
+            ) : null}
+
             {/* The decomposition (requirement: clear split) */}
             {cartMinor != null ? (
               <View style={styles.decompBox}>
@@ -413,9 +463,24 @@ export function VoucherRedeemSheet({
                 disabled={!printerConnected}
                 style={{flex: 1}}
               />
+              {/* v21 (round-27 #2): the closing button SPELLS OUT the
+                  acknowledged difference — the cashier can't hand the
+                  goods over without reading it. */}
               <AppButton
-                title="تم — تسليم البضاعة"
-                variant="success"
+                title={
+                  cartMinor != null &&
+                  cartMinor !== step.data.result.value_minor
+                    ? step.data.counterExtraMinor > 0
+                      ? 'استلمت الفرق نقداً — تسليم البضاعة'
+                      : 'إتمام — الفرق ضمن مطالبة المؤسسة'
+                    : 'تم — تسليم البضاعة'
+                }
+                variant={
+                  cartMinor != null &&
+                  cartMinor !== step.data.result.value_minor
+                    ? 'primary'
+                    : 'success'
+                }
                 onPress={onClose}
                 style={{flex: 1}}
               />
@@ -573,6 +638,71 @@ const styles = StyleSheet.create({
     color: '#8E8E9A',
     fontFamily: fonts.regular,
     fontSize: typography.micro,
+  },
+  /** v21 (round-27 #2): the exact-match rule, stated up front. */
+  cartRule: {
+    color: '#FDBA74',
+    fontFamily: fonts.bold,
+    fontSize: typography.micro + 1,
+  },
+  /** v21 (round-27 #1): standalone-redemption commitment note. */
+  standaloneBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    backgroundColor: 'rgba(59,130,246,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(59,130,246,0.20)',
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+  },
+  standaloneText: {
+    flex: 1,
+    color: '#9EC5FE',
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    lineHeight: 16,
+  },
+  /** v21 (round-27 #2): exact-match confirmation / mismatch warning. */
+  matchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(74,222,128,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(74,222,128,0.30)',
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+  },
+  matchText: {
+    flex: 1,
+    color: '#4ADE80',
+    fontFamily: fonts.bold,
+    fontSize: typography.micro + 1,
+    lineHeight: 16,
+  },
+  mismatchBox: {
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(245,158,11,0.12)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(245,158,11,0.55)',
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+    gap: 4,
+  },
+  mismatchTitle: {
+    color: '#FCD34D',
+    fontFamily: fonts.black,
+    fontSize: typography.small,
+    textAlign: 'center',
+  },
+  mismatchText: {
+    color: '#FDE68A',
+    fontFamily: fonts.regular,
+    fontSize: typography.micro + 1,
+    textAlign: 'center',
+    lineHeight: 16,
   },
   scanBtn: {
     flexDirection: 'row',

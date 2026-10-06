@@ -475,13 +475,20 @@ export const LocalDebtsRepo = {
 
   /** v17 (round-23 #1): the creditor behind an INV-L invoice —
    *  feeds the debt receipt on reprints and the invoice-center
-   *  detail card (local-book debts have no صِلة queue row). */
+   *  detail card (local-book debts have no صِلة queue row).
+   *  v21 (round-27 #6): also returns the local customer id so the
+   *  reprint can print the customer's WHOLE outstanding. */
   async creditorByInvoiceRef(
     invoiceRef: string,
-  ): Promise<{name: string; phone: string | null} | null> {
+  ): Promise<{
+    name: string;
+    phone: string | null;
+    localCustomerId: number | null;
+  } | null> {
     try {
       const result = await getDb().execute(
-        `SELECT lc.name AS name, lc.phone AS phone
+        `SELECT lc.name AS name, lc.phone AS phone,
+                d.local_customer_id AS local_customer_id
          FROM local_debts d
          JOIN local_customers lc ON lc.id = d.local_customer_id
          WHERE d.invoice_ref = ?
@@ -489,12 +496,47 @@ export const LocalDebtsRepo = {
         [invoiceRef],
       );
       const row = result.rows?._array?.[0] as
-        | {name?: string; phone?: string | null}
+        | {
+            name?: string;
+            phone?: string | null;
+            local_customer_id?: number | null;
+          }
         | undefined;
       if (row?.name == null) {
         return null;
       }
-      return {name: String(row.name), phone: row.phone ?? null};
+      return {
+        name: String(row.name),
+        phone: row.phone ?? null,
+        localCustomerId:
+          row.local_customer_id == null
+            ? null
+            : Number(row.local_customer_id),
+      };
+    } catch {
+      return null;
+    }
+  },
+
+  /** v21 (round-27 #6): one local customer's CURRENT outstanding
+   *  (unmigrated debts − payments) — the «إجمالي الديون على الزبون»
+   *  figure for the local-book debt receipt. Live at call time, so
+   *  calling AFTER the sale transaction includes the new invoice. */
+  async outstandingFor(localCustomerId: number): Promise<number | null> {
+    try {
+      const result = await getDb().execute(
+        `SELECT
+           COALESCE((SELECT SUM(amount_minor) FROM local_debts d
+                      WHERE d.local_customer_id = ? AND d.migrated = 0), 0)
+           -
+           COALESCE((SELECT SUM(amount_minor) FROM local_payments p
+                      WHERE p.local_customer_id = ?), 0) AS outstanding`,
+        [localCustomerId, localCustomerId],
+      );
+      const row = result.rows?._array?.[0] as
+        | {outstanding?: number | null}
+        | undefined;
+      return row == null ? null : Number(row.outstanding ?? 0);
     } catch {
       return null;
     }

@@ -30,6 +30,13 @@ const LABELS = {
   reference: 'SILA Ref',
   creditCovered: 'Prepaid credit',
   netDebt: 'Net debt',
+  /** v21 (round-27 #6): the customer's WHOLE standing — «قيمة هذا
+   *  الدين» alongside «إجمالي الديون على الزبون» (the total
+   *  outstanding on this customer AFTER this invoice, both books).
+   *  English labels keep the receipt's Latin look; the Arabic
+   *  summary line below spells it out for the customer. */
+  thisDebt: 'This Debt',
+  totalCustomerDebts: 'Total Debts On Customer',
   thanks: 'Thank You!',
 } as const;
 
@@ -52,6 +59,16 @@ export interface DebtReceiptData {
    *  the merchant sees the invoice is (partially) PAID, with the
    *  NET debt spelled out. */
   creditCoveredMinor?: number;
+  /** v21 (round-27 #6): the NET debt THIS invoice adds to the
+   *  customer (invoice debt − prepaid coverage). Printed beside the
+   *  whole standing so the receipt answers both questions at once:
+   *  what is this debt, and what does the customer owe in total. */
+  thisDebtMinor?: number | null;
+  /** v21 (round-27 #6): the customer's TOTAL outstanding across the
+   *  relevant book AFTER this invoice (صِلة: cached server balance +
+   *  this net debt while the upload is pending; local book: live
+   *  debts − payments). Null = unknown (never printed). */
+  customerTotalDebtsMinor?: number | null;
 }
 
 export function buildDebtReceiptJob(
@@ -118,6 +135,19 @@ export function buildDebtReceiptJob(
   if (data.customerPhoneLast4) {
     b.textLine(`${LABELS.customer}: ****${data.customerPhoneLast4}`);
   }
+  // v21 (round-27 #6): the customer's WHOLE standing right in the
+  //  header — «إجمالي الديون على هذا الزبون» (this invoice
+  //  included), so the merchant and the customer see the full
+  //  picture at the top of the receipt, before the items.
+  const totalDebtsMinor =
+    data.customerTotalDebtsMinor != null && data.customerTotalDebtsMinor >= 0
+      ? Math.round(data.customerTotalDebtsMinor)
+      : null;
+  if (totalDebtsMinor != null) {
+    b.bold(true)
+      .textLine(`${LABELS.totalCustomerDebts}: ${(totalDebtsMinor / 100).toFixed(2)}`)
+      .bold(false);
+  }
   b.separator(width);
 
   // ── Items ──
@@ -171,6 +201,28 @@ export function buildDebtReceiptJob(
         )} ₪ — والباقي ديناً: ${(netMinor / 100).toFixed(2)} ₪`,
       );
     }
+  }
+
+  // ── v21 (round-27 #6): the debt pair — «قيمة هذا الدين» beside
+  //    «إجمالي الديون على الزبون» (already in the header; repeated
+  //    at the totals so the numbers can't be missed) + the Arabic
+  //    one-liner that spells both out for the customer. ──
+  if (totalDebtsMinor != null) {
+    const thisDebtMinor =
+      data.thisDebtMinor != null
+        ? Math.max(0, Math.round(data.thisDebtMinor))
+        : Math.max(0, Math.round(data.sale.total_amount * 100) - coveredMinor);
+    b.align(2)
+      .twoColumns(LABELS.thisDebt, thisDebtMinor / 100, width)
+      .bold(true)
+      .twoColumns(LABELS.totalCustomerDebts, totalDebtsMinor / 100, width)
+      .bold(false)
+      .align(1)
+      .textLine(
+        `إجمالي الديون القائمة على الزبون: ${(totalDebtsMinor / 100).toFixed(
+          2,
+        )} ₪ — منها هذه الفاتورة: ${(thisDebtMinor / 100).toFixed(2)} ₪`,
+      );
   }
 
   // ── Footer: the book that holds the debt (round-23 #1 — the

@@ -576,6 +576,13 @@ export interface CampaignDebtRow {
   last_redemption_at: string | null;
   last_settlement_at: string | null;
   updated_at: string | null;
+  /** v21 (round-27 #1): the merchant's own switch — ONLY campaigns
+   *  marked active in THIS store count in the dues/settlements books,
+   *  the headline totals and the reports. Feed-discovered campaigns
+   *  start inactive; a real redemption flips the campaign active (the
+   *  store is already committed server-side) and the merchant can
+   *  toggle it any time from the القسائم tab. */
+  active_in_store: boolean;
 }
 
 /** v20: one institution settlement mirrored from the server's

@@ -439,14 +439,20 @@ async function voucherRedemptionsCycle(): Promise<void> {
  *  into the local book, fires the two §6 notifications (partial→full
  *  «استُوفي حقك كاملاً» + a new settlement arriving) and records the
  *  updated_since cursor. Isolated: a failure here NEVER poisons the
- *  debts sync state. */
-async function settlementsSyncCycle(): Promise<void> {
+ *  debts sync state.
+ *  v21 (round-27 #1): a campaign the merchant has NOT marked active
+ *  in this store mirrors its campaign row (name/status/balances stay
+ *  truthful for the moment it IS enabled) but its settlements are
+ *  NOT stored and NO notifications fire — an inactive campaign's
+ *  dues/settlements never enter the books until the merchant flips
+ *  his switch (which then runs the FULL refresh below). */
+async function settlementsSyncCycle(full = false): Promise<void> {
   const store = useSilaStore.getState();
   const pairing = store.pairing;
   if (pairing == null) {
     return;
   }
-  const cursor = getString(KEYS_CURSOR, '');
+  const cursor = full ? '' : getString(KEYS_CURSOR, '');
   try {
     const feed = await silaFetchSettlements(
       pairing,
@@ -454,6 +460,12 @@ async function settlementsSyncCycle(): Promise<void> {
     );
     for (const server of feed.campaigns ?? []) {
       const before = await VouchersRepo.upsertCampaignFromFeed(server);
+      // v21 (round-27 #1): the merchant's switch decides what counts.
+      const campaignActive =
+        before == null ? false : before.active_in_store === true;
+      if (!campaignActive) {
+        continue; // mirrored, but its settlements/notifications don't count.
+      }
       const freshSettlements = await VouchersRepo.upsertSettlements(
         server.campaign_id,
         server.campaign_name,
@@ -1181,6 +1193,25 @@ export const SilaSync = {
     }
     try {
       await settlementsSyncCycle();
+    } catch {
+      // isolated by design
+    }
+  },
+
+  /** v21 (round-27 #1): FULL settlements refresh — no updated_since
+   *  cursor, so the server returns EVERY contracted campaign with its
+   *  complete balances + latest settlements. Runs right after the
+   *  merchant flips a campaign ACTIVE in his store: the just-enabled
+   *  campaign's settlements (skipped while it was inactive) are
+   *  mirrored now, and its dues enter the books immediately. */
+  async refreshVouchersFull(): Promise<void> {
+    try {
+      await voucherRedemptionsCycle();
+    } catch {
+      // isolated by design
+    }
+    try {
+      await settlementsSyncCycle(true);
     } catch {
       // isolated by design
     }

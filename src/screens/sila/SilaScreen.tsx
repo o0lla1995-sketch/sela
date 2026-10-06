@@ -783,9 +783,9 @@ export function SilaScreen() {
             <Icon name="ticket" size={19} color={c.accent} />
           </View>
           <View style={{flex: 1}}>
-            <Text style={styles.campaignsLabel}>مستحقات الحملات (قسائم)</Text>
+            <Text style={styles.campaignsLabel}>مستحقات الحملات الفعّالة (قسائم)</Text>
             <Text style={styles.campaignsMeta}>
-              {campaignCount} حملة · اضغط لعرض التفاصيل والصرف
+              {campaignCount} حملة فعّالة بالمتجر · اضغط للتفعيل والصرف
             </Text>
           </View>
           <Text
@@ -812,8 +812,8 @@ export function SilaScreen() {
           تلقائياً عند المزامنة).
         </Text>
         <Text style={styles.guideLine}>
-          • القسائم: صرف قسائم الحملات المؤسسية + مستحقاتك على المؤسسات حتى
-          التسوية — ليست ديناً على الزبائن.
+          • القسائم: فعّل حملات المؤسسات في متجرك واصرف قسائمها —
+          مستحقاتك على المؤسسة دين حتى التسوية، وليست ديناً على الزبائن.
         </Text>
       </Card>
     </>
@@ -1030,14 +1030,16 @@ export function SilaScreen() {
                 </View>
               ) : null}
 
-              {/* v15 (§2.3): record a cashier repayment */}
+              {/* v15 (§2.3): record a cashier repayment — v21
+                  (round-27 #5): prominent by design (the merchant's
+                  round-25 complaint: cramped + indistinguishable). */}
               {customer.outstanding_minor > 0 ? (
                 <AppButton
                   title="تسجيل سداد نقدي"
                   icon="wallet"
-                  small
-                  variant="secondary"
+                  variant="primary"
                   onPress={() => openPaySheet(customer)}
+                  style={{marginTop: spacing.sm}}
                 />
               ) : (
                 <View style={styles.settledRow}>
@@ -1331,17 +1333,22 @@ export function SilaScreen() {
           </>
         )}
 
-        {/* v15 (round-21 #3) + v19 (round-25 #4): repayment sheet —
-            INLINE absolute overlay (NEVER a Modal on this ROM).
+        {/* v15 (round-21 #3) + v19 (round-25 #4) + v21 (round-27 #5):
+            repayment sheet — INLINE absolute overlay (NEVER a Modal
+            on this ROM). v21: moved OUT of the ScrollView — an
+            absolute overlay inside the scroll content sticks to the
+            PAGE (the merchant's «النافذة معلقة في الصفحة» complaint);
+            at the Screen level it always covers the visible screen.
             STRICT validation + overpayment confirmation. */}
-        {paySheet != null ? (
-          <View style={styles.payOverlay}>
-            <TouchableOpacity
-              style={styles.payOverlayDim}
-              activeOpacity={1}
-              onPress={() => setPaySheet(null)}
-            />
-            <View style={styles.paySheet}>
+      </ScrollView>
+      {paySheet != null ? (
+        <View style={styles.payOverlay}>
+          <TouchableOpacity
+            style={styles.payOverlayDim}
+            activeOpacity={1}
+            onPress={() => setPaySheet(null)}
+          />
+          <View style={styles.paySheet}>
               <View style={styles.payHandle} />
               <Text style={styles.payTitle}>تسجيل سداد نقدي</Text>
               <View style={styles.payCustomerRow}>
@@ -1386,8 +1393,7 @@ export function SilaScreen() {
                   }
                   activeOpacity={0.8}>
                   <Text style={styles.payQuickText}>
-                    السداد الكامل (
-                    {formatMoney(paySheet.outstanding_minor / 100)} ₪)
+                    السداد الكامل ({formatMoney(paySheet.outstanding_minor / 100)})
                   </Text>
                 </TouchableOpacity>
               ) : null}
@@ -1414,9 +1420,8 @@ export function SilaScreen() {
                 />
               </View>
             </View>
-          </View>
-        ) : null}
-      </ScrollView>
+        </View>
+      ) : null}
     </Screen>
   );
 }

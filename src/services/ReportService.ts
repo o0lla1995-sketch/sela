@@ -112,6 +112,13 @@ export interface TreasurySnapshot {
   prepaidCoveredAllTime: number;
   /** v20: تسويات الحملات المؤكّدة عبر التاريخ (من لقطة الخادم). */
   campaignSettlementsAllTime: number;
+  /** v21 (round-27 #3): المستحق الآن من الحملات الفعّالة في
+   *  المتجر — مطالبة قائمة (دين) على المؤسسات حتى التسوية،
+   *  تُعرض في الخزينة ضمن الديون تماماً كديون صِلة ودفتر
+   *  المتجر، وعند كل تسوية مؤكدة تتحول إلى رصيد محصّل. */
+  campaignDueAllTime: number;
+  /** v21: عدد الحملات الفعّالة (label wording). */
+  campaignsActiveCount: number;
   /** v20: فواتير القسائم عبر التاريخ (بضاعة خرجت بلا نقدي كاشير). */
   voucherSalesAllTime: number;
   /** v20: الفرق النقدي الذي دفعه المستحقون بالكاشير عبر التاريخ. */
@@ -309,6 +316,11 @@ export const ReportService = {
       appCollectionsAllTime,
       prepaidCoveredAllTime,
       campaignSettlementsAllTime,
+      // v21 (round-27 #3): the standing campaign claim — a DEBT on
+      // the institutions until each settlement lands (then it turns
+      // into received cash above), exactly like صِلة debts.
+      campaignDueAllTime: campaignTotals.dueMinor / 100,
+      campaignsActiveCount: campaignTotals.campaignsCount,
       voucherSalesAllTime,
       voucherCounterExtraAllTime,
       cashTotal:

@@ -175,6 +175,10 @@ export function PosScreen() {
   // pending-debts badge right on the checkout row.
   const silaPaired = useSilaStore(state => state.pairing != null);
   const silaPending = useSilaStore(state => state.pending);
+  // v21 (round-27 #6): the cart's قسيمة button appears ONLY when the
+  // merchant has an ACTIVE campaign in this store (his own switch on
+  // the القسائم tab) — not merely when the device is paired.
+  const silaActiveCampaigns = useSilaStore(state => state.activeCampaigns);
 
   const [search, setSearch] = useState('');
   /** v9 (round-13 #3): true while the search box holds KEYBOARD
@@ -267,6 +271,20 @@ export function PosScreen() {
       setDiscountText('');
     }
   }, [discount]);
+
+  // v21 (round-27 #6): the قسيمة button's visibility depends on the
+  // ACTIVE-campaign count, which changes on the صِلة screen (enable/
+  // disable) and after every settlement sync — refresh on every
+  // focus + on every pairing change.
+  useEffect(() => {
+    void useSilaStore.getState().refreshActiveCampaigns();
+  }, [silaPaired]);
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      void useSilaStore.getState().refreshActiveCampaigns();
+    });
+    return unsubscribe;
+  }, [navigation]);
 
   // v8.2: a sale that empties the cart also folds the expanded view
   // back down — the grid must return for the next customer.
@@ -2183,10 +2201,14 @@ export function PosScreen() {
                     loading={busy}
                     style={{flex: 1.5}}
                   />
-                  {/* v20: صرف قسيمة صِلة — cart-tied voucher redemption
-                    (campaigns the store is contracted in). Shown when
-                    paired: the whole voucher path is a live صِلة flow. */}
-                  {silaPaired ? (
+                  {/* v21 (round-27 #6): صرف قسيمة صِلة — cart-tied
+                    voucher redemption. Shown ONLY when the device is
+                    paired AND at least one campaign is ACTIVE in this
+                    store (the merchant's own switch on القسائم) — a
+                    paired device with no active campaign never shows
+                    the button (the merchant is not committed to any
+                    campaign here). */}
+                  {silaPaired && silaActiveCampaigns > 0 ? (
                     <TouchableOpacity
                       style={[styles.debtBtn, styles.voucherBtn]}
                       onPress={() => {
@@ -2372,10 +2394,13 @@ export function PosScreen() {
         }}
         printerConnected={printerStatus === 'connected'}
         onRedeemed={() => {
-          // The INV-V sale is booked — the cart is fulfilled.
+          // The INV-V sale is booked — the cart is fulfilled. The
+          // campaign books may have changed (a first redemption
+          // activates its campaign) — refresh the counter.
           clear();
           setDiscountText('');
           void refreshCatalog();
+          void useSilaStore.getState().refreshActiveCampaigns();
         }}
       />
 

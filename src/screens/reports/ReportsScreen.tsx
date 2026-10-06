@@ -318,7 +318,9 @@ export function ReportsScreen() {
               {/* 2-ج-2) v20: مبيعات القسائم الشرائية بالفترة — the
                   campaigns column (face value from the server + the
                   goods invoices + the counter difference). Shown when
-                  there is any voucher activity in the range. */}
+                  there is any voucher activity in the range.
+                  v21 (round-27 #1): every figure counts ACTIVE-IN-STORE
+                  campaigns only (the merchant's own switch). */}
               {(cash?.voucherSalesCount ?? 0) > 0 ? (
                 <>
                   <Text style={styles.subTitle}>القسائم الشرائية بالفترة</Text>
@@ -360,7 +362,7 @@ export function ReportsScreen() {
                     {(cash?.campaignDueMinor ?? 0) > 0 ? (
                       <View style={styles.rowLine}>
                         <Text style={styles.rowLabel}>
-                          المستحق الآن من الحملات
+                          المستحق الآن من الحملات الفعّالة (دين على المؤسسات)
                         </Text>
                         <Text style={[styles.rowValue, {color: c.warning}]}>
                           {formatMoney((cash?.campaignDueMinor ?? 0) / 100)}

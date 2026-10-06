@@ -210,6 +210,11 @@ export function HomeScreen() {
     (treasury?.prepaidCoveredAllTime ?? 0) +
     (treasury?.campaignSettlementsAllTime ?? 0);
   const campaignSettlementsShekels = treasury?.campaignSettlementsAllTime ?? 0;
+  // v21 (round-27 #3): the standing campaign claim — a DEBT the
+  //  institutions owe this store until settled (then it becomes
+  //  received cash), exactly like the صِلة and local-book debts.
+  const campaignDueShekels = treasury?.campaignDueAllTime ?? 0;
+  const campaignsActiveCount = treasury?.campaignsActiveCount ?? 0;
   const viaSilaShekels =
     (treasury?.cashierCollectionsAllTime ?? 0) +
     (treasury?.appCollectionsAllTime ?? 0) +
@@ -405,6 +410,24 @@ export function HomeScreen() {
                 </Text>
                 <Text style={[styles.breakdownValue, {color: c.warning}]}>
                   {formatMoney(silaOutstandingShekels)}
+                </Text>
+              </View>
+            ) : null}
+            {/* v21 (round-27 #3): the campaign claim as a STANDING
+                DEBT on the institutions — the vouchers were redeemed
+                (goods out), the money is owed until each settlement
+                arrives and turns into collected cash. Active-in-store
+                campaigns only, exactly like the dues headline. */}
+            {campaignDueShekels > 0 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  من الدين: مطالبات الحملات (قسائم — على المؤسسات)
+                  {campaignsActiveCount > 1
+                    ? ` — ${campaignsActiveCount} حملة فعّالة`
+                    : ''}
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.warning}]}>
+                  {formatMoney(campaignDueShekels)}
                 </Text>
               </View>
             ) : null}
