@@ -304,18 +304,69 @@ export const SilaRepo = {
     }
   },
 
-  /** Recent rows for the merchant's debt panel (newest first). */
-  async recent(limit = 60): Promise<SilaDebtRow[]> {
+  /** Recent rows for the merchant's debt panel (newest first).
+   *  v19 (round-25 #5): paged (limit + offset) + optional state
+   *  filter + optional search (invoice ref / customer name) — the
+   *  redesigned صِلة debts tab searches and pages through hundreds
+   *  of invoices instead of one flat wall. */
+  async recent(
+    limit = 60,
+    offset = 0,
+    stateFilter?: SilaDebtRow['state'],
+    search?: string,
+  ): Promise<SilaDebtRow[]> {
+    const clauses: string[] = [];
+    const args: unknown[] = [];
+    if (stateFilter) {
+      clauses.push('state = ?');
+      args.push(stateFilter);
+    }
+    const q = search?.trim() ?? '';
+    if (q.length > 0) {
+      clauses.push('(pos_invoice_ref LIKE ? OR customer_name LIKE ?)');
+      args.push(`%${q}%`, `%${q}%`);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     const result = await getDb().execute(
-      `SELECT * FROM sila_debt_queue
+      `SELECT * FROM sila_debt_queue ${where}
        ORDER BY CASE state WHEN 'failed' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
                 local_id DESC
-       LIMIT ?`,
-      [limit],
+       LIMIT ? OFFSET ?`,
+      [...args, limit, offset],
     );
     return (result.rows?._array ?? []).map(row =>
       rowToDebt(row as Record<string, unknown>),
     );
+  },
+
+  /** v19 (round-25 #5): row count for the paged debts tab — same
+   *  filters as recent() so «عرض المزيد» knows when to stop. */
+  async debtQueueCount(
+    stateFilter?: SilaDebtRow['state'],
+    search?: string,
+  ): Promise<number> {
+    try {
+      const clauses: string[] = [];
+      const args: unknown[] = [];
+      if (stateFilter) {
+        clauses.push('state = ?');
+        args.push(stateFilter);
+      }
+      const q = search?.trim() ?? '';
+      if (q.length > 0) {
+        clauses.push('(pos_invoice_ref LIKE ? OR customer_name LIKE ?)');
+        args.push(`%${q}%`, `%${q}%`);
+      }
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+      const result = await getDb().execute(
+        `SELECT COUNT(*) AS cnt FROM sila_debt_queue ${where}`,
+        args,
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {cnt?: number};
+      return Number(row.cnt ?? 0);
+    } catch {
+      return 0;
+    }
   },
 
   async byInvoiceRef(invoiceRef: string): Promise<SilaDebtRow | null> {
@@ -730,14 +781,17 @@ export const SilaRepo = {
     }
   },
 
-  async recentPayments(limit = 40): Promise<SilaPaymentRow[]> {
+  async recentPayments(
+    limit = 40,
+    offset = 0,
+  ): Promise<SilaPaymentRow[]> {
     try {
       const result = await getDb().execute(
         `SELECT * FROM sila_payment_queue
          ORDER BY CASE state WHEN 'failed' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
                   local_id DESC
-         LIMIT ?`,
-        [limit],
+         LIMIT ? OFFSET ?`,
+        [limit, offset],
       );
       return (result.rows?._array ?? []).map(row =>
         rowToPayment(row as Record<string, unknown>),
@@ -826,8 +880,11 @@ export const SilaRepo = {
     }
   },
 
-  /** Repayments inside a date range (reports) — [from 00:00, to 23:59]
-   *  local time, by created_at. */
+  /** Repayments inside a date range (reports) — by LOCAL day of the
+   *  created_at timestamp (v19 round-25 #6: these tables store UTC
+   *  via datetime('now'); comparing the raw string against local
+   *  date boundaries misattributed payments made between 00:00 and
+   *  03:00 to the PREVIOUS day — Asia/Jerusalem is UTC+3). */
   async paymentsInRange(
     from: string,
     to: string,
@@ -836,8 +893,9 @@ export const SilaRepo = {
       const result = await getDb().execute(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(amount_minor), 0) AS minor
          FROM sila_payment_queue
-         WHERE created_at >= ? AND created_at <= ?`,
-        [`${from} 00:00:00`, `${to} 23:59:59`],
+         WHERE date(created_at, 'localtime') >= ?
+           AND date(created_at, 'localtime') <= ?`,
+        [from, to],
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
         cnt?: number | null;
@@ -910,7 +968,7 @@ export const SilaRepo = {
              app_purchases_minor = excluded.app_purchases_minor,
              last_payment_at = excluded.last_payment_at,
              last_payment_amount_minor = excluded.last_payment_amount_minor,
-             reconcile_offset_minor = COALESCE(excluded.reconcile_offset_minor, sila_customers.reconcile_offset_minor),
+             reconcile_offset_minor = CASE WHEN excluded.reconcile_offset_minor > 0 THEN excluded.reconcile_offset_minor ELSE sila_customers.reconcile_offset_minor END,
              last_synced_at = excluded.last_synced_at`
         : `INSERT INTO sila_customers (
              customer_id, name, phone_last4, outstanding_minor,
@@ -930,7 +988,7 @@ export const SilaRepo = {
              app_purchases_minor = excluded.app_purchases_minor,
              last_payment_at = excluded.last_payment_at,
              last_payment_amount_minor = excluded.last_payment_amount_minor,
-             reconcile_offset_minor = COALESCE(excluded.reconcile_offset_minor, sila_customers.reconcile_offset_minor),
+             reconcile_offset_minor = CASE WHEN excluded.reconcile_offset_minor > 0 THEN excluded.reconcile_offset_minor ELSE sila_customers.reconcile_offset_minor END,
              last_synced_at = excluded.last_synced_at`;
       const args = knowsCredit
         ? [
@@ -1073,7 +1131,8 @@ export const SilaRepo = {
 
   /** v17 (round-23 #2): Σ credit_covered_minor of debt rows created in
    *  the range — the money prepaid credit absorbed (treated as
-   *  received at sale/migration time in the store's cash math). */
+   *  received at sale/migration time in the store's cash math).
+   *  v19 (round-25 #6): LOCAL-day comparison (created_at is UTC). */
   async creditCoveredInRange(
     from: string,
     to: string,
@@ -1082,8 +1141,9 @@ export const SilaRepo = {
       const result = await getDb().execute(
         `SELECT COALESCE(SUM(credit_covered_minor), 0) AS minor
          FROM sila_debt_queue
-         WHERE created_at >= ? AND created_at <= ?`,
-        [`${from} 00:00:00`, `${to} 23:59:59`],
+         WHERE date(created_at, 'localtime') >= ?
+           AND date(created_at, 'localtime') <= ?`,
+        [from, to],
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
         minor?: number | null;
@@ -1101,10 +1161,8 @@ export const SilaRepo = {
    * ─────────────────────────────────────────────────────────────────
    * When a customer repays their STORE debt through the Sila app
    * (not at the cashier), the server's pos_outstanding_minor drops
-   * and — before v18 — the store's books simply lost the money: the
-   * debt vanished with no «مقبوضات مستلمة» record anywhere (the
-   * exact complaint «فإن الدين يختفي ولا يسجل سدادات مستلمة من
-   * صلة»).
+   * and the store's books must see the money (the round-24 complaint
+   * «فإن الدين يختفي ولا يسجل سدادات مستلمة من صلة»).
    *
    * The server knows the full stock per customer:
    *   collectedOnStoreDebts = pos_purchases_minor − pos_outstanding_minor
@@ -1113,7 +1171,12 @@ export const SilaRepo = {
    * pos_outstanding by FIFO, migration 0069).
    *
    * The store knows its own share of that stock:
-   *   cashier collections      = Σ sila_payment_queue.amount (synced)
+   *   cashier collections      = Σ sila_payment_queue.amount
+   *                              (synced OR syncing — a payment that
+   *                              already reached the server but isn't
+   *                              marked synced yet must not inflate
+   *                              the gap: the v18 race recorded such
+   *                              rows TWICE)
    *   prepaid-credit coverage  = Σ sila_debt_queue.credit_covered_minor
    *   already-detected app
    *   collections              = Σ sila_app_collections.amount
@@ -1122,18 +1185,27 @@ export const SilaRepo = {
    * collected on the store's behalf that no local book has seen:
    *   unrecorded = (stock − localShare) − reconcile_offset_minor
    *
-   * The baseline (reconcile_offset_minor, write-once at the FIRST
-   * full sight of the customer) keeps a fresh install / new pairing
-   * from claiming ANOTHER device's historical collections: for
-   * those the gap is frozen as the starting point, and only NEW
-   * collections above it are recorded. Upgrades (v17→v18) keep the
-   * 0 default — their books DO cover the server history, so the
-   * full gap is exactly the «disappeared» money to recover.
+   * v19 (round-25 #1 — the «تحصيل دين 67.10» complaint): the baseline
+   * is now frozen for EVERY customer at the FIRST v19 sight, not
+   * only for cache-new ones. The v18 upgrade path left existing
+   * rows anchored at 0, so the ENTIRE historical gap (old app
+   * payments from before v18 — «معاملات قديمة» exactly as the
+   * merchant suspected) dumped at once as ONE huge collection dated
+   * TODAY. With `freezeBaseline` (the first v19 pass after the
+   * update) every existing customer's CURRENT gap becomes the
+   * anchor: history stays history, and only NEW app payments are
+   * recorded — dated correctly, sized correctly.
+   *
+   * The anchor is preserved forever by upsertCustomers (write-once:
+   * a non-positive incoming value never overwrites a stored one —
+   * the v18 COALESCE(0, old) bug wiped every anchor to 0 on each
+   * full refresh, which re-armed the historical dump).
    *
    * This method is SELF-HEALING and IDEMPOTENT: no cursors, no
    * time windows (survives offline gaps >10 ledger entries), heals
-   * restores, and repopulates ALL historical collections on the
-   * first v18 sync because the server stock always knew them.
+   * restores, and never re-records what the books already carry
+   * (each recorded collection grows localShare by the same amount,
+   * so the gap returns to zero by itself).
    *
    * `newCustomerOffsets` collects the baseline anchors for customers
    * the cache has never seen — the caller hands them to
@@ -1149,6 +1221,10 @@ export const SilaRepo = {
       posOutstandingMinor: number;
     }[],
     newCustomerOffsets: Map<string, number>,
+    /** v19 (round-25 #1): first-pass flag — freeze the CURRENT gap
+     * of every EXISTING cache row as its baseline so historical
+     * collections never dump as fresh money. */
+    freezeBaseline = false,
   ): Promise<number> {
     if (rows.length === 0) {
       return 0;
@@ -1164,7 +1240,7 @@ export const SilaRepo = {
         const aggResult = await db.execute(
           `SELECT
              (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_payment_queue
-               WHERE customer_id = ? AND state = 'synced') AS cashier_minor,
+               WHERE customer_id = ? AND state IN ('synced','syncing')) AS cashier_minor,
              (SELECT COALESCE(SUM(credit_covered_minor), 0) FROM sila_debt_queue
                WHERE customer_id = ?) AS credit_minor,
              (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_app_collections
@@ -1180,6 +1256,10 @@ export const SilaRepo = {
           Number(agg.cashier_minor ?? 0) +
           Number(agg.credit_minor ?? 0) +
           Number(agg.app_minor ?? 0);
+        const currentGap = Math.max(
+          0,
+          Math.round(collectedOnStoreDebts - localShare),
+        );
 
         // First full sight of this customer? Freeze the historical
         // gap as the baseline — pre-existing history (another
@@ -1192,13 +1272,26 @@ export const SilaRepo = {
           | {reconcile_offset_minor?: number | null}
           | undefined;
         if (cached == null) {
-          newCustomerOffsets.set(
-            row.customerId,
-            Math.max(0, Math.round(collectedOnStoreDebts - localShare)),
-          );
+          newCustomerOffsets.set(row.customerId, currentGap);
           continue; // nothing to record on the very first sight
         }
         const offset = Number(cached.reconcile_offset_minor ?? 0);
+        // v19: the one-time baseline freeze for rows created before
+        // this update (anchored 0 by the v18 upgrade path) — their
+        // current gap is HISTORY, not fresh money. Never lowers an
+        // existing anchor.
+        if (freezeBaseline && currentGap > offset) {
+          await db.execute(
+            `UPDATE sila_customers SET reconcile_offset_minor = ?
+             WHERE customer_id = ?`,
+            [currentGap, row.customerId],
+          );
+          logDiag(
+            'sila',
+            `جُمّد أساس مطابقة تحصيلات ${row.name} عند ${(currentGap / 100).toFixed(2)}₪ (تاريخ قديم — لن يُسجّل كتحصيل جديد)`,
+          );
+          continue;
+        }
         const unrecorded = collectedOnStoreDebts - localShare - offset;
         if (unrecorded <= 0) {
           continue; // books already know everything above the anchor
@@ -1279,8 +1372,10 @@ export const SilaRepo = {
   },
 
   /** v18 (round-24 #1): Sila-app collections inside a date range
-   *  (reports) — by detected_at, the moment the store learned of
-   *  them (the actual payment happened server-side shortly before). */
+   *  (reports) — by LOCAL day of detected_at (v19: UTC→localday
+   *  conversion, same fix as paymentsInRange), the moment the store
+   *  learned of them (the actual payment happened server-side
+   *  shortly before). */
   async appCollectionsInRange(
     from: string,
     to: string,
@@ -1289,8 +1384,9 @@ export const SilaRepo = {
       const result = await getDb().execute(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(amount_minor), 0) AS minor
          FROM sila_app_collections
-         WHERE detected_at >= ? AND detected_at <= ?`,
-        [`${from} 00:00:00`, `${to} 23:59:59`],
+         WHERE date(detected_at, 'localtime') >= ?
+           AND date(detected_at, 'localtime') <= ?`,
+        [from, to],
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
         cnt?: number | null;
@@ -1306,32 +1402,99 @@ export const SilaRepo = {
    *  ledger views (newest first). */
   async recentAppCollections(
     limit = 40,
+    offset = 0,
   ): Promise<
     {
       local_id: number;
       customer_id: string;
       customer_name: string | null;
       amount_minor: number;
+      pos_purchases_minor: number | null;
+      pos_outstanding_minor: number | null;
       detected_at: string;
     }[]
   > {
     try {
       const result = await getDb().execute(
-        `SELECT local_id, customer_id, customer_name, amount_minor, detected_at
+        `SELECT local_id, customer_id, customer_name, amount_minor,
+                pos_purchases_minor, pos_outstanding_minor, detected_at
          FROM sila_app_collections
          ORDER BY local_id DESC
-         LIMIT ?`,
-        [limit],
+         LIMIT ? OFFSET ?`,
+        [limit, offset],
       );
       return (result.rows?._array ?? []).map(row => ({
         local_id: Number((row as {local_id?: number}).local_id ?? 0),
         customer_id: String((row as {customer_id?: string}).customer_id ?? ''),
         customer_name: (row as {customer_name?: string}).customer_name ?? null,
         amount_minor: Number((row as {amount_minor?: number}).amount_minor ?? 0),
+        pos_purchases_minor:
+          (row as {pos_purchases_minor?: number}).pos_purchases_minor ?? null,
+        pos_outstanding_minor:
+          (row as {pos_outstanding_minor?: number}).pos_outstanding_minor ?? null,
         detected_at: String((row as {detected_at?: string}).detected_at ?? ''),
       }));
     } catch {
       return [];
+    }
+  },
+
+  /** v19 (round-25 #5): total row count of the collections ledger —
+   *  the paged السدادّات tab knows whether more pages exist. */
+  async appCollectionsCount(): Promise<number> {
+    try {
+      const result = await getDb().execute(
+        'SELECT COUNT(*) AS cnt FROM sila_app_collections',
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {cnt?: number};
+      return Number(row.cnt ?? 0);
+    } catch {
+      return 0;
+    }
+  },
+
+  /** v19 (round-25 #1): removes a MISTAKEN app-collection row after
+   *  the merchant reviews it (the «تحصيل 67.10» complaint — old
+   *  history dumped by the v18 engine may not belong in today's
+   *  books). The removal is logged, and the customer's baseline
+   *  anchor absorbs the amount so the self-healing engine NEVER
+   *  re-records it on the next pass. */
+  async deleteAppCollection(localId: number): Promise<boolean> {
+    const db = getDb();
+    try {
+      const row = await db.execute(
+        'SELECT customer_id, customer_name, amount_minor FROM sila_app_collections WHERE local_id = ?',
+        [localId],
+      );
+      const hit = row.rows?._array?.[0] as
+        | {customer_id?: string; customer_name?: string; amount_minor?: number}
+        | undefined;
+      if (hit == null) {
+        return false;
+      }
+      await db.execute('DELETE FROM sila_app_collections WHERE local_id = ?', [
+        localId,
+      ]);
+      // Absorb the deleted amount into the baseline so the next
+      // reconciliation pass doesn't resurrect it (idempotency of
+      // the merchant's decision, not just of the engine).
+      await db.execute(
+        `UPDATE sila_customers
+           SET reconcile_offset_minor = reconcile_offset_minor + ?
+         WHERE customer_id = ?`,
+        [Math.max(0, Math.round(Number(hit.amount_minor ?? 0))), hit.customer_id],
+      );
+      logDiag(
+        'sila',
+        `حُذف تحصيل تطبيق صِلة #${localId} (${hit.customer_name ?? 'زبون'} — ${
+          Number(hit.amount_minor ?? 0) / 100
+        }₪) بقرار التاجر — أُضيف للمون الأساسي حتى لا يعود`,
+        'warn',
+      );
+      return true;
+    } catch (error) {
+      logDiag('sila', `تعذر حذف تحصيل تطبيق صِلة: ${toMessage(error)}`, 'warn');
+      return false;
     }
   },
 };

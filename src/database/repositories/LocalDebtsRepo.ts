@@ -108,6 +108,21 @@ async function maxLocalDebtSequence(): Promise<number> {
   return max;
 }
 
+/** v19 (round-25 #3): the Palestinian registration standards the
+ *  merchant asked for — enforced on BOTH the form and the repo so
+ *  bad data can never enter the book from any path. */
+const ID_NUMBER_RE = /^\d{9}$/;
+/** Jawwal prefixes only (056 / 059) — 10 digits total. */
+const PHONE_RE = /^05[69]\d{7}$/;
+
+export function isValidIdNumber(value: string): boolean {
+  return ID_NUMBER_RE.test(value);
+}
+
+export function isValidLocalPhone(value: string): boolean {
+  return PHONE_RE.test(value);
+}
+
 export const LocalDebtsRepo = {
   /** Reserves the next LOCAL debt number: INV-L-YYYYMMDD-NNNN. */
   async reserveLocalDebtRef(): Promise<string> {
@@ -153,10 +168,14 @@ export const LocalDebtsRepo = {
   // ── customers ─────────────────────────────────────────────────
 
   /**
-   * Creates a local debt account. Refuses (throws with a spoken
-   * Arabic message) when the ID number already exists — locally OR
-   * in the صِلة cache — so the same person never lives on both
-   * sides («لا يتكرر نفس الزبون في الجانبين من خلال رقم الهوية»).
+   * Creates a local debt account. v19 (round-25 #3): the
+   * registration standards — ID number EXACTLY 9 digits, mobile
+   * EXACTLY 10 digits starting 056/059 (Jawwal), both enforced
+   * here (defense in depth behind the form). Refuses (throws with
+   * a spoken Arabic message) when the ID number already exists —
+   * locally OR in the صِلة cache — so the same person never lives
+   * on both sides («لا يتكرر نفس الزبون في الجانبين من خلال رقم
+   * الهوية»).
    */
   async createCustomer(input: {
     idNumber: string;
@@ -165,12 +184,18 @@ export const LocalDebtsRepo = {
     notes?: string | null;
   }): Promise<LocalCustomer> {
     const idNumber = input.idNumber.replace(/\s+/g, '');
-    if (idNumber.length < 4) {
-      throw new Error('رقم الهوية قصير جداً — أدخل 4 أرقام على الأقل');
+    if (!ID_NUMBER_RE.test(idNumber)) {
+      throw new Error('رقم الهوية يجب أن يكون 9 أرقام بالضبط');
     }
     const name = input.name.trim();
     if (name.length === 0) {
       throw new Error('اسم الزبون مطلوب');
+    }
+    const phone = (input.phone ?? '').replace(/[\s-]/g, '');
+    if (!PHONE_RE.test(phone)) {
+      throw new Error(
+        'رقم الجوال مطلوب: 10 أرقام يبدأ بـ 056 أو 059 (مثال: 0591234567)',
+      );
     }
     // Local uniqueness (SQLite UNIQUE also guards, but with a nicer message).
     const localHit = await this.byIdNumber(idNumber);
@@ -201,7 +226,7 @@ export const LocalDebtsRepo = {
     await getDb().execute(
       `INSERT INTO local_customers (id_number, name, phone, notes)
        VALUES (?, ?, ?, ?)`,
-      [idNumber, name, input.phone?.trim() || null, input.notes?.trim() || null],
+      [idNumber, name, phone, input.notes?.trim() || null],
     );
     const created = await this.byIdNumber(idNumber);
     if (created == null) {
@@ -386,7 +411,11 @@ export const LocalDebtsRepo = {
     return rowToDebt(row.rows?._array?.[0] ?? {});
   },
 
-  /** Records a repayment from a local account (RCP-L series). */
+  /** Records a repayment from a local account (RCP-L series).
+   *  v19 (round-25 #4): amounts LARGER than the outstanding are
+   *  allowed by design — the excess becomes a CREDIT balance
+   *  (رصيد دائن، outstanding goes negative) the customer's next
+   *  debts consume. The UI confirms the split before recording. */
   async addPayment(input: {
     localCustomerId: number;
     amountMinor: number;
@@ -472,7 +501,10 @@ export const LocalDebtsRepo = {
   },
 
   /** v17 (round-23 #2): local repayments collected in a range —
-   *  the reports' «سدادّات دفتر المتجر» figure. */
+   *  the reports' «سدادّات دفتر المتجر» figure. v19 (round-25 #6):
+   *  LOCAL-day comparison — local_payments stores UTC via
+   *  datetime('now'), and the old raw-string comparison shifted
+   *  post-midnight payments into the previous day (UTC+3). */
   async paymentsInRange(
     from: string,
     to: string,
@@ -481,8 +513,9 @@ export const LocalDebtsRepo = {
       const result = await getDb().execute(
         `SELECT COUNT(*) AS cnt, COALESCE(SUM(amount_minor), 0) AS minor
          FROM local_payments
-         WHERE created_at >= ? AND created_at <= ?`,
-        [`${from} 00:00:00`, `${to} 23:59:59`],
+         WHERE date(created_at, 'localtime') >= ?
+           AND date(created_at, 'localtime') <= ?`,
+        [from, to],
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
         cnt?: number | null;

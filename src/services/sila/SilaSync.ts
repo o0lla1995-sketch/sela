@@ -61,6 +61,12 @@ const CUSTOMERS_CURSOR_KEY = 'sila_customers_updated_since_v1';
 /** One-time v12 repair flag — requeues rows failed by the v11
  *  null-fields VALIDATION_ERROR bug (see SilaRepo). */
 const VALIDATION_REQUEUE_FLAG = 'sila_requeued_validation_fix_v1';
+/** v19 (round-25 #1): one-time baseline freeze — the FIRST v19
+ *  customers pass anchors every existing customer's current
+ *  reconciliation gap as HISTORY, so old app payments from before
+ *  this update can never dump as one huge «تحصيل» dated today (the
+ *  67.10₪ complaint). Consumed on the first successful pass. */
+const RECONCILE_V19_FREEZE_FLAG = 'sila_reconcile_v19_freeze_v1';
 
 /** Result of one cycle — the UI toasts `message` on manual sync. */
 export interface SilaSyncOutcome {
@@ -220,10 +226,17 @@ async function syncCustomersCycle(): Promise<void> {
   // app collections), anchored at each customer's baseline. The
   // positive gap = money the customer paid THROUGH THE SILA APP on
   // this store's debts — recorded as an incoming collection so the
-  // debt never «vanishes» silently («فإن الدين يختفي ولا يسجل
-  // سدادات مستلمة من صلة» — fixed). Isolated: a reconciliation
+  // debt never «vanishes» silently. Isolated: a reconciliation
   // failure must never poison the balances refresh (the pass is
   // idempotent — the next cycle re-covers the same gap).
+  //
+  // v19 (round-25 #1): the FIRST pass after this update runs with
+  // freezeBaseline — every existing customer's CURRENT gap becomes
+  // the permanent baseline (history stays history; the v18 upgrade
+  // path dumped it as one huge collection dated today — the
+  // «تحصيل دين 67.10» complaint). Only payments made AFTER this
+  // freeze are recorded, dated and sized correctly.
+  const freezeFirstPass = getString(RECONCILE_V19_FREEZE_FLAG, '') === '';
   const newCustomerOffsets = new Map<string, number>();
   try {
     const recordedMinor = await SilaRepo.reconcileAppCollections(
@@ -234,12 +247,20 @@ async function syncCustomersCycle(): Promise<void> {
         posOutstandingMinor: row.pos_outstanding_minor ?? 0,
       })),
       newCustomerOffsets,
+      freezeFirstPass,
     );
+    if (freezeFirstPass) {
+      setString(RECONCILE_V19_FREEZE_FLAG, '1');
+      logDiag(
+        'sila',
+        'اكتمل تجميد أسس مطابقة تحصيلات صِلة (مرة واحدة) — السدادات القديمة لن تُسجّل كتحصيلات جديدة',
+      );
+    }
     if (recordedMinor > 0) {
       notificationsStore.push(
         'sila_collection',
         'تحصيل جديد عبر تطبيق صِلة',
-        `استلمت صِلة ${(recordedMinor / 100).toFixed(2)} ₪ من ديون متجرك — سُجّلت في الخزينة والتقارير`,
+        `سدّد زبون دينه من تطبيق صِلة — استلمت صِلة ${(recordedMinor / 100).toFixed(2)} ₪ نيابة عنك على ديون فواتير متجرك، وسُجّلت في الخزينة والتقارير`,
         {system: true},
       );
     }

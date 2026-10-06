@@ -294,10 +294,24 @@ export function HomeScreen() {
           title="الخزينة والديون"
           hint="النقد الفعلي لديك + الديون المستحقة لك"
           action={
-            <TouchableOpacity
-              onPress={() => navigation.navigate('LocalDebts' as never)}>
-              <Text style={styles.seeAll}>دفتر الديون</Text>
-            </TouchableOpacity>
+            /* v19 (round-25 #5): while the store is actually paired,
+             * «دفتر صِلة» sits NEXT to «دفتر الديون» — one tap from
+             * the dashboard to the صِلة debts/receipts center. */
+            <View style={styles.ledgerLinksRow}>
+              <TouchableOpacity
+                onPress={() => navigation.navigate('LocalDebts' as never)}>
+                <Text style={styles.seeAll}>دفتر الديون</Text>
+              </TouchableOpacity>
+              {paired ? (
+                <>
+                  <View style={styles.ledgerLinksDivider} />
+                  <TouchableOpacity
+                    onPress={() => navigation.navigate('Sila' as never)}>
+                    <Text style={styles.seeAll}>دفتر صِلة</Text>
+                  </TouchableOpacity>
+                </>
+              ) : null}
+            </View>
           }
         />
         <Card style={styles.moneyCard}>
@@ -604,6 +618,17 @@ const useStyles = makeStyles(c =>
       color: c.accent,
       fontFamily: fonts.bold,
       fontSize: typography.small,
+    },
+    // v19 (round-25 #5): the paired dashboard links row.
+    ledgerLinksRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    ledgerLinksDivider: {
+      width: 1,
+      height: 12,
+      backgroundColor: c.borderSoft,
     },
     statsGrid: {
       gap: spacing.md,

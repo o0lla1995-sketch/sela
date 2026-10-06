@@ -130,7 +130,7 @@ export function ReportsScreen() {
   return (
     <View style={styles.screen}>
       <AppHeader
-        title="التقارير والمحاسبة"
+        title="التقارير"
         subtitle="المبيعات والنقد والديون"
         showBack={false}
         right={
@@ -304,10 +304,19 @@ export function ReportsScreen() {
                 ) : null}
               </View>
 
-              {/* 2-د) The outstanding snapshot — receivables now. */}
+              {/* 2-د) The outstanding snapshot — receivables now.
+                  v19 (round-25 #2): the informational app-origin cell
+                  appears ONLY when it actually carries debt — a
+                  permanent 0.00 cell (the complaint «دائما صفر»)
+                  taught the merchant nothing and looked broken. */}
               <Text style={styles.subTitle}>الدين القائم الآن</Text>
               <View style={styles.outstandingGrid}>
-                <View style={styles.outstandingCell}>
+                <View
+                  style={
+                    (cash?.appOriginOutstandingMinor ?? 0) > 0
+                      ? styles.outstandingCell
+                      : styles.outstandingCellFull
+                  }>
                   <Text style={styles.outstandingValue}>
                     {formatMoney(
                       ((cash?.localOutstandingMinor ?? 0) +
@@ -326,7 +335,7 @@ export function ReportsScreen() {
                         } زبون مدين — دفتر المتجر`}
                   </Text>
                 </View>
-                {paired ? (
+                {paired && (cash?.appOriginOutstandingMinor ?? 0) > 0 ? (
                   <View style={styles.outstandingCellInfo}>
                     <Text style={styles.outstandingValueInfo}>
                       {formatMoney((cash?.appOriginOutstandingMinor ?? 0) / 100)}
@@ -602,6 +611,16 @@ const useStyles = makeStyles(c =>
     },
     outstandingCell: {
       flex: 1,
+      backgroundColor: c.surfaceHi,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.sm + 2,
+      gap: 2,
+      alignItems: 'center',
+    },
+    outstandingCellFull: {
+      flexGrow: 1,
       backgroundColor: c.surfaceHi,
       borderRadius: radius.md,
       borderWidth: 1,

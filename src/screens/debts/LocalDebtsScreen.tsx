@@ -16,7 +16,7 @@
  * blacks Modals after the native scanner closes; the same lesson as
  * the POS debt sheet).
  */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Alert,
   BackHandler,
@@ -33,11 +33,16 @@ import {
   AppHeader,
   EmptyState,
   Field,
+  type FieldHandle,
   SectionTitle,
   StatCard,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
-import {LocalDebtsRepo} from '../../database/repositories/LocalDebtsRepo';
+import {
+  LocalDebtsRepo,
+  isValidIdNumber,
+  isValidLocalPhone,
+} from '../../database/repositories/LocalDebtsRepo';
 import {SilaRepo} from '../../services/sila/SilaRepo';
 import {SilaSync} from '../../services/sila/SilaSync';
 import {InvoiceService} from '../../services/InvoiceService';
@@ -86,6 +91,17 @@ export function LocalDebtsScreen() {
   const [addName, setAddName] = useState('');
   const [addPhone, setAddPhone] = useState('');
   const [addBusy, setAddBusy] = useState(false);
+  /** v19 (round-25 #3): inline validation messages (shown under the
+   *  fields after the first submit attempt) + field refs for the
+   *  keyboard «التالي» chain: هوية ← اسم ← جوال ← إنشاء. */
+  const [addErrors, setAddErrors] = useState<{
+    id?: string;
+    name?: string;
+    phone?: string;
+  }>({});
+  const idFieldRef = useRef<FieldHandle>(null);
+  const nameFieldRef = useRef<FieldHandle>(null);
+  const phoneFieldRef = useRef<FieldHandle>(null);
   /** The open customer profile (detail sheet). */
   const [detail, setDetail] = useState<LocalCustomerBalance | null>(null);
   const [detailDebts, setDetailDebts] = useState<LocalDebt[]>([]);
@@ -141,6 +157,39 @@ export function LocalDebtsScreen() {
     if (addBusy) {
       return;
     }
+    // v19 (round-25 #3): the registration standards — ID exactly 9
+    // digits, mobile exactly 10 digits starting 056/059. Errors are
+    // shown INLINE under their fields (and the offending field
+    // grabs focus), not as a late alert after the fact.
+    const errors: {id?: string; name?: string; phone?: string} = {};
+    if (!isValidIdNumber(addId)) {
+      errors.id =
+        addId.length === 0
+          ? 'رقم الهوية مطلوب'
+          : `رقم الهوية 9 أرقام بالضبط (${addId.length} حالياً)`;
+    }
+    if (addName.trim().length === 0) {
+      errors.name = 'اسم الزبون مطلوب';
+    }
+    if (!isValidLocalPhone(addPhone)) {
+      errors.phone =
+        addPhone.length === 0
+          ? 'رقم الجوال مطلوب'
+          : addPhone.length !== 10
+          ? `رقم الجوال 10 أرقام بالضبط (${addPhone.length} حالياً)`
+          : 'يبدأ بـ 056 أو 059 فقط';
+    }
+    setAddErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      if (errors.id) {
+        idFieldRef.current?.focus();
+      } else if (errors.name) {
+        nameFieldRef.current?.focus();
+      } else {
+        phoneFieldRef.current?.focus();
+      }
+      return;
+    }
     setAddBusy(true);
     try {
       const created = await LocalDebtsRepo.createCustomer({
@@ -151,6 +200,7 @@ export function LocalDebtsScreen() {
       setAddId('');
       setAddName('');
       setAddPhone('');
+      setAddErrors({});
       setAddOpen(false);
       await reload();
       toast(`أُنشئ حساب «${created.name}» في دفتر المتجر`, 'success');
@@ -166,9 +216,35 @@ export function LocalDebtsScreen() {
 
   const confirmDelete = useCallback(
     (entry: LocalCustomerBalance) => {
+      // v19 (round-25 #6 — accounting audit): deleting an account
+      // that still carries a balance corrupts the books — a deleted
+      // DEBT silently becomes «cash sales» in the treasury (the
+      // expected-cash inflates by the outstanding), and a deleted
+      // CREDIT erases what the customer is owed. Settled accounts
+      // only.
+      if (entry.outstandingMinor > 0) {
+        Alert.alert(
+          'لا يمكن الحذف — دين قائم',
+          `على «${entry.customer.name}» دين قائم ${formatMoney(
+            entry.outstandingMinor / 100,
+          )} ₪. حذف الحساب يُفقد الدين نهائياً ويضخّم النقد المتوقع في الخزينة بنفس المبلغ.\nسجّل السداد أولاً (أو رحّل الحساب إلى صِلة) ثم احذفه.`,
+          [{text: 'فهمت', style: 'cancel'}],
+        );
+        return;
+      }
+      if (entry.outstandingMinor < 0) {
+        Alert.alert(
+          'لا يمكن الحذف — رصيد دائن',
+          `لدى «${entry.customer.name}» رصيد دائن ${formatMoney(
+            Math.abs(entry.outstandingMinor) / 100,
+          )} ₪ (سدّد أكثر من دينه). حذف الحساب يمحو حقه من الدفاتر.\nردّ للزبون قيمة رصيده أو سجّله كتقاص، ثم احذف الحساب.`,
+          [{text: 'فهمت', style: 'cancel'}],
+        );
+        return;
+      }
       Alert.alert(
         'حذف حساب الزبون',
-        `سيُحذف حساب «${entry.customer.name}» وكل ديونونه وسدادّاته من دفتر المتجر نهائياً. هل أنت متأكد؟`,
+        `حساب «${entry.customer.name}» مسدّد بالكامل (لا دين ولا رصيد).\nسيُحذف الحساب وسجل عملياته (الديون المسددة والسدادّات) من دفتر المتجر نهائياً — أرصدة الخزينة لن تتأثر. هل أنت متأكد؟`,
         [
           {text: 'تراجع', style: 'cancel'},
           {
@@ -187,6 +263,47 @@ export function LocalDebtsScreen() {
     [reload, toast],
   );
 
+  /** v19 (round-25 #4): the actual write — reached directly (amount
+   *  within the debt) or after the overpayment confirmation. */
+  const doRecordPayment = useCallback(
+    async (amount: number) => {
+      if (detail == null) {
+        return;
+      }
+      setPayBusy(true);
+      try {
+        await LocalDebtsRepo.addPayment({
+          localCustomerId: detail.customer.id,
+          amountMinor: Math.round(amount * 100),
+          method: 'cash',
+        });
+        const customerId = detail.customer.id;
+        const customerName = detail.customer.name;
+        const wasExcess =
+          Math.round(amount * 100) > detail.outstandingMinor &&
+          detail.outstandingMinor >= 0;
+        setPayAmount('');
+        setPayOpen(false);
+        await refreshDetail(customerId);
+        toast(
+          wasExcess
+            ? `سُجّل سداد ${formatMoney(amount)} من ${customerName} — الدين مُطفأ والزيادة رصيد دائن`
+            : `سُجّل سداد ${formatMoney(amount)} من ${customerName}`,
+          'success',
+          wasExcess ? 5000 : undefined,
+        );
+      } catch (error) {
+        Alert.alert(
+          'فشل تسجيل السداد',
+          error instanceof Error ? error.message : 'خطأ غير متوقع',
+        );
+      } finally {
+        setPayBusy(false);
+      }
+    },
+    [detail, refreshDetail, toast],
+  );
+
   const recordPayment = useCallback(async () => {
     if (detail == null || payBusy) {
       return;
@@ -196,29 +313,32 @@ export function LocalDebtsScreen() {
       Alert.alert('مبلغ غير صالح', 'أدخل مبلغ السداد');
       return;
     }
-    setPayBusy(true);
-    try {
-      await LocalDebtsRepo.addPayment({
-        localCustomerId: detail.customer.id,
-        amountMinor: Math.round(amount * 100),
-        method: 'cash',
-      });
-      setPayAmount('');
-      setPayOpen(false);
-      await refreshDetail(detail.customer.id);
-      toast(
-        `سُجّل سداد ${formatMoney(amount)} من ${detail.customer.name}`,
-        'success',
-      );
-    } catch (error) {
-      Alert.alert(
-        'فشل تسجيل السداد',
-        error instanceof Error ? error.message : 'خطأ غير متوقع',
-      );
-    } finally {
-      setPayBusy(false);
+    if (amount > 1000000) {
+      Alert.alert('مبلغ غير منطقي', 'أقصى مبلغ مسموح 1,000,000 ₪');
+      return;
     }
-  }, [detail, payAmount, payBusy, refreshDetail, toast]);
+    // v19 (round-25 #4): the merchant may receive MORE than the
+    // outstanding — confirmed once with the exact split so the
+    // books never surprise anyone: debt extinguished + credit kept.
+    const outstandingMinor = detail.outstandingMinor;
+    const amountMinor = Math.round(amount * 100);
+    if (amountMinor > outstandingMinor && outstandingMinor >= 0) {
+      const excess = (amountMinor - outstandingMinor) / 100;
+      Alert.alert(
+        'المبلغ أكبر من الدين القائم',
+        `الدين القائم: ${formatMoney(outstandingMinor / 100)}\nالمبلغ المدخل: ${formatMoney(amount)}\n\nسيُطفأ الدين بالكامل وتبقى زيادة ${formatMoney(excess)} رصيداً دائناً للزبون تُخصم من مشترياته القادمة. متابعة؟`,
+        [
+          {text: 'تراجع', style: 'cancel'},
+          {
+            text: 'تأكيد السداد',
+            onPress: () => void doRecordPayment(amount),
+          },
+        ],
+      );
+      return;
+    }
+    await doRecordPayment(amount);
+  }, [detail, doRecordPayment, payAmount, payBusy]);
 
   /** v17 (round-23 #8): link + AUTO-migrate — ONE scan, ONE flow.
    *  Scanning the person's صِلة QR (their card / offline code) now:
@@ -276,7 +396,13 @@ export function LocalDebtsScreen() {
       const customerName = detail.customer.name;
 
       const planLines =
-        outstanding <= 0
+        outstanding < 0
+          ? `⚠ هذا الزبون لديه رصيد دائن لديك بمقدار ${formatMoney(
+              Math.abs(outstanding) / 100,
+            )} ₪ (سدّد أكثر من دينه).\n` +
+            'بعد الربط سيُحذف الحساب المحلي ولن يظهر هذا الرصيد في أي دفتر — أعطِ الزبون قيمته نقداً أو اتركه يشتري بها قبل الترحيل.\n' +
+            'إن اخترت المتابعة فالتأكيد الثاني إقرار منك بأن الرصيد صُفّي بينك وبين الزبون.'
+          : outstanding === 0
           ? 'لا رصيد قائم على الحساب — سيُربط ويُحذف من الدفتر المحلي فوراً.'
           : `الرصيد القائم: ${formatMoney(outstanding / 100)} ₪\n` +
             (covered > 0
@@ -289,6 +415,77 @@ export function LocalDebtsScreen() {
               : 'لا رصيد مسبق للزبون في صِلة — يُرحَّل كامل الرصيد ديناً\n') +
             'سيُحذف حساب الدفتر المحلي بعد الربط — أعمال الزبون القادمة تسجَّل عبر صِلة مباشرة.';
 
+      // v19 (round-25 #6): the migrate action, extracted so the
+      // CREDIT-balance case can demand a SECOND explicit
+      // confirmation before the local account (and its credit) is
+      // deleted forever.
+      const runMigration = async () => {
+        try {
+          const result = await LocalDebtsRepo.linkAndMigrateToSila(
+            customerId,
+            cid,
+            () => InvoiceService.reserveDebtNumberForRenumber(),
+            async input => {
+              await SilaRepo.enqueue({
+                idempotencyKey: input.idempotencyKey,
+                customerId: input.customerId,
+                customerName: input.customerName,
+                customerPhoneLast4: customerPhone
+                  ? customerPhone.replace(/\D/g, '').slice(-4)
+                  : null,
+                customerCard: null,
+                offlineQr: null,
+                amountMinor: input.amountMinor,
+                posInvoiceRef: input.posInvoiceRef,
+                description: input.description,
+                scannedAt: new Date().toISOString(),
+                creditCoveredMinor: input.creditCoveredMinor,
+              });
+            },
+            creditMinor,
+          );
+          setDetail(null);
+          await reload();
+          void SilaSync.syncNow();
+          if (!result.migrated) {
+            toast(
+              outstanding < 0
+                ? `رُبط ${customerName} بصِلة وحُذف حسابه — تأكدتَ أن الرصيد الدائن ${formatMoney(
+                    Math.abs(outstanding) / 100,
+                  )} صُفّي مع الزبون`
+                : `رُبط ${customerName} بصِلة — لا رصيد قائم، وحُذف حسابه من الدفتر`,
+              'success',
+              6000,
+            );
+          } else if (result.creditCoveredMinor > 0) {
+            toast(
+              `رُحّل رصيد ${customerName} إلى صِلة: ${formatMoney(
+                result.outstandingMinor / 100,
+              )} — غطّى الرصيد المسبق ${formatMoney(
+                result.creditCoveredMinor / 100,
+              )} (سداد في المتجر) والباقي ${formatMoney(
+                result.netMinor / 100,
+              )} دين. حُذف الحساب المحلي`,
+              'success',
+              6500,
+            );
+          } else {
+            toast(
+              `رُحّل رصيد ${customerName} (${formatMoney(
+                result.outstandingMinor / 100,
+              )}) إلى صِلة وحُذف الحساب المحلي`,
+              'success',
+              5000,
+            );
+          }
+        } catch (error) {
+          Alert.alert(
+            'فشل الربط والترحيل',
+            error instanceof Error ? error.message : 'خطأ غير متوقع',
+          );
+        }
+      };
+
       Alert.alert(
         'ربط الحساب وترحيل الديون إلى صِلة',
         `${planLines}\n${
@@ -300,67 +497,26 @@ export function LocalDebtsScreen() {
           {text: 'تراجع', style: 'cancel'},
           {
             text: 'ربط وترحيل',
-            onPress: async () => {
-              try {
-                const result = await LocalDebtsRepo.linkAndMigrateToSila(
-                  customerId,
-                  cid,
-                  () => InvoiceService.reserveDebtNumberForRenumber(),
-                  async input => {
-                    await SilaRepo.enqueue({
-                      idempotencyKey: input.idempotencyKey,
-                      customerId: input.customerId,
-                      customerName: input.customerName,
-                      customerPhoneLast4: customerPhone
-                        ? customerPhone.replace(/\D/g, '').slice(-4)
-                        : null,
-                      customerCard: null,
-                      offlineQr: null,
-                      amountMinor: input.amountMinor,
-                      posInvoiceRef: input.posInvoiceRef,
-                      description: input.description,
-                      scannedAt: new Date().toISOString(),
-                      creditCoveredMinor: input.creditCoveredMinor,
-                    });
-                  },
-                  creditMinor,
-                );
-                setDetail(null);
-                await reload();
-                void SilaSync.syncNow();
-                if (!result.migrated) {
-                  toast(
-                    `رُبط ${customerName} بصِلة — لا رصيد قائم، وحُذف حسابه من الدفتر`,
-                    'success',
-                    5000,
-                  );
-                } else if (result.creditCoveredMinor > 0) {
-                  toast(
-                    `رُحّل رصيد ${customerName} إلى صِلة: ${formatMoney(
-                      result.outstandingMinor / 100,
-                    )} — غطّى الرصيد المسبق ${formatMoney(
-                      result.creditCoveredMinor / 100,
-                    )} (سداد في المتجر) والباقي ${formatMoney(
-                      result.netMinor / 100,
-                    )} دين. حُذف الحساب المحلي`,
-                    'success',
-                    6500,
-                  );
-                } else {
-                  toast(
-                    `رُحّل رصيد ${customerName} (${formatMoney(
-                      result.outstandingMinor / 100,
-                    )}) إلى صِلة وحُذف الحساب المحلي`,
-                    'success',
-                    5000,
-                  );
-                }
-              } catch (error) {
+            onPress: () => {
+              if (outstanding < 0) {
+                // v19 (round-25 #6): the credit balance dies with
+                // the local account — demand a clear-eyed second OK.
                 Alert.alert(
-                  'فشل الربط والترحيل',
-                  error instanceof Error ? error.message : 'خطأ غير متوقع',
+                  'رصيد دائن سيُفقد من الدفاتر',
+                  `لدى ${customerName} رصيد دائن ${formatMoney(
+                    Math.abs(outstanding) / 100,
+                  )} ₪. حذف الحساب المحلي يمحو هذا الرصيد نهائياً من الدفتر (المال بحوزتك أصلاً — لكن الزبون يستحق قيمته).\nهل صافيتَ الزبون (ردّيت له قيمة الرصيد أو اشترى بها)؟`,
+                  [
+                    {text: 'لا، تراجع', style: 'cancel'},
+                    {
+                      text: 'نعم — صُفّي الرصيد، تابع',
+                      onPress: () => void runMigration(),
+                    },
+                  ],
                 );
+                return;
               }
+              void runMigration();
             },
           },
         ],
@@ -493,11 +649,22 @@ export function LocalDebtsScreen() {
                 <Text
                   style={[
                     styles.balanceNum,
-                    {color: entry.outstandingMinor > 0 ? c.danger : c.success},
+                    {
+                      color:
+                        entry.outstandingMinor > 0 ? c.danger : c.success,
+                    },
                   ]}>
-                  {formatMoney(entry.outstandingMinor / 100)}
+                  {formatMoney(
+                    Math.abs(entry.outstandingMinor) / 100,
+                  )}
                 </Text>
-                <Text style={styles.balanceLabel}>دين قائم</Text>
+                <Text style={styles.balanceLabel}>
+                  {entry.outstandingMinor > 0
+                    ? 'دين قائم'
+                    : entry.outstandingMinor === 0
+                    ? 'مسدّد'
+                    : 'رصيد دائن'}
+                </Text>
               </View>
             </TouchableOpacity>
           ))
@@ -522,42 +689,83 @@ export function LocalDebtsScreen() {
             <View style={styles.sheetHandle} />
             <Text style={styles.sheetTitle}>حساب دين جديد — دفتر المتجر</Text>
             <Field
-              label="رقم الهوية *"
+              ref={idFieldRef}
+              label="رقم الهوية (9 أرقام) *"
               value={addId}
-              onChangeText={setAddId}
-              keyboardType="numeric"
+              onChangeText={text => {
+                setAddId(text.replace(/\D/g, '').slice(0, 9));
+                if (addErrors.id) {
+                  setAddErrors({...addErrors, id: undefined});
+                }
+              }}
+              keyboardType="number-pad"
               placeholder="مثال: 401234567"
               returnKeyType="next"
+              onSubmitEditing={() => nameFieldRef.current?.focus()}
             />
+            {addErrors.id ? (
+              <Text style={styles.fieldError}>{addErrors.id}</Text>
+            ) : null}
             <Field
-              label="الاسم *"
+              ref={nameFieldRef}
+              label="الاسم الكامل *"
               value={addName}
-              onChangeText={setAddName}
+              onChangeText={text => {
+                setAddName(text);
+                if (addErrors.name) {
+                  setAddErrors({...addErrors, name: undefined});
+                }
+              }}
               placeholder="اسم الزبون الكامل"
               returnKeyType="next"
+              onSubmitEditing={() => phoneFieldRef.current?.focus()}
             />
+            {addErrors.name ? (
+              <Text style={styles.fieldError}>{addErrors.name}</Text>
+            ) : null}
             <Field
-              label="رقم الجوال"
+              ref={phoneFieldRef}
+              label="رقم الجوال (056 / 059) *"
               value={addPhone}
-              onChangeText={setAddPhone}
+              onChangeText={text => {
+                setAddPhone(text.replace(/\D/g, '').slice(0, 10));
+                if (addErrors.phone) {
+                  setAddErrors({...addErrors, phone: undefined});
+                }
+              }}
               keyboardType="phone-pad"
-              placeholder="05XXXXXXXX"
+              placeholder="0591234567"
               returnKeyType="done"
+              onSubmitEditing={() => {
+                Keyboard.dismiss();
+                void createCustomer();
+              }}
             />
+            {addErrors.phone ? (
+              <Text style={styles.fieldError}>{addErrors.phone}</Text>
+            ) : null}
             <Text style={styles.sheetHint}>
-              رقم الهوية يمنع تكرار الزبون: إن كان له حساب صِلة بنفس الرقم
-              سيظهر تنبيه — ديونته تسجَّل عبر صِلة أو يُربط الحسابان لاحقاً.
+              معايير التسجيل: هوية 9 أرقام بالضبط، وجوال 10 أرقام يبدأ بـ 056
+              أو 059. رقم الهوية يمنع تكرار الزبون: إن كان له حساب صِلة بنفس
+              الرقم سيظهر تنبيه — ديونته تسجَّل عبر صِلة أو يُربط الحسابان
+              لاحقاً.
             </Text>
             <AppButton
               title="إنشاء الحساب"
               icon="plus"
-              onPress={() => void createCustomer()}
+              onPress={() => {
+                Keyboard.dismiss();
+                void createCustomer();
+              }}
               loading={addBusy}
             />
             <AppButton
               title="إلغاء"
               variant="secondary"
-              onPress={() => setAddOpen(false)}
+              onPress={() => {
+                setAddErrors({});
+                setAddOpen(false);
+              }}
             />
           </View>
         </View>
@@ -610,9 +818,15 @@ export function LocalDebtsScreen() {
                         detail.outstandingMinor > 0 ? c.danger : c.success,
                     },
                   ]}>
-                  {formatMoney(detail.outstandingMinor / 100)}
+                  {formatMoney(Math.abs(detail.outstandingMinor) / 100)}
                 </Text>
-                <Text style={styles.detailStatLabel}>دين قائم</Text>
+                <Text style={styles.detailStatLabel}>
+                  {detail.outstandingMinor > 0
+                    ? 'دين قائم'
+                    : detail.outstandingMinor === 0
+                    ? 'مسدّد'
+                    : 'رصيد دائن'}
+                </Text>
               </View>
               <View style={styles.detailStat}>
                 <Text style={styles.detailStatNum}>
@@ -739,7 +953,13 @@ export function LocalDebtsScreen() {
               سداد نقدي — {detail.customer.name}
             </Text>
             <Text style={styles.payBalanceText}>
-              الدين القائم: {formatMoney(detail.outstandingMinor / 100)}
+              {detail.outstandingMinor > 0
+                ? `الدين القائم: ${formatMoney(detail.outstandingMinor / 100)}`
+                : detail.outstandingMinor === 0
+                ? 'لا دين قائم'
+                : `رصيد دائن للزبون: ${formatMoney(
+                    Math.abs(detail.outstandingMinor) / 100,
+                  )}`}
             </Text>
             <Field
               label="المبلغ المستلم (₪)"
@@ -748,10 +968,32 @@ export function LocalDebtsScreen() {
               keyboardType="decimal-pad"
               placeholder="0.00"
               returnKeyType="done"
+              onSubmitEditing={() => {
+                Keyboard.dismiss();
+                void recordPayment();
+              }}
             />
+            {detail.outstandingMinor > 0 ? (
+              <TouchableOpacity
+                style={styles.payQuickBtn}
+                onPress={() =>
+                  setPayAmount(
+                    (detail.outstandingMinor / 100)
+                      .toFixed(2)
+                      .replace(/\.00$/, ''),
+                  )
+                }
+                activeOpacity={0.8}>
+                <Text style={styles.payQuickText}>
+                  السداد الكامل ({formatMoney(detail.outstandingMinor / 100)}{' '}
+                  ₪)
+                </Text>
+              </TouchableOpacity>
+            ) : null}
             <Text style={styles.sheetHint}>
               يُسجَّل السداد في دفتر المتجر فقط (لا يُرفع إلى صِلة) ويخفض
-              الرصيد القائم فوراً.
+              الرصيد فوراً. يمكنك استلام مبلغ أكبر من الدين — يُطفأ الدين
+              والزيادة تبقى رصيداً دائناً للزبون تُخصم من مشترياته القادمة.
             </Text>
             <AppButton
               title="تأكيد السداد"
@@ -785,6 +1027,13 @@ const useStyles = makeStyles(c =>
       lineHeight: 19,
     },
     statsRow: {flexDirection: 'row', gap: spacing.md},
+    fieldError: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: 12,
+      marginTop: -6,
+      marginBottom: 2,
+    },
     addLink: {
       color: c.accent,
       fontFamily: fonts.bold,
@@ -900,6 +1149,15 @@ const useStyles = makeStyles(c =>
       color: c.danger,
       fontFamily: fonts.bold,
       fontSize: 13.5,
+    },
+    payQuickBtn: {
+      alignItems: 'center',
+      paddingVertical: 4,
+    },
+    payQuickText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: 13,
     },
     detailSheet: {
       backgroundColor: c.surface,
