@@ -24,6 +24,7 @@ import {
   BackHandler,
   Dimensions,
   I18nManager,
+  Keyboard,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -44,13 +45,8 @@ import {
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {PinPad} from '../../components/PinPad';
-import {
-  CashService,
-  EXPENSE_CATEGORIES,
-  authorizeWithBiometric,
-  verifyWithdrawalPin,
-  withdrawalSecurityMode,
-} from '../../services/CashService';
+import {CashService, EXPENSE_CATEGORIES, authorizeWithBiometric, verifyWithdrawalPin, withdrawalSecurityMode} from '../../services/CashService';
+import {CashRepo} from '../../database/repositories/CashRepo';
 import {useAppLockStore} from '../../stores/appLockStore';
 import {useToastStore} from '../../stores/toastStore';
 import {usePrinterStore} from '../../stores/printerStore';
@@ -85,6 +81,12 @@ const PERIOD_OPTIONS: {value: PeriodKey; label: string}[] = [
 ];
 
 type KindFilter = 'all' | CashMovementKind;
+
+/** v26 (round-34 #5): the ledger's page size — the on-screen list
+ *  grows by one page per «تحميل المزيد» press instead of mounting
+ *  the whole history (months of accumulated vouchers) in one shot,
+ *  and the total counter tells the merchant there is more below. */
+const LEDGER_PAGE = 60;
 
 const KIND_CHIPS: {key: KindFilter; label: string}[] = [
   {key: 'all', label: 'الكل'},
@@ -126,6 +128,79 @@ function periodRange(key: PeriodKey): {from: string; to: string} {
   }
 }
 
+/** v26 (round-34 #5): keeps a bottom sheet ABOVE the keyboard on
+ * ROMs whose IME never resizes the window (overlay keyboards — the
+ * «تختفي النافذة عند فتح لوحة المفاتيح» complaint): listens to the
+ * REAL keyboard events, lifts the sheet by the exact keyboard height
+ * and shrinks it by the same amount (the form scrolls inside). On
+ * ROMs where adjustResize DOES shrink the window (the window height
+ * measured while the keyboard was open drops by the keyboard's
+ * height), the lift is skipped so the sheet is never compensated
+ * twice. Deterministic on both worlds. */
+function useKeyboardLift(): {liftY: Animated.Value; shrink: Animated.Value} {
+  const liftY = useRef(new Animated.Value(0)).current;
+  const shrink = useRef(new Animated.Value(0)).current;
+  const kbOpen = useRef(false);
+  const closedWindowH = useRef(Dimensions.get('window').height);
+
+  useEffect(() => {
+    const apply = (kbHeight: number) => {
+      const nowWindowH = Dimensions.get('window').height;
+      const alreadyResized =
+        closedWindowH.current - nowWindowH >= kbHeight * 0.6;
+      const lift = alreadyResized ? 0 : -kbHeight;
+      Animated.parallel([
+        Animated.timing(liftY, {
+          toValue: lift,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+        Animated.timing(shrink, {
+          toValue: lift,
+          duration: 180,
+          useNativeDriver: false,
+        }),
+      ]).start();
+    };
+    const reset = () => {
+      Animated.parallel([
+        Animated.timing(liftY, {
+          toValue: 0,
+          duration: 160,
+          useNativeDriver: true,
+        }),
+        Animated.timing(shrink, {
+          toValue: 0,
+          duration: 160,
+          useNativeDriver: false,
+        }),
+      ]).start();
+    };
+    const show = Keyboard.addListener('keyboardDidShow', e => {
+      kbOpen.current = true;
+      apply(e.endCoordinates.height);
+    });
+    const hide = Keyboard.addListener('keyboardDidHide', () => {
+      kbOpen.current = false;
+      // Re-baseline in case the device rotated while typing.
+      closedWindowH.current = Dimensions.get('window').height;
+      reset();
+    });
+    const dims = Dimensions.addEventListener('change', ({window}) => {
+      if (!kbOpen.current) {
+        closedWindowH.current = window.height;
+      }
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+      dims.remove();
+    };
+  }, [liftY, shrink]);
+
+  return {liftY, shrink};
+}
+
 export function CashMovementsScreen() {
   const c = useThemeColors();
   const styles = useStyles();
@@ -135,6 +210,8 @@ export function CashMovementsScreen() {
   const [period, setPeriod] = useState<PeriodKey>('month');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [rows, setRows] = useState<CashMovementRecord[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [totals, setTotals] = useState<CashMovementTotals | null>(null);
   const [drawerMinor, setDrawerMinor] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -150,16 +227,25 @@ export function CashMovementsScreen() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [statement, drawer] = await Promise.all([
+      // v26 (round-34 #5): the ledger loads ONE page (newest first)
+      // plus the period's TOTAL count — years of accumulated
+      // vouchers no longer mount in one shot; «تحميل المزيد» appends
+      // the next page on demand.
+      const [page, count, totalsAll, drawer] = await Promise.all([
+        CashRepo.list({
+          from: range.from,
+          to: range.to,
+          kind: kindFilter,
+          limit: LEDGER_PAGE,
+          offset: 0,
+        }),
+        CashRepo.countFor(range.from, range.to, kindFilter),
         CashService.statement(range.from, range.to),
         CashService.drawerNowMinor(),
       ]);
-      setRows(
-        kindFilter === 'all'
-          ? statement.rows
-          : statement.rows.filter(row => row.kind === kindFilter),
-      );
-      setTotals(statement.totals);
+      setRows(page);
+      setTotalCount(count);
+      setTotals(totalsAll.totals);
       setDrawerMinor(drawer);
     } catch (error) {
       toast(
@@ -170,6 +256,40 @@ export function CashMovementsScreen() {
       setLoading(false);
     }
   }, [range, kindFilter, toast]);
+
+  /** v26 (round-34 #5): appends the next page of the ledger. */
+  const loadMore = useCallback(async () => {
+    if (loadingMore || loading || rows.length >= totalCount) {
+      return;
+    }
+    setLoadingMore(true);
+    try {
+      const page = await CashRepo.list({
+        from: range.from,
+        to: range.to,
+        kind: kindFilter,
+        limit: LEDGER_PAGE,
+        offset: rows.length,
+      });
+      setRows(prev =>
+        page.length === 0
+          ? prev
+          : [...prev, ...page.filter(r => !prev.some(p => p.local_id === r.local_id))],
+      );
+      if (page.length < LEDGER_PAGE) {
+        // Everything loaded — pin the counter to the real total.
+        const count = await CashRepo.countFor(range.from, range.to, kindFilter);
+        setTotalCount(count);
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'تعذر تحميل المزيد',
+        'error',
+      );
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, loading, rows.length, totalCount, range, kindFilter, toast]);
 
   useFocusEffect(
     useCallback(() => {
@@ -433,7 +553,11 @@ export function CashMovementsScreen() {
         {/* ── The movements ledger ── */}
         <SectionTitle
           title="سجل الحركات"
-          hint="سندات مرقمة غير قابلة للتعديل — مسار تدقيق كامل"
+          hint={
+            totalCount > 0
+              ? `عرض ${rows.length} من ${totalCount} سند — مرقمة ولا تُعدّل`
+              : 'سندات مرقمة غير قابلة للتعديل — مسار تدقيق كامل'
+          }
         />
         {loading ? (
           <View style={styles.centerBox}>
@@ -493,6 +617,31 @@ export function CashMovementsScreen() {
                 </View>
               );
             })}
+            {/* v26 (round-34 #5): the next page — big periods grow on
+                demand; the counter in the section title always says
+                how much is left below. */}
+            {rows.length < totalCount ? (
+              <TouchableOpacity
+                style={styles.loadMoreBtn}
+                onPress={() => void loadMore()}
+                disabled={loadingMore}
+                activeOpacity={0.7}>
+                {loadingMore ? (
+                  <ActivityIndicator size="small" color={c.accent} />
+                ) : (
+                  <>
+                    <Icon name="download" size={15} color={c.accent} />
+                    <Text style={styles.loadMoreText}>
+                      تحميل المزيد ({totalCount - rows.length} سند متبقية)
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            ) : totalCount > LEDGER_PAGE ? (
+              <Text style={styles.ledgerEndText}>
+                عرض كل سندات الفترة ({totalCount})
+              </Text>
+            ) : null}
           </View>
         )}
 
@@ -594,7 +743,19 @@ function MovementSheet({
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
 
-  const entrance = useRef(new Animated.Value(0)).current;
+  // v26 (round-34 #5): the keyboard lift — the sheet rises above the
+  // IME on overlay-keyboard ROMs and shrinks by the same height (the
+  // form scrolls inside), so the amount field, the note and the
+  // confirm button stay reachable. On adjustResize ROMs the lift
+  // self-disarms (see useKeyboardLift).
+  const {liftY, shrink} = useKeyboardLift();
+
+  // v26 (round-34 #4): instant render (no entrance animation — the
+  // ROM lesson from the return sheet) + a 400ms close-guard so a
+  // bounced opening touch on the freshly mounted backdrop can never
+  // kill the window («الضغط أول مرة وكأنه فتح وأغلق بسرعة»).
+  const mountedAt = useRef(Date.now());
+
   const [amountText, setAmountText] = useState('');
   const [category, setCategory] = useState(
     mode === 'expense' ? EXPENSE_CATEGORIES[0] : mode === 'withdrawal' ? 'سحب رصيد' : 'إيداع نقدي',
@@ -619,20 +780,27 @@ function MovementSheet({
   const securityMode = withdrawalSecurityMode();
   const hasPin = useAppLockStore(s => s.pinHash != null);
 
-  // Soft entrance (the v25 return-sheet lesson).
-  useEffect(() => {
-    entrance.setValue(0);
-    Animated.timing(entrance, {
-      toValue: 1,
-      duration: 150,
-      useNativeDriver: true,
-    }).start();
-  }, [entrance]);
+  // v26: the guarded backdrop close (needs busy/authStage above).
+  const backdropPressGuarded = useCallback(() => {
+    if (busy || authStage === 'authorizing') {
+      return;
+    }
+    if (Date.now() - mountedAt.current < 400) {
+      return; // the opening touch's bounce — ignore it.
+    }
+    onClose();
+  }, [busy, authStage, onClose]);
 
-  // Hardware back closes (unless mid-authorization).
+  // Hardware back closes (unless mid-authorization). v26: guarded
+  // like the backdrop — a spurious back right after opening can no
+  // longer kill the fresh sheet.
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!busy && authStage !== 'authorizing') {
+      if (
+        !busy &&
+        authStage !== 'authorizing' &&
+        Date.now() - mountedAt.current >= 400
+      ) {
         onClose();
       }
       return true;
@@ -761,28 +929,18 @@ function MovementSheet({
   const gate = mode === 'withdrawal' && securityMode !== 'none' && authStage !== 'passed';
 
   return (
-    <Animated.View style={[sheetStyles(c).backdrop, {opacity: entrance}]}>
-      <Pressable
-        style={{flex: 1}}
-        onPress={() => {
-          if (!busy && authStage !== 'authorizing') {
-            onClose();
-          }
-        }}
-      />
+    <View style={sheetStyles(c).backdrop}>
+      <Pressable style={{flex: 1}} onPress={backdropPressGuarded} />
+      {/* v26 (round-34 #5): AnimatedHeight via the shrink value — the
+          sheet rises by liftY and its height shrinks by the same
+          amount while the keyboard is open, so the form stays fully
+          visible and scrollable above the IME. */}
       <Animated.View
         style={[
           sheetStyles(c).sheet,
-          {height: sheetHeight},
           {
-            transform: [
-              {
-                translateY: entrance.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [26, 0],
-                }),
-              },
-            ],
+            height: Animated.add(sheetHeight, shrink),
+            transform: [{translateY: liftY}],
           },
         ]}>
         <Pressable style={{flex: 1}} onPress={() => undefined} disabled={busy}>
@@ -1036,7 +1194,7 @@ function MovementSheet({
           )}
         </Pressable>
       </Animated.View>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -1384,6 +1542,31 @@ const useStyles = makeStyles(c =>
     },
     centerBox: {paddingVertical: spacing.xxl},
     ledger: {gap: spacing.sm},
+    /** v26 (round-34 #5): the load-more footer of the paged ledger. */
+    loadMoreBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      borderWidth: 1.5,
+      borderStyle: 'dashed',
+      borderColor: c.accentSoft,
+      borderRadius: radius.md,
+      paddingVertical: 14,
+      backgroundColor: c.surface,
+    },
+    loadMoreText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    ledgerEndText: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'center',
+      paddingVertical: 10,
+    },
     ledgerRow: {
       flexDirection: 'row',
       alignItems: 'center',

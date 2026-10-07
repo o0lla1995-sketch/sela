@@ -503,14 +503,41 @@ export const SaleRepo = {
       // 5) The DEBT reversal — same transaction, no half states.
       let debtAdjustedMinor = 0;
       if (input.book === 'local') {
-        const adjusted = await tx.execute(
-          `UPDATE local_debts
-             SET amount_minor = MAX(0, amount_minor - ?)
-           WHERE invoice_ref = ? AND migrated = 0`,
-          [refundMinor, input.invoiceRef],
+        // v26 (round-34 #2): local_debts.amount_minor carries
+        // CHECK (amount_minor > 0) — the old blind
+        // `SET amount_minor = MAX(0, amount_minor - ?)` CRASHED with
+        // an SQL CHECK error the moment a return zeroed the debt
+        // (returning ALL the items of an INV-L invoice), rolling the
+        // whole transaction back — «لا يسمح بإرجاع كل الأصناف جميعا».
+        // The fix mirrors the sila pending-queue discipline: read the
+        // current amount, shrink it while it stays positive, DELETE
+        // the row when the return consumes it entirely (the invoice
+        // + the sale_returns snapshot keep the full history, and the
+        // customer disappears from the debtors list owing nothing).
+        const localRow = await tx.execute(
+          'SELECT amount_minor FROM local_debts WHERE invoice_ref = ? AND migrated = 0',
+          [input.invoiceRef],
         );
-        if (adjusted.rowsAffected === 1) {
-          debtAdjustedMinor = refundMinor;
+        const localDebt = localRow.rows?._array?.[0] as
+          | {amount_minor?: number | null}
+          | undefined;
+        if (localDebt != null) {
+          const currentLocal = Number(localDebt.amount_minor ?? 0);
+          if (refundMinor >= currentLocal) {
+            await tx.execute(
+              'DELETE FROM local_debts WHERE invoice_ref = ? AND migrated = 0',
+              [input.invoiceRef],
+            );
+            debtAdjustedMinor = currentLocal;
+          } else {
+            await tx.execute(
+              `UPDATE local_debts
+                 SET amount_minor = amount_minor - ?
+               WHERE invoice_ref = ? AND migrated = 0`,
+              [refundMinor, input.invoiceRef],
+            );
+            debtAdjustedMinor = refundMinor;
+          }
         }
       } else if (input.book === 'sila') {
         if (input.silaReversal != null) {

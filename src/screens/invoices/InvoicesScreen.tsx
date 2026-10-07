@@ -16,7 +16,6 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Animated,
   BackHandler,
   Clipboard,
   Dimensions,
@@ -356,6 +355,15 @@ export function InvoicesScreen() {
               // v23 (round-29 #2): a RETURN row — its own look, so a
               // refund can never be mistaken for a sale.
               const isReturn = row.return_kind != null;
+              // v26 (round-34 #1): the status badges moved OFF the
+              // main row line into their own wrapped line under the
+              // invoice number. With the old layout every badge was a
+              // DIRECT child of the horizontal row — the moment a
+              // status changed and «منها مرتجع» appeared, five chips
+              // + the amount fought for one line and the card blew up
+              // «كبيرة جدا ومشوهة». Now the main line NEVER changes
+              // shape (icon + number + amount), and badges stack
+              // neatly below, wrapping to a second line if needed.
               return (
                 <TouchableOpacity
                   key={row.id}
@@ -375,79 +383,106 @@ export function InvoicesScreen() {
                       color={isReturn ? c.warning : c.accent}
                     />
                   </View>
-                  <View style={{flex: 1}}>
-                    <Text style={styles.rowInvoice}>{row.invoice_number}</Text>
+                  <View style={{flex: 1, minWidth: 0}}>
+                    <View style={styles.rowTitleLine}>
+                      <Text
+                        style={styles.rowInvoice}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit={false}>
+                        {row.invoice_number}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.rowAmount,
+                          isReturn ? {color: c.warning} : null,
+                        ]}
+                        numberOfLines={1}>
+                        {formatMoney(row.total_amount)}
+                      </Text>
+                    </View>
                     <Text style={styles.rowMeta}>
                       {formatDateTime(row.created_at)} · {row.itemsCount} صنف
                     </Text>
+                    {/* The badges line — compact chips, wrapping safely
+                        without ever stretching the card. */}
+                    <View style={styles.rowBadges}>
+                      {/* v23 (round-29 #2): a return receipt — its badge
+                          says which book it reversed. */}
+                      {isReturn ? (
+                        <View style={[styles.debtChip, styles.returnChip]}>
+                          <Icon name="undo" size={10} color={c.warning} />
+                          <Text
+                            style={[styles.debtChipText, {color: c.warning}]}>
+                            مرتجع
+                          </Text>
+                        </View>
+                      ) : row.returned_minor != null &&
+                        row.returned_minor > 0 ? (
+                        <View style={[styles.debtChip, styles.returnChip]}>
+                          <Icon name="undo" size={10} color={c.warning} />
+                          <Text
+                            style={[styles.debtChipText, {color: c.warning}]}>
+                            منها مرتجع
+                          </Text>
+                        </View>
+                      ) : null}
+                      {/* v14 (round-20 #3): INV-D numbers are debt invoices
+                          by construction — badge them even if the queue row
+                          was somehow lost; queue membership (older INV-
+                          format debts) keeps working as before. */}
+                      {!isReturn &&
+                      (debtRefs.has(row.invoice_number) ||
+                        row.invoice_number.startsWith('INV-D-') ||
+                        row.invoice_number.startsWith('INV-L-')) ? (
+                        <View style={styles.debtChip}>
+                          <Icon name="qrFrame" size={10} color={c.warning} />
+                          <Text style={styles.debtChipText}>دين</Text>
+                        </View>
+                      ) : null}
+                      {/* v20: INV-V numbers are VOUCHER redemptions — their
+                          own chip so the type is visible at a glance (the
+                          naming-by-type requirement). */}
+                      {!isReturn && row.invoice_number.startsWith('INV-V-') ? (
+                        <View style={[styles.debtChip, styles.voucherChip]}>
+                          <Icon name="ticket" size={10} color={c.info} />
+                          <Text style={[styles.debtChipText, {color: c.info}]}>
+                            قسيمة
+                          </Text>
+                        </View>
+                      ) : null}
+                      {/* v20: an INV-D debt invoice the prepaid credit
+                          (partly) covered — marked «رصيد» so the merchant
+                          reads instantly it is not a pure debt. */}
+                      {!isReturn && prepaidRefs.has(row.invoice_number) ? (
+                        <View style={[styles.debtChip, styles.prepaidChip]}>
+                          <Icon name="wallet" size={10} color={c.success} />
+                          <Text
+                            style={[styles.debtChipText, {color: c.success}]}>
+                            رصيد
+                          </Text>
+                        </View>
+                      ) : null}
+                      {!isReturn ? (
+                        <View
+                          style={[
+                            styles.debtChip,
+                            row.payment_type === 'WHOLESALE'
+                              ? styles.wholesaleChip
+                              : styles.retailChip,
+                          ]}>
+                          <Text
+                            style={[
+                              styles.debtChipText,
+                              row.payment_type === 'WHOLESALE'
+                                ? {color: c.info}
+                                : {color: c.textDim},
+                            ]}>
+                            {row.payment_type === 'WHOLESALE' ? 'جملة' : 'مفرق'}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
                   </View>
-                  {/* v23 (round-29 #2): a return receipt — its badge
-                      says which book it reversed. */}
-                  {isReturn ? (
-                    <View style={[styles.debtChip, styles.returnChip]}>
-                      <Icon name="undo" size={11} color={c.warning} />
-                      <Text style={[styles.debtChipText, {color: c.warning}]}>
-                        مرتجع
-                      </Text>
-                    </View>
-                  ) : row.returned_minor != null && row.returned_minor > 0 ? (
-                    <View style={[styles.debtChip, styles.returnChip]}>
-                      <Icon name="undo" size={11} color={c.warning} />
-                      <Text style={[styles.debtChipText, {color: c.warning}]}>
-                        منها مرتجع
-                      </Text>
-                    </View>
-                  ) : null}
-                  {/* v14 (round-20 #3): INV-D numbers are debt invoices
-                      by construction — badge them even if the queue row
-                      was somehow lost; queue membership (older INV-
-                      format debts) keeps working as before. */}
-                  {!isReturn &&
-                  (debtRefs.has(row.invoice_number) ||
-                    row.invoice_number.startsWith('INV-D-') ||
-                    row.invoice_number.startsWith('INV-L-')) ? (
-                    <View style={styles.debtChip}>
-                      <Icon name="qrFrame" size={11} color={c.warning} />
-                      <Text style={styles.debtChipText}>دين</Text>
-                    </View>
-                  ) : null}
-                  {/* v20: INV-V numbers are VOUCHER redemptions — their
-                      own chip so the type is visible at a glance (the
-                      naming-by-type requirement). */}
-                  {!isReturn && row.invoice_number.startsWith('INV-V-') ? (
-                    <View style={[styles.debtChip, styles.voucherChip]}>
-                      <Icon name="ticket" size={11} color={c.info} />
-                      <Text style={[styles.debtChipText, {color: c.info}]}>
-                        قسيمة
-                      </Text>
-                    </View>
-                  ) : null}
-                  {/* v20: an INV-D debt invoice the prepaid credit
-                      (partly) covered — marked «رصيد» so the merchant
-                      reads instantly it is not a pure debt. */}
-                  {!isReturn && prepaidRefs.has(row.invoice_number) ? (
-                    <View style={[styles.debtChip, styles.prepaidChip]}>
-                      <Icon name="wallet" size={11} color={c.success} />
-                      <Text style={[styles.debtChipText, {color: c.success}]}>
-                        رصيد
-                      </Text>
-                    </View>
-                  ) : null}
-                  {!isReturn ? (
-                    <Badge
-                      label={row.payment_type === 'WHOLESALE' ? 'جملة' : 'مفرق'}
-                      tone={
-                        row.payment_type === 'WHOLESALE' ? 'info' : 'neutral'
-                      }
-                    />
-                  ) : null}
-                  <Text
-                    style={[
-                      styles.rowAmount,
-                      isReturn ? {color: c.warning} : null,
-                    ]}>
-                    {formatMoney(row.total_amount)}
-                  </Text>
                 </TouchableOpacity>
               );
             })}
@@ -725,6 +760,10 @@ export function InvoiceDetailScreen() {
   // v23 (round-29 #2): can this invoice still take a return? Real
   //  invoices only (never a RET itself, never INV-V) and only while
   //  something of its value remains un-returned.
+  //  v26 (round-34 #2): 1-agora tolerance — the pro-rata rounding of
+  //  refund_minor (Σ round(line×ratio) vs round(Σ)) can leave the
+  //  accumulator ±1 agora off the invoice total; without the epsilon
+  //  the button could stay on a fully-returned invoice.
   const totalMinor = Math.round(sale.total_amount * 100);
   const returnedSoFar =
     returns.reduce((sum, r) => sum + r.refund_minor, 0) ?? 0;
@@ -732,7 +771,7 @@ export function InvoiceDetailScreen() {
     sale.return_kind == null &&
     !sale.invoice_number.startsWith('INV-V-') &&
     !sale.invoice_number.startsWith('RET-') &&
-    returnedSoFar < totalMinor;
+    totalMinor - returnedSoFar > 1;
 
   return (
     <View style={styles.screen}>
@@ -1294,15 +1333,29 @@ function ReturnSheet({
   const toast = useToastStore(state => state.show);
   const settings = useSettingsStore(state => state.settings);
 
-  // v25 (round-32 #1): a STABLE height + a soft fade/slide entrance.
-  // The old sheet opened with maxHeight and a tiny spinner, then
-  // JUMPED to the full-height list in one frame the moment the
-  // (fast, local) prepareReturn resolved — on this ROM that read as
-  // TWO windows flashing («نافذة تظهر لحظة ثم تغطيها نافذة الإرجاع
-  // قبل رؤيتها»). A fixed height means loading → list is ONE
-  // window whose CONTENT changes, and the 140ms entrance removes
-  // the abrupt flash entirely.
-  const entrance = useRef(new Animated.Value(0)).current;
+  // v26 (round-34 #4): NO entrance animation and a 400ms close-guard.
+  // The v25 fade+slide entrance still read as «فتح وأغلق بسرعة» on the
+  // first press of this ROM: the sheet mounted at opacity 0 while the
+  // JS thread ran the prepareReturn queries, the first native-driven
+  // animation frames dropped, and any stray/bounced touch landed on
+  // the just-mounted backdrop Pressable → instant close. Now the sheet
+  // renders at FULL opacity in the very first frame (nothing to
+  // glitch), and the backdrop ignores every press within 400ms of
+  // mount — the bounced second tap of a cold digitizer can no longer
+  // close the window it just opened.
+  const mountedAt = useRef(0);
+  if (visible && mountedAt.current === 0) {
+    mountedAt.current = Date.now();
+  }
+  if (!visible) {
+    mountedAt.current = 0;
+  }
+  const backdropPressGuarded = useCallback(() => {
+    if (Date.now() - mountedAt.current < 400) {
+      return; // the opening touch's bounce — ignore it.
+    }
+    onClose();
+  }, [onClose]);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1470,33 +1523,20 @@ function ReturnSheet({
 
   // v24 (round-31 #1): hardware back closes the sheet — the
   // replacement for the Modal's onRequestClose (an INLINE overlay
-  // has none).
+  // has none). v26: guarded like the backdrop — a spurious back
+  // event right after opening can no longer kill the fresh sheet.
   useEffect(() => {
     if (!visible) {
       return;
     }
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!busy) {
+      if (!busy && Date.now() - mountedAt.current >= 400) {
         onClose();
       }
       return true;
     });
     return () => sub.remove();
   }, [visible, busy, onClose]);
-
-  // v25 (round-32 #1): ONE soft entrance animation (fade + slight
-  // rise) — replaces the instant mount jump.
-  useEffect(() => {
-    if (!visible) {
-      return;
-    }
-    entrance.setValue(0);
-    Animated.timing(entrance, {
-      toValue: 1,
-      duration: 150,
-      useNativeDriver: true,
-    }).start();
-  }, [visible, entrance]);
 
   // v24 (round-31 #1): INLINE absolute overlay — NEVER a RN Modal
   // (a Modal rendered EMPTY/BLACK on this ROM right after the native
@@ -1510,34 +1550,12 @@ function ReturnSheet({
   const sheetHeight = Math.round(Dimensions.get('window').height * 0.72);
 
   return (
-    <Animated.View
-      style={[
-        retStyles(c).backdrop,
-        {opacity: entrance},
-      ]}>
+    <View style={retStyles(c).backdrop}>
       <Pressable
         style={{flex: 1}}
-        onPress={() => {
-          if (!busy) {
-            onClose();
-          }
-        }}
+        onPress={backdropPressGuarded}
       />
-      <Animated.View
-        style={[
-          retStyles(c).sheet,
-          {height: sheetHeight},
-          {
-            transform: [
-              {
-                translateY: entrance.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [26, 0],
-                }),
-              },
-            ],
-          },
-        ]}>
+      <View style={[retStyles(c).sheet, {height: sheetHeight}]}>
         <Pressable
           style={{flex: 1}}
           onPress={() => undefined}
@@ -1709,8 +1727,8 @@ function ReturnSheet({
           </>
         )}
         </Pressable>
-      </Animated.View>
-    </Animated.View>
+      </View>
+    </View>
   );
 }
 
@@ -1977,7 +1995,7 @@ const useStyles = makeStyles(c =>
     // List rows
     row: {
       flexDirection: 'row',
-      alignItems: 'center',
+      alignItems: 'flex-start',
       gap: spacing.md,
       backgroundColor: c.surface,
       borderWidth: 1,
@@ -1993,17 +2011,35 @@ const useStyles = makeStyles(c =>
       alignItems: 'center',
       justifyContent: 'center',
     },
+    /** v26 (round-34 #1): invoice number + amount ALWAYS on one line —
+     *  badges can never squeeze them again. */
+    rowTitleLine: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: spacing.sm,
+    },
     rowInvoice: {
       color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.caption,
       fontVariant: ['tabular-nums'],
+      flexShrink: 1,
     },
     rowMeta: {
       color: c.textFaint,
       fontFamily: fonts.regular,
       fontSize: typography.small,
       marginTop: 1,
+    },
+    /** v26 (round-34 #1): the wrapped badges line — chips stack and
+     *  wrap; the card grows a badge line at most, never distorts. */
+    rowBadges: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: 5,
+      marginTop: 6,
     },
     rowAmount: {
       color: c.accent,
@@ -2019,7 +2055,8 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.warningSoft,
       borderRadius: 6,
       paddingHorizontal: 6,
-      paddingVertical: 3,
+      paddingVertical: 2.5,
+      alignSelf: 'flex-start',
     },
     /** v20: the قسيمة chip (info tint) + the رصيد chip (success tint). */
     voucherChip: {
@@ -2027,6 +2064,14 @@ const useStyles = makeStyles(c =>
     },
     prepaidChip: {
       backgroundColor: c.successSoft,
+    },
+    /** v26: the pricing chip — جملة keeps the info tint, مفرق turns
+     *  neutral so it never fights the status chips for attention. */
+    wholesaleChip: {
+      backgroundColor: c.infoSoft,
+    },
+    retailChip: {
+      backgroundColor: c.surfaceHi,
     },
     debtChipText: {
       color: c.warning,

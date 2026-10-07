@@ -101,6 +101,12 @@ export interface CashDebtsBundle {
   depositsCount: number;
   /** v25: صافي النقد بالفترة بعد المصروفات والمسحوبات. */
   netCashAfterMovements: number;
+  /** v26 (round-34 #3): لقطة الآن — النقد المتوقع بالخزينة (نفس
+   *  معادلة الرئيسية، لكن بالفترة/الكل حسب الخزينة اللحظية). */
+  cashNowMinor: number;
+  /** v26 (round-34 #3): إجمالي الخصومات بالفترة — بطاقتها الخاصة
+   *  في ملخص المبيعات حتى يرى التاجر «تفاصيل الخصم» صريحة. */
+  discountTotal: number;
 }
 
 export interface ReportBundle {
@@ -211,6 +217,8 @@ export const ReportService = {
       voucherSettlementsReceived,
       campaignTotals,
       cashMovements,
+      pendingReversals,
+      treasuryNow,
     ] = await Promise.all([
       ReportRepo.summary(range),
       ReportRepo.topProducts(range, 10),
@@ -237,6 +245,13 @@ export const ReportService = {
       VouchersRepo.campaignsTotals(),
       // v25 (round-32 #3): the cash-movements ledger of the period.
       CashRepo.totalsFor(range.from, range.to),
+      // v26 (round-34 #3): reversal payments not yet on the صِلة
+      // server — netted out of the LIVE standing debt so a return
+      // shows immediately (not only after the next sync cycle).
+      SilaRepo.pendingReversalsMinor(),
+      // v26 (round-34 #6): the live «النقد بالخزينة الآن» cell in
+      // the الدين القائم الآن grid of the reports page.
+      this.treasurySnapshot(),
     ]);
 
     const topByProfit = [...topByRevenue]
@@ -289,8 +304,15 @@ export const ReportService = {
         localDebtorsCount: localBook.debtorsCount,
         // Server pos part + this device's not-yet-uploaded debt rows
         // (store-origin by definition — never understate offline).
-        silaOutstandingMinor:
-          silaTotals.posTotalMinor + debtQueueTotals.pendingMinor,
+        // v26 (round-34 #3): NET OF PENDING RETURN REVERSALS — the
+        // merchant reads the LIVE debt a synced-debt return created,
+        // the moment the return receipt is issued.
+        silaOutstandingMinor: Math.max(
+          0,
+          silaTotals.posTotalMinor +
+            debtQueueTotals.pendingMinor -
+            pendingReversals,
+        ),
         silaDebtorsCount:
           silaTotals.debtorsCount + (debtQueueTotals.pendingCount > 0 ? 1 : 0),
         appOriginOutstandingMinor: silaTotals.appTotalMinor,
@@ -315,6 +337,10 @@ export const ReportService = {
           cashMovements.depositsMinor / 100 -
           cashMovements.expensesMinor / 100 -
           cashMovements.withdrawalsMinor / 100,
+        // v26 (round-34): the live drawer number + the period's
+        // discounts (its own KPI — «تفاصيل الخصم بعد الإرجاعات»).
+        cashNowMinor: Math.round(treasuryNow.cashTotal * 100),
+        discountTotal: summary.discountTotal,
       },
     };
   },

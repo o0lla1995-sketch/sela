@@ -71,15 +71,23 @@ const QUICK_ACTIONS: {
     | 'Stocktake'
     | 'Invoices'
     | 'Sila'
-    | 'LocalDebts';
+    | 'LocalDebts'
+    | 'CashMovements';
   accent?: boolean;
 }[] = [
   {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
   {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
   {key: 'invoices', label: 'الفواتير', icon: 'inbox', target: 'Invoices'},
   {key: 'debts', label: 'الديون', icon: 'book', target: 'LocalDebts'},
+  // v26 (round-34 #6): الخزينة gets its own shortcut — the expenses /
+  // withdrawals / deposits center is one tap away from the dashboard
+  // (it left the reports header to live HERE).
+  {key: 'cash', label: 'الخزينة', icon: 'wallet', target: 'CashMovements'},
   {key: 'stocktake', label: 'الجرد', icon: 'clipboard', target: 'Stocktake'},
   {key: 'reports', label: 'التقارير', icon: 'chart', target: 'Reports'},
+  // v26: دفتر صِلة joins the quick actions WHILE PAIRED (the same
+  // gate as its Home links — never a dead shortcut when unlinked).
+  {key: 'sila', label: 'دفتر صِلة', icon: 'qrFrame', target: 'Sila'},
 ];
 
 export function HomeScreen() {
@@ -121,6 +129,10 @@ export function HomeScreen() {
     count: number;
     minor: number;
   } | null>(null);
+  // v26 (round-34 #6): the money card's breakdown starts COLLAPSED —
+  // «اظهار فقط النقد بالخزينة والدين القائم وتظهر باقي التفاصيل عند
+  // الضغط» — one tap expands the full sources/deductions list.
+  const [moneyDetailsOpen, setMoneyDetailsOpen] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -139,12 +151,19 @@ export function HomeScreen() {
         debtorsCount: localTotals.debtorsCount,
       });
       // Sila-side figures — refreshed live, read only when paired.
-      const [silaTotals, queueTotals] = await Promise.all([
+      // v26 (round-34 #3): pendingReversals — synced-debt returns not
+      // yet uploaded — are netted out so «الدين القائم» moves the
+      // MOMENT a return receipt is issued, not after the next sync.
+      const [silaTotals, queueTotals, pendingReversals] = await Promise.all([
         SilaRepo.customersOutstandingTotal(),
         SilaRepo.totals(),
+        SilaRepo.pendingReversalsMinor(),
       ]);
       setSilaDebt({
-        outstandingMinor: silaTotals.posTotalMinor + queueTotals.pendingMinor,
+        outstandingMinor: Math.max(
+          0,
+          silaTotals.posTotalMinor + queueTotals.pendingMinor - pendingReversals,
+        ),
         debtorsCount:
           silaTotals.debtorsCount + (queueTotals.pendingCount > 0 ? 1 : 0),
         lastSyncedAt: silaTotals.lastSyncedAt,
@@ -367,8 +386,28 @@ export function HomeScreen() {
             </View>
           </View>
 
-          {/* The short breakdown — sources of the two numbers above. */}
-          <View style={styles.breakdownBox}>
+          {/* v26 (round-34 #6): the breakdown starts COLLAPSED — only
+              the two hero numbers show; one tap drops the full list
+              of sources/deductions down («لتوفير مساحة في الصفحة
+              الرئيسية»). */}
+          <TouchableOpacity
+            style={styles.detailsToggle}
+            onPress={() => setMoneyDetailsOpen(open => !open)}
+            activeOpacity={0.7}>
+            <Icon
+              name={moneyDetailsOpen ? 'chevronDown' : 'chevronLeft'}
+              size={14}
+              color={c.textDim}
+            />
+            <Text style={styles.detailsToggleText}>
+              {moneyDetailsOpen
+                ? 'إخفاء تفاصيل الخزينة والديون'
+                : 'تفاصيل الخزينة والديون (المصادر والخصومات)'}
+            </Text>
+          </TouchableOpacity>
+
+          {moneyDetailsOpen ? (
+            <View style={styles.breakdownBox}>
             <View style={styles.breakdownRow}>
               <Text style={styles.breakdownLabel}>
                 مبيعات نقدية (كامل السجل)
@@ -474,7 +513,8 @@ export function HomeScreen() {
                 </Text>
               </View>
             ) : null}
-          </View>
+            </View>
+          ) : null}
 
           {paired ? (
             <>
@@ -514,36 +554,39 @@ export function HomeScreen() {
         {/* ── Quick actions ──────────────────────────────────── */}
         <SectionTitle title="إجراءات سريعة" />
         <View style={styles.quickGrid}>
-          {QUICK_ACTIONS.map(action => (
-            <TouchableOpacity
-              key={action.key}
-              style={[
-                styles.quickCard,
-                action.accent
-                  ? {backgroundColor: c.accent, borderColor: c.accent}
-                  : null,
-              ]}
-              onPress={() =>
-                navigation.navigate(
-                  action.target as never,
-                  action.target === 'ProductForm' ? {} : undefined,
-                )
-              }
-              activeOpacity={0.8}>
-              <Icon
-                name={action.icon}
-                size={26}
-                color={action.accent ? c.onAccent : c.accent}
-              />
-              <Text
+          {/* v26: دفتر صِلة appears only while actually paired. */}
+          {QUICK_ACTIONS.filter(action => action.key !== 'sila' || paired).map(
+            action => (
+              <TouchableOpacity
+                key={action.key}
                 style={[
-                  styles.quickLabel,
-                  action.accent ? {color: c.onAccent} : null,
-                ]}>
-                {action.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
+                  styles.quickCard,
+                  action.accent
+                    ? {backgroundColor: c.accent, borderColor: c.accent}
+                    : null,
+                ]}
+                onPress={() =>
+                  navigation.navigate(
+                    action.target as never,
+                    action.target === 'ProductForm' ? {} : undefined,
+                  )
+                }
+                activeOpacity={0.8}>
+                <Icon
+                  name={action.icon}
+                  size={26}
+                  color={action.accent ? c.onAccent : c.accent}
+                />
+                <Text
+                  style={[
+                    styles.quickLabel,
+                    action.accent ? {color: c.onAccent} : null,
+                  ]}>
+                  {action.label}
+                </Text>
+              </TouchableOpacity>
+            ),
+          )}
         </View>
 
         {/* ── Stock alerts ───────────────────────────────────── */}
@@ -749,6 +792,24 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.micro + 1,
       textAlign: 'center',
+    },
+    /** v26 (round-34 #6): the breakdown toggle — a slim, quiet row. */
+    detailsToggle: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: 8,
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    detailsToggleText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 2,
+      flex: 0,
     },
     breakdownBox: {
       backgroundColor: c.surfaceHi,

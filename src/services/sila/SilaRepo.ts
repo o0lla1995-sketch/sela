@@ -960,6 +960,29 @@ export const SilaRepo = {
     }
   },
 
+  /** v26 (round-34 #3): reversal payments ENQUEUED but not yet on the
+   *  صِلة server (pending/syncing) — the part of a synced-debt return
+   *  the server hasn't seen yet. The live «الدين القائم» displays
+   *  (Home + reports) subtract this so a return is reflected
+   *  IMMEDIATELY, not only after the next upload + balances refresh
+   *  («لم تتغير قيم الدين القائم بعد الإرجاعات»). */
+  async pendingReversalsMinor(): Promise<number> {
+    try {
+      const result = await getDb().execute(
+        `SELECT COALESCE(SUM(amount_minor), 0) AS minor
+         FROM sila_payment_queue
+         WHERE COALESCE(kind, 'repayment') = 'return_reversal'
+           AND state IN ('pending','syncing')`,
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        minor?: number | null;
+      };
+      return Number(row.minor ?? 0);
+    } catch {
+      return 0;
+    }
+  },
+
   // ── customers cache (§7) ───────────────────────────────────────
 
   /** v15 (§3.2-ب): REPLACE the row per customer — no MERGE, no local

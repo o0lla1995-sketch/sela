@@ -1095,6 +1095,25 @@ export const InvoiceService = {
       ).toFixed(2)} ₪`,
     );
 
+    // v26 (round-34 #3): a synced-debt return left a reversal payment
+    // in the queue — push it to the صِلة server RIGHT AWAY (fire and
+    // forget) so the customer's debt drops server-side and the
+    // refreshed balances reach the Home/reports screens on the next
+    // focus, instead of waiting for the periodic cycle. Lazy require:
+    // SilaSync imports THIS module (counters), so a top-level import
+    // would create a cycle.
+    if (silaReversal != null) {
+      try {
+        const {SilaSync} = require('./sila/SilaSync') as typeof import(
+          './sila/SilaSync'
+        );
+        void SilaSync.syncNow().catch(() => undefined);
+      } catch {
+        // The sync engine is unavailable mid-test — the queue keeps
+        // the reversal; the next cycle uploads it either way.
+      }
+    }
+
     if (input.print) {
       try {
         const items: SaleReturnItem[] = await SaleRepo.returnItems(result.id);

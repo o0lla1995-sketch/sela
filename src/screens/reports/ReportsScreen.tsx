@@ -18,8 +18,8 @@
  * inside revenue, and «النقد المحصّل» adds the collections back.
  */
 import React, {useCallback, useState} from 'react';
-import {Dimensions, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useFocusEffect, useNavigation} from '@react-navigation/native';
+import {Dimensions, ScrollView, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import {useFocusEffect} from '@react-navigation/native';
 import {
   AppButton,
   AppHeader,
@@ -31,6 +31,7 @@ import {
 } from '../../components/ui';
 import {ErrorBoundary} from '../../components/ErrorBoundary';
 import {BarChart} from '../../components/charts/BarChart';
+import {Icon} from '../../components/Icon';
 import {ReportService, type ReportBundle} from '../../services/ReportService';
 import {ExportService} from '../../services/ExportService';
 import {useToastStore} from '../../stores/toastStore';
@@ -59,13 +60,23 @@ const RANGE_OPTIONS: {value: ReportRangeKey; label: string}[] = [
 export function ReportsScreen() {
   const c = useThemeColors();
   const styles = useStyles();
-  const navigation = useNavigation<any>();
   const toast = useToastStore(state => state.show);
   const [rangeKey, setRangeKey] = useState<ReportRangeKey>('last7');
   const [bundle, setBundle] = useState<ReportBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState<'csv' | 'xls' | null>(null);
   const [topMode, setTopMode] = useState<'revenue' | 'profit'>('revenue');
+  // v26 (round-34 #6): the cash & debts sections start COLLAPSED —
+  // each shows its HEADLINE number; one tap expands the details
+  // («بشكل مختصر ويتوسع عند الضغط عليه لعرض التفاصيل»). The hero
+  // collected-cash, the net-of-movements number and the standing
+  // debt stay ALWAYS visible («يبقى التفاصيل المهمة ظاهرة»).
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>(
+    {},
+  );
+  const toggleSection = useCallback((key: string) => {
+    setOpenSections(prev => ({...prev, [key]: !prev[key]}));
+  }, []);
 
   const load = useCallback(
     async (key: ReportRangeKey) => {
@@ -129,29 +140,13 @@ export function ReportsScreen() {
 
   return (
     <View style={styles.screen}>
+      {/* v26 (round-34 #6): the الخزينة + الفواتير header buttons are
+          GONE — they live in the Home quick actions now (the user's
+          own reorganization), so the reports header stays clean. */}
       <AppHeader
         title="التقارير"
         subtitle="المبيعات والنقد والديون"
         showBack={false}
-        right={
-          <View style={{flexDirection: 'row', gap: spacing.sm}}>
-            {/* v25 (round-32 #3): the treasury movements center —
-                expenses / withdrawals / deposits + the PDF
-                statement. */}
-            <AppButton
-              small
-              title="الخزينة"
-              icon="wallet"
-              onPress={() => navigation.navigate('CashMovements' as never)}
-            />
-            <AppButton
-              small
-              title="الفواتير"
-              icon="inbox"
-              onPress={() => navigation.navigate('Invoices' as never)}
-            />
-          </View>
-        }
       />
 
       <ScrollView
@@ -228,6 +223,16 @@ export function ReportsScreen() {
                   icon="undo"
                 />
               </View>
+              {/* v26 (round-34 #3): the period's DISCOUNTS — their own
+                  KPI so «تفاصيل الخصم» is explicit in the summary
+                  (returns already net every number above). */}
+              <View style={styles.statsCell}>
+                <StatCard
+                  label="الخصومات"
+                  value={formatMoney(bundle.cash?.discountTotal ?? 0)}
+                  icon="tag"
+                />
+              </View>
             </View>
 
             {/* ── 2) النقد والديون — ONE clean card (v18) ────── */}
@@ -253,248 +258,269 @@ export function ReportsScreen() {
                 </Text>
               </View>
 
-              {/* 2-ب) Collections received in the range. */}
-              <Text style={styles.subTitle}>المقبوضات المستلمة بالفترة</Text>
-              <View style={styles.rowBox}>
-                <View style={styles.rowLine}>
-                  <Text style={styles.rowLabel}>
-                    إجمالي المقبوضات (سداد ديون)
-                  </Text>
-                  <Text style={[styles.rowValue, {color: c.success}]}>
-                    {formatMoney(cash?.collections ?? 0)}
-                  </Text>
-                </View>
-                <View style={styles.rowLine}>
-                  <Text style={styles.rowLabel}>منها: دفتر المتجر</Text>
-                  <Text style={styles.rowValue}>
-                    {formatMoney(cash?.localBookAmount ?? 0)}
-                  </Text>
-                </View>
-                {paired ? (
-                  <>
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        منها: سدادّات استلمها الكاشير (فواتير صِلة)
-                      </Text>
-                      <Text style={styles.rowValue}>
-                        {formatMoney(cash?.cashierSilaAmount ?? 0)}
-                      </Text>
-                    </View>
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        منها: تحصيلات عبر تطبيق صِلة
-                      </Text>
-                      <Text style={styles.rowValue}>
-                        {formatMoney(cash?.viaSilaAppAmount ?? 0)}
-                      </Text>
-                    </View>
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        منها: سدّدها رصيد مسبق للزبون
-                      </Text>
-                      <Text style={styles.rowValue}>
-                        {formatMoney(cash?.prepaidAmount ?? 0)}
-                      </Text>
-                    </View>
-                    {/* v22 (round-28 #2): money received from the
-                        campaign institutions in the range — «المستلم»
-                        (server truth: pending + confirmed). */}
-                    {(cash?.campaignSettlementsAmount ?? 0) > 0 ? (
-                      <View style={styles.rowLine}>
-                        <Text style={styles.rowLabel}>
-                          منها: مستلم من حملات القسائم (المؤسسات)
-                        </Text>
-                        <Text style={[styles.rowValue, {color: c.success}]}>
-                          {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
-                        </Text>
-                      </View>
-                    ) : null}
-                  </>
-                ) : null}
-              </View>
-
-              {/* 2-ج) Credit invoices issued in the range. */}
-              <Text style={styles.subTitle}>فواتير الدين بالفترة</Text>
-              <View style={styles.rowBox}>
-                <View style={styles.rowLine}>
-                  <Text style={styles.rowLabel}>
-                    إجمالي مبيعات الدين · {cash?.creditSalesCount ?? 0} فاتورة
-                  </Text>
-                  <Text style={[styles.rowValue, {color: c.warning}]}>
-                    {formatMoney(cash?.creditSalesAmount ?? 0)}
-                  </Text>
-                </View>
-                <View style={styles.rowLine}>
-                  <Text style={styles.rowLabel}>منها: دفتر المتجر (INV-L)</Text>
-                  <Text style={styles.rowValue}>
-                    {formatMoney(cash?.localCreditSalesAmount ?? 0)}
-                  </Text>
-                </View>
-                {paired ? (
-                  <View style={styles.rowLine}>
-                    <Text style={styles.rowLabel}>منها: عبر صِلة (INV-D)</Text>
-                    <Text style={styles.rowValue}>
-                      {formatMoney(cash?.silaCreditSalesAmount ?? 0)}
-                    </Text>
-                  </View>
-                ) : null}
-                {/* v24 (round-31 #3): the coupon-born debts of the
-                    period — the claims created on the institutions by
-                    voucher redemptions (face value), until the
-                    settlements land. Its own line, NOT a «منها» of
-                    the customer-debt total above. */}
-                {(cash?.voucherCreditSalesAmount ?? 0) > 0 ? (
+              {/* 2-ب) Collections received in the range — v26: brief
+                  headline (the total) + expandable breakdown. */}
+              <CollapseSection
+                title="المقبوضات المستلمة بالفترة (سداد الديون)"
+                valueText={formatMoney(cash?.collections ?? 0)}
+                valueColor={c.success}
+                open={openSections.collections === true}
+                onToggle={() => toggleSection('collections')}
+                show={(cash?.collections ?? 0) > 0}>
+                <View style={styles.rowBox}>
                   <View style={styles.rowLine}>
                     <Text style={styles.rowLabel}>
-                      عبر قسائم صِلة · {cash?.voucherCreditSalesCount ?? 0}{' '}
-                      عملية صرف (مستحقات على المؤسسات حتى التسوية)
+                      إجمالي المقبوضات (سداد ديون)
                     </Text>
-                    <Text style={[styles.rowValue, {color: c.info}]}>
-                      {formatMoney(cash?.voucherCreditSalesAmount ?? 0)}
+                    <Text style={[styles.rowValue, {color: c.success}]}>
+                      {formatMoney(cash?.collections ?? 0)}
                     </Text>
                   </View>
-                ) : null}
-              </View>
-
-              {/* 2-ج-2) v20: مبيعات القسائم الشرائية بالفترة — the
-                  campaigns column (face value from the server + the
-                  goods invoices + the counter difference). Shown when
-                  there is any voucher activity in the range.
-                  v21 (round-27 #1): every figure counts ACTIVE-IN-STORE
-                  campaigns only (the merchant's own switch). */}
-              {(cash?.voucherSalesCount ?? 0) > 0 ? (
-                <>
-                  <Text style={styles.subTitle}>القسائم الشرائية بالفترة</Text>
-                  <View style={styles.rowBox}>
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        قسائم مصروفة · {cash?.voucherSalesCount ?? 0} عملية
-                      </Text>
-                      <Text style={[styles.rowValue, {color: c.info}]}>
-                        {formatMoney(cash?.voucherSalesAmount ?? 0)}
-                      </Text>
-                    </View>
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        منها: بضاعة مسجّلة (INV-V)
-                      </Text>
-                      <Text style={styles.rowValue}>
-                        {formatMoney(cash?.voucherGoodsAmount ?? 0)}
-                      </Text>
-                    </View>
-                    {(cash?.voucherCounterExtraAmount ?? 0) > 0 ? (
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>منها: دفتر المتجر</Text>
+                    <Text style={styles.rowValue}>
+                      {formatMoney(cash?.localBookAmount ?? 0)}
+                    </Text>
+                  </View>
+                  {paired ? (
+                    <>
                       <View style={styles.rowLine}>
                         <Text style={styles.rowLabel}>
-                          منها: فرق نقدي استُلم فوراً بالكاشير
+                          منها: سدادّات استلمها الكاشير (فواتير صِلة)
                         </Text>
                         <Text style={styles.rowValue}>
-                          {formatMoney(cash?.voucherCounterExtraAmount ?? 0)}
+                          {formatMoney(cash?.cashierSilaAmount ?? 0)}
                         </Text>
                       </View>
-                    ) : null}
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          منها: تحصيلات عبر تطبيق صِلة
+                        </Text>
+                        <Text style={styles.rowValue}>
+                          {formatMoney(cash?.viaSilaAppAmount ?? 0)}
+                        </Text>
+                      </View>
+                      <View style={styles.rowLine}>
+                        <Text style={styles.rowLabel}>
+                          منها: سدّدها رصيد مسبق للزبون
+                        </Text>
+                        <Text style={styles.rowValue}>
+                          {formatMoney(cash?.prepaidAmount ?? 0)}
+                        </Text>
+                      </View>
+                      {/* v22 (round-28 #2): money received from the
+                          campaign institutions in the range — «المستلم»
+                          (server truth: pending + confirmed). */}
+                      {(cash?.campaignSettlementsAmount ?? 0) > 0 ? (
+                        <View style={styles.rowLine}>
+                          <Text style={styles.rowLabel}>
+                            منها: مستلم من حملات القسائم (المؤسسات)
+                          </Text>
+                          <Text style={[styles.rowValue, {color: c.success}]}>
+                            {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </>
+                  ) : null}
+                </View>
+              </CollapseSection>
+
+              {/* 2-ج) Credit invoices issued in the range — v26:
+                  headline (count + total) + expandable split. */}
+              <CollapseSection
+                title={`فواتير الدين بالفترة · ${cash?.creditSalesCount ?? 0} فاتورة`}
+                valueText={formatMoney(cash?.creditSalesAmount ?? 0)}
+                valueColor={c.warning}
+                open={openSections.credit === true}
+                onToggle={() => toggleSection('credit')}
+                show={(cash?.creditSalesCount ?? 0) > 0}>
+                <View style={styles.rowBox}>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      إجمالي مبيعات الدين · {cash?.creditSalesCount ?? 0} فاتورة
+                    </Text>
+                    <Text style={[styles.rowValue, {color: c.warning}]}>
+                      {formatMoney(cash?.creditSalesAmount ?? 0)}
+                    </Text>
+                  </View>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>منها: دفتر المتجر (INV-L)</Text>
+                    <Text style={styles.rowValue}>
+                      {formatMoney(cash?.localCreditSalesAmount ?? 0)}
+                    </Text>
+                  </View>
+                  {paired ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>منها: عبر صِلة (INV-D)</Text>
+                      <Text style={styles.rowValue}>
+                        {formatMoney(cash?.silaCreditSalesAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {/* v24 (round-31 #3): the coupon-born debts of the
+                      period — the claims created on the institutions by
+                      voucher redemptions (face value), until the
+                      settlements land. Its own line, NOT a «منها» of
+                      the customer-debt total above. */}
+                  {(cash?.voucherCreditSalesAmount ?? 0) > 0 ? (
                     <View style={styles.rowLine}>
                       <Text style={styles.rowLabel}>
-                        مستلم تسويات الحملات بالفترة
+                        عبر قسائم صِلة · {cash?.voucherCreditSalesCount ?? 0}{' '}
+                        عملية صرف (مستحقات على المؤسسات حتى التسوية)
+                      </Text>
+                      <Text style={[styles.rowValue, {color: c.info}]}>
+                        {formatMoney(cash?.voucherCreditSalesAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </CollapseSection>
+
+              {/* 2-ج-2) v20: مبيعات القسائم الشرائية بالفترة — v26:
+                  collapsed headline (count + face value) with the
+                  goods/settlements split inside. Shown only when there
+                  is voucher activity in the range. v21: every figure
+                  counts ACTIVE-IN-STORE campaigns only. */}
+              <CollapseSection
+                title={`القسائم الشرائية بالفترة · ${cash?.voucherSalesCount ?? 0} عملية`}
+                valueText={formatMoney(cash?.voucherSalesAmount ?? 0)}
+                valueColor={c.info}
+                open={openSections.vouchers === true}
+                onToggle={() => toggleSection('vouchers')}
+                show={(cash?.voucherSalesCount ?? 0) > 0}>
+                <View style={styles.rowBox}>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      قسائم مصروفة · {cash?.voucherSalesCount ?? 0} عملية
+                    </Text>
+                    <Text style={[styles.rowValue, {color: c.info}]}>
+                      {formatMoney(cash?.voucherSalesAmount ?? 0)}
+                    </Text>
+                  </View>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      منها: بضاعة مسجّلة (INV-V)
+                    </Text>
+                    <Text style={styles.rowValue}>
+                      {formatMoney(cash?.voucherGoodsAmount ?? 0)}
+                    </Text>
+                  </View>
+                  {(cash?.voucherCounterExtraAmount ?? 0) > 0 ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        منها: فرق نقدي استُلم فوراً بالكاشير
                       </Text>
                       <Text style={styles.rowValue}>
-                        {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
+                        {formatMoney(cash?.voucherCounterExtraAmount ?? 0)}
                       </Text>
                     </View>
-                    {(cash?.campaignDueMinor ?? 0) > 0 ? (
-                      <View style={styles.rowLine}>
-                        <Text style={styles.rowLabel}>
-                          المستحق الآن من الحملات المفعّلة (دين على المؤسسات)
-                        </Text>
-                        <Text style={[styles.rowValue, {color: c.warning}]}>
-                          {formatMoney((cash?.campaignDueMinor ?? 0) / 100)}
-                        </Text>
-                      </View>
-                    ) : null}
+                  ) : null}
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      مستلم تسويات الحملات بالفترة
+                    </Text>
+                    <Text style={styles.rowValue}>
+                      {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
+                    </Text>
                   </View>
-                </>
-              ) : null}
-
-              {/* 2-ج-3) v25 (round-32 #3): المصروفات والمسحوبات
-                  بالفترة — the drawer's non-sale life. Expenses and
-                  withdrawals LEFT the drawer, deposits came back;
-                  the net line answers «كم بقي فعلياً من نقدي
-                  بالفترة». */}
-              {(cash?.expensesCount ?? 0) > 0 ||
-              (cash?.withdrawalsCount ?? 0) > 0 ||
-              (cash?.depositsCount ?? 0) > 0 ? (
-                <>
-                  <Text style={styles.subTitle}>
-                    المصروفات والمسحوبات بالفترة
-                  </Text>
-                  <View style={styles.rowBox}>
-                    {(cash?.expensesCount ?? 0) > 0 ? (
-                      <View style={styles.rowLine}>
-                        <Text style={styles.rowLabel}>
-                          مصروفات · {cash?.expensesCount ?? 0} سند
-                        </Text>
-                        <Text style={[styles.rowValue, {color: c.danger}]}>
-                          − {formatMoney(cash?.expensesAmount ?? 0)}
-                        </Text>
-                      </View>
-                    ) : null}
-                    {(cash?.withdrawalsCount ?? 0) > 0 ? (
-                      <View style={styles.rowLine}>
-                        <Text style={styles.rowLabel}>
-                          مسحوبات رصيد · {cash?.withdrawalsCount ?? 0} سند
-                        </Text>
-                        <Text style={[styles.rowValue, {color: c.danger}]}>
-                          − {formatMoney(cash?.withdrawalsAmount ?? 0)}
-                        </Text>
-                      </View>
-                    ) : null}
-                    {(cash?.depositsCount ?? 0) > 0 ? (
-                      <View style={styles.rowLine}>
-                        <Text style={styles.rowLabel}>
-                          إيداعات نقدية · {cash?.depositsCount ?? 0} سند
-                        </Text>
-                        <Text style={[styles.rowValue, {color: c.success}]}>
-                          + {formatMoney(cash?.depositsAmount ?? 0)}
-                        </Text>
-                      </View>
-                    ) : null}
+                  {(cash?.campaignDueMinor ?? 0) > 0 ? (
                     <View style={styles.rowLine}>
-                      <Text
-                        style={[
-                          styles.rowLabel,
-                          {fontFamily: fonts.bold, color: c.text},
-                        ]}>
-                        صافي النقد بالفترة (بعد المصروفات والمسحوبات)
+                      <Text style={styles.rowLabel}>
+                        المستحق الآن من الحملات المفعّلة (دين على المؤسسات)
                       </Text>
-                      <Text
-                        style={[
-                          styles.rowValue,
-                          {
-                            fontFamily: fonts.bold,
-                            color: (cash?.netCashAfterMovements ?? 0) >= 0
-                              ? c.success
-                              : c.danger,
-                          },
-                        ]}>
-                        {formatMoney(cash?.netCashAfterMovements ?? 0)}
+                      <Text style={[styles.rowValue, {color: c.warning}]}>
+                        {formatMoney((cash?.campaignDueMinor ?? 0) / 100)}
                       </Text>
                     </View>
-                  </View>
-                </>
-              ) : null}
+                  ) : null}
+                </View>
+              </CollapseSection>
+
+              {/* 2-ج-3) v25 (round-32 #3) → v26: المصروفات والمسحوبات
+                  بالفترة — the headline is the section's IMPORTANT
+                  number (صافي النقد بعد الحركات) and stays visible
+                  always; the breakdown expands on press. */}
+              <CollapseSection
+                title="صافي النقد بالفترة (بعد المصروفات والمسحوبات)"
+                valueText={formatMoney(cash?.netCashAfterMovements ?? 0)}
+                valueColor={
+                  (cash?.netCashAfterMovements ?? 0) >= 0
+                    ? c.success
+                    : c.danger
+                }
+                open={openSections.movements === true}
+                onToggle={() => toggleSection('movements')}
+                show={
+                  (cash?.expensesCount ?? 0) > 0 ||
+                  (cash?.withdrawalsCount ?? 0) > 0 ||
+                  (cash?.depositsCount ?? 0) > 0
+                }>
+                <View style={styles.rowBox}>
+                  {(cash?.expensesCount ?? 0) > 0 ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        مصروفات · {cash?.expensesCount ?? 0} سند
+                      </Text>
+                      <Text style={[styles.rowValue, {color: c.danger}]}>
+                        − {formatMoney(cash?.expensesAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {(cash?.withdrawalsCount ?? 0) > 0 ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        مسحوبات رصيد · {cash?.withdrawalsCount ?? 0} سند
+                      </Text>
+                      <Text style={[styles.rowValue, {color: c.danger}]}>
+                        − {formatMoney(cash?.withdrawalsAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {(cash?.depositsCount ?? 0) > 0 ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        إيداعات نقدية · {cash?.depositsCount ?? 0} سند
+                      </Text>
+                      <Text style={[styles.rowValue, {color: c.success}]}>
+                        + {formatMoney(cash?.depositsAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  <View style={styles.rowLine}>
+                    <Text
+                      style={[
+                        styles.rowLabel,
+                        {fontFamily: fonts.bold, color: c.text},
+                      ]}>
+                      صافي النقد بالفترة (بعد المصروفات والمسحوبات)
+                    </Text>
+                    <Text
+                      style={[
+                        styles.rowValue,
+                        {
+                          fontFamily: fonts.bold,
+                          color: (cash?.netCashAfterMovements ?? 0) >= 0
+                            ? c.success
+                            : c.danger,
+                        },
+                      ]}>
+                      {formatMoney(cash?.netCashAfterMovements ?? 0)}
+                      </Text>
+                    </View>
+                </View>
+              </CollapseSection>
 
               {/* 2-د) The outstanding snapshot — receivables now.
-                  v19 (round-25 #2): the informational app-origin cell
-                  appears ONLY when it actually carries debt — a
-                  permanent 0.00 cell (the complaint «دائما صفر»)
-                  taught the merchant nothing and looked broken. */}
+                  v26 (round-34 #6): the informational «ديون تطبيق صِلة
+                  للمعلومية» cell is GONE (the user's call) — its place
+                  now carries the LIVE «النقد بالخزينة الآن» cell, the
+                  drawer's real number from the treasury equation, so
+                  the two numbers the merchant checks side by side
+                  (what I'm owed / what I hold) are one glance apart. */}
               <Text style={styles.subTitle}>الدين القائم الآن</Text>
               <View style={styles.outstandingGrid}>
-                <View
-                  style={
-                    (cash?.appOriginOutstandingMinor ?? 0) > 0
-                      ? styles.outstandingCell
-                      : styles.outstandingCellFull
-                  }>
+                <View style={styles.outstandingCell}>
                   <Text style={styles.outstandingValue}>
                     {formatMoney(
                       ((cash?.localOutstandingMinor ?? 0) +
@@ -523,18 +549,20 @@ export function ReportsScreen() {
                         } زبون مدين — دفتر المتجر`}
                   </Text>
                 </View>
-                {paired && (cash?.appOriginOutstandingMinor ?? 0) > 0 ? (
-                  <View style={styles.outstandingCellInfo}>
-                    <Text style={styles.outstandingValueInfo}>
-                      {formatMoney(
-                        (cash?.appOriginOutstandingMinor ?? 0) / 100,
-                      )}
-                    </Text>
-                    <Text style={styles.outstandingMeta}>
-                      ديون تطبيق صِلة — للمعلومية فقط، ليست من مبيعاتك
-                    </Text>
-                  </View>
-                ) : null}
+                {/* v26: النقد بالخزينة الآن — the live drawer number
+                    (replaced the informational sila-app-debts cell). */}
+                <View style={styles.outstandingCellInfo}>
+                  <Text
+                    style={[
+                      styles.outstandingValueInfo,
+                      {color: c.success},
+                    ]}>
+                    {formatMoney((cash?.cashNowMinor ?? 0) / 100)}
+                  </Text>
+                  <Text style={styles.outstandingMeta}>
+                    النقد بالخزينة الآن — بعد المصروفات والمسحوبات
+                  </Text>
+                </View>
               </View>
 
               <Text style={styles.chartHint}>
@@ -606,7 +634,9 @@ export function ReportsScreen() {
                   subtitle="أفضل منتجاتك ستظهر هنا بعد أول فاتورة"
                 />
               ) : (
-                topProducts.slice(0, 8).map((product, index) => (
+                /* v26 (round-34 #6): the TOP FIVE only — «يظهر فقط
+                    أكثر خمسة فقط» — the rest live in the CSV export. */
+                topProducts.slice(0, 5).map((product, index) => (
                   <View key={product.productId} style={styles.topRow}>
                     <View style={styles.topRank}>
                       <Text style={styles.topRankText}>{index + 1}</Text>
@@ -706,6 +736,63 @@ function compactNumber(value: number): string {
   return String(rounded);
 }
 
+// ────────────────────────────────────────────────────────────────
+// v26 (round-34 #6): CollapseSection — the reports card's brief
+// rows. The HEADLINE (title + the section's key number + chevron)
+// is ALWAYS visible; the details expand under it on press. Returns
+// null entirely when `show` is false (sections with no activity in
+// the period never leave an empty stub).
+// ────────────────────────────────────────────────────────────────
+function CollapseSection({
+  title,
+  valueText,
+  valueColor,
+  open,
+  onToggle,
+  show = true,
+  children,
+}: {
+  title: string;
+  valueText: string;
+  valueColor?: string;
+  open: boolean;
+  onToggle: () => void;
+  show?: boolean;
+  children: React.ReactNode;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  if (!show) {
+    return null;
+  }
+  return (
+    <>
+      <TouchableOpacity
+        style={styles.collapseHead}
+        onPress={onToggle}
+        activeOpacity={0.7}>
+        <Icon
+          name={open ? 'chevronDown' : 'chevronLeft'}
+          size={13}
+          color={c.textFaint}
+        />
+        <Text style={styles.collapseTitle} numberOfLines={1}>
+          {title}
+        </Text>
+        <Text
+          style={[
+            styles.collapseValue,
+            valueColor != null ? {color: valueColor} : null,
+          ]}
+          numberOfLines={1}>
+          {valueText}
+        </Text>
+      </TouchableOpacity>
+      {open ? <View style={styles.collapseBody}>{children}</View> : null}
+    </>
+  );
+}
+
 const useStyles = makeStyles(c =>
   StyleSheet.create({
     screen: {flex: 1, backgroundColor: c.bg},
@@ -740,6 +827,35 @@ const useStyles = makeStyles(c =>
       borderRightWidth: 3,
       borderRightColor: c.accent,
       paddingRight: spacing.sm,
+    },
+    // ── v26 (round-34 #6): the collapsible section styles ────────
+    collapseHead: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 8,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      backgroundColor: c.surfaceHi,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 11,
+      marginTop: spacing.md,
+    },
+    collapseTitle: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      textAlign: 'left',
+    },
+    collapseValue: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    collapseBody: {
+      marginTop: 6,
     },
     cashHero: {
       backgroundColor: c.surfaceHi,
@@ -797,19 +913,10 @@ const useStyles = makeStyles(c =>
     outstandingGrid: {
       flexDirection: 'row',
       gap: spacing.sm,
+      marginTop: spacing.xs,
     },
     outstandingCell: {
       flex: 1,
-      backgroundColor: c.surfaceHi,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      padding: spacing.sm + 2,
-      gap: 2,
-      alignItems: 'center',
-    },
-    outstandingCellFull: {
-      flexGrow: 1,
       backgroundColor: c.surfaceHi,
       borderRadius: radius.md,
       borderWidth: 1,

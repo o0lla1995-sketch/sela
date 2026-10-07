@@ -199,14 +199,27 @@ export const CashService = {
     return movement;
   },
 
-  /** The period statement bundle (list + totals + categories). */
-  async statement(from: string, to: string): Promise<{
+  /** The period statement bundle (list + totals + categories).
+   *  v26 (round-34 #5): `full: true` lifts the row cap to 10,000 for
+   *  the ARCHIVAL exports (PDF A4 / thermal) — a statement document
+   *  must carry every voucher of the period; the on-screen ledger
+   *  keeps the paged 500 cap. */
+  async statement(
+    from: string,
+    to: string,
+    opts?: {full?: boolean},
+  ): Promise<{
     rows: CashMovementRecord[];
     totals: CashMovementTotals;
     categories: {category: string; count: number; totalMinor: number}[];
   }> {
     const [rows, totals, categories] = await Promise.all([
-      CashRepo.list({from, to, kind: 'all', limit: 500}),
+      CashRepo.list({
+        from,
+        to,
+        kind: 'all',
+        limit: opts?.full ? 10000 : 500,
+      }),
       CashRepo.totalsFor(from, to),
       CashRepo.categoryTotals(from, to),
     ]);
@@ -224,7 +237,7 @@ export const CashService = {
    *  and saves it into Downloads/SmartVisionPOS — the archival copy
    *  (the merchant's «كشف pdf كامل خاص السحب والمصروفات»). */
   async exportStatementPdf(from: string, to: string): Promise<string> {
-    const data = await this.statement(from, to);
+    const data = await this.statement(from, to, {full: true});
     const treasury = await ReportService.treasurySnapshot();
     const settings = useSettingsStore.getState().settings;
     const shekels = (minor: number) => `${(minor / 100).toFixed(2)} ₪`;
@@ -313,7 +326,7 @@ export const CashService = {
     if (status !== 'connected') {
       throw new Error('لا توجد طابعة متصلة — أوصل الطابعة أولاً');
     }
-    const data = await this.statement(from, to);
+    const data = await this.statement(from, to, {full: true});
     const treasury = await ReportService.treasurySnapshot();
     const job = buildCashStatementJob(
       {

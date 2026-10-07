@@ -162,7 +162,11 @@ export const CashRepo = {
       clauses.push('kind = ?');
       params.push(input.kind);
     }
-    params.push(Math.min(Math.max(input.limit ?? 100, 1), 500));
+    // v26 (round-34 #5): the cap rose to 10,000 — the EXPORT paths
+    // (PDF A4 / thermal statement) must carry EVERY row of the
+    // period, never a truncated first page; the UI ledger stays paged
+    // by its own small page size.
+    params.push(Math.min(Math.max(input.limit ?? 100, 1), 10000));
     params.push(Math.max(input.offset ?? 0, 0));
     const result = await getDb().execute(
       `SELECT * FROM cash_movements
@@ -174,6 +178,32 @@ export const CashRepo = {
     return (result.rows?._array ?? []).map(row =>
       rowToRecord(row as Record<string, unknown>),
     );
+  },
+
+  /** v26 (round-34 #5): how many movements the period+filter
+   *  holds IN TOTAL — the paged ledger's «عرض X من Y سند» counter
+   *  and its «load more» visibility. */
+  async countFor(
+    from: string,
+    to: string,
+    kind: CashMovementKind | 'all' = 'all',
+  ): Promise<number> {
+    try {
+      const clauses = ['date(created_at) BETWEEN date(?) AND date(?)'];
+      const params: (string | number)[] = [from, to];
+      if (kind !== 'all') {
+        clauses.push('kind = ?');
+        params.push(kind);
+      }
+      const result = await getDb().execute(
+        `SELECT COUNT(*) AS cnt FROM cash_movements WHERE ${clauses.join(' AND ')}`,
+        params,
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {cnt?: number};
+      return Number(row.cnt ?? 0);
+    } catch {
+      return 0;
+    }
   },
 
   /** Period totals for the statement + reports. */
