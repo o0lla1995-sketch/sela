@@ -13,7 +13,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Alert,
-  Keyboard,
   ScrollView,
   StyleSheet,
   Text,
@@ -73,24 +72,13 @@ export function StocktakeScreen() {
   const [starting, setStarting] = useState(false);
   const [reportSession, setReportSession] = useState<Stocktake | null>(null);
   const [reportItems, setReportItems] = useState<StocktakeItem[] | null>(null);
-  // v8.2 (round-11 #5): while the count keyboard is open, the whole
-  // screen works for the LIST — stats, search, filters and the
-  // bottom bar fold away so the merchant sees the maximum number of
-  // counting rows while typing.
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
-
-  useEffect(() => {
-    const show = Keyboard.addListener('keyboardDidShow', () =>
-      setKeyboardOpen(true),
-    );
-    const hide = Keyboard.addListener('keyboardDidHide', () =>
-      setKeyboardOpen(false),
-    );
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
+  // v29.1 (round-37 #3): صفر مستمعات Keyboard — الإحصاءات والبحث
+  // والفلاتر وشريط الأسفل تبقى دائماً. طيّها لحظة فتح اللوحة (v8.2)
+  // كان يفكّ شريط البحث نفسه بعد تركيزه مباشرة — أي أن الضغط على
+  // البحث كان يقتل لوحة المفاتيح حتماً على أي جهاز، ويحرّك قسم
+  // المنتجات كاملاً للأعلى أثناء استقرار الـ IME في باقي الحقول
+  // (نفس علة روم الجهاز). الشجرة الآن ثابتة تماماً لحظة فتح أي
+  // لوحة — والنظام وحده يقلّص نافذة الشاشة.
 
   /** Count-input chain (round-8): "next" on the keyboard jumps to
    *  the NEXT product's count field — counting flows row by row
@@ -474,47 +462,42 @@ export function StocktakeScreen() {
       <View style={styles.body}>
         {/* v8.1 compact progress strip — ONE slim bar (~52dp) replaces
             the three tall stat cards that ate the counting list.
-            v8.2: hidden while the count keyboard is open. */}
-        {!keyboardOpen ? (
-          <View style={styles.miniStats}>
-            <MiniStat
-              tone="success"
-              label="مطابق"
-              value={String(summary?.matchedItems ?? 0)}
-            />
-            <View style={styles.miniStatDivider} />
-            <MiniStat
-              tone="danger"
-              label="نقص"
-              value={String(summary?.shortageItems ?? 0)}
-            />
-            <View style={styles.miniStatDivider} />
-            <MiniStat
-              tone="info"
-              label="زيادة"
-              value={String(summary?.surplusItems ?? 0)}
-            />
-          </View>
-        ) : null}
-
-        {!keyboardOpen ? (
-          <SearchBar
-            value={search}
-            onChangeText={setSearch}
-            placeholder="ابحث بالاسم أو امسح الباركود…"
+            v29.1: always visible (stable tree — see top). */}
+        <View style={styles.miniStats}>
+          <MiniStat
+            tone="success"
+            label="مطابق"
+            value={String(summary?.matchedItems ?? 0)}
           />
-        ) : null}
+          <View style={styles.miniStatDivider} />
+          <MiniStat
+            tone="danger"
+            label="نقص"
+            value={String(summary?.shortageItems ?? 0)}
+          />
+          <View style={styles.miniStatDivider} />
+          <MiniStat
+            tone="info"
+            label="زيادة"
+            value={String(summary?.surplusItems ?? 0)}
+          />
+        </View>
+
+        <SearchBar
+          value={search}
+          onChangeText={setSearch}
+          placeholder="ابحث بالاسم أو امسح الباركود…"
+        />
 
         {/* v8.2 (round-11 #5): ONE tight filters block — the chips row
             and the uncounted-only toggle sit together with a hairline
             gap (the old body-level gap left a hole between them).
-            Folds away while the keyboard is open. */}
-        {!keyboardOpen ? (
-          <View style={styles.filtersBlock}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{gap: 6, paddingVertical: 2}}>
+            v29.1: always visible (stable tree — see top). */}
+        <View style={styles.filtersBlock}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{gap: 6, paddingVertical: 2}}>
               <FilterChip
                 label="الكل"
                 active={categoryFilter === 'all'}
@@ -528,7 +511,7 @@ export function StocktakeScreen() {
                   onPress={() => setCategoryFilter(cat.id)}
                 />
               ))}
-            </ScrollView>
+          </ScrollView>
             <TouchableOpacity
               style={styles.pendingToggle}
               onPress={() => setOnlyPending(value => !value)}
@@ -547,7 +530,6 @@ export function StocktakeScreen() {
               </Text>
             </TouchableOpacity>
           </View>
-        ) : null}
 
         {filteredItems.length === 0 ? (
           <EmptyState
@@ -559,9 +541,7 @@ export function StocktakeScreen() {
           <ScrollView
             contentContainerStyle={{
               gap: spacing.sm,
-              // v8.2: tight bottom padding while typing — every
-              // millimeter above the keyboard shows counting rows.
-              paddingBottom: keyboardOpen ? spacing.md : spacing.xxl,
+              paddingBottom: spacing.xxl,
             }}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled">
@@ -583,25 +563,25 @@ export function StocktakeScreen() {
           </ScrollView>
         )}
 
-        {!keyboardOpen ? (
-          <View style={styles.bottomBar}>
-            <AppButton
-              title="إلغاء الجرد"
-              variant="danger"
-              icon="x"
-              small
-              style={{flex: 1}}
-              onPress={cancelSession}
-            />
-            <AppButton
-              title="إنهاء الجرد وتطبيق النتائج"
-              icon="check"
-              small
-              style={{flex: 2}}
-              onPress={completeSession}
-            />
-          </View>
-        ) : null}
+        {/* v29.1: الشريط السفلي يبقى دائماً — إلغاء/إنهاء الجرد في
+            متناول اليد حتى أثناء الكتابة، والشجرة لا تتغير. */}
+        <View style={styles.bottomBar}>
+          <AppButton
+            title="إلغاء الجرد"
+            variant="danger"
+            icon="x"
+            small
+            style={{flex: 1}}
+            onPress={cancelSession}
+          />
+          <AppButton
+            title="إنهاء الجرد وتطبيق النتائج"
+            icon="check"
+            small
+            style={{flex: 2}}
+            onPress={completeSession}
+          />
+        </View>
       </View>
     </View>
   );
