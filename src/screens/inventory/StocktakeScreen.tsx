@@ -12,7 +12,10 @@
  */
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  ActivityIndicator,
   Alert,
+  FlatList,
+  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -38,6 +41,11 @@ import {useCatalogStore} from '../../stores/catalogStore';
 import {useNotificationsStore} from '../../stores/notificationsStore';
 import {useToastStore} from '../../stores/toastStore';
 import {parseNumber, formatDateTime, formatQty} from '../../core/format';
+import {
+  cameraPermissionMessage,
+  ensureCameraPermission,
+  scanBarcode,
+} from '../../services/vision/scanFlow';
 import {
   fonts,
   makeStyles,
@@ -84,6 +92,10 @@ export function StocktakeScreen() {
    *  the NEXT product's count field — counting flows row by row
    *  without ever touching the screen. */
   const countRefs = useRef<({focus: () => void} | null)[]>([]);
+  /** v30 (round-38 #2): the counting list's ref — a scanned product
+   *  may sit far below the rendered window of the virtualized list,
+   *  so it is scrolled into view BEFORE its count input is focused. */
+  const listRef = useRef<FlatList<StocktakeItem> | null>(null);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -321,12 +333,97 @@ export function StocktakeScreen() {
       if (categoryFilter !== 'all' && item.categoryId !== categoryFilter) {
         return false;
       }
-      if (query && !item.productName.toLowerCase().includes(query)) {
+      // v30 (round-38 #2): the query matches the NAME or an exact
+      // BARCODE — so a scanned code filled into the search field
+      // lands on its product straight away.
+      if (
+        query &&
+        !item.productName.toLowerCase().includes(query) &&
+        (item.barcode ?? '') !== query
+      ) {
         return false;
       }
       return true;
     });
   }, [items, search, categoryFilter, onlyPending]);
+
+  // ── v30 (round-38 #2): scan-to-search beside the counting search ──
+  const [scanBusy, setScanBusy] = useState(false);
+  /** The product whose count input gets focused once the filtered
+   *  list containing it has rendered (after a barcode scan). */
+  const [pendingFocusId, setPendingFocusId] = useState<number | null>(null);
+
+  const scanForCount = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    const permission = await ensureCameraPermission();
+    if (permission !== 'granted') {
+      Alert.alert('إذن الكاميرا مطلوب', cameraPermissionMessage(permission), [
+        {text: 'إغلاق', style: 'cancel'},
+        {
+          text: 'فتح الإعدادات',
+          onPress: () => {
+            void Linking.openSettings();
+          },
+        },
+      ]);
+      return;
+    }
+    setScanBusy(true);
+    try {
+      const code = await scanBarcode();
+      if (code == null) {
+        return; // scanner closed without a read.
+      }
+      setSearch(code);
+      const exact = items.filter(item => item.barcode === code);
+      if (exact.length === 1) {
+        // Found — focus its count input once the list re-renders,
+        // ready for the merchant to type the counted quantity.
+        setPendingFocusId(exact[0].product_id);
+      } else if (exact.length === 0) {
+        toast(
+          `لا يوجد منتج بهذا الباركود (${code}) في جلسة الجرد`,
+          'info',
+          4500,
+        );
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل مسح الباركود',
+        'error',
+      );
+    } finally {
+      setScanBusy(false);
+    }
+  }, [scanBusy, items, toast]);
+
+  // Focus the scanned product's count input as soon as it appears
+  // in the (virtualized) filtered list: the row may live far below
+  // the rendered window — scroll it into view first, THEN focus its
+  // input after the row has actually mounted (v30 round-38 #2).
+  useEffect(() => {
+    if (pendingFocusId == null) {
+      return;
+    }
+    const index = filteredItems.findIndex(
+      item => item.product_id === pendingFocusId,
+    );
+    if (index < 0) {
+      return;
+    }
+    listRef.current?.scrollToIndex({
+      index,
+      viewPosition: 0.4,
+      animated: false,
+    });
+    const timer = setTimeout(() => {
+      countRefs.current[index]?.focus();
+      setPendingFocusId(null);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [pendingFocusId, filteredItems]);
 
   // ── Full report view (completed session) ─────────────────────
   if (reportSession != null && reportItems != null) {
@@ -483,11 +580,30 @@ export function StocktakeScreen() {
           />
         </View>
 
-        <SearchBar
-          value={search}
-          onChangeText={setSearch}
-          placeholder="ابحث بالاسم أو امسح الباركود…"
-        />
+        {/* v30 (round-38 #2): البحث + زر مسح الباركود (أيقونة فقط)
+            — المسح يعبّئ حقل البحث بالكود ويركّز حقل عدّ المنتج
+            المطابق مباشرة (نفس نمط المخزون). */}
+        <View style={styles.searchRow}>
+          <View style={{flex: 1}}>
+            <SearchBar
+              value={search}
+              onChangeText={setSearch}
+              placeholder="ابحث بالاسم أو امسح الباركود…"
+            />
+          </View>
+          <TouchableOpacity
+            style={styles.scanBtn}
+            onPress={() => void scanForCount()}
+            disabled={scanBusy}
+            activeOpacity={0.7}
+            hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
+            {scanBusy ? (
+              <ActivityIndicator size="small" color={c.accent} />
+            ) : (
+              <Icon name="barcode" size={22} color={c.accent} />
+            )}
+          </TouchableOpacity>
+        </View>
 
         {/* v8.2 (round-11 #5): ONE tight filters block — the chips row
             and the uncounted-only toggle sit together with a hairline
@@ -538,16 +654,46 @@ export function StocktakeScreen() {
             subtitle="جرّب بحثاً أو تصنيفاً آخر"
           />
         ) : (
-          <ScrollView
-            contentContainerStyle={{
-              gap: spacing.sm,
-              paddingBottom: spacing.xxl,
+          /* v30 (round-38 #2): FlatList افتراضية بدل ScrollView العادي
+           * — جلسة الجرد تعرض كل كتالوج المتجر؛ بلا افتراضية كان فتح
+           * لوحة المفاتيح (البحث أو حقل العدّ) يعيد تخطيط آلاف الصفوف
+           * على الخيط الرئيسي فيستسلم الـ IME ويغلقها فوراً (نفس درس
+           * المخزون v28). الافتراضية تُبقي التمريرة صغيرة واللوحة
+           * مفتوحة، وسلسلة «التالي» بين حقول العدّ تعمل كالمعتاد
+           * (الصفوف المجاورة للمنطقة المرئية محمّلة دوماً). */
+          <FlatList
+            ref={listRef}
+            style={{flex: 1}}
+            data={filteredItems}
+            keyExtractor={item => String(item.product_id)}
+            onScrollToIndexFailed={info => {
+              // The row's frame is not measured yet (fresh filter) —
+              // estimate from the average frame and retry shortly.
+              const estimate =
+                info.index <= info.highestMeasuredFrameIndex
+                  ? info.index
+                  : Math.max(
+                      0,
+                      info.highestMeasuredFrameIndex +
+                        Math.floor(
+                          (info.index - info.highestMeasuredFrameIndex) /
+                            4,
+                        ),
+                    );
+              listRef.current?.scrollToIndex({
+                index: estimate,
+                animated: false,
+              });
+              setTimeout(() => {
+                listRef.current?.scrollToIndex({
+                  index: info.index,
+                  viewPosition: 0.4,
+                  animated: false,
+                });
+              }, 120);
             }}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled">
-            {filteredItems.map((item, index) => (
+            renderItem={({item, index}) => (
               <CountRow
-                key={item.product_id}
                 item={item}
                 onSetCounted={setCounted}
                 onMarkMatched={markMatched}
@@ -559,8 +705,17 @@ export function StocktakeScreen() {
                   countRefs.current[index] = handle;
                 }}
               />
-            ))}
-          </ScrollView>
+            )}
+            contentContainerStyle={{
+              gap: spacing.sm,
+              paddingBottom: spacing.xxl,
+            }}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            initialNumToRender={12}
+            maxToRenderPerBatch={12}
+            windowSize={7}
+          />
         )}
 
         {/* v29.1: الشريط السفلي يبقى دائماً — إلغاء/إنهاء الجرد في
@@ -859,6 +1014,23 @@ const useStyles = makeStyles(c =>
       flex: 1,
       padding: spacing.lg,
       gap: spacing.md,
+    },
+    /** v30 (round-38 #2): البحث + زر المسح في صف واحد (نفس نمط
+     *  المخزون ومركز الفواتير). */
+    searchRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    scanBtn: {
+      width: 46,
+      height: 48,
+      borderRadius: radius.md,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     miniStats: {
       flexDirection: 'row',

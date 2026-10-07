@@ -31,7 +31,6 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   BackHandler,
-  Dimensions,
   I18nManager,
   Pressable,
   ScrollView,
@@ -42,6 +41,7 @@ import {
   View,
 } from 'react-native';
 import {useFocusEffect, useNavigation} from '@react-navigation/native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {
   AppButton,
   AppHeader,
@@ -715,21 +715,14 @@ function MovementSheet({
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
 
-  // v29 (round-37 #1): ارتفاع ثابت يُلتقط مرة واحدة عند فتح
-  // النافذة — لا useWindowDimensions ولا أي مستمع Keyboard: حين
-  // تُفتح لوحة الملاحظات (اختيارية) لا يتغير أي بعد في الشجرة،
-  // والـ ScrollView داخل النافذة يكفي لجلب الحقل المركّز للظهور.
-  // هذا بعد أربع جولات فاشلة (v25–v28) من «الرفع/التعويض» —
-  // المشكلة لم تكن في مقدار الرفع بل في وجود رد فعل JS أصلاً:
-  // أي إعادة تخطيط لحظة استقرار الـ IME تجعل روم الجهاز يغلق
-  // اللوحة. المبلغ نفسه صار من لوحة أرقام مدمجة (لا TextInput).
-  const fixedSheetHeight = useMemo(
-    () =>
-      Math.round(
-        Math.max(240, Dimensions.get('window').height * 0.72),
-      ),
-    [],
-  );
+  // v30 (round-38 #1): النافذة تملأ الشاشة كاملة — height:'100%'
+  // من الطبقة الخلفية المطلقة (تساوي الشاشة المرئية دائماً وبلا
+  // أي Dimensions)، والعناصر تتوزع بـ flex فتتلاءم مع أي حجم شاشة:
+  // الترويسة والمبلغ ولوحة الأرقام وزر التأكيد مثبّتة، وما بينها
+  // (الفئات والملاحظة) يتمرر. ولا يزال صفر مستمعات Keyboard —
+  // لوحة النظام لا تُستدعى للمبلغ أصلاً (لوحة أرقام مدمجة من v29)
+  // فلا شيء يتحرك في الشجرة لحظة فتح أي لوحة.
+  const insets = useSafeAreaInsets();
 
   // v26 (round-34 #4): instant render (no entrance animation — the
   // ROM lesson from the return sheet) + a 400ms close-guard so a
@@ -738,6 +731,12 @@ function MovementSheet({
   const mountedAt = useRef(Date.now());
 
   const [amountText, setAmountText] = useState('');
+  /** v30 (round-38 #1): true أثناء تركيز حقل نصي (الملاحظة/الفئة
+   *  المخصصة) — تخفي لوحة الأرقام ليأخذ حقل النص مساحته فوق
+   *  لوحة النظام. الحدث onFocus يسبق فتح اللوحة (ليس مستمع
+   *  keyboardDidShow بعدها) فالتخطيط يستقر قبل أن يبدأ الـ IME
+   *  — لا خطر الإغلاق الفوري إطلاقاً. */
+  const [textFocused, setTextFocused] = useState(false);
   const [category, setCategory] = useState(
     mode === 'expense' ? EXPENSE_CATEGORIES[0] : mode === 'withdrawal' ? 'سحب رصيد' : 'إيداع نقدي',
   );
@@ -914,13 +913,23 @@ function MovementSheet({
   return (
     <View style={sheetStyles(c).backdrop}>
       <Pressable style={{flex: 1}} onPress={backdropPressGuarded} />
-      {/* v29 (round-37 #1): ارتفاع ثابت — لا تعويض ولا رفع. أي
-          لوحة تُفتح (ملاحظة اختيارية فقط) تترك هذه الشجرة كما هي
-          تماماً؛ لا شيء يتغير حول الحقل المركّز فلا ييأس الـ IME.
-          المبلغ يُدخل من لوحة الأرقام المدمجة أدناه — لوحة النظام
-          لا تُستدعى للمبلغ إطلاقاً. */}
+      {/* v30 (round-38 #1): النافذة تملأ الشاشة كاملة — height:'100%'
+          تتلاءم مع أي حجم شاشة وبلا أي Dimensions (الطبقة الخلفية
+          المطلقة تساوي الشاشة المرئية دائماً). التوزيع flex: الترويسة
+          والمبلغ ولوحة الأرقام والتأكيد مثبّتة والوسط (الفئات
+          والملاحظة) يتمرر — عناصر POS احترافية بحجم مناسب للشاشة.
+          وما زال صفر مستمعات Keyboard: لوحة النظام لا تُستدعى
+          للمبلغ أصلاً (لوحة مدمجة منذ v29) فلا شيء يتحرك لحظة فتح
+          أي لوحة (الملاحظة وحدها اختيارية والـ ScrollView يجلبها). */}
       <View
-        style={[sheetStyles(c).sheet, {height: fixedSheetHeight}]}>
+        style={[
+          sheetStyles(c).sheet,
+          {
+            height: '100%',
+            paddingTop: Math.max(insets.top, 10),
+            paddingBottom: Math.max(insets.bottom, 10),
+          },
+        ]}>
         <Pressable style={{flex: 1}} onPress={() => undefined} disabled={busy}>
           {/* ── Header ── */}
           <View style={sheetStyles(c).head}>
@@ -1053,76 +1062,55 @@ function MovementSheet({
                 </View>
               ) : null}
 
+              {/* v30 (round-38 #1): المبلغ — مثبّت فوق منطقة التمرير،
+                  كبير وواضح كبطاقة POS، يبقى مرئياً دائماً أثناء
+                  الكتابة على لوحة الأرقام أسفل النافذة. عرض فقط —
+                  لا TextInput (لوحة النظام لا تُستدعى للمبلغ إطلاقاً
+                  منذ v29). */}
+              <Text style={sheetStyles(c).formLabel}>المبلغ (₪)</Text>
+              <View
+                style={[
+                  sheetStyles(c).amountRow,
+                  overDrawer ? {borderColor: c.danger} : null,
+                ]}>
+                <Text
+                  style={[
+                    sheetStyles(c).amountDisplay,
+                    amountText === '' ? {color: c.textFaint} : null,
+                  ]}>
+                  {amountText === '' ? '0.00' : amountText}
+                </Text>
+                <Text style={sheetStyles(c).amountSuffix}>₪</Text>
+                {amountText !== '' ? (
+                  <TouchableOpacity
+                    style={sheetStyles(c).amountClearBtn}
+                    onPress={() => setAmountText('')}
+                    disabled={busy}
+                    activeOpacity={0.75}>
+                    <Icon name="x" size={13} color={c.textDim} />
+                    <Text style={sheetStyles(c).amountClearText}>مسح</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+              <Text
+                style={[
+                  sheetStyles(c).drawerHint,
+                  overDrawer ? {color: c.danger} : null,
+                ]}>
+                {isOut
+                  ? `النقد المتاح بالخزينة: ${formatMoney(drawerMinor / 100)}`
+                  : `النقد الحالي بالخزينة: ${formatMoney(drawerMinor / 100)}`}
+                {overDrawer ? ' — المبلغ أكبر من المتاح!' : ''}
+              </Text>
+
+              {/* الوسط القابل للتمرير — فئات المصروف والملاحظة
+                  (المبلغ واللوحة والتأكيد مثبتة حوله فتتلاءم
+                  العناصر مع أي ارتفاع شاشة). */}
               <ScrollView
                 style={{flex: 1}}
                 contentContainerStyle={sheetStyles(c).form}
                 showsVerticalScrollIndicator={false}
                 keyboardShouldPersistTaps="handled">
-                {/* v29 (round-37 #1): المبلغ — عرض فقط + لوحة أرقام
-                    مدمجة. لا TextInput هنا: لوحة النظام لا تُستدعى
-                    للمبلغ إطلاقاً (نفس نمط لوحة الوزن v9.2 — درس
-                    روم الجهاز النهائي: أي تغيير تخطيط لحظة فتح
-                    اللوحة يقتلها، فلا تُفتح أصلاً). */}
-                <Text style={sheetStyles(c).formLabel}>المبلغ (₪)</Text>
-                <View
-                  style={[
-                    sheetStyles(c).amountRow,
-                    overDrawer ? {borderColor: c.danger} : null,
-                  ]}>
-                  <Text
-                    style={[
-                      sheetStyles(c).amountDisplay,
-                      amountText === '' ? {color: c.textFaint} : null,
-                    ]}>
-                    {amountText === '' ? '0.00' : amountText}
-                  </Text>
-                  <Text style={sheetStyles(c).amountSuffix}>₪</Text>
-                  {amountText !== '' ? (
-                    <TouchableOpacity
-                      style={sheetStyles(c).amountClearBtn}
-                      onPress={() => setAmountText('')}
-                      disabled={busy}
-                      activeOpacity={0.75}>
-                      <Icon name="x" size={13} color={c.textDim} />
-                      <Text style={sheetStyles(c).amountClearText}>مسح</Text>
-                    </TouchableOpacity>
-                  ) : null}
-                </View>
-                <Text
-                  style={[
-                    sheetStyles(c).drawerHint,
-                    overDrawer ? {color: c.danger} : null,
-                  ]}>
-                  {isOut
-                    ? `النقد المتاح بالخزينة: ${formatMoney(drawerMinor / 100)}`
-                    : `النقد الحالي بالخزينة: ${formatMoney(drawerMinor / 100)}`}
-                  {overDrawer ? ' — المبلغ أكبر من المتاح!' : ''}
-                </Text>
-
-                {/* لوحة الأرقام المدمجة — أرقام وفاصلة وحذف فقط،
-                    بقواعد النقود (أغورتان، بلا سوابق صفرية). */}
-                <View style={sheetStyles(c).keypad}>
-                  {AMOUNT_KEYPAD_KEYS.map((row, rowIndex) => (
-                    <View key={rowIndex} style={sheetStyles(c).keypadRow}>
-                      {row.map(key => (
-                        <TouchableOpacity
-                          key={key}
-                          style={[
-                            sheetStyles(c).keypadKey,
-                            key === '⌫' ? sheetStyles(c).keypadKeyDanger : null,
-                          ]}
-                          onPress={() =>
-                            setAmountText(prev => applyAmountKey(prev, key))
-                          }
-                          disabled={busy}
-                          activeOpacity={0.65}>
-                          <Text style={sheetStyles(c).keypadKeyText}>{key}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  ))}
-                </View>
-
                 {/* Expense categories */}
                 {mode === 'expense' ? (
                   <>
@@ -1182,6 +1170,8 @@ function MovementSheet({
                         placeholder="اكتب اسم الفئة"
                         placeholderTextColor={c.textFaint}
                         editable={!busy}
+                        onFocus={() => setTextFocused(true)}
+                        onBlur={() => setTextFocused(false)}
                       />
                     ) : null}
                   </>
@@ -1197,8 +1187,39 @@ function MovementSheet({
                   placeholderTextColor={c.textFaint}
                   multiline
                   editable={!busy}
+                  onFocus={() => setTextFocused(true)}
+                  onBlur={() => setTextFocused(false)}
                 />
               </ScrollView>
+
+              {/* لوحة الأرقام المدمجة — مثبتة أسفل النافذة (نمط POS
+                  الاحترافي): أرقام وفاصلة وحذف فقط بقواعد النقود
+                  (أغورتان، بلا سوابق صفرية). تختفي أثناء تركيز حقل
+                  نصي (الملاحظة/الفئة المخصصة) لتفسح له فوق لوحة
+                  النظام — onFocus يسبق فتح اللوحة فلا سباق مع IME. */}
+              {!textFocused ? (
+                <View style={sheetStyles(c).keypad}>
+                  {AMOUNT_KEYPAD_KEYS.map((row, rowIndex) => (
+                    <View key={rowIndex} style={sheetStyles(c).keypadRow}>
+                      {row.map(key => (
+                        <TouchableOpacity
+                          key={key}
+                          style={[
+                            sheetStyles(c).keypadKey,
+                            key === '⌫' ? sheetStyles(c).keypadKeyDanger : null,
+                          ]}
+                          onPress={() =>
+                            setAmountText(prev => applyAmountKey(prev, key))
+                          }
+                          disabled={busy}
+                          activeOpacity={0.65}>
+                          <Text style={sheetStyles(c).keypadKeyText}>{key}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
 
               {/* ── Confirm ── */}
               <View style={sheetStyles(c).summaryBox}>
@@ -1245,13 +1266,12 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
     },
     sheet: {
       backgroundColor: c.bg,
-      borderTopLeftRadius: 22,
-      borderTopRightRadius: 22,
-      paddingTop: spacing.lg,
-      paddingBottom: spacing.xl,
+      // v30 (round-38 #1): نافذة بملء الشاشة — بلا حواف مدوّرة
+      // ولا حشوات عمودية ثابتة (الحشوة من SafeArea inline).
+      borderTopLeftRadius: 0,
+      borderTopRightRadius: 0,
       paddingHorizontal: spacing.lg,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
+      borderWidth: 0,
       overflow: 'hidden',
     },
     head: {
@@ -1382,13 +1402,14 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       borderRadius: radius.sm,
       paddingHorizontal: spacing.md,
     },
-    /** v29 (round-37 #1): المبلغ — عرض فقط (لا TextInput) + زر مسح. */
+    /** v30 (round-38 #1): المبلغ — عرض فقط (لا TextInput) + زر مسح.
+     *  بحجم بطاقة POS كبيرة تليق بنافذة ملء الشاشة. */
     amountDisplay: {
       flex: 1,
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: 24,
-      paddingVertical: 10,
+      fontSize: 32,
+      paddingVertical: 12,
       textAlign: I18nManager.isRTL ? 'right' : 'left',
       fontVariant: ['tabular-nums'],
     },
@@ -1413,19 +1434,19 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       fontFamily: fonts.bold,
       fontSize: typography.caption,
     },
-    /** v29 (round-37 #1): لوحة الأرقام المدمجة — نفس مقاسات لوحة
-     *  الوزن المجرّبة في نقطة البيع (PosScreen). */
+    /** v30 (round-38 #1): لوحة الأرقام المدمجة — مثبتة أسفل نافذة
+     *  ملء الشاشة، أزرار أطول مريحة (نمط POS). */
     keypad: {
-      gap: spacing.xs + 2,
-      marginTop: spacing.xs,
+      gap: spacing.xs + 3,
+      marginTop: spacing.sm,
     },
     keypadRow: {
       flexDirection: 'row',
-      gap: spacing.xs + 2,
+      gap: spacing.xs + 3,
     },
     keypadKey: {
       flex: 1,
-      height: 50,
+      height: 54,
       borderRadius: radius.md,
       backgroundColor: c.surfaceAlt,
       borderWidth: 1,
@@ -1439,7 +1460,7 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
     keypadKeyText: {
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: 21,
+      fontSize: 23,
       fontVariant: ['tabular-nums'],
     },
     drawerHint: {

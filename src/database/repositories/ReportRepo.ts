@@ -32,24 +32,55 @@ function rangeBounds(range: DateRange): [string, string] {
   return [`${range.from} 00:00:00`, `${range.to} 23:59:59`];
 }
 
+/* ── v30 (round-38 #3): إسناد المرتجعات لفترة الفاتورة الأصلية ──
+ *
+ * قاعدة التاجر: «إرجاع مبيعات قديمة لا يجعل مبيعات اليوم بالسالب،
+ * والمفترض ألا تُحتسب المنتجات المرجعة في اليوم الذي أُرجعت فيه».
+ * النموذج المحاسبي (نفس انضباط Loyverse): إيصال المرتجع (RET-) يُسند
+ * إلى فترة الفاتورة الأصلية التي خرجت منها البضاعة — لا إلى يوم
+ * معالجة الاسترداد. هكذا:
+ *   • مبيعات اليوم/صافي الربح لا ينقصان أبداً بسبب مرتجع فاتورة
+ *     قديمة (المردود يُخصم من يوم البيع نفسه — التاريخ المُعاد
+ *     صياغته)، ولا يمكن أن يصبح رصيد اليوم سالباً لأن كل مرتجع
+ *     مُسند لفترته لا يتجاوز فاتورته الأصلية داخل نفس الفترة.
+ *   • مؤشر «المرتجعات» (عدد/قيمة) يبقى بيوم المعالجة — التاجر يرى
+ *     ما استردّه اليوم فعلاً بشفافية تامة.
+ * ربط وصيغة الإسناد (دفاعي: صف RET بلا سلسلة sale_returns — لا
+ * يحدث، تُنشآن في معاملة واحدة — يبقى على تاريخه الذاتي). */
+const RETURN_ORIGINAL_LINK = `
+  SELECT sr.return_number AS ret_number, o.created_at AS orig_created_at
+  FROM sale_returns sr
+  JOIN sales o ON o.id = sr.sale_id`;
+
+/** التاريخ الذي ينتمي إليه الصف: للمرتجع = تاريخ فاتورته الأصلية. */
+const EFFECTIVE_AT = `CASE WHEN s.return_kind IS NOT NULL
+  THEN COALESCE(link.orig_created_at, s.created_at)
+  ELSE s.created_at END`;
+
+/** شرط الانتماء للفترة بالتاريخ المُسند. */
+const EFFECTIVE_IN_RANGE = `${EFFECTIVE_AT} >= ? AND ${EFFECTIVE_AT} <= ?`;
+
 export const ReportRepo = {
   async summary(range: DateRange): Promise<ReportSummary> {
     const [start, end] = rangeBounds(range);
-    // v23 (round-29 #2): RET rows are NEGATIVE sales — revenue/cogs/
-    // profit net out automatically; the invoice COUNT excludes them
-    // (a return is not an invoice) and they surface as their own
-    // returns line (count + refunded value).
+    // v23 (round-29 #2) → v30 (round-38 #3): RET rows are NEGATIVE
+    // sales that net revenue/cogs/profit — but in the ORIGINAL
+    // invoice's period (EFFECTIVE_AT), so refunding an old sale can
+    // never dent today's figures («لا تُحتسب منتجات مرجعة قديمة في
+    // اليوم»). The invoice COUNT is own-date (a return is not an
+    // invoice) and the returns KPI stays own-date too — the merchant
+    // still SEES what he refunded today, it just never distorts the
+    // net numbers.
     const salesResult = await getDb().execute(
       `SELECT
-         COALESCE(SUM(total_amount), 0) AS revenue,
-         COALESCE(SUM(total_cost), 0) AS cogs,
-         COALESCE(SUM(total_profit), 0) AS profit,
-         COALESCE(SUM(discount), 0) AS discount_total,
-         COUNT(*) AS invoices,
-         COALESCE(SUM(CASE WHEN return_kind IS NOT NULL THEN 1 ELSE 0 END), 0) AS returns_cnt,
-         COALESCE(SUM(CASE WHEN return_kind IS NOT NULL THEN -total_amount ELSE 0 END), 0) AS returns_total
-       FROM sales
-       WHERE created_at >= ? AND created_at <= ?`,
+         COALESCE(SUM(s.total_amount), 0) AS revenue,
+         COALESCE(SUM(s.total_cost), 0) AS cogs,
+         COALESCE(SUM(s.total_profit), 0) AS profit,
+         COALESCE(SUM(s.discount), 0) AS discount_total
+       FROM sales s
+       LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+         ON link.ret_number = s.invoice_number
+       WHERE ${EFFECTIVE_IN_RANGE}`,
       [start, end],
     );
     const salesRow =
@@ -59,6 +90,23 @@ export const ReportRepo = {
             cogs?: number;
             profit?: number;
             discount_total?: number;
+          }
+        | undefined) ?? {};
+
+    // Activity counters — by the row's OWN date: real invoices
+    // created in the period + refunds PROCESSED in the period.
+    const activityResult = await getDb().execute(
+      `SELECT
+         COALESCE(SUM(CASE WHEN s.return_kind IS NULL THEN 1 ELSE 0 END), 0) AS invoices,
+         COALESCE(SUM(CASE WHEN s.return_kind IS NOT NULL THEN 1 ELSE 0 END), 0) AS returns_cnt,
+         COALESCE(SUM(CASE WHEN s.return_kind IS NOT NULL THEN -s.total_amount ELSE 0 END), 0) AS returns_total
+       FROM sales s
+       WHERE s.created_at >= ? AND s.created_at <= ?`,
+      [start, end],
+    );
+    const activityRow =
+      (activityResult.rows?._array?.[0] as
+        | {
             invoices?: number;
             returns_cnt?: number;
             returns_total?: number;
@@ -69,16 +117,17 @@ export const ReportRepo = {
       `SELECT COALESCE(SUM(si.quantity), 0) AS items
        FROM sale_items si
        JOIN sales s ON s.id = si.sale_id
-       WHERE s.created_at >= ? AND s.created_at <= ?`,
+       LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+         ON link.ret_number = s.invoice_number
+       WHERE ${EFFECTIVE_IN_RANGE}`,
       [start, end],
     );
     const itemsRow = itemsResult.rows?._array?.[0] as
       | {items?: number}
       | undefined;
 
-    const invoicesAll = Number(salesRow.invoices ?? 0);
-    const returnsCount = Number(salesRow.returns_cnt ?? 0);
-    const invoices = invoicesAll - returnsCount;
+    const invoices = Number(activityRow.invoices ?? 0);
+    const returnsCount = Number(activityRow.returns_cnt ?? 0);
     const revenue = Number(salesRow.revenue ?? 0);
     return {
       revenue,
@@ -89,12 +138,15 @@ export const ReportRepo = {
       discountTotal: Number(salesRow.discount_total ?? 0),
       avgInvoice: invoices > 0 ? revenue / invoices : 0,
       returnsCount,
-      returnsTotal: Number(salesRow.returns_total ?? 0),
+      returnsTotal: Number(activityRow.returns_total ?? 0),
     };
   },
 
   async topProducts(range: DateRange, limit = 10): Promise<TopProduct[]> {
     const [start, end] = rangeBounds(range);
+    // v30 (round-38 #3): return lines net their product's totals in
+    // the ORIGINAL invoice's period — an old sale's refund never
+    // plants a negative row in today's best-sellers.
     const result = await getDb().execute(
       `SELECT
          si.product_id AS product_id,
@@ -104,8 +156,10 @@ export const ReportRepo = {
          SUM(si.total_line_price - si.cost_price * si.quantity) AS profit
        FROM sale_items si
        JOIN sales s ON s.id = si.sale_id
+       LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+         ON link.ret_number = s.invoice_number
        LEFT JOIN products p ON p.id = si.product_id
-       WHERE s.created_at >= ? AND s.created_at <= ?
+       WHERE ${EFFECTIVE_IN_RANGE}
        GROUP BY si.product_id, p.name
        ORDER BY revenue DESC
        LIMIT ?`,
@@ -123,13 +177,18 @@ export const ReportRepo = {
 
   async dailySeries(range: DateRange): Promise<DailyPoint[]> {
     const [start, end] = rangeBounds(range);
+    // v30 (round-38 #3): a return nets its ORIGINAL day's bar (the
+    // restated-history view) — today's bar never dips negative from
+    // an old invoice's refund.
     const result = await getDb().execute(
       `SELECT
-         substr(created_at, 1, 10) AS day,
-         SUM(total_amount) AS revenue,
-         SUM(total_profit) AS profit
-       FROM sales
-       WHERE created_at >= ? AND created_at <= ?
+         substr(${EFFECTIVE_AT}, 1, 10) AS day,
+         SUM(s.total_amount) AS revenue,
+         SUM(s.total_profit) AS profit
+       FROM sales s
+       LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+         ON link.ret_number = s.invoice_number
+       WHERE ${EFFECTIVE_IN_RANGE}
        GROUP BY day
        ORDER BY day ASC`,
       [start, end],
@@ -167,13 +226,17 @@ export const ReportRepo = {
 
   async hourlySeries(range: DateRange): Promise<HourlyPoint[]> {
     const [start, end] = rangeBounds(range);
+    // v30 (round-38 #3): the return lands in the ORIGINAL sale's
+    // hour — the hourly curve stays the original day's shape.
     const result = await getDb().execute(
       `SELECT
-         CAST(substr(created_at, 12, 2) AS INTEGER) AS hour,
-         SUM(total_amount) AS revenue,
+         CAST(substr(${EFFECTIVE_AT}, 12, 2) AS INTEGER) AS hour,
+         SUM(s.total_amount) AS revenue,
          COUNT(*) AS orders
-       FROM sales
-       WHERE created_at >= ? AND created_at <= ?
+       FROM sales s
+       LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+         ON link.ret_number = s.invoice_number
+       WHERE ${EFFECTIVE_IN_RANGE}
        GROUP BY hour
        ORDER BY hour ASC`,
       [start, end],
@@ -198,7 +261,7 @@ export const ReportRepo = {
    *  credit sales in the range, SPLIT BY SERIES — INV-D (صِلة) and
    *  INV-L (دفتر المتجر) — NET OF RETURNS: a RET row carrying
    *  return_kind 'sila'/'local' subtracts from its book's amount
-   * IN THE RETURN'S OWN PERIOD, so a debt-invoice return never
+   * IN ITS ORIGINAL INVOICE'S PERIOD (v30 round-38 #3), so a debt-invoice return never
    *  distorts the period's cash-sales math (its negative revenue
    * and its negative credit-sale cancel out). */
   async debtSalesSummary(range: DateRange): Promise<DebtSalesSummary> {
@@ -206,17 +269,19 @@ export const ReportRepo = {
     try {
       const result = await getDb().execute(
         `SELECT
-           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-D-%' THEN 1 ELSE 0 END), 0) AS sila_cnt,
-           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-D-%' THEN total_amount ELSE 0 END), 0)
-             + COALESCE(SUM(CASE WHEN return_kind = 'sila' THEN total_amount ELSE 0 END), 0) AS sila_amount,
-           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN 1 ELSE 0 END), 0) AS local_cnt,
-           COALESCE(SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN total_amount ELSE 0 END), 0)
-             + COALESCE(SUM(CASE WHEN return_kind = 'local' THEN total_amount ELSE 0 END), 0) AS local_amount
-         FROM sales
-         WHERE created_at >= ? AND created_at <= ?
-           AND (invoice_number LIKE 'INV-D-%'
-             OR invoice_number LIKE 'INV-L-%'
-             OR return_kind IS NOT NULL)`,
+           COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-D-%' THEN 1 ELSE 0 END), 0) AS sila_cnt,
+           COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-D-%' THEN s.total_amount ELSE 0 END), 0)
+             + COALESCE(SUM(CASE WHEN s.return_kind = 'sila' THEN s.total_amount ELSE 0 END), 0) AS sila_amount,
+           COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-L-%' THEN 1 ELSE 0 END), 0) AS local_cnt,
+           COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-L-%' THEN s.total_amount ELSE 0 END), 0)
+             + COALESCE(SUM(CASE WHEN s.return_kind = 'local' THEN s.total_amount ELSE 0 END), 0) AS local_amount
+         FROM sales s
+         LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+           ON link.ret_number = s.invoice_number
+         WHERE ${EFFECTIVE_IN_RANGE}
+           AND (s.invoice_number LIKE 'INV-D-%'
+             OR s.invoice_number LIKE 'INV-L-%'
+             OR s.return_kind IS NOT NULL)`,
         [start, end],
       );
       const row = (result.rows?._array?.[0] ?? {}) as {
@@ -315,7 +380,9 @@ export const ReportRepo = {
          s.payment_type AS payment_type,
          s.return_kind AS return_kind
        FROM sales s
-       WHERE s.created_at >= ? AND s.created_at <= ?
+       LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+         ON link.ret_number = s.invoice_number
+       WHERE ${EFFECTIVE_IN_RANGE}
        ORDER BY s.created_at ASC`,
       [start, end],
     );

@@ -245,6 +245,10 @@ export interface StocktakeItem {
   stocktake_id: number;
   product_id: number;
   productName: string;
+  /** v30 (round-38 #2): the product's barcode — scan-to-search in
+   *  the counting screen matches it exactly (same contract as the
+   *  inventory search). */
+  barcode: string | null;
   categoryId: number | null;
   system_qty: number;
   counted_qty: number | null;

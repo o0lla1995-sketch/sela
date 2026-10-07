@@ -30,6 +30,7 @@ function rowToItem(row: Record<string, unknown>): StocktakeItem {
     stocktake_id: Number(row.stocktake_id),
     product_id: Number(row.product_id),
     productName: String(row.product_name ?? ''),
+    barcode: row.barcode == null ? null : String(row.barcode),
     categoryId: row.category_id == null ? null : Number(row.category_id),
     system_qty: Number(row.system_qty ?? 0),
     counted_qty: row.counted_qty == null ? null : Number(row.counted_qty),
@@ -131,7 +132,7 @@ export const StocktakeRepo = {
       conditions.push('si.counted_qty IS NULL');
     }
     const result = await getDb().execute(
-      `SELECT si.*, p.name AS product_name, p.category_id, p.sold_by_weight, ${UNIT_HINT_SQL}
+      `SELECT si.*, p.name AS product_name, p.barcode, p.category_id, p.sold_by_weight, ${UNIT_HINT_SQL}
        FROM stocktake_items si
        JOIN products p ON p.id = si.product_id
        WHERE ${conditions.join(' AND ')}
