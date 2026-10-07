@@ -1146,6 +1146,11 @@ const useToastStyles = makeStyles(c =>
       left: spacing.lg,
       right: spacing.lg,
       gap: spacing.sm,
+      // v31 (round-39 #3): فوق طبقة القفل (9999) — رسائل البيع في
+      // «وضع البيع السريع» (نقطة البيع فوق شاشة القفل) يجب أن
+      // تظهر فوق كل شيء وإلا لَما رأى العامل تأكيد البيع.
+      zIndex: 10000,
+      elevation: 10000,
     },
     toast: {
       ...shadows.floating,

@@ -139,8 +139,81 @@ export function StocktakeScreen() {
     }, [loadAll]),
   );
 
+  /** v31 (round-39 #1): وضع العدّ — عند الضغط على منتج تُطوى
+   *  الإحصاءات والفلاتر والشريط السفلي فيمتلئ قسم المنتجات بالصفحة
+   *  «كما كان»، ويُركّز حقل عدّ المنتج المضغوط. لا علاقة لهذا
+   *  بلوحة المفاتيح إطلاقاً (لا مستمعات ولا ردود فعل onFocus) —
+   *  التغيير يحدث بضغطة المنتج نفسها، وقبل فتح أي لوحة، فتستقر
+   *  الشجرة ثم يُركّز الحقل بعد ~280ms. شريط البحث لا يتغير أبداً
+   *  بين الوضعين فيبقى ساكناً لحظة الضغط عليه (إصلاح v29.1 محفوظ). */
+  const [countMode, setCountMode] = useState(false);
+  const countFocusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countFocusTimer2 = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clean the delayed-focus chain on unmount.
+  useEffect(
+    () => () => {
+      if (countFocusTimer.current != null) {
+        clearTimeout(countFocusTimer.current);
+      }
+      if (countFocusTimer2.current != null) {
+        clearTimeout(countFocusTimer2.current);
+      }
+    },
+    [],
+  );
+
+  /** v31: الضغط على منتج — يفتح وضع العدّ (أول مرة) ويركّز حقل
+   *  عدّه. الطيّ يحدث أولاً ثم يُلبث ~280ms حتى يستقر التخطيط
+   *  الجديد قبل تركيز الحقل — التركيز لحظة تغيّر الشجرة هو بالضبط
+   *  ما كان يقتل لوحة المفاتيح على روم الجهاز (درس v29/v29.1)،
+   *  فالترتيب هنا: اطمئ على الشجرة ← ركّز. */
+  const onPressProduct = useCallback(
+    (index: number) => {
+      if (countMode) {
+        // Already in counting layout — nothing moves; a plain focus
+        // switch between inputs is safe on every ROM.
+        countRefs.current[index]?.focus();
+        return;
+      }
+      // Blur whatever holds focus (e.g. the search box) so the
+      // collapse NEVER moves a focused input, then fold.
+      const focused = TextInput.State.currentlyFocusedInput();
+      focused?.blur?.();
+      setCountMode(true);
+      if (countFocusTimer.current != null) {
+        clearTimeout(countFocusTimer.current);
+      }
+      if (countFocusTimer2.current != null) {
+        clearTimeout(countFocusTimer2.current);
+      }
+      // Bring the row into the (now taller) list first…
+      countFocusTimer.current = setTimeout(() => {
+        listRef.current?.scrollToIndex({
+          index,
+          viewPosition: 0.3,
+          animated: false,
+        });
+        // …then focus its count input on the settled tree.
+        countFocusTimer2.current = setTimeout(() => {
+          countRefs.current[index]?.focus();
+        }, 140);
+      }, 280);
+    },
+    [countMode],
+  );
+
+  /** v31: الرجوع من وضع العدّ — يُفقد تركيز أي حقل أولاً (تُغلق
+   *  اللوحة بهدوء) ثم تُفتح الأقسام، فلا يتحرك حقل مركّز أبداً. */
+  const exitCountMode = useCallback(() => {
+    const focused = TextInput.State.currentlyFocusedInput();
+    focused?.blur?.();
+    setCountMode(false);
+  }, []);
+
   const startSession = useCallback(async () => {
     setStarting(true);
+    setCountMode(false);
     try {
       const created = await StocktakeRepo.start();
       await loadAll();
@@ -557,28 +630,47 @@ export function StocktakeScreen() {
       />
 
       <View style={styles.body}>
-        {/* v8.1 compact progress strip — ONE slim bar (~52dp) replaces
-            the three tall stat cards that ate the counting list.
-            v29.1: always visible (stable tree — see top). */}
-        <View style={styles.miniStats}>
-          <MiniStat
-            tone="success"
-            label="مطابق"
-            value={String(summary?.matchedItems ?? 0)}
-          />
-          <View style={styles.miniStatDivider} />
-          <MiniStat
-            tone="danger"
-            label="نقص"
-            value={String(summary?.shortageItems ?? 0)}
-          />
-          <View style={styles.miniStatDivider} />
-          <MiniStat
-            tone="info"
-            label="زيادة"
-            value={String(summary?.surplusItems ?? 0)}
-          />
-        </View>
+        {/* v31 (round-39 #1): في الوضع العادي شريط التقدّم المدمج
+            (v8.1) — وفي وضع العدّ (ضغط منتج) يحل محله شريط رقيق
+            بنفس المكان وزر «عرض الكل» للرجوع، فلا يتزحزح شريط
+            البحث بين الوضعين إلا فارق ارتفاع ضئيل مرة واحدة لحظة
+            ضغط المنتج — وبعدها يبقى ساكناً تماماً. */}
+        {countMode ? (
+          <View style={styles.countModeBar}>
+            <Icon name="clipboard" size={15} color={c.accent} />
+            <Text style={styles.countModeText} numberOfLines={1}>
+              وضع العدّ — المنتجات بملء الشاشة
+            </Text>
+            <TouchableOpacity
+              style={styles.countModeExit}
+              onPress={exitCountMode}
+              activeOpacity={0.75}
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              <Icon name="chevronDown" size={14} color={c.textDim} />
+              <Text style={styles.countModeExitText}>عرض الكل</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={styles.miniStats}>
+            <MiniStat
+              tone="success"
+              label="مطابق"
+              value={String(summary?.matchedItems ?? 0)}
+            />
+            <View style={styles.miniStatDivider} />
+            <MiniStat
+              tone="danger"
+              label="نقص"
+              value={String(summary?.shortageItems ?? 0)}
+            />
+            <View style={styles.miniStatDivider} />
+            <MiniStat
+              tone="info"
+              label="زيادة"
+              value={String(summary?.surplusItems ?? 0)}
+            />
+          </View>
+        )}
 
         {/* v30 (round-38 #2): البحث + زر مسح الباركود (أيقونة فقط)
             — المسح يعبّئ حقل البحث بالكود ويركّز حقل عدّ المنتج
@@ -608,8 +700,10 @@ export function StocktakeScreen() {
         {/* v8.2 (round-11 #5): ONE tight filters block — the chips row
             and the uncounted-only toggle sit together with a hairline
             gap (the old body-level gap left a hole between them).
-            v29.1: always visible (stable tree — see top). */}
-        <View style={styles.filtersBlock}>
+            v29.1: always visible (stable tree — see top).
+            v31: يُطوى في وضع العدّ (ضغط منتج) — انظر أعلى. */}
+        {!countMode ? (
+          <View style={styles.filtersBlock}>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -646,6 +740,7 @@ export function StocktakeScreen() {
               </Text>
             </TouchableOpacity>
           </View>
+        ) : null}
 
         {filteredItems.length === 0 ? (
           <EmptyState
@@ -697,6 +792,7 @@ export function StocktakeScreen() {
                 item={item}
                 onSetCounted={setCounted}
                 onMarkMatched={markMatched}
+                onPressRow={() => onPressProduct(index)}
                 returnKeyType={
                   index === filteredItems.length - 1 ? 'done' : 'next'
                 }
@@ -719,24 +815,28 @@ export function StocktakeScreen() {
         )}
 
         {/* v29.1: الشريط السفلي يبقى دائماً — إلغاء/إنهاء الجرد في
-            متناول اليد حتى أثناء الكتابة، والشجرة لا تتغير. */}
-        <View style={styles.bottomBar}>
-          <AppButton
-            title="إلغاء الجرد"
-            variant="danger"
-            icon="x"
-            small
-            style={{flex: 1}}
-            onPress={cancelSession}
-          />
-          <AppButton
-            title="إنهاء الجرد وتطبيق النتائج"
-            icon="check"
-            small
-            style={{flex: 2}}
-            onPress={completeSession}
-          />
-        </View>
+            متناول اليد حتى أثناء الكتابة، والشجرة لا تتغير.
+            v31: يُطوى في وضع العدّ ليملأ قسم المنتجات الصفحة —
+            «إنهاء» يبقى متاحاً دائماً في ترويسة الشاشة. */}
+        {!countMode ? (
+          <View style={styles.bottomBar}>
+            <AppButton
+              title="إلغاء الجرد"
+              variant="danger"
+              icon="x"
+              small
+              style={{flex: 1}}
+              onPress={cancelSession}
+            />
+            <AppButton
+              title="إنهاء الجرد وتطبيق النتائج"
+              icon="check"
+              small
+              style={{flex: 2}}
+              onPress={completeSession}
+            />
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -750,6 +850,7 @@ function CountRow({
   item,
   onSetCounted,
   onMarkMatched,
+  onPressRow,
   returnKeyType,
   onSubmitEditing,
   registerRef,
@@ -757,6 +858,9 @@ function CountRow({
   item: StocktakeItem;
   onSetCounted: (item: StocktakeItem, raw: string) => Promise<void>;
   onMarkMatched: (item: StocktakeItem) => Promise<void>;
+  /** v31 (round-39 #1): pressing the PRODUCT itself opens the
+   *  full-page counting mode and focuses this row's count input. */
+  onPressRow?: () => void;
   /** Keyboard chain (round-8): "next" jumps to the next row's count. */
   returnKeyType?: 'next' | 'done';
   onSubmitEditing?: () => void;
@@ -801,7 +905,13 @@ function CountRow({
 
   return (
     <View style={styles.row}>
-      <View style={{flex: 1}}>
+      {/* v31 (round-39 #1): الضغط على المنتج نفسه — يفتح وضع العدّ
+          بملء الصفحة ويركّز حقل العدّ (بلا أي رد فعل على اللوحة). */}
+      <TouchableOpacity
+        style={{flex: 1}}
+        activeOpacity={0.75}
+        onPress={onPressRow}
+        disabled={onPressRow == null}>
         <Text style={styles.rowName} numberOfLines={1}>
           {item.productName}
         </Text>
@@ -817,7 +927,7 @@ function CountRow({
           ) : null}
         </View>
         <Badge label={toneLabel} tone={tone} />
-      </View>
+      </TouchableOpacity>
       <View style={styles.countActions}>
         <TouchableOpacity
           style={styles.matchButton}
@@ -1070,6 +1180,42 @@ const useStyles = makeStyles(c =>
       alignSelf: 'stretch',
       backgroundColor: c.borderSoft,
       marginVertical: 2,
+    },
+    /** v31 (round-39 #1): شريط وضع العدّ — رقيق (نفس موضع شريط
+     *  التقدّم) يظهر عند ضغط منتج: تعريف الوضع + زر «عرض الكل»
+     *  للرجوع للوضع الكامل. */
+    countModeBar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.accentSofter,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      borderRadius: radius.md,
+      paddingVertical: 7,
+      paddingHorizontal: spacing.sm,
+    },
+    countModeText: {
+      flex: 1,
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    countModeExit: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 6,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+    },
+    countModeExitText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
     },
     /** v8.2 (round-11 #5): chips + uncounted toggle grouped in ONE
      *  tight block — no stray gap between them. */

@@ -22,10 +22,15 @@
  * v29 (round-37 #1) — الدرس النهائي للوحة المفاتيح: المبلغ يُدخل
  * من لوحة أرقام مدمجة داخل النافذة (نفس نمط v9.2 للوزن —
  * Loyverse/Square) ولا يوجد أي TextInput للمبلغ أصلاً، وارتفاع
- * النافذة ثابت يُلتقط مرة عند الفتح، وصفر مستمعات Keyboard في
- * الشاشة كلها — لا شيء يتحرك حين تُفتح أي لوحة، فلا يستسلم الـ
- * IME ويغلقها. الملاحظة (اختيارية) تظل TextField عادية بلا أي
- * رد فعل JS على اللوحة.
+ * النافذة ثابت، وصفر مستمعات Keyboard في الشاشة كلها.
+ *
+ * v31 (round-39 #2) — لوحة الأرقام لا تختفي أبداً: أُلغي إخفاء
+ * لوحة الأرقام أثناء تركيز الملاحظة/الفئة المخصصة (طلب التاجر،
+ * وهو أيضاً بنمط قاتل الـ IME على روم الجهاز — أي تغيّر شجرة
+ * لحظة التركيز يغلق اللوحة). الملاحظة والفئة المخصصة مثبّتان
+ * تحت المبلغ كسطر واحد مضغوط فيبقيان مرئيين فوق لوحة النظام،
+ * والفئات وحدها في الوسط القابل للتمرير — الشجرة كاملة ثابتة
+ * مهما فُتح أو أُغلق من لوحات.
  */
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
@@ -676,9 +681,9 @@ const SHEET_TITLES: Record<CashMovementKind, string> = {
 };
 
 const SHEET_SUBS: Record<CashMovementKind, string> = {
-  expense: 'مؤمّن بالبصمة أو رمز PIN — يُخصم من الخزينة ويُطبع سنده فوراً',
-  withdrawal: 'مؤمّن بالبصمة أو رمز PIN — السقف ما في الدرج فقط',
-  deposit: 'مؤمّن بالبصمة أو رمز PIN — يُضاف للخزينة ويُطبع سنده فوراً',
+  expense: 'يُخصم من الخزينة ويُطبع سنده فوراً',
+  withdrawal: 'السقف ما في الدرج فقط',
+  deposit: 'يُضاف للخزينة ويُطبع سنده فوراً',
 };
 
 /** v27 (round-35 #3): the biometric prompt copy per movement. */
@@ -731,12 +736,12 @@ function MovementSheet({
   const mountedAt = useRef(Date.now());
 
   const [amountText, setAmountText] = useState('');
-  /** v30 (round-38 #1): true أثناء تركيز حقل نصي (الملاحظة/الفئة
-   *  المخصصة) — تخفي لوحة الأرقام ليأخذ حقل النص مساحته فوق
-   *  لوحة النظام. الحدث onFocus يسبق فتح اللوحة (ليس مستمع
-   *  keyboardDidShow بعدها) فالتخطيط يستقر قبل أن يبدأ الـ IME
-   *  — لا خطر الإغلاق الفوري إطلاقاً. */
-  const [textFocused, setTextFocused] = useState(false);
+  /** v31 (round-39 #2): لا حالة تركيز إطلاقاً — لوحة الأرقام تبقى
+   *  مركّبة دائماً ولا يتحرك شيء في الشجرة لحظة تركيز الملاحظة
+   *  أو الفئة المخصصة (أي رد فعل JS على التركيز هو بنمط قاتل
+   *  الـ IME على روم الجهاز — درس v29). حقل الملاحظة/Fئة المخصصة
+   *  مثبّتان فوق منطقة الفئات القابلة للتمرير فيبقيان مرئيين
+   *  دائماً مهما ارتفعت لوحة النظام. */
   const [category, setCategory] = useState(
     mode === 'expense' ? EXPENSE_CATEGORIES[0] : mode === 'withdrawal' ? 'سحب رصيد' : 'إيداع نقدي',
   );
@@ -1052,22 +1057,15 @@ function MovementSheet({
                   </View>
                 </View>
               ) : null}
-              {authStage === 'passed' ? (
-                <View style={[sheetStyles(c).warnBox, {backgroundColor: c.successSoft}]}>
-                  <Icon name="checkCircle" size={14} color={c.success} />
-                  <Text style={[sheetStyles(c).warnText, {color: c.success}]}>
-                    تم التأمين {authMethod === 'fingerprint' ? 'بالبصمة' : 'برمز PIN'} —
-                    أكمل العملية
-                  </Text>
-                </View>
-              ) : null}
+              {/* v31 (round-39 #2): حُذفت ملاحظة «تم التأمين بالبصمة/
+                  برمز PIN — أكمل العملية» من النافذة بناءً على طلب
+                  التاجر — التأمين نفسه يعمل كما هو (البوابة أعلاه)
+                  دون أي إشارة داخل النافذة. */}
 
-              {/* v30 (round-38 #1): المبلغ — مثبّت فوق منطقة التمرير،
-                  كبير وواضح كبطاقة POS، يبقى مرئياً دائماً أثناء
-                  الكتابة على لوحة الأرقام أسفل النافذة. عرض فقط —
-                  لا TextInput (لوحة النظام لا تُستدعى للمبلغ إطلاقاً
-                  منذ v29). */}
-              <Text style={sheetStyles(c).formLabel}>المبلغ (₪)</Text>
+              {/* v31 (round-39 #2): المبلغ — مثبّت كبطاقة POS، عرض
+                  فقط بلا TextInput (لوحة النظام لا تُستدعى للمبلغ
+                  إطلاقاً منذ v29). علامة ₪ وزر المسح داخل البطاقة
+                  فلا حاجة لسطر عنوان فوقها. */}
               <View
                 style={[
                   sheetStyles(c).amountRow,
@@ -1103,123 +1101,120 @@ function MovementSheet({
                 {overDrawer ? ' — المبلغ أكبر من المتاح!' : ''}
               </Text>
 
-              {/* الوسط القابل للتمرير — فئات المصروف والملاحظة
-                  (المبلغ واللوحة والتأكيد مثبتة حوله فتتلاءم
-                  العناصر مع أي ارتفاع شاشة). */}
-              <ScrollView
-                style={{flex: 1}}
-                contentContainerStyle={sheetStyles(c).form}
-                showsVerticalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled">
-                {/* Expense categories */}
-                {mode === 'expense' ? (
-                  <>
-                    <Text style={sheetStyles(c).formLabel}>فئة المصروف</Text>
-                    <View style={sheetStyles(c).catGrid}>
-                      {EXPENSE_CATEGORIES.map(cat => {
-                        const active = !showCustom && category === cat;
-                        return (
-                          <TouchableOpacity
-                            key={cat}
-                            style={[
-                              sheetStyles(c).catChip,
-                              active && {
-                                backgroundColor: c.accent,
-                                borderColor: c.accent,
-                              },
-                            ]}
-                            onPress={() => {
-                              setCategory(cat);
-                              setShowCustom(false);
-                            }}
-                            activeOpacity={0.7}>
-                            <Text
-                              style={[
-                                sheetStyles(c).catChipText,
-                                {color: active ? c.onAccent : c.textDim},
-                              ]}>
-                              {cat}
-                            </Text>
-                          </TouchableOpacity>
-                        );
-                      })}
-                      <TouchableOpacity
-                        style={[
-                          sheetStyles(c).catChip,
-                          showCustom && {
-                            backgroundColor: c.accent,
-                            borderColor: c.accent,
-                          },
-                        ]}
-                        onPress={() => setShowCustom(true)}
-                        activeOpacity={0.7}>
-                        <Text
-                          style={[
-                            sheetStyles(c).catChipText,
-                            {color: showCustom ? c.onAccent : c.textDim},
-                          ]}>
-                          فئة أخرى…
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                    {showCustom ? (
-                      <TextInput
-                        style={sheetStyles(c).customInput}
-                        value={customCategory}
-                        onChangeText={setCustomCategory}
-                        placeholder="اكتب اسم الفئة"
-                        placeholderTextColor={c.textFaint}
-                        editable={!busy}
-                        onFocus={() => setTextFocused(true)}
-                        onBlur={() => setTextFocused(false)}
-                      />
-                    ) : null}
-                  </>
-                ) : null}
-
-                {/* Note */}
-                <Text style={sheetStyles(c).formLabel}>ملاحظة (اختياري)</Text>
+              {/* v31 (round-39 #2): الفئة المخصصة والملاحظة — مثبّتان
+                  مباشرة تحت المبلغ (سطر واحد مضغوط والعنوان داخل
+                  الحقل كـ placeholder) فيبقيان مرئيين دائماً حتى مع
+                  لوحة النظام مفتوحة، ولوحة الأرقام أسفلهما لا تختفي
+                  أبداً. */}
+              {mode === 'expense' && showCustom ? (
                 <TextInput
-                  style={sheetStyles(c).noteInput}
-                  value={note}
-                  onChangeText={setNote}
-                  placeholder="مثال: فاتورة كهرباء شهر 10"
+                  style={sheetStyles(c).customInput}
+                  value={customCategory}
+                  onChangeText={setCustomCategory}
+                  placeholder="اكتب اسم الفئة…"
                   placeholderTextColor={c.textFaint}
-                  multiline
+                  maxLength={40}
                   editable={!busy}
-                  onFocus={() => setTextFocused(true)}
-                  onBlur={() => setTextFocused(false)}
                 />
-              </ScrollView>
-
-              {/* لوحة الأرقام المدمجة — مثبتة أسفل النافذة (نمط POS
-                  الاحترافي): أرقام وفاصلة وحذف فقط بقواعد النقود
-                  (أغورتان، بلا سوابق صفرية). تختفي أثناء تركيز حقل
-                  نصي (الملاحظة/الفئة المخصصة) لتفسح له فوق لوحة
-                  النظام — onFocus يسبق فتح اللوحة فلا سباق مع IME. */}
-              {!textFocused ? (
-                <View style={sheetStyles(c).keypad}>
-                  {AMOUNT_KEYPAD_KEYS.map((row, rowIndex) => (
-                    <View key={rowIndex} style={sheetStyles(c).keypadRow}>
-                      {row.map(key => (
-                        <TouchableOpacity
-                          key={key}
-                          style={[
-                            sheetStyles(c).keypadKey,
-                            key === '⌫' ? sheetStyles(c).keypadKeyDanger : null,
-                          ]}
-                          onPress={() =>
-                            setAmountText(prev => applyAmountKey(prev, key))
-                          }
-                          disabled={busy}
-                          activeOpacity={0.65}>
-                          <Text style={sheetStyles(c).keypadKeyText}>{key}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  ))}
-                </View>
               ) : null}
+              <TextInput
+                style={sheetStyles(c).noteInput}
+                value={note}
+                onChangeText={setNote}
+                placeholder="ملاحظة (اختياري) — مثال: فاتورة كهرباء شهر 10"
+                placeholderTextColor={c.textFaint}
+                maxLength={140}
+                editable={!busy}
+              />
+
+              {/* الوسط القابل للتمرير — فئات المصروف فقط (يرتصّ
+                  بهدوء عند فتح لوحة النظام والحقول المثبتة فوقه
+                  تبقى مرئية). */}
+              {mode === 'expense' ? (
+                <ScrollView
+                  style={{flex: 1}}
+                  contentContainerStyle={sheetStyles(c).form}
+                  showsVerticalScrollIndicator={false}
+                  keyboardShouldPersistTaps="handled">
+                  <View style={sheetStyles(c).catGrid}>
+                    {EXPENSE_CATEGORIES.map(cat => {
+                      const active = !showCustom && category === cat;
+                      return (
+                        <TouchableOpacity
+                          key={cat}
+                          style={[
+                            sheetStyles(c).catChip,
+                            active && {
+                              backgroundColor: c.accent,
+                              borderColor: c.accent,
+                            },
+                          ]}
+                          onPress={() => {
+                            setCategory(cat);
+                            setShowCustom(false);
+                          }}
+                          activeOpacity={0.7}>
+                          <Text
+                            style={[
+                              sheetStyles(c).catChipText,
+                              {color: active ? c.onAccent : c.textDim},
+                            ]}>
+                            {cat}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                    <TouchableOpacity
+                      style={[
+                        sheetStyles(c).catChip,
+                        showCustom && {
+                          backgroundColor: c.accent,
+                          borderColor: c.accent,
+                        },
+                      ]}
+                      onPress={() => setShowCustom(true)}
+                      activeOpacity={0.7}>
+                      <Text
+                        style={[
+                          sheetStyles(c).catChipText,
+                          {color: showCustom ? c.onAccent : c.textDim},
+                        ]}>
+                        فئة أخرى…
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </ScrollView>
+              ) : (
+                <View style={{flex: 1}} />
+              )}
+
+              {/* v31 (round-39 #2): لوحة الأرقام المدمجة — تبقى
+                  مركّبة دائماً ولا تختفي أبداً (طلب التاجر الصريح):
+                  أرقام وفاصلة وحذف فقط بقواعد النقود الصارمة. أي
+                  إخفاء/إظهار مشروط بالتركيز هو بنمط قاتل الـ IME
+                  على روم الجهاز — الآن صفر تغيّرات في الشجرة عند
+                  تركيز الملاحظة أو الفئة المخصصة. */}
+              <View style={sheetStyles(c).keypad}>
+                {AMOUNT_KEYPAD_KEYS.map((row, rowIndex) => (
+                  <View key={rowIndex} style={sheetStyles(c).keypadRow}>
+                    {row.map(key => (
+                      <TouchableOpacity
+                        key={key}
+                        style={[
+                          sheetStyles(c).keypadKey,
+                          key === '⌫' ? sheetStyles(c).keypadKeyDanger : null,
+                        ]}
+                        onPress={() =>
+                          setAmountText(prev => applyAmountKey(prev, key))
+                        }
+                        disabled={busy}
+                        activeOpacity={0.65}>
+                        <Text style={sheetStyles(c).keypadKeyText}>{key}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ))}
+              </View>
 
               {/* ── Confirm ── */}
               <View style={sheetStyles(c).summaryBox}>
@@ -1385,13 +1380,7 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
     },
     form: {
       gap: spacing.sm,
-      paddingVertical: spacing.md,
-    },
-    formLabel: {
-      color: c.textDim,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-      marginTop: spacing.xs,
+      paddingVertical: spacing.sm,
     },
     amountRow: {
       flexDirection: 'row',
@@ -1402,14 +1391,15 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       borderRadius: radius.sm,
       paddingHorizontal: spacing.md,
     },
-    /** v30 (round-38 #1): المبلغ — عرض فقط (لا TextInput) + زر مسح.
-     *  بحجم بطاقة POS كبيرة تليق بنافذة ملء الشاشة. */
+    /** v31 (round-39 #2): المبلغ — عرض فقط (لا TextInput) + زر مسح.
+     *  مُدمج قليلاً (26px) لتتسع الترويسة والملاحظة ولوحة الأرقام
+     *  معاً فوق أي شاشة. */
     amountDisplay: {
       flex: 1,
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: 32,
-      paddingVertical: 12,
+      fontSize: 26,
+      paddingVertical: 9,
       textAlign: I18nManager.isRTL ? 'right' : 'left',
       fontVariant: ['tabular-nums'],
     },
@@ -1434,19 +1424,20 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       fontFamily: fonts.bold,
       fontSize: typography.caption,
     },
-    /** v30 (round-38 #1): لوحة الأرقام المدمجة — مثبتة أسفل نافذة
-     *  ملء الشاشة، أزرار أطول مريحة (نمط POS). */
+    /** v31 (round-39 #2): لوحة الأرقام المدمجة — مركّبة دائماً
+     *  (أبداً لا تُفكّك)، أزرار 46px مريحة تفسح للملاحظة المثبتة
+     *  فوقها مساحة كافية مهما ارتفعت لوحة النظام. */
     keypad: {
-      gap: spacing.xs + 3,
-      marginTop: spacing.sm,
+      gap: spacing.xs + 2,
+      marginTop: spacing.xs + 2,
     },
     keypadRow: {
       flexDirection: 'row',
-      gap: spacing.xs + 3,
+      gap: spacing.xs + 2,
     },
     keypadKey: {
       flex: 1,
-      height: 54,
+      height: 46,
       borderRadius: radius.md,
       backgroundColor: c.surfaceAlt,
       borderWidth: 1,
@@ -1460,7 +1451,7 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
     keypadKeyText: {
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: 23,
+      fontSize: 21,
       fontVariant: ['tabular-nums'],
     },
     drawerHint: {
@@ -1496,8 +1487,11 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       borderColor: c.border,
       borderRadius: radius.sm,
       paddingHorizontal: spacing.md,
-      paddingVertical: 8,
+      paddingVertical: 9,
     },
+    /** v31 (round-39 #2): الملاحظة — سطر واحد مضغوط مثبّت تحت
+     *  المبلغ (بلا label — العنوان placeholder داخل الحقل)، يبقى
+     *  مرئياً ومكتوباً دائماً حتى مع لوحة النظام مفتوحة. */
     noteInput: {
       color: c.text,
       fontFamily: fonts.regular,
@@ -1507,15 +1501,15 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       borderColor: c.border,
       borderRadius: radius.sm,
       paddingHorizontal: spacing.md,
-      paddingVertical: 10,
-      minHeight: 70,
-      textAlignVertical: 'top',
+      paddingVertical: 9,
+      minHeight: 44,
+      textAlignVertical: 'center',
     },
     summaryBox: {
       borderTopWidth: 1,
       borderTopColor: c.borderSoft,
-      paddingTop: spacing.md,
-      gap: spacing.md,
+      paddingTop: spacing.sm,
+      gap: spacing.sm,
     },
     totalRow: {
       flexDirection: 'row',

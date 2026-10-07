@@ -146,7 +146,16 @@ type BarcodeOutcome =
   | {status: 'unknown'}
   | {status: 'error'; name?: string; reason?: string};
 
-export function PosScreen() {
+/** v31 (round-39 #3): topGap — عند تشغيل الشاشة داخل «وضع البيع
+ *  السريع» فوق شاشة القفل يتعيّن استبدال حشوة شريط الحالة
+ *  (insets.top) بحشوة صغيرة لأن شريط القفل فوقها يغطي الـ inset
+ *  أصلاً — تمرير undefined (الوضع الطبيعي كتبويب رئيسي) يبقي
+ *  السلوك الأصلي كما هو حرفياً. */
+export function PosScreen({
+  topGap,
+}: {
+  topGap?: number;
+} = {}) {
   const c = useThemeColors();
   const styles = useStyles();
   const insets = useSafeAreaInsets();
@@ -1904,7 +1913,14 @@ export function PosScreen() {
       {/* v8.2 (round-11 #3): NO top header — every millimeter of the
           screen works for the product grid and the cart. The pricing
           mode is already visible in the Segmented control. */}
-      <View style={[styles.body, {paddingTop: insets.top + spacing.sm}]}>
+      <View
+        style={[
+          styles.body,
+          // v31 (round-39 #3): فوق شاشة القفل يستبدل الـ inset
+          // بحشوة صغيرة (شريط وضع البيع يغطي شريط الحالة)، وإلا
+          // فالحشوة الأصلية تماماً.
+          {paddingTop: topGap ?? insets.top + spacing.sm},
+        ]}>
         {/* ── Pricing mode + search + scan ─────────────────── */}
         <View style={styles.controlsRow}>
           <Segmented
