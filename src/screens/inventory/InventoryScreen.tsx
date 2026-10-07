@@ -5,13 +5,12 @@
  * counts, roomier rows with stock + unit badges, quick access to
  * stocktake (الجرد) and category management.
  */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
   Image,
-  Keyboard,
   Linking,
   ScrollView,
   StyleSheet,
@@ -230,23 +229,13 @@ function InventoryLayout({
     }
   }, [scanBusy, allProducts, navigation, toast, setSearch]);
 
-  // v8.3 (round-12 #2): while the search keyboard is open the
-  // category chips fold away — the search field stays fully visible
-  // and the results list gets the whole remaining screen instead of
-  // the keyboard + chips squeezing it over the search bar.
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
-  useEffect(() => {
-    const show = Keyboard.addListener('keyboardDidShow', () =>
-      setKeyboardOpen(true),
-    );
-    const hide = Keyboard.addListener('keyboardDidHide', () =>
-      setKeyboardOpen(false),
-    );
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
+  // v29 (round-37 #2): صفر مستمعات Keyboard — شرائح التصنيفات
+  // تبقى دائماً في مكانها. طيّها لحظة فتح اللوحة (v8.3) كان يحرّك
+  // قسم المنتجات كاملاً للأعلى أثناء استقرار الـ IME — وهذا بعينه
+  // ما جعل روم الجهاز يستسلم ويغلق اللوحة فوراً («تغلق مباشرة
+  // بسبب تحرك قسم المنتجات للاعلي»). الآن لا يتغير شيء في الشجرة
+  // لحظة الفتح: النظام يقلّص نافذة الشاشة (adjustResize) والقائمة
+  // الافتراضية تتصاغر معها بهدوء — ولوحة المفاتيح تبقى مفتوحة.
 
   return (
     <View style={styles.screen}>
@@ -343,51 +332,51 @@ function InventoryLayout({
         </View>
 
         {/* ── Category chips — compact, horizontally scrollable.
-            v8.3 (round-12 #2): hidden while the search keyboard is
-            open (more room for results + the search field), and the
-            list starts DIRECTLY under them (no dead gap).
+            v29 (round-37 #2): ALWAYS rendered — the keyboard-reactive
+            folding (v8.3) moved the products section up the moment
+            the keyboard opened, which is exactly what flash-closed
+            the IME on this ROM. The chips now stay put; only the OS
+            resize (adjustResize) shrinks the virtualized list.
             v23 (round-29 #1): «المؤرشفة» chip at the end — products
             deleted WITH history (kept for reports/returns). ── */}
-        {!keyboardOpen ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{
-              gap: 6,
-              paddingVertical: 2,
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{
+            gap: 6,
+            paddingVertical: 2,
+          }}
+          style={styles.chipsRow}>
+          <FilterChip
+            label="الكل"
+            count={countFor('all')}
+            active={filter === 'all' && !showArchived}
+            onPress={() => {
+              setShowArchived(false);
+              setFilter('all');
             }}
-            style={styles.chipsRow}>
+          />
+          {categories.map(category => (
             <FilterChip
-              label="الكل"
-              count={countFor('all')}
-              active={filter === 'all' && !showArchived}
+              key={category.id}
+              label={category.name}
+              count={countFor(category.id)}
+              active={filter === category.id && !showArchived}
               onPress={() => {
                 setShowArchived(false);
-                setFilter('all');
+                setFilter(category.id);
               }}
             />
-            {categories.map(category => (
-              <FilterChip
-                key={category.id}
-                label={category.name}
-                count={countFor(category.id)}
-                active={filter === category.id && !showArchived}
-                onPress={() => {
-                  setShowArchived(false);
-                  setFilter(category.id);
-                }}
-              />
-            ))}
-            {archivedProducts.length > 0 ? (
-              <FilterChip
-                label="المؤرشفة"
-                count={archivedProducts.length}
-                active={showArchived}
-                onPress={() => setShowArchived(!showArchived)}
-              />
-            ) : null}
-          </ScrollView>
-        ) : null}
+          ))}
+          {archivedProducts.length > 0 ? (
+            <FilterChip
+              label="المؤرشفة"
+              count={archivedProducts.length}
+              active={showArchived}
+              onPress={() => setShowArchived(!showArchived)}
+            />
+          ) : null}
+        </ScrollView>
 
         {showArchived ? (
           archivedProducts.length === 0 ? (

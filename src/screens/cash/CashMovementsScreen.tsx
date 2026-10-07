@@ -18,6 +18,14 @@
  *
  * ROM discipline: كل النوافذ INLINE absolute overlays — أبداً RN
  * Modal (نفس درس روم الجهاز من v24: المودال تسوّده بعد الماسح).
+ *
+ * v29 (round-37 #1) — الدرس النهائي للوحة المفاتيح: المبلغ يُدخل
+ * من لوحة أرقام مدمجة داخل النافذة (نفس نمط v9.2 للوزن —
+ * Loyverse/Square) ولا يوجد أي TextInput للمبلغ أصلاً، وارتفاع
+ * النافذة ثابت يُلتقط مرة عند الفتح، وصفر مستمعات Keyboard في
+ * الشاشة كلها — لا شيء يتحرك حين تُفتح أي لوحة، فلا يستسلم الـ
+ * IME ويغلقها. الملاحظة (اختيارية) تظل TextField عادية بلا أي
+ * رد فعل JS على اللوحة.
  */
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
@@ -25,14 +33,12 @@ import {
   BackHandler,
   Dimensions,
   I18nManager,
-  Keyboard,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import {useFocusEffect, useNavigation} from '@react-navigation/native';
@@ -67,6 +73,9 @@ import {
   localMonthStart,
   localToday,
 } from '../../core/format';
+/** v29 (round-37 #1): لوحة أرقام المبلغ المدمجة — منطق صافٍ قابل
+ *  للاختبار (نفس شبكة لوحة الوزن في نقطة البيع). */
+import {AMOUNT_KEYPAD_KEYS, amountTextToMinor, applyAmountKey} from '../../core/amountKeypad';
 import type {
   CashMovementKind,
   CashMovementRecord,
@@ -128,90 +137,6 @@ function periodRange(key: PeriodKey): {from: string; to: string} {
     default:
       return {from: '2000-01-01', to: today};
   }
-}
-
-/** v28 (round-36 #1): keeps the movement sheet ABOVE the keyboard —
- * REWRITTEN AROUND THE LIVE WINDOW HEIGHT. The story so far:
- *
- *  v26 animated the sheet height (Animated.add) — instant crash.
- *  v27 switched to plain state + `alreadyResized` detection — but the
- *  detection read `Dimensions.get('window').height` synchronously
- *  inside `keyboardDidShow`, where the value is STILL the pre-keyboard
- *  height (the dimensions change event arrives in the same native
- *  layout pass, ordering unspecified) — so on adjustResize ROMs the
- *  lift was ALWAYS applied ON TOP of the window resize (double
- *  compensation): the sheet flew past the window top, the focused
- *  amount field landed OUTSIDE the visible window, and Android's
- *  InputMethodManager gave up on serving an invisible view →
- *  «تفتح لوحة المفاتيح وتغلق بسرعة».
- *
- *  v28 is deterministic in BOTH worlds:
- *   • The sheet's HEIGHT is a fraction of the LIVE window height
- *     (useWindowDimensions) — when adjustResize shrinks the window,
- *     the sheet re-flows to 72% of the VISIBLE height and stays fully
- *     inside the window, anchored above the keyboard. No transform,
- *     nothing to fight, the keyboard stays.
- *   • A delayed, race-free check (300ms after keyboardDidShow — long
- *     after any dimensions event has landed) applies a plain
- *     translateY lift ONLY when the window did NOT shrink (exotic
- *     overlay-keyboard ROMs). */
-function useKeyboardSheetLift(): {lift: number} {
-  const windowH = Dimensions.get('window').height;
-  const [lift, setLift] = useState(0);
-  /** Live mirrors readable inside timers (state closures go stale). */
-  const liveWindowH = useRef(windowH);
-  const closedWindowH = useRef(windowH);
-  const kbOpenRef = useRef(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  liveWindowH.current = windowH;
-
-  useEffect(() => {
-    const dims = Dimensions.addEventListener('change', ({window}) => {
-      if (!kbOpenRef.current) {
-        // Keyboard closed — this is the true "closed" baseline.
-        closedWindowH.current = window.height;
-      }
-      liveWindowH.current = window.height;
-    });
-    const show = Keyboard.addListener('keyboardDidShow', e => {
-      kbOpenRef.current = true;
-      const kbHeight = e.endCoordinates.height;
-      if (timerRef.current != null) {
-        clearTimeout(timerRef.current);
-      }
-      // Decide AFTER the dust settles — by now the dimensions event
-      // (if this ROM resizes) has arrived and liveWindowH is final.
-      timerRef.current = setTimeout(() => {
-        timerRef.current = null;
-        if (!kbOpenRef.current) {
-          return;
-        }
-        const resizedDown =
-          closedWindowH.current - liveWindowH.current >= kbHeight * 0.5;
-        setLift(resizedDown ? 0 : Math.round(kbHeight));
-      }, 300);
-    });
-    const hide = Keyboard.addListener('keyboardDidHide', () => {
-      kbOpenRef.current = false;
-      if (timerRef.current != null) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
-      closedWindowH.current = liveWindowH.current;
-      setLift(0);
-    });
-    return () => {
-      show.remove();
-      hide.remove();
-      dims.remove();
-      if (timerRef.current != null) {
-        clearTimeout(timerRef.current);
-      }
-    };
-  }, []);
-
-  return {lift};
 }
 
 export function CashMovementsScreen() {
@@ -790,16 +715,21 @@ function MovementSheet({
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
 
-  // v28 (round-36 #1): the keyboard lift — LIVE window sizing (zero
-  // Animated): the sheet's height is 72% of the CURRENT visible
-  // window, so on adjustResize ROMs (this device) it simply re-flows
-  // to 72% of the keyboard-free area and stays fully inside the
-  // window — the focused amount field is always visible and the
-  // keyboard stays open. Only on exotic overlay-keyboard ROMs does
-  // the race-free delayed check apply a plain translateY (see
-  // useKeyboardSheetLift — the v26/v27 history lives there).
-  const {lift} = useKeyboardSheetLift();
-  const liveWindowH = useWindowDimensions().height;
+  // v29 (round-37 #1): ارتفاع ثابت يُلتقط مرة واحدة عند فتح
+  // النافذة — لا useWindowDimensions ولا أي مستمع Keyboard: حين
+  // تُفتح لوحة الملاحظات (اختيارية) لا يتغير أي بعد في الشجرة،
+  // والـ ScrollView داخل النافذة يكفي لجلب الحقل المركّز للظهور.
+  // هذا بعد أربع جولات فاشلة (v25–v28) من «الرفع/التعويض» —
+  // المشكلة لم تكن في مقدار الرفع بل في وجود رد فعل JS أصلاً:
+  // أي إعادة تخطيط لحظة استقرار الـ IME تجعل روم الجهاز يغلق
+  // اللوحة. المبلغ نفسه صار من لوحة أرقام مدمجة (لا TextInput).
+  const fixedSheetHeight = useMemo(
+    () =>
+      Math.round(
+        Math.max(240, Dimensions.get('window').height * 0.72),
+      ),
+    [],
+  );
 
   // v26 (round-34 #4): instant render (no entrance animation — the
   // ROM lesson from the return sheet) + a 400ms close-guard so a
@@ -912,13 +842,7 @@ function MovementSheet({
     },
     [],
   );
-  const amountMinor = useMemo(() => {
-    const value = Number(amountText.replace(',', '.'));
-    if (!Number.isFinite(value) || value <= 0) {
-      return 0;
-    }
-    return Math.round(value * 100);
-  }, [amountText]);
+  const amountMinor = useMemo(() => amountTextToMinor(amountText), [amountText]);
 
   const effectiveCategory =
     showCustom && customCategory.trim().length > 0
@@ -984,41 +908,19 @@ function MovementSheet({
     toast,
   ]);
 
-  // v28 (round-36 #1): 72% of the LIVE window height — when the
-  // keyboard opens (adjustResize) the window shrinks and the sheet
-  // re-computes against the VISIBLE height, so it always fits above
-  // the keyboard with its bottom anchored at the IME top. Never
-  // smaller than 240px so the confirm box survives a huge IME.
-  const sheetHeight = Math.round(
-    Math.max(240, Math.min(liveWindowH * 0.72, liveWindowH - 16)),
-  );
   // v27 (round-35 #3): the gate applies to ALL THREE movements.
   const gate = securityMode !== 'none' && authStage !== 'passed';
-  // v28: plain numbers — zero Animated, zero stale Dimension reads.
-  // The lift is non-zero ONLY on overlay-keyboard ROMs (delayed
-  // race-free detection); on this device's adjustResize ROM it is
-  // always 0 — the sheet just re-flows with the live window height.
-  const visibleSheetHeight = Math.max(240, sheetHeight - lift);
 
   return (
     <View style={sheetStyles(c).backdrop}>
       <Pressable style={{flex: 1}} onPress={backdropPressGuarded} />
-      {/* v28 (round-36 #1): a PLAIN View sized against the LIVE
-          window — when adjustResize shrinks the window this height
-          re-computes to 72% of the VISIBLE area, the backdrop's
-          flex-end anchors the sheet at the keyboard's top edge and
-          the whole form stays INSIDE the window (a view pushed
-          outside the window is what made Android's IME give up and
-          flash-close in v27). translateY applies only on exotic
-          overlay-keyboard ROMs (see useKeyboardSheetLift). */}
+      {/* v29 (round-37 #1): ارتفاع ثابت — لا تعويض ولا رفع. أي
+          لوحة تُفتح (ملاحظة اختيارية فقط) تترك هذه الشجرة كما هي
+          تماماً؛ لا شيء يتغير حول الحقل المركّز فلا ييأس الـ IME.
+          المبلغ يُدخل من لوحة الأرقام المدمجة أدناه — لوحة النظام
+          لا تُستدعى للمبلغ إطلاقاً. */}
       <View
-        style={[
-          sheetStyles(c).sheet,
-          {
-            height: visibleSheetHeight,
-            ...(lift > 0 ? {transform: [{translateY: -lift}]} : null),
-          },
-        ]}>
+        style={[sheetStyles(c).sheet, {height: fixedSheetHeight}]}>
         <Pressable style={{flex: 1}} onPress={() => undefined} disabled={busy}>
           {/* ── Header ── */}
           <View style={sheetStyles(c).head}>
@@ -1156,24 +1058,35 @@ function MovementSheet({
                 contentContainerStyle={sheetStyles(c).form}
                 showsVerticalScrollIndicator={false}
                 keyboardShouldPersistTaps="handled">
-                {/* Amount */}
+                {/* v29 (round-37 #1): المبلغ — عرض فقط + لوحة أرقام
+                    مدمجة. لا TextInput هنا: لوحة النظام لا تُستدعى
+                    للمبلغ إطلاقاً (نفس نمط لوحة الوزن v9.2 — درس
+                    روم الجهاز النهائي: أي تغيير تخطيط لحظة فتح
+                    اللوحة يقتلها، فلا تُفتح أصلاً). */}
                 <Text style={sheetStyles(c).formLabel}>المبلغ (₪)</Text>
-                <View style={sheetStyles(c).amountRow}>
-                  <TextInput
+                <View
+                  style={[
+                    sheetStyles(c).amountRow,
+                    overDrawer ? {borderColor: c.danger} : null,
+                  ]}>
+                  <Text
                     style={[
-                      sheetStyles(c).amountInput,
-                      overDrawer ? {borderColor: c.danger} : null,
-                    ]}
-                    value={amountText}
-                    onChangeText={text =>
-                      setAmountText(text.replace(/[^\d.,]/g, ''))
-                    }
-                    keyboardType="decimal-pad"
-                    placeholder="0.00"
-                    placeholderTextColor={c.textFaint}
-                    editable={!busy}
-                  />
+                      sheetStyles(c).amountDisplay,
+                      amountText === '' ? {color: c.textFaint} : null,
+                    ]}>
+                    {amountText === '' ? '0.00' : amountText}
+                  </Text>
                   <Text style={sheetStyles(c).amountSuffix}>₪</Text>
+                  {amountText !== '' ? (
+                    <TouchableOpacity
+                      style={sheetStyles(c).amountClearBtn}
+                      onPress={() => setAmountText('')}
+                      disabled={busy}
+                      activeOpacity={0.75}>
+                      <Icon name="x" size={13} color={c.textDim} />
+                      <Text style={sheetStyles(c).amountClearText}>مسح</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
                 <Text
                   style={[
@@ -1185,6 +1098,30 @@ function MovementSheet({
                     : `النقد الحالي بالخزينة: ${formatMoney(drawerMinor / 100)}`}
                   {overDrawer ? ' — المبلغ أكبر من المتاح!' : ''}
                 </Text>
+
+                {/* لوحة الأرقام المدمجة — أرقام وفاصلة وحذف فقط،
+                    بقواعد النقود (أغورتان، بلا سوابق صفرية). */}
+                <View style={sheetStyles(c).keypad}>
+                  {AMOUNT_KEYPAD_KEYS.map((row, rowIndex) => (
+                    <View key={rowIndex} style={sheetStyles(c).keypadRow}>
+                      {row.map(key => (
+                        <TouchableOpacity
+                          key={key}
+                          style={[
+                            sheetStyles(c).keypadKey,
+                            key === '⌫' ? sheetStyles(c).keypadKeyDanger : null,
+                          ]}
+                          onPress={() =>
+                            setAmountText(prev => applyAmountKey(prev, key))
+                          }
+                          disabled={busy}
+                          activeOpacity={0.65}>
+                          <Text style={sheetStyles(c).keypadKeyText}>{key}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  ))}
+                </View>
 
                 {/* Expense categories */}
                 {mode === 'expense' ? (
@@ -1445,18 +1382,65 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       borderRadius: radius.sm,
       paddingHorizontal: spacing.md,
     },
-    amountInput: {
+    /** v29 (round-37 #1): المبلغ — عرض فقط (لا TextInput) + زر مسح. */
+    amountDisplay: {
       flex: 1,
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: 22,
+      fontSize: 24,
       paddingVertical: 10,
       textAlign: I18nManager.isRTL ? 'right' : 'left',
+      fontVariant: ['tabular-nums'],
     },
     amountSuffix: {
       color: c.textDim,
       fontFamily: fonts.bold,
       fontSize: typography.body,
+    },
+    amountClearBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.sm,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      backgroundColor: c.surfaceHi,
+    },
+    amountClearText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption,
+    },
+    /** v29 (round-37 #1): لوحة الأرقام المدمجة — نفس مقاسات لوحة
+     *  الوزن المجرّبة في نقطة البيع (PosScreen). */
+    keypad: {
+      gap: spacing.xs + 2,
+      marginTop: spacing.xs,
+    },
+    keypadRow: {
+      flexDirection: 'row',
+      gap: spacing.xs + 2,
+    },
+    keypadKey: {
+      flex: 1,
+      height: 50,
+      borderRadius: radius.md,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    keypadKeyDanger: {
+      borderColor: c.danger,
+    },
+    keypadKeyText: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: 21,
+      fontVariant: ['tabular-nums'],
     },
     drawerHint: {
       color: c.textFaint,
