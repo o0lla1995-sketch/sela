@@ -497,6 +497,13 @@ export interface SilaCustomerServerRow {
   other_minor?: number;
   pos_purchases_minor?: number;
   app_purchases_minor?: number;
+  /** v33 (round-41 #11 — 0075 store accounting): دين هذا الجهاز
+   *  تحديداً بعد الإسناد ثنائي المرحلة (سدادّات نقطتك تطفئ دين
+   *  نقطتك أولاً ثم الفائض يطفئ الأقدم عالمياً) — هذا هو «دين
+   *  متجرك» من جهة الخادم. قبل 0075 لا يُرسل → 0 (توافق رجعي). */
+  device_outstanding_minor?: number;
+  device_purchases_minor?: number;
+  device_payments_minor?: number;
   last_payment_at?: string | null;
   last_payment_amount_minor?: number | null;
   last_payment_method?: string | null;
@@ -514,6 +521,9 @@ export interface SilaCustomerServerRow {
     pos_receipt_ref?: string | null;
     payment_method?: string | null;
     created_at?: string;
+    /** 0075: نقطة البيع المنشأة للقيد (null = عمليات تطبيق صِلة). */
+    pos_device_id?: string | null;
+    pos_device_name?: string | null;
   }[];
   recent_pos_refs?: {
     reference_code?: string | null;
@@ -554,8 +564,20 @@ export async function silaFetchCustomers(
   }
   const body = (await response.json()) as {
     customers?: SilaCustomerServerRow[];
+    /** 0075: هوية هذا الجهاز عند التاجر (الاسم قد يعدّله التاجر من
+     *  تطبيق صِلة — §2.4 «لا تعتمد على الاسم في أي منطق»). */
+    device?: {device_id?: string; device_name?: string} | null;
+    device_outstanding_minor_total?: number;
+    pos_outstanding_minor_total?: number;
+    app_outstanding_minor_total?: number;
   };
-  logDiag('sila', `تم جلب ${body.customers?.length ?? 0} زبون من صِلة`);
+  logDiag(
+    'sila',
+    `تم جلب ${body.customers?.length ?? 0} زبون من صِلة` +
+      (body.device?.device_name
+        ? ` (نقطة البيع: ${body.device.device_name})`
+        : ''),
+  );
   return body.customers ?? [];
 }
 

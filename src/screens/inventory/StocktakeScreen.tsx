@@ -1100,14 +1100,17 @@ function CountRow({
 }
 
 // ────────────────────────────────────────────────────────────────
-// v32 (round-40 #2): FocusCountCard — بطاقة العدّ أحادية المنتج.
-// تعرض المنتج الواحد المُعَدّ فقط (طلب التاجر الصريح): اسم كبير،
-// كمية النظام، حقل عدّ واحد كبير ثابت لا يُعاد تركيبه أبداً عند
-// الانتقال بين المنتجات (فلا تُغلق لوحة المفاتيح — درس روم الجهاز
-// v29+)، شارة فرق حيّة تتحدث أثناء الكتابة، وزر «مطابق» وزرا
-// «السابق/التالي» يعملان بلمسة واحدة حتى واللوحة مفتوحة (ScrollView
-// بـ keyboardShouldPersistTaps="handled" في الأب).
-// ────────────────────────────────────────────────────────────────
+// v32 (round-40 #2) → v33 (round-41 #6): FocusCountCard — بطاقة
+// العدّ أحادية المنتج بتصميم مضغوط: أربعة صفوف فقط (طلب التاجر:
+// «البطاقة كبيرة جداً — صغّرها واضغط العناصر سوياً بشكل احترافي
+// دون تداخل») — ترويسة تجمع الموضع والاسم والخروج في سطر واحد،
+// سطر كمية النظام، ثم حقل العدّ وزر «مطابق» جنباً إلى جنب، ثم
+// شارة الفرق الحيّة وأزرار السابق/التالي في سطر واحد. حقل العدّ
+// واحد ثابت لا يُعاد تركيبه أبداً عند التنقل بين المنتجات فلا
+// تُغلق لوحة المفاتيح (درس روم الجهاز v29+)، وScrollView الأب
+// بـ keyboardShouldPersistTaps="handled" فتعمل الأزرار بلمسة
+// واحدة حتى واللوحة مفتوحة.
+// ────────────────────────────────────────────────────────────
 
 function FocusCountCard({
   item,
@@ -1158,91 +1161,83 @@ function FocusCountCard({
 
   return (
     <View style={styles.focusCard}>
-      {/* الموضع + الرجوع للقائمة الكاملة */}
+      {/* ترويسة مضغوطة: الموضع + الاسم + الخروج — سطر واحد */}
       <View style={styles.focusHeaderRow}>
-        <Badge label={`${position} / ${total}`} tone="neutral" />
+        <View style={styles.focusBadgeWrap}>
+          <Badge label={`${position}/${total}`} tone="neutral" />
+        </View>
+        <Text style={styles.focusName} numberOfLines={1}>
+          {item.productName}
+        </Text>
         <TouchableOpacity
           style={styles.focusExitBtn}
           onPress={onExit}
           activeOpacity={0.75}>
-          <Icon name="list" size={14} color={c.textDim} />
+          <Icon name="list" size={13} color={c.textDim} />
           <Text style={styles.focusExitText}>عرض الكل</Text>
         </TouchableOpacity>
       </View>
 
-      {/* المنتج — الاسم كبيراً وكمية النظام تحته */}
-      <Text style={styles.focusName} numberOfLines={2}>
-        {item.productName}
-      </Text>
-      <View style={styles.focusMetaRow}>
-        <Text style={styles.focusMeta}>
-          بالنظام: {formatQty(item.system_qty)}
-          {item.soldByWeight === 1 ? ' كغ' : ''}
-        </Text>
-        {item.unitHint ? (
-          <Text style={styles.focusHint} numberOfLines={1}>
-            ({item.unitHint})
-          </Text>
-        ) : null}
-      </View>
-
-      {/* حقل العدّ — كبير ووحيد، لا يُفكّك أبداً بين المنتجات */}
-      <TextInput
-        ref={inputRef}
-        style={styles.focusInput}
-        value={text}
-        onChangeText={onChangeText}
-        keyboardType={item.soldByWeight === 1 ? 'decimal-pad' : 'numeric'}
-        placeholder={item.soldByWeight === 1 ? '0.0' : '0'}
-        placeholderTextColor={c.textFaint}
-        returnKeyType={atLast ? 'done' : 'next'}
-        onSubmitEditing={() => {
-          if (!atLast) {
-            onAdvance(1);
-          }
-        }}
-        blurOnSubmit={false}
-      />
-      <Text style={styles.focusInputLabel}>
-        {item.soldByWeight === 1 ? 'العدّ الفعلي (كغ)' : 'العدّ الفعلي'}
+      {/* كمية النظام + الوحدة — سطر صغير هادئ */}
+      <Text style={styles.focusMeta} numberOfLines={1}>
+        بالنظام: {formatQty(item.system_qty)}
+        {item.soldByWeight === 1 ? ' كغ' : ''}
+        {item.unitHint ? ` · (${item.unitHint})` : ''}
       </Text>
 
-      {/* الفرق الحيّ + زر المطابقة */}
-      <View style={styles.focusFeedbackRow}>
-        <Badge label={toneLabel} tone={tone} />
+      {/* حقل العدّ + زر المطابقة — جنباً إلى جنب */}
+      <View style={styles.focusInputRow}>
+        <TextInput
+          ref={inputRef}
+          style={styles.focusInput}
+          value={text}
+          onChangeText={onChangeText}
+          keyboardType={item.soldByWeight === 1 ? 'decimal-pad' : 'numeric'}
+          placeholder={item.soldByWeight === 1 ? '0.0' : '0'}
+          placeholderTextColor={c.textFaint}
+          returnKeyType={atLast ? 'done' : 'next'}
+          onSubmitEditing={() => {
+            if (!atLast) {
+              onAdvance(1);
+            }
+          }}
+          blurOnSubmit={false}
+        />
         <TouchableOpacity
           style={styles.focusMatchBtn}
           onPress={onMarkMatched}
           activeOpacity={0.8}>
-          <Icon name="check" size={15} color={c.success} />
+          <Icon name="check" size={16} color={c.success} />
           <Text style={styles.focusMatchText}>مطابق</Text>
         </TouchableOpacity>
       </View>
 
-      {/* التنقل: السابق / التالي */}
+      {/* الفرق الحيّ + التنقل — سطر واحد */}
       <View style={styles.focusNavRow}>
-        <AppButton
-          title="السابق"
-          icon="chevronRight"
-          variant="secondary"
-          small
-          disabled={atFirst}
-          onPress={() => onAdvance(-1)}
-          style={{flex: 1}}
-        />
-        <AppButton
-          title={atLast ? 'آخر منتج' : 'التالي'}
-          icon="chevronLeft"
-          variant="primary"
-          small
-          disabled={atLast}
-          onPress={() => onAdvance(1)}
-          style={{flex: 1}}
-        />
+        <View style={styles.focusBadgeWrap}>
+          <Badge label={toneLabel} tone={tone} />
+        </View>
+        <View style={styles.focusNavBtns}>
+          <AppButton
+            title="السابق"
+            icon="chevronRight"
+            variant="secondary"
+            small
+            disabled={atFirst}
+            onPress={() => onAdvance(-1)}
+            style={{flex: 1}}
+          />
+          <AppButton
+            title={atLast ? 'الأخير' : 'التالي'}
+            icon="chevronLeft"
+            variant="primary"
+            small
+            disabled={atLast}
+            onPress={() => onAdvance(1)}
+            style={{flex: 1}}
+          />
+        </View>
       </View>
-      <Text style={styles.focusNavHint}>
-        زر «التالي» في لوحة المفاتيح ينقلك للمنتج التالي مباشرة
-      </Text>
     </View>
   );
 }
@@ -1688,8 +1683,10 @@ const useStyles = makeStyles(c =>
       textAlign: 'center',
       fontVariant: ['tabular-nums'],
     },
-    /** v32 (round-40 #2): بطاقة التركيز الأحادية — تملأ قسم
-     *  المنتجات وتتمرر عند ضيق الشاشة مع لوحة مفتوحة. */
+    /** v33 (round-41 #6): بطاقة التركيز المضغوطة — أربعة صفوف
+     *  بدل ثمانية (طلب التاجر)، حشوات أصغر واسم بسطر واحد وحقل
+     *  عدّ متوسط الحجم بجواره زر المطابقة، وشارة الفرق مع أزرار
+     *  التنقل في سطر واحد — لا تداخل ولا تشويه. */
     focusCardScroll: {
       flexGrow: 1,
       justifyContent: 'center',
@@ -1701,24 +1698,25 @@ const useStyles = makeStyles(c =>
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: radius.lg,
-      padding: spacing.lg,
-      gap: spacing.md,
+      padding: spacing.md,
+      gap: spacing.sm,
     },
     focusHeaderRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'space-between',
+      gap: spacing.sm,
     },
+    focusBadgeWrap: {alignItems: 'flex-start'},
     focusExitBtn: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 4,
+      gap: 3,
       backgroundColor: c.surfaceAlt,
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: radius.pill,
-      paddingHorizontal: 10,
-      paddingVertical: 5,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
     },
     focusExitText: {
       color: c.textDim,
@@ -1726,62 +1724,46 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
     },
     focusName: {
+      flex: 1,
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: typography.title + 2,
-      lineHeight: 30,
+      fontSize: typography.body + 1,
       textAlign: 'right',
-    },
-    focusMetaRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
     },
     focusMeta: {
       color: c.textDim,
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: typography.small - 1,
       fontVariant: ['tabular-nums'],
+      marginTop: -2,
     },
-    focusHint: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro,
-      flexShrink: 1,
+    focusInputRow: {
+      flexDirection: 'row',
+      alignItems: 'stretch',
+      gap: spacing.sm,
     },
     focusInput: {
+      flex: 1,
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: typography.heading + 8,
+      fontSize: typography.heading + 2,
       textAlign: 'center',
       backgroundColor: c.surfaceAlt,
       borderWidth: 1.5,
       borderColor: c.accentSoft,
       borderRadius: radius.md,
-      paddingVertical: 12,
-    },
-    focusInputLabel: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro + 1,
-      textAlign: 'center',
-      marginTop: -spacing.xs,
-    },
-    focusFeedbackRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
+      paddingVertical: 8,
     },
     focusMatchBtn: {
       flexDirection: 'row',
       alignItems: 'center',
+      justifyContent: 'center',
       gap: 5,
       backgroundColor: c.successSoft,
       borderWidth: 1,
       borderColor: c.success,
-      borderRadius: radius.sm,
+      borderRadius: radius.md,
       paddingHorizontal: spacing.md,
-      paddingVertical: 8,
     },
     focusMatchText: {
       color: c.success,
@@ -1790,13 +1772,13 @@ const useStyles = makeStyles(c =>
     },
     focusNavRow: {
       flexDirection: 'row',
+      alignItems: 'center',
       gap: spacing.sm,
     },
-    focusNavHint: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro,
-      textAlign: 'center',
+    focusNavBtns: {
+      flex: 1,
+      flexDirection: 'row',
+      gap: spacing.sm,
     },
     chip: {
       // v8.1: fixed 30dp height + tight padding — identical chip size

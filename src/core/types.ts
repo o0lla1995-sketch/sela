@@ -533,6 +533,12 @@ export interface SilaCustomer {
   other_minor: number;
   pos_purchases_minor: number;
   app_purchases_minor: number;
+  /** v33 (round-41 #11 — 0075): دين الزبون لهذه النقطة (هذا الجهاز)
+   *  بعد الإسناد ثنائي المرحلة على الخادم — سدادّات نقطتك تطفئ دين
+   *  نقطتك أولاً. 0 على خوادم ما قبل 0075 (توافق رجعي كامل). */
+  device_outstanding_minor: number;
+  device_purchases_minor: number;
+  device_payments_minor: number;
   last_payment_at: string | null;
   last_payment_amount_minor: number | null;
   last_synced_at: string | null;

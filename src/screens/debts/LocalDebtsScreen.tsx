@@ -317,23 +317,23 @@ export function LocalDebtsScreen() {
       Alert.alert('مبلغ غير منطقي', 'أقصى مبلغ مسموح 1,000,000 ₪');
       return;
     }
-    // v19 (round-25 #4): the merchant may receive MORE than the
-    // outstanding — confirmed once with the exact split so the
-    // books never surprise anyone: debt extinguished + credit kept.
+    // v33 (round-41 #1): السداد لا يتجاوز الدين القائم أبداً — قيد
+    // صريح بطلب التاجر («قيمة المبلغ المدخل أقل او يساوي قيمة الدين»)
+    // بدل مسار الدفع الزائد القديم: لا رصيد دائن يُنشأ من النافذة،
+    // والزيادة تُرفض برسالة واضحة بالمبلغ الأقصى المسموح.
     const outstandingMinor = detail.outstandingMinor;
+    if (outstandingMinor <= 0) {
+      Alert.alert(
+        'لا دين قائم',
+        'لا يوجد دين قائم على هذا الزبون — لا يمكن تسجيل سداد',
+      );
+      return;
+    }
     const amountMinor = Math.round(amount * 100);
-    if (amountMinor > outstandingMinor && outstandingMinor >= 0) {
-      const excess = (amountMinor - outstandingMinor) / 100;
+    if (amountMinor > outstandingMinor) {
       Alert.alert(
         'المبلغ أكبر من الدين القائم',
-        `الدين القائم: ${formatMoney(outstandingMinor / 100)}\nالمبلغ المدخل: ${formatMoney(amount)}\n\nسيُطفأ الدين بالكامل وتبقى زيادة ${formatMoney(excess)} رصيداً دائناً للزبون تُخصم من مشترياته القادمة. متابعة؟`,
-        [
-          {text: 'تراجع', style: 'cancel'},
-          {
-            text: 'تأكيد السداد',
-            onPress: () => void doRecordPayment(amount),
-          },
-        ],
+        `الدين القائم: ${formatMoney(outstandingMinor / 100)}\nالمبلغ المدخل: ${formatMoney(amount)}\n\nأدخل مبلغاً أقل أو مساوياً للدين القائم (أو استخدم زر «السداد الكامل»).`,
       );
       return;
     }
@@ -991,8 +991,8 @@ export function LocalDebtsScreen() {
             ) : null}
             <Text style={styles.sheetHint}>
               يُسجَّل السداد في دفتر المتجر فقط (لا يُرفع إلى صِلة) ويخفض
-              الرصيد فوراً. يمكنك استلام مبلغ أكبر من الدين — يُطفأ الدين
-              والزيادة تبقى رصيداً دائناً للزبون تُخصم من مشترياته القادمة.
+              الرصيد فوراً. المبلغ يجب أن يكون أقل أو مساوياً للدين القائم —
+              لا يُقبل سداد فوق الدين من هذه النافذة.
             </Text>
             <AppButton
               title="تأكيد السداد"

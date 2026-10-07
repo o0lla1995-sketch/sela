@@ -29,13 +29,14 @@ import {
   SectionTitle,
   type FieldHandle,
 } from '../../components/ui';
-import {Icon} from '../../components/Icon';
+import {Icon, type IconName} from '../../components/Icon';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
 import {EmbeddingRepo} from '../../database/repositories/EmbeddingRepo';
 import {UnitRepo} from '../../database/repositories/UnitRepo';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {usePrinterStore} from '../../stores/printerStore';
+import {storeModeConfig} from '../../core/storeModes';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {useToastStore} from '../../stores/toastStore';
 import {VisionRecognitionService} from '../../services/vision/VisionRecognitionService';
@@ -137,6 +138,10 @@ export function ProductFormScreen() {
   const refreshCatalog = useCatalogStore(state => state.refresh);
   const printerStatus = usePrinterStore(state => state.status);
   const settings = useSettingsStore(state => state.settings);
+  /** v33 (round-41 #4): تكوين نمط المتجر — يقود ظهور/إخفاء الأقسام
+   *  وطريقة البيع الافتراضية حسب مجال المتجر (بقالة/كافيتريا/ملابس/
+   *  صيدلية/فواكه/مطعم). */
+  const modeConfig = storeModeConfig(settings.storeMode);
   // v9.1 (round-14 #6): label printing state.
   const [labelCopies, setLabelCopies] = useState(1);
   const [labelBusy, setLabelBusy] = useState(false);
@@ -173,7 +178,9 @@ export function ProductFormScreen() {
   const [imageUri, setImageUri] = useState<string | null>(null);
   /** v8.3 (round-12 #4): قطعة (counted) or وزن (weighed — prices per
    *  kilo, fractional kg stock, weight pad at the POS). */
-  const [saleMode, setSaleMode] = useState<'piece' | 'weight'>('piece');
+  const [saleMode, setSaleMode] = useState<'piece' | 'weight'>(
+    modeConfig.defaultSaleMode,
+  );
   const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
   // ── v32 (round-40 #3): تاريخ انتهاء الصلاحية — اختياري، بإحدى
   //    طريقتين: تاريخ محدد (يوم/شهر/سنة) أو مدة من اليوم (أيام أو
@@ -190,6 +197,14 @@ export function ProductFormScreen() {
   //    لتوفير مساحة الصفحة، بسطر ملخّص يعرض الوحدات الحالية، ويُفتح
   //    بالضغط على الترويسة (أو زر «+ وحدة» الذي يفتح ويضيف معاً).
   const [unitsOpen, setUnitsOpen] = useState(false);
+  // ── v33 (round-41 #9): الأقسام الاختيارية قابلة للطي — الصلاحية
+  //    مفتوحة افتراضياً في المجالات التي الصلاحية فيها جوهرية
+  //    (بقالة/صيدلية/فواكه)، والاستلام والبصمة مطويان دائماً في
+  //    البداية (ترويستهما تعرضان الحالة)، وقسم الصلاحية يُفتح
+  //    تلقائياً عند تحرير منتج له صلاحية محفوظة.
+  const [expiryOpen, setExpiryOpen] = useState(modeConfig.expiry === 'prominent');
+  const [receiveOpen, setReceiveOpen] = useState(false);
+  const [visionOpen, setVisionOpen] = useState(false);
   // ── v16 (round-22 #3): استلام البضاعة — quick receiving with
   // AUTO-FILL. The merchant picks how the goods arrived (by carton
   // or by weight-bag), enters counts + the package price, and the
@@ -261,6 +276,7 @@ export function ProductFormScreen() {
               product.expiry_date != null &&
               product.expiry_date.length >= 10
             ) {
+              setExpiryOpen(true);
               setExpiryMode('date');
               setExpiryDay(product.expiry_date.slice(8, 10));
               setExpiryMonth(product.expiry_date.slice(5, 7));
@@ -562,6 +578,27 @@ export function ProductFormScreen() {
       setLabelBusy(false);
     }
   }, [toast]);
+
+  /** v33 (round-41 #4): إلحاق مقاس/لون بالاسم — نمط الملابس. كل
+   *  رقاقة تُلحق « — القيمة» بالاسم إن لم تكن موجودة (أو تزيلها إن
+   *  ضُغطت وهي مضافة)، فيصبح كل مقاس/لون منتجاً مستقلاً بمخزونه
+   *  وباركوده الداخلي، والاسم يقرأ بوضوح («قميص قطن — أسود — L»). */
+  const appendVariant = useCallback(
+    (variant: string) => {
+      setName(prev => {
+        const base = prev.trim();
+        if (base.length === 0) {
+          toast('اكتب اسم المنتج أولاً ثم اختر المقاس/اللون', 'info');
+          return prev;
+        }
+        if (base.includes(` — ${variant}`)) {
+          return base.replace(` — ${variant}`, '');
+        }
+        return `${base} — ${variant}`;
+      });
+    },
+    [toast],
+  );
 
   /** v9.1 (round-14 #6): prints N product labels on the thermal
    *  printer — name + price + a scannable barcode (EAN-13 or
@@ -1470,129 +1507,6 @@ export function ProductFormScreen() {
           contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled">
-          {/* ── Vision enrollment ─────────────────────────────── */}
-          <SectionTitle
-            title="بصمة المنتج"
-            hint="اختياري لكن موصى به — يتيح البيع بالتعرف البصري"
-          />
-          <View style={styles.anglesRow}>
-            {ANGLE_LABELS.map(angle => {
-              const state = angles[angle];
-              return (
-                <TouchableOpacity
-                  key={angle}
-                  style={[
-                    styles.angleCard,
-                    state.embedding != null ? {borderColor: c.success} : null,
-                  ]}
-                  onPress={() => void captureAngle(angle)}
-                  activeOpacity={0.8}>
-                  {state.thumbnailPath != null ? (
-                    <Image
-                      source={{uri: `file://${state.thumbnailPath}`}}
-                      style={styles.angleImage}
-                    />
-                  ) : (
-                    <View style={[styles.angleImage, styles.angleFallback]}>
-                      <Icon name="camera" size={22} color={c.textDim} />
-                    </View>
-                  )}
-                  <Text style={styles.angleLabel}>
-                    {ANGLE_LABELS_AR[angle]}
-                  </Text>
-                  {state.embedding != null ? (
-                    <Badge label="مسجّلة" tone="success" />
-                  ) : (
-                    <Badge label="فارغة" tone="neutral" />
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          {/* v8: one tap → the NATIVE photo engine opens full-screen
-              (torch + proper preview guaranteed) → the fingerprint
-              of the first empty angle is saved automatically. */}
-          <AppButton
-            title="تصوير بصمة المنتج بالكاميرا"
-            variant="secondary"
-            icon="camera"
-            small
-            onPress={() => {
-              const firstEmpty = ANGLE_LABELS.find(
-                angle => angles[angle]?.embedding == null,
-              );
-              if (firstEmpty == null) {
-                toast(
-                  'كل الزوايا مسجّلة — المس أي بطاقة زاوية لإعادة تصويرها',
-                  'info',
-                );
-                return;
-              }
-              void captureAngle(firstEmpty);
-            }}
-          />
-
-          {/* ── v8.3 (round-12 #4): HOW is this product sold? ──
-              قطعة = counted pieces (default). وزن = weighed — the
-              prices below become PER KILO, stock is fractional kg,
-              and the POS opens a weight pad (with وقية/نصف كغ
-              quick chips) instead of adding whole pieces. */}
-          <SectionTitle
-            title="طريقة البيع"
-            hint={
-              saleMode === 'weight'
-                ? 'الأسعار أدناه لكل كيلوغرام — المخزون بالكيلو ويسمح بالكسور (12.5)'
-                : 'يُباع بالقطعة — الكمية أعداد صحيحة'
-            }
-          />
-          <View style={styles.saleModeRow}>
-            <TouchableOpacity
-              style={[
-                styles.saleModeChip,
-                saleMode === 'piece' ? styles.saleModeChipActive : null,
-              ]}
-              onPress={() => setSaleMode('piece')}
-              activeOpacity={0.8}>
-              <Icon
-                name="box"
-                size={18}
-                color={saleMode === 'piece' ? c.onAccent : c.textDim}
-              />
-              <Text
-                style={[
-                  styles.saleModeText,
-                  saleMode === 'piece'
-                    ? {color: c.onAccent}
-                    : {color: c.textDim},
-                ]}>
-                بالقطعة
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.saleModeChip,
-                saleMode === 'weight' ? styles.saleModeChipActive : null,
-              ]}
-              onPress={() => setSaleMode('weight')}
-              activeOpacity={0.8}>
-              <Icon
-                name="scale"
-                size={18}
-                color={saleMode === 'weight' ? c.onAccent : c.textDim}
-              />
-              <Text
-                style={[
-                  styles.saleModeText,
-                  saleMode === 'weight'
-                    ? {color: c.onAccent}
-                    : {color: c.textDim},
-                ]}>
-                بالوزن (كغ)
-              </Text>
-            </TouchableOpacity>
-          </View>
-
           {/* ── Details form ──────────────────────────────────── */}
           <SectionTitle title="بيانات المنتج" />
           <Field
@@ -1673,21 +1587,488 @@ export function ProductFormScreen() {
               />
             </Card>
           ) : null}
+
+{/* ── v33 (round-41 #4): المقاس واللون — ملابس فقط: رقائق
+              سريعة تُلحق بالاسم، وكل مقاس يُحفظ منتجاً مستقلاً
+              بباركود داخلي (زر التوليد بجانب الباركود أعلاه). ── */}
+{modeConfig.variantSizes != null ? (
+  <View style={styles.variantBox}>
+    <View style={styles.categoryHeader}>
+      <Text style={styles.fieldLabelOuter}>المقاس واللون</Text>
+      <Text style={styles.variantHint}>يُلحق بالاسم — كل مقاس منتج مستقل</Text>
+    </View>
+    <View style={styles.variantChipsRow}>
+      {modeConfig.variantSizes.map(size => (
+        <TouchableOpacity
+          key={`size-${size}`}
+          style={[
+            styles.catChip,
+            name.includes(` — ${size}`)
+              ? {backgroundColor: c.accent, borderColor: c.accent}
+              : null,
+          ]}
+          onPress={() => appendVariant(size)}
+          activeOpacity={0.75}>
+          <Text
+            style={[
+              styles.catChipText,
+              {color: name.includes(` — ${size}`) ? c.onAccent : c.textDim},
+            ]}>
+            {size}
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+    <View style={styles.variantChipsRow}>
+      {(modeConfig.variantColors ?? []).map(color => (
+        <TouchableOpacity
+          key={`color-${color}`}
+          style={[
+            styles.catChip,
+            name.includes(` — ${color}`)
+              ? {backgroundColor: c.accent, borderColor: c.accent}
+              : null,
+          ]}
+          onPress={() => appendVariant(color)}
+          activeOpacity={0.75}>
+          <Text
+            style={[
+              styles.catChipText,
+              {
+                color: name.includes(` — ${color}`) ? c.onAccent : c.textDim,
+              },
+            ]}>
+            {color}
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+    <Text style={styles.variantFootnote}>
+      بعد حفظ هذا المقاس أضف المقاس التالي من «إضافة منتج» — الاسم نفسه مع
+      مقاس/لون مختلف وباركود داخلي لكل واحد.
+    </Text>
+  </View>
+) : null}
+          {/* ── Category picker ──────────────────────────────── */}
+          <View style={styles.categoryHeader}>
+            <Text style={styles.fieldLabelOuter}>التصنيف</Text>
+            <TouchableOpacity
+              onPress={() => navigation.navigate('ManageCategories' as never)}>
+              <Text style={styles.manageLink}>إدارة التصنيفات</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.categoryWrap}>
+            <TouchableOpacity
+              style={[
+                styles.catChip,
+                categoryId === 'none'
+                  ? {backgroundColor: c.accent, borderColor: c.accent}
+                  : null,
+              ]}
+              onPress={() => setCategoryId('none')}>
+              <Text
+                style={[
+                  styles.catChipText,
+                  {color: categoryId === 'none' ? c.onAccent : c.textDim},
+                ]}>
+                بدون تصنيف
+              </Text>
+            </TouchableOpacity>
+            {categories.map(category => (
+              <TouchableOpacity
+                key={category.id}
+                style={[
+                  styles.catChip,
+                  categoryId === category.id
+                    ? {backgroundColor: c.accent, borderColor: c.accent}
+                    : null,
+                ]}
+                onPress={() => setCategoryId(category.id)}>
+                <Text
+                  style={[
+                    styles.catChipText,
+                    {
+                      color:
+                        categoryId === category.id ? c.onAccent : c.textDim,
+                    },
+                  ]}>
+                  {category.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+{modeConfig.saleModeSelector ? (
+  <>
+          {/* ── v8.3 (round-12 #4): HOW is this product sold? ──
+              قطعة = counted pieces (default). وزن = weighed — the
+              prices below become PER KILO, stock is fractional kg,
+              and the POS opens a weight pad (with وقية/نصف كغ
+              quick chips) instead of adding whole pieces. */}
+          <SectionTitle
+            title="طريقة البيع"
+            hint={
+              saleMode === 'weight'
+                ? 'الأسعار أدناه لكل كيلوغرام — المخزون بالكيلو ويسمح بالكسور (12.5)'
+                : 'يُباع بالقطعة — الكمية أعداد صحيحة'
+            }
+          />
+          <View style={styles.saleModeRow}>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                saleMode === 'piece' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => setSaleMode('piece')}
+              activeOpacity={0.8}>
+              <Icon
+                name="box"
+                size={18}
+                color={saleMode === 'piece' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  saleMode === 'piece'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
+                ]}>
+                بالقطعة
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                saleMode === 'weight' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => setSaleMode('weight')}
+              activeOpacity={0.8}>
+              <Icon
+                name="scale"
+                size={18}
+                color={saleMode === 'weight' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  saleMode === 'weight'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
+                ]}>
+                بالوزن (كغ)
+              </Text>
+            </TouchableOpacity>
+          </View>
+  </>
+) : null}
+          <Field
+            ref={costRef}
+            label={
+              saleMode === 'weight'
+                ? 'سعر التكلفة للكيلو (₪) *'
+                : 'سعر التكلفة للقطعة (₪) *'
+            }
+            value={costPrice}
+            onChangeText={setCostPrice}
+            keyboardType="numeric"
+            placeholder="0.00"
+            returnKeyType="next"
+            onSubmitEditing={() => retailRef.current?.focus()}
+          />
+          <View style={styles.priceRow}>
+            <View style={{flex: 1}}>
+              <Field
+                ref={retailRef}
+                label={
+                  saleMode === 'weight'
+                    ? 'سعر المفرق للكيلو (₪) *'
+                    : 'سعر المفرق (₪) *'
+                }
+                value={retailPrice}
+                onChangeText={setRetailPrice}
+                keyboardType="numeric"
+                placeholder="0.00"
+                returnKeyType="next"
+                onSubmitEditing={() => wholesaleRef.current?.focus()}
+              />
+            </View>
+            <View style={{flex: 1}}>
+              <Field
+                ref={wholesaleRef}
+                label={
+                  saleMode === 'weight'
+                    ? 'سعر الجملة للكيلو (₪)'
+                    : 'سعر الجملة (₪)'
+                }
+                value={wholesalePrice}
+                onChangeText={setWholesalePrice}
+                keyboardType="numeric"
+                placeholder="= المفرق"
+                returnKeyType="next"
+                onSubmitEditing={() => stockRef.current?.focus()}
+              />
+            </View>
+          </View>
+          {/* ── Stock entry: weight = fractional kg directly; piece
+              = type in any unit, stored in pieces ── */}
+          <View style={styles.priceRow}>
+            <View style={{flex: 1.2}}>
+              <Field
+                ref={stockRef}
+                label={
+                  saleMode === 'weight'
+                    ? `الكمية الحالية (${WEIGHT_UNIT_NAME})`
+                    : `الكمية ${
+                        stockUnitId != null
+                          ? `بـ${unitNameById.get(stockUnitId) ?? ''}`
+                          : `(${BASE_UNIT_NAME})`
+                      }`
+                }
+                value={stock}
+                onChangeText={setStock}
+                keyboardType={saleMode === 'weight' ? 'decimal-pad' : 'numeric'}
+                placeholder={saleMode === 'weight' ? '0.0' : '0'}
+                returnKeyType="next"
+                onSubmitEditing={() => thresholdRef.current?.focus()}
+              />
+            </View>
+            <View style={{flex: 1}}>
+              <Field
+                ref={thresholdRef}
+                label={saleMode === 'weight' ? 'حد التنبيه (كغ)' : 'حد التنبيه'}
+                value={threshold}
+                onChangeText={setThreshold}
+                keyboardType={saleMode === 'weight' ? 'decimal-pad' : 'numeric'}
+                placeholder={
+                  saleMode === 'weight'
+                    ? '5'
+                    : String(DEFAULT_LOW_STOCK_THRESHOLD)
+                }
+                returnKeyType="done"
+                onSubmitEditing={() => Keyboard.dismiss()}
+              />
+            </View>
+          </View>
+          {saleMode === 'weight' ? (
+            <Text style={styles.stockHintText}>
+              منتج وزن — الأسعار لكل كيلو، والمخزون يُحفظ بالكيلوغرام بكسور
+              عشرية (مثال: 12.5). عند البيع تُفتح لوحة وزن مع أزرار وقية ونصف
+              كيلو.
+            </Text>
+          ) : stockUnitChoices.length > 0 ? (
+            <View style={styles.stockUnitRow}>
+              <Text style={styles.stockUnitLabel}>وحدة الإدخال:</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.stockUnitChips}>
+                <StockUnitChip
+                  label={BASE_UNIT_NAME}
+                  active={stockUnitId == null}
+                  onPress={() => switchStockUnit(null)}
+                />
+                {stockUnitChoices.map(row => (
+                  <StockUnitChip
+                    key={row.unit_id}
+                    label={unitNameById.get(row.unit_id) ?? 'وحدة'}
+                    active={stockUnitId === row.unit_id}
+                    onPress={() => switchStockUnit(row.unit_id)}
+                  />
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+          {stockHint ? (
+            <Text style={styles.stockHintText}>{stockHint}</Text>
+          ) : null}
+
+{/* ── v33 (round-41 #9): الأقسام الاختيارية — قابلة للطي ── */}
+{modeConfig.expiry !== 'hidden' ? (
+  <FoldSection
+    title="تاريخ انتهاء الصلاحية"
+    hint={expiryMode === 'none' ? 'اختياري — بلا صلاحية' : 'مضبوط'}
+    icon="clock"
+    open={expiryOpen}
+    onToggle={() => setExpiryOpen(open => !open)}
+    badge={
+      expiryDate != null && expiryStatus != null ? expiryStatus.label : null
+    }
+    badgeTone={
+      expiryStatus?.state === 'expired'
+        ? 'danger'
+        : expiryStatus?.state === 'expiring'
+        ? 'warning'
+        : 'success'
+    }>
+          {/* ── v32 (round-40 #3): تاريخ انتهاء الصلاحية — اختياري ──
+              بإحدى طريقتين: تاريخ محدد، أو مدة من اليوم (أيام/أشهر)
+              تُحسب إلى تاريخ فعلي. المنتجات قريبة الانتهاء أو المنتهية
+              تظهر في تنبيهات المخزون وإشعارات خاصة. */}
+          <View style={styles.categoryHeader}>
+            <Text style={styles.fieldLabelOuter}>
+              تاريخ انتهاء الصلاحية (اختياري)
+            </Text>
+            {expiryMode !== 'none' ? (
+              <TouchableOpacity
+                onPress={() => {
+                  setExpiryMode('none');
+                  setExpiryDay('');
+                  setExpiryMonth('');
+                  setExpiryYear('');
+                  setDurationValue('');
+                }}>
+                <Text style={styles.manageLink}>إزالة</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+          <View style={styles.expiryChipsRow}>
+            <ExpiryModeChip
+              label="بلا صلاحية"
+              active={expiryMode === 'none'}
+              onPress={() => setExpiryMode('none')}
+            />
+            <ExpiryModeChip
+              label="تاريخ محدد"
+              active={expiryMode === 'date'}
+              onPress={() => setExpiryMode('date')}
+            />
+            <ExpiryModeChip
+              label="مدة من اليوم"
+              active={expiryMode === 'duration'}
+              onPress={() => setExpiryMode('duration')}
+            />
+          </View>
+          {expiryMode === 'date' ? (
+            <View style={styles.expiryFieldsRow}>
+              <View style={{flex: 1}}>
+                <Field
+                  label="اليوم"
+                  value={expiryDay}
+                  onChangeText={text =>
+                    setExpiryDay(text.replace(/[^0-9]/g, '').slice(0, 2))
+                  }
+                  keyboardType="numeric"
+                  placeholder="21"
+                  returnKeyType="next"
+                />
+              </View>
+              <View style={{flex: 1}}>
+                <Field
+                  label="الشهر"
+                  value={expiryMonth}
+                  onChangeText={text =>
+                    setExpiryMonth(text.replace(/[^0-9]/g, '').slice(0, 2))
+                  }
+                  keyboardType="numeric"
+                  placeholder="12"
+                  returnKeyType="next"
+                />
+              </View>
+              <View style={{flex: 1.4}}>
+                <Field
+                  label="السنة"
+                  value={expiryYear}
+                  onChangeText={text =>
+                    setExpiryYear(text.replace(/[^0-9]/g, '').slice(0, 4))
+                  }
+                  keyboardType="numeric"
+                  placeholder="2026"
+                  returnKeyType="done"
+                />
+              </View>
+            </View>
+          ) : null}
+          {expiryMode === 'duration' ? (
+            <View style={styles.expiryFieldsRow}>
+              <View style={{flex: 1}}>
+                <Field
+                  label="المدة"
+                  value={durationValue}
+                  onChangeText={text =>
+                    setDurationValue(text.replace(/[^0-9]/g, '').slice(0, 4))
+                  }
+                  keyboardType="numeric"
+                  placeholder={durationUnit === 'days' ? '30' : '6'}
+                  returnKeyType="done"
+                />
+              </View>
+              <TouchableOpacity
+                style={[
+                  styles.durationUnitBtn,
+                  durationUnit === 'days'
+                    ? {backgroundColor: c.accent, borderColor: c.accent}
+                    : null,
+                ]}
+                onPress={() => setDurationUnit('days')}
+                activeOpacity={0.75}>
+                <Text
+                  style={[
+                    styles.durationUnitText,
+                    {color: durationUnit === 'days' ? c.onAccent : c.textDim},
+                  ]}>
+                  أيام
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.durationUnitBtn,
+                  durationUnit === 'months'
+                    ? {backgroundColor: c.accent, borderColor: c.accent}
+                    : null,
+                ]}
+                onPress={() => setDurationUnit('months')}
+                activeOpacity={0.75}>
+                <Text
+                  style={[
+                    styles.durationUnitText,
+                    {color: durationUnit === 'months' ? c.onAccent : c.textDim},
+                  ]}>
+                  أشهر
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+          {expiryDate != null && expiryStatus != null ? (
+            <View style={styles.expiryStatusRow}>
+              <Badge
+                label={expiryStatus.label}
+                tone={
+                  expiryStatus.state === 'expired'
+                    ? 'danger'
+                    : expiryStatus.state === 'expiring'
+                    ? 'warning'
+                    : 'success'
+                }
+              />
+              <Text style={styles.expiryStatusDate}>
+                {`ينتهي في ${expiryDate.slice(8, 10)}/${expiryDate.slice(
+                  5,
+                  7,
+                )}/${expiryDate.slice(0, 4)}`}
+              </Text>
+            </View>
+          ) : expiryDate === undefined ? (
+            <Text style={styles.expiryInvalidText}>
+              {expiryMode === 'date'
+                ? 'أكمل اليوم والشهر والسنة بصيغة صحيحة'
+                : 'أدخل مدة صالحة أكبر من صفر'}
+            </Text>
+          ) : null}
+  </FoldSection>
+) : null}
+{modeConfig.receiving ? (
+  <FoldSection
+    title="استلام البضاعة (تعبئة تلقائية)"
+    hint="كراتين أو أكياس — الكمية والتكلفة والأسعار المقترحة تُملأ تلقائياً"
+    icon="box"
+    open={receiveOpen}
+    onToggle={() => setReceiveOpen(open => !open)}
+    badge={receiveMode === 'none' ? null : 'مفعّل'}>
           {/* ── v16 (round-22 #3): استلام البضاعة — smart receiving
               with AUTO-FILL. The merchant picks how the goods arrived
               (cartons or weight bags), types counts + package price,
               and quantity/cost/suggested prices (and the matching
               كرتونة/كيس sale unit) fill themselves. ─────────────── */}
-          <SectionTitle
-            title="استلام البضاعة (تعبئة تلقائية)"
-            hint={
-              receiveMode === 'none'
-                ? 'اختر كيف وصلت البضاعة — الكمية والتكلفة والأسعار المقترحة تُملأ تلقائياً'
-                : receiveMode === 'carton'
-                ? 'عدد الكراتين × القطع بالكرتونة — الكمية وتكلفة القطعة تُحسب وتُملأ تلقائياً'
-                : 'عدد الأكياس × وزن الكيس — الكمية بالكيلو وتكلفة الكيلو تُحسب وتُملأ تلقائياً'
-            }
-          />
           <View style={styles.saleModeRow}>
             <TouchableOpacity
               style={[
@@ -1904,332 +2285,8 @@ export function ProductFormScreen() {
               )}
             </Card>
           ) : null}
-
-          <Field
-            ref={costRef}
-            label={
-              saleMode === 'weight'
-                ? 'سعر التكلفة للكيلو (₪) *'
-                : 'سعر التكلفة للقطعة (₪) *'
-            }
-            value={costPrice}
-            onChangeText={setCostPrice}
-            keyboardType="numeric"
-            placeholder="0.00"
-            returnKeyType="next"
-            onSubmitEditing={() => retailRef.current?.focus()}
-          />
-          <View style={styles.priceRow}>
-            <View style={{flex: 1}}>
-              <Field
-                ref={retailRef}
-                label={
-                  saleMode === 'weight'
-                    ? 'سعر المفرق للكيلو (₪) *'
-                    : 'سعر المفرق (₪) *'
-                }
-                value={retailPrice}
-                onChangeText={setRetailPrice}
-                keyboardType="numeric"
-                placeholder="0.00"
-                returnKeyType="next"
-                onSubmitEditing={() => wholesaleRef.current?.focus()}
-              />
-            </View>
-            <View style={{flex: 1}}>
-              <Field
-                ref={wholesaleRef}
-                label={
-                  saleMode === 'weight'
-                    ? 'سعر الجملة للكيلو (₪)'
-                    : 'سعر الجملة (₪)'
-                }
-                value={wholesalePrice}
-                onChangeText={setWholesalePrice}
-                keyboardType="numeric"
-                placeholder="= المفرق"
-                returnKeyType="next"
-                onSubmitEditing={() => stockRef.current?.focus()}
-              />
-            </View>
-          </View>
-          {/* ── Stock entry: weight = fractional kg directly; piece
-              = type in any unit, stored in pieces ── */}
-          <View style={styles.priceRow}>
-            <View style={{flex: 1.2}}>
-              <Field
-                ref={stockRef}
-                label={
-                  saleMode === 'weight'
-                    ? `الكمية الحالية (${WEIGHT_UNIT_NAME})`
-                    : `الكمية ${
-                        stockUnitId != null
-                          ? `بـ${unitNameById.get(stockUnitId) ?? ''}`
-                          : `(${BASE_UNIT_NAME})`
-                      }`
-                }
-                value={stock}
-                onChangeText={setStock}
-                keyboardType={saleMode === 'weight' ? 'decimal-pad' : 'numeric'}
-                placeholder={saleMode === 'weight' ? '0.0' : '0'}
-                returnKeyType="next"
-                onSubmitEditing={() => thresholdRef.current?.focus()}
-              />
-            </View>
-            <View style={{flex: 1}}>
-              <Field
-                ref={thresholdRef}
-                label={saleMode === 'weight' ? 'حد التنبيه (كغ)' : 'حد التنبيه'}
-                value={threshold}
-                onChangeText={setThreshold}
-                keyboardType={saleMode === 'weight' ? 'decimal-pad' : 'numeric'}
-                placeholder={
-                  saleMode === 'weight'
-                    ? '5'
-                    : String(DEFAULT_LOW_STOCK_THRESHOLD)
-                }
-                returnKeyType="done"
-                onSubmitEditing={() => Keyboard.dismiss()}
-              />
-            </View>
-          </View>
-          {saleMode === 'weight' ? (
-            <Text style={styles.stockHintText}>
-              منتج وزن — الأسعار لكل كيلو، والمخزون يُحفظ بالكيلوغرام بكسور
-              عشرية (مثال: 12.5). عند البيع تُفتح لوحة وزن مع أزرار وقية ونصف
-              كيلو.
-            </Text>
-          ) : stockUnitChoices.length > 0 ? (
-            <View style={styles.stockUnitRow}>
-              <Text style={styles.stockUnitLabel}>وحدة الإدخال:</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.stockUnitChips}>
-                <StockUnitChip
-                  label={BASE_UNIT_NAME}
-                  active={stockUnitId == null}
-                  onPress={() => switchStockUnit(null)}
-                />
-                {stockUnitChoices.map(row => (
-                  <StockUnitChip
-                    key={row.unit_id}
-                    label={unitNameById.get(row.unit_id) ?? 'وحدة'}
-                    active={stockUnitId === row.unit_id}
-                    onPress={() => switchStockUnit(row.unit_id)}
-                  />
-                ))}
-              </ScrollView>
-            </View>
-          ) : null}
-          {stockHint ? (
-            <Text style={styles.stockHintText}>{stockHint}</Text>
-          ) : null}
-
-          {/* ── v32 (round-40 #3): تاريخ انتهاء الصلاحية — اختياري ──
-              بإحدى طريقتين: تاريخ محدد، أو مدة من اليوم (أيام/أشهر)
-              تُحسب إلى تاريخ فعلي. المنتجات قريبة الانتهاء أو المنتهية
-              تظهر في تنبيهات المخزون وإشعارات خاصة. */}
-          <View style={styles.categoryHeader}>
-            <Text style={styles.fieldLabelOuter}>
-              تاريخ انتهاء الصلاحية (اختياري)
-            </Text>
-            {expiryMode !== 'none' ? (
-              <TouchableOpacity
-                onPress={() => {
-                  setExpiryMode('none');
-                  setExpiryDay('');
-                  setExpiryMonth('');
-                  setExpiryYear('');
-                  setDurationValue('');
-                }}>
-                <Text style={styles.manageLink}>إزالة</Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-          <View style={styles.expiryChipsRow}>
-            <ExpiryModeChip
-              label="بلا صلاحية"
-              active={expiryMode === 'none'}
-              onPress={() => setExpiryMode('none')}
-            />
-            <ExpiryModeChip
-              label="تاريخ محدد"
-              active={expiryMode === 'date'}
-              onPress={() => setExpiryMode('date')}
-            />
-            <ExpiryModeChip
-              label="مدة من اليوم"
-              active={expiryMode === 'duration'}
-              onPress={() => setExpiryMode('duration')}
-            />
-          </View>
-          {expiryMode === 'date' ? (
-            <View style={styles.expiryFieldsRow}>
-              <View style={{flex: 1}}>
-                <Field
-                  label="اليوم"
-                  value={expiryDay}
-                  onChangeText={text =>
-                    setExpiryDay(text.replace(/[^0-9]/g, '').slice(0, 2))
-                  }
-                  keyboardType="numeric"
-                  placeholder="21"
-                  returnKeyType="next"
-                />
-              </View>
-              <View style={{flex: 1}}>
-                <Field
-                  label="الشهر"
-                  value={expiryMonth}
-                  onChangeText={text =>
-                    setExpiryMonth(text.replace(/[^0-9]/g, '').slice(0, 2))
-                  }
-                  keyboardType="numeric"
-                  placeholder="12"
-                  returnKeyType="next"
-                />
-              </View>
-              <View style={{flex: 1.4}}>
-                <Field
-                  label="السنة"
-                  value={expiryYear}
-                  onChangeText={text =>
-                    setExpiryYear(text.replace(/[^0-9]/g, '').slice(0, 4))
-                  }
-                  keyboardType="numeric"
-                  placeholder="2026"
-                  returnKeyType="done"
-                />
-              </View>
-            </View>
-          ) : null}
-          {expiryMode === 'duration' ? (
-            <View style={styles.expiryFieldsRow}>
-              <View style={{flex: 1}}>
-                <Field
-                  label="المدة"
-                  value={durationValue}
-                  onChangeText={text =>
-                    setDurationValue(text.replace(/[^0-9]/g, '').slice(0, 4))
-                  }
-                  keyboardType="numeric"
-                  placeholder={durationUnit === 'days' ? '30' : '6'}
-                  returnKeyType="done"
-                />
-              </View>
-              <TouchableOpacity
-                style={[
-                  styles.durationUnitBtn,
-                  durationUnit === 'days'
-                    ? {backgroundColor: c.accent, borderColor: c.accent}
-                    : null,
-                ]}
-                onPress={() => setDurationUnit('days')}
-                activeOpacity={0.75}>
-                <Text
-                  style={[
-                    styles.durationUnitText,
-                    {color: durationUnit === 'days' ? c.onAccent : c.textDim},
-                  ]}>
-                  أيام
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.durationUnitBtn,
-                  durationUnit === 'months'
-                    ? {backgroundColor: c.accent, borderColor: c.accent}
-                    : null,
-                ]}
-                onPress={() => setDurationUnit('months')}
-                activeOpacity={0.75}>
-                <Text
-                  style={[
-                    styles.durationUnitText,
-                    {color: durationUnit === 'months' ? c.onAccent : c.textDim},
-                  ]}>
-                  أشهر
-                </Text>
-              </TouchableOpacity>
-            </View>
-          ) : null}
-          {expiryDate != null && expiryStatus != null ? (
-            <View style={styles.expiryStatusRow}>
-              <Badge
-                label={expiryStatus.label}
-                tone={
-                  expiryStatus.state === 'expired'
-                    ? 'danger'
-                    : expiryStatus.state === 'expiring'
-                    ? 'warning'
-                    : 'success'
-                }
-              />
-              <Text style={styles.expiryStatusDate}>
-                {`ينتهي في ${expiryDate.slice(8, 10)}/${expiryDate.slice(
-                  5,
-                  7,
-                )}/${expiryDate.slice(0, 4)}`}
-              </Text>
-            </View>
-          ) : expiryDate === undefined ? (
-            <Text style={styles.expiryInvalidText}>
-              {expiryMode === 'date'
-                ? 'أكمل اليوم والشهر والسنة بصيغة صحيحة'
-                : 'أدخل مدة صالحة أكبر من صفر'}
-            </Text>
-          ) : null}
-
-          {/* ── Category picker ──────────────────────────────── */}
-          <View style={styles.categoryHeader}>
-            <Text style={styles.fieldLabelOuter}>التصنيف</Text>
-            <TouchableOpacity
-              onPress={() => navigation.navigate('ManageCategories' as never)}>
-              <Text style={styles.manageLink}>إدارة التصنيفات</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.categoryWrap}>
-            <TouchableOpacity
-              style={[
-                styles.catChip,
-                categoryId === 'none'
-                  ? {backgroundColor: c.accent, borderColor: c.accent}
-                  : null,
-              ]}
-              onPress={() => setCategoryId('none')}>
-              <Text
-                style={[
-                  styles.catChipText,
-                  {color: categoryId === 'none' ? c.onAccent : c.textDim},
-                ]}>
-                بدون تصنيف
-              </Text>
-            </TouchableOpacity>
-            {categories.map(category => (
-              <TouchableOpacity
-                key={category.id}
-                style={[
-                  styles.catChip,
-                  categoryId === category.id
-                    ? {backgroundColor: c.accent, borderColor: c.accent}
-                    : null,
-                ]}
-                onPress={() => setCategoryId(category.id)}>
-                <Text
-                  style={[
-                    styles.catChipText,
-                    {
-                      color:
-                        categoryId === category.id ? c.onAccent : c.textDim,
-                    },
-                  ]}>
-                  {category.name}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
+  </FoldSection>
+) : null}
           {/* ── Units editor — v32 (round-40 #4): قابل للطي ──────
               مطوي افتراضياً لتوفير مساحة الصفحة؛ الترويسة تعرض عدد
               الوحدات وسطر ملخّص، والضغط يفتح المحرّر الكامل (الحزم
@@ -2529,6 +2586,78 @@ export function ProductFormScreen() {
             />
           )}
 
+{modeConfig.vision ? (
+  <FoldSection
+    title="بصمة المنتج (التعرف البصري)"
+    hint={
+      capturedCount > 0
+        ? `${capturedCount}/3 بصمة محفوظة`
+        : 'اختياري — للبيع بالتعرف البصري'
+    }
+    icon="camera"
+    open={visionOpen}
+    onToggle={() => setVisionOpen(open => !open)}
+    badge={capturedCount > 0 ? `${capturedCount}/3` : null}>
+          {/* ── Vision enrollment ─────────────────────────────── */}
+          <View style={styles.anglesRow}>
+            {ANGLE_LABELS.map(angle => {
+              const state = angles[angle];
+              return (
+                <TouchableOpacity
+                  key={angle}
+                  style={[
+                    styles.angleCard,
+                    state.embedding != null ? {borderColor: c.success} : null,
+                  ]}
+                  onPress={() => void captureAngle(angle)}
+                  activeOpacity={0.8}>
+                  {state.thumbnailPath != null ? (
+                    <Image
+                      source={{uri: `file://${state.thumbnailPath}`}}
+                      style={styles.angleImage}
+                    />
+                  ) : (
+                    <View style={[styles.angleImage, styles.angleFallback]}>
+                      <Icon name="camera" size={22} color={c.textDim} />
+                    </View>
+                  )}
+                  <Text style={styles.angleLabel}>
+                    {ANGLE_LABELS_AR[angle]}
+                  </Text>
+                  {state.embedding != null ? (
+                    <Badge label="مسجّلة" tone="success" />
+                  ) : (
+                    <Badge label="فارغة" tone="neutral" />
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* v8: one tap → the NATIVE photo engine opens full-screen
+              (torch + proper preview guaranteed) → the fingerprint
+              of the first empty angle is saved automatically. */}
+          <AppButton
+            title="تصوير بصمة المنتج بالكاميرا"
+            variant="secondary"
+            icon="camera"
+            small
+            onPress={() => {
+              const firstEmpty = ANGLE_LABELS.find(
+                angle => angles[angle]?.embedding == null,
+              );
+              if (firstEmpty == null) {
+                toast(
+                  'كل الزوايا مسجّلة — المس أي بطاقة زاوية لإعادة تصويرها',
+                  'info',
+                );
+                return;
+              }
+              void captureAngle(firstEmpty);
+            }}
+          />
+  </FoldSection>
+) : null}
           {productId != null ? (
             <View style={{marginTop: spacing.lg, gap: spacing.md}}>
               {/* v23 (round-29 #1): the archived state card + restore —
@@ -2565,8 +2694,70 @@ export function ProductFormScreen() {
               )}
             </View>
           ) : null}
+
         </ScrollView>
       </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+/**
+ * v33 (round-41 #9): FoldSection — قسم قابل للطي بنمط الأنظمة
+ * العالمية: ترويسة (أيقونة + عنوان + شارة حالة اختيارية + سهم)
+ * تفتح/تطوي المحتوى بضغطة واحدة. الأقسام الاختيارية (الصلاحية /
+ * استلام البضاعة / البصمة) تطوى افتراضياً فتبقى الصفحة قصيرة
+ * ومرتبة، وحالة كل قسم ظاهرة في ترويسته حتى وهي مطوية.
+ */
+function FoldSection({
+  title,
+  hint,
+  icon,
+  open,
+  onToggle,
+  badge,
+  badgeTone = 'neutral',
+  children,
+}: {
+  title: string;
+  hint?: string;
+  icon: IconName;
+  open: boolean;
+  onToggle: () => void;
+  badge?: string | null;
+  badgeTone?: 'neutral' | 'success' | 'warning' | 'danger';
+  children: React.ReactNode;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  return (
+    <View style={styles.foldSection}>
+      <TouchableOpacity
+        style={styles.foldHeader}
+        onPress={onToggle}
+        activeOpacity={0.75}>
+        <View style={styles.foldIconWrap}>
+          <Icon name={icon} size={17} color={c.accent} />
+        </View>
+        <View style={{flex: 1}}>
+          <View style={styles.foldTitleRow}>
+            <Text style={styles.foldTitle}>{title}</Text>
+            {badge != null && badge.length > 0 ? (
+              <Badge label={badge} tone={badgeTone} />
+            ) : null}
+          </View>
+          {hint != null && hint.length > 0 ? (
+            <Text style={styles.foldHint} numberOfLines={1}>
+              {hint}
+            </Text>
+          ) : null}
+        </View>
+        <Icon
+          name={open ? 'chevronDown' : 'chevronLeft'}
+          size={17}
+          color={c.textDim}
+        />
+      </TouchableOpacity>
+      {open ? <View style={styles.foldBody}>{children}</View> : null}
     </View>
   );
 }
@@ -2896,6 +3087,71 @@ const useStyles = makeStyles(c =>
       marginTop: spacing.xs,
     },
     // ── v32 (round-40 #4): ترويسة وحدات البيع القابلة للطي ───────
+    /** v33 (round-41 #9): FoldSection — الأقسام الاختيارية القابلة
+     *  للطي (نفس لغة وحدات البيع v32 — ترويسة بطاقة بشارة وسهم). */
+    foldSection: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      overflow: 'hidden',
+    },
+    foldHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      padding: spacing.md,
+    },
+    foldIconWrap: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    foldTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    foldTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      flexShrink: 1,
+    },
+    foldHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 2,
+    },
+    foldBody: {
+      paddingHorizontal: spacing.md,
+      paddingBottom: spacing.md,
+      gap: spacing.sm,
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+    },
+    /** v33 (round-41 #4): المقاس واللون — نمط الملابس. */
+    variantBox: {gap: spacing.sm},
+    variantHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+    },
+    variantChipsRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 6,
+    },
+    variantFootnote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 16,
+    },
     unitsFoldHeader: {
       flexDirection: 'row',
       alignItems: 'center',

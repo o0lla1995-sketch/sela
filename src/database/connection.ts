@@ -1202,6 +1202,36 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 17;
   }
 
+  if (version < 18) {
+    // v33 (round-41 #11 — SILA_STORE_APP_SPEC_v990 §3/§4.5, هجرة
+    // 0075 على خادم صِلة): فصل حسابي لكل نقطة بيع — الأعمدة الثلاثة
+    //  الجديدة تحمل أرصدة «هذا الجهاز تحديداً» من إسناد الخادم ثنائي
+    //  المرحلة (device_outstanding = المستحق المسند لنقطتك)، فلا
+    //  تختلط بفواتير متاجر التاجر الأخرى المرتبطة بنفس الحساب.
+    const deviceCols: [string, string][] = [
+      ['device_outstanding_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['device_purchases_minor', 'INTEGER NOT NULL DEFAULT 0'],
+      ['device_payments_minor', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+    for (const [column, ddl] of deviceCols) {
+      const check = await database.execute(
+        "SELECT COUNT(*) AS cnt FROM pragma_table_info('sila_customers') WHERE name = ?",
+        [column],
+      );
+      const has = (check.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+      if (!has) {
+        await database.execute(
+          `ALTER TABLE sila_customers ADD COLUMN ${column} ${ddl}`,
+        );
+      }
+    }
+    logDiag(
+      'db',
+      'ترحيل v18: حسابات منفصلة لكل نقطة بيع (device_* من 0075)',
+    );
+    version = 18;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }

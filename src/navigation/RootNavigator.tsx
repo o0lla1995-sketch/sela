@@ -27,6 +27,7 @@ import {ReportsScreen} from '../screens/reports/ReportsScreen';
 import {SettingsScreen} from '../screens/settings/SettingsScreen';
 import {ProductFormScreen} from '../screens/inventory/ProductFormScreen';
 import {StocktakeScreen} from '../screens/inventory/StocktakeScreen';
+import {StockAlertsScreen} from '../screens/inventory/StockAlertsScreen';
 import {ManageCategoriesScreen} from '../screens/inventory/ManageCategoriesScreen';
 import {ManageUnitsScreen} from '../screens/inventory/ManageUnitsScreen';
 import {PrinterSettingsScreen} from '../screens/printer/PrinterSettingsScreen';
@@ -46,6 +47,9 @@ export type RootStackParamList = {
   MainTabs: undefined;
   ProductForm: {productId?: number; barcode?: string} | undefined;
   Stocktake: undefined;
+  /** v33 (round-41 #8): صفحة تنبيهات المخزون المخصصة — كل التنبيهات
+   *  بفلاتر النوع (تنبيهات لا إشعارات). */
+  StockAlerts: undefined;
   ManageCategories: undefined;
   ManageUnits: undefined;
   PrinterSettings: undefined;
@@ -172,6 +176,7 @@ export function RootNavigator() {
           options={{animation: 'slide_from_bottom'}}
         />
         <Stack.Screen name="Stocktake" component={StocktakeScreen} />
+        <Stack.Screen name="StockAlerts" component={StockAlertsScreen} />
         <Stack.Screen
           name="ManageCategories"
           component={ManageCategoriesScreen}

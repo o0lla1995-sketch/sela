@@ -55,6 +55,13 @@ import {
 import type {ScannerMode} from '../../core/config';
 import {parseNumber} from '../../core/format';
 import type {PricingMode} from '../../core/types';
+import {
+  STORE_MODES,
+  storeModeConfig,
+  type StoreMode,
+} from '../../core/storeModes';
+import {CategoryRepo} from '../../database/repositories/CategoryRepo';
+import {UnitRepo} from '../../database/repositories/UnitRepo';
 
 /** slider 5.x ships FC types that trip @types/react 18 (returns
  *  ReactNode instead of Element|null) — cast to a plain ComponentType. */
@@ -78,6 +85,81 @@ export function SettingsScreen() {
 
   const [requestingPermission, setRequestingPermission] = useState(false);
   const [pickingLogo, setPickingLogo] = useState(false);
+  /** v33 (round-41 #4): منتقي نمط المتجر — طبقة داخلية (نفس انضباط
+   *  الـ Modal في هذا الرّوم). */
+  const [modePickerOpen, setModePickerOpen] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
+
+  /** v33 (round-41 #4): تبديل نمط المتجر — يزرع الأصناف والوحدات
+   *  المقترحة للنمط الجديد (بلا حذف أي بيانات قائمة أبداً) ثم يحدّث
+   *  إعدادات النمط ويقفل الكتالوج — والصفحة/الكتالوج يتكيّفان فوراً. */
+  const applyStoreMode = useCallback(
+    async (mode: StoreMode) => {
+      if (modeBusy || mode === settings.storeMode) {
+        setModePickerOpen(false);
+        return;
+      }
+      const config = storeModeConfig(mode);
+      Alert.alert(
+        `تحويل المتجر إلى: ${config.label}`,
+        `ستُزرع التصنيفات والوحدات المقترحة لهذا المجال إن لم تكن موجودة (لا يُحذف أي منتج أو تصنيف أو وحدة قائمة)، وستتكيف صفحة المنتج مع مجالك تلقائياً.\n\nهل تريد المتابعة؟`,
+        [
+          {text: 'تراجع', style: 'cancel'},
+          {
+            text: 'تحويل المتجر',
+            onPress: async () => {
+              setModeBusy(true);
+              try {
+                let addedCategories = 0;
+                let addedUnits = 0;
+                const existingCategories = await CategoryRepo.list();
+                const existingNames = new Set(
+                  existingCategories.map(cat => cat.name.trim()),
+                );
+                for (const name of config.categorySeeds) {
+                  if (!existingNames.has(name)) {
+                    await CategoryRepo.create(name);
+                    addedCategories += 1;
+                  }
+                }
+                const existingUnits = await UnitRepo.list();
+                const existingUnitNames = new Set(
+                  existingUnits.map(u => u.name.trim()),
+                );
+                for (const seed of config.unitSeeds) {
+                  if (!existingUnitNames.has(seed.name)) {
+                    await UnitRepo.create(seed.name, seed.short, seed.kind);
+                    addedUnits += 1;
+                  }
+                }
+                update({storeMode: mode});
+                await refreshCatalog();
+                setModePickerOpen(false);
+                toast(
+                  `أصبح متجرك «${config.label}»` +
+                    (addedCategories > 0 || addedUnits > 0
+                      ? ` — أُضيف ${addedCategories} تصنيف و${addedUnits} وحدة مقترحة`
+                      : ''),
+                  'success',
+                  5000,
+                );
+              } catch (error) {
+                toast(
+                  error instanceof Error
+                    ? error.message
+                    : 'تعذر تحويل نمط المتجر',
+                  'error',
+                );
+              } finally {
+                setModeBusy(false);
+              }
+            },
+          },
+        ],
+      );
+    },
+    [modeBusy, settings.storeMode, update, refreshCatalog, toast],
+  );
 
   const requestNotificationPermission = useCallback(async () => {
     setRequestingPermission(true);
@@ -387,6 +469,39 @@ export function SettingsScreen() {
           />
         </Card>
 
+        {/* ── v33 (round-41 #4): نمط المتجر — مجال عملك ────── */}
+        <Card style={styles.group}>
+          <SectionTitle
+            title="نمط المتجر"
+            hint="الأصناف والوحدات وصفحة المنتج تتكيّف مع مجالك"
+          />
+          <TouchableOpacity
+            style={styles.modeCard}
+            onPress={() => setModePickerOpen(true)}
+            activeOpacity={0.8}>
+            <View style={styles.modeIcon}>
+              <Icon
+                name={storeModeConfig(settings.storeMode).icon}
+                size={24}
+                color={c.accent}
+              />
+            </View>
+            <View style={{flex: 1}}>
+              <Text style={styles.modeLabel}>
+                {storeModeConfig(settings.storeMode).label}
+              </Text>
+              <Text style={styles.modeBlurb} numberOfLines={2}>
+                {storeModeConfig(settings.storeMode).blurb}
+              </Text>
+            </View>
+            <Icon name="chevronLeft" size={16} color={c.textFaint} />
+          </TouchableOpacity>
+          <Text style={styles.modeHint}>
+            التحويل يضيف التصنيفات والوحدات المقترحة للمجال الجديد ولا يحذف
+            أي بيانات — منتجاتك وفواتيرك تبقى كما هي تماماً.
+          </Text>
+        </Card>
+
         {/* ── Scanner engine ─────────────────────────────────── */}
         <Card style={styles.group}>
           <SectionTitle
@@ -556,6 +671,17 @@ export function SettingsScreen() {
               style={{flex: 1}}
             />
           </View>
+          {/* v33 (round-41 #3): الإشعارات تصل حتى والتطبيق مغلق — عامل
+              خلفي دوري (كل 6 ساعات تقريباً) يفحص المخزون والصلاحية
+              ويرسل إشعار النظام بنفسه. */}
+          <View style={styles.bgNotifNote}>
+            <Icon name="bell" size={13} color={c.info} />
+            <Text style={styles.bgNotifText}>
+              تصل التنبيهات إلى هاتفك حتى والتطبيق مغلق تماماً — فحص دوري
+              للمخزون وتواريخ الصلاحية كل عدة ساعات يرسل إشعار النظام بنفسه
+              (مرة واحدة لكل حالة في اليوم).
+            </Text>
+          </View>
         </Card>
 
         {/* ── Management ─────────────────────────────────────── */}
@@ -711,6 +837,72 @@ export function SettingsScreen() {
           {APP_NAME} · الإصدار {APP_VERSION_LABEL} · يعمل دون إنترنت 100%
         </Text>
       </ScrollView>
+
+      {/* ── v33 (round-41 #4): منتقي نمط المتجر — طبقة داخلية ── */}
+      {modePickerOpen ? (
+        <View style={styles.modeOverlay}>
+          <TouchableOpacity
+            style={styles.modeOverlayDim}
+            activeOpacity={1}
+            onPress={() => setModePickerOpen(false)}
+          />
+          <View style={styles.modeSheet}>
+            <View style={styles.modeSheetHandle} />
+            <Text style={styles.modeSheetTitle}>اختر نمط متجرك</Text>
+            <Text style={styles.modeSheetHint}>
+              كل نمط يجهّز الأصناف والوحدات وصفحة المنتج لمجاله — يمكنك
+              التغيير لاحقاً بلا أي فقدان بيانات
+            </Text>
+            <ScrollView
+              style={{flexShrink: 1}}
+              contentContainerStyle={{gap: spacing.sm}}
+              showsVerticalScrollIndicator={false}>
+              {STORE_MODES.map(config => {
+                const active = config.key === settings.storeMode;
+                return (
+                  <TouchableOpacity
+                    key={config.key}
+                    style={[
+                      styles.modeOptionCard,
+                      active ? {borderColor: c.accent, borderWidth: 1.5} : null,
+                    ]}
+                    onPress={() => void applyStoreMode(config.key)}
+                    disabled={modeBusy}
+                    activeOpacity={0.8}>
+                    <View
+                      style={[
+                        styles.modeOptionIcon,
+                        active
+                          ? {backgroundColor: c.accentSoft}
+                          : null,
+                      ]}>
+                      <Icon
+                        name={config.icon}
+                        size={22}
+                        color={c.accent}
+                      />
+                    </View>
+                    <View style={{flex: 1}}>
+                      <Text style={styles.modeOptionLabel}>
+                        {config.label}
+                        {active ? '  (النمط الحالي)' : ''}
+                      </Text>
+                      <Text style={styles.modeOptionBlurb} numberOfLines={2}>
+                        {config.blurb}
+                      </Text>
+                    </View>
+                    {active ? (
+                      <Icon name="checkCircle" size={18} color={c.success} />
+                    ) : (
+                      <Icon name="chevronLeft" size={15} color={c.textFaint} />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -754,6 +946,128 @@ const useStyles = makeStyles(c =>
       paddingBottom: spacing.xxl,
     },
     group: {gap: spacing.md},
+    /** v33 (round-41 #3): ملاحظة الإشعارات خارج التطبيق. */
+    bgNotifNote: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: spacing.sm,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.md,
+    },
+    bgNotifText: {
+      flex: 1,
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 2,
+      lineHeight: 17,
+    },
+    /** v33 (round-41 #4): بطاقة النمط الحالي + منتقى الأنماط. */
+    modeCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    modeIcon: {
+      width: 46,
+      height: 46,
+      borderRadius: 14,
+      backgroundColor: c.accentSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    modeLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    modeBlurb: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 17,
+      marginTop: 2,
+    },
+    modeHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 16,
+    },
+    modeOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      justifyContent: 'flex-end',
+      zIndex: 60,
+      elevation: 60,
+    },
+    modeOverlayDim: {flex: 1},
+    modeSheet: {
+      backgroundColor: c.bg,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      paddingHorizontal: spacing.lg,
+      paddingBottom: spacing.xl,
+      maxHeight: '82%',
+      gap: spacing.md,
+    },
+    modeSheetHandle: {
+      alignSelf: 'center',
+      width: 44,
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: c.border,
+      marginTop: spacing.sm,
+    },
+    modeSheetTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+    },
+    modeSheetHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 18,
+    },
+    modeOptionCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    modeOptionIcon: {
+      width: 44,
+      height: 44,
+      borderRadius: 13,
+      backgroundColor: c.surfaceAlt,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    modeOptionLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body - 1,
+    },
+    modeOptionBlurb: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 2,
+      lineHeight: 16,
+      marginTop: 2,
+    },
+
     fieldLabel: {
       color: c.textDim,
       fontFamily: fonts.bold,

@@ -28,6 +28,7 @@ import {
   radius,
   spacing,
   useThemeColors,
+  typography,
 } from '../../core/theme';
 import {LICENSE_CONTACT_FALLBACK} from '../../core/config';
 import {useLicenseStore} from '../../stores/licenseStore';
@@ -157,19 +158,28 @@ export function SubscriptionSection() {
               </Text>
             </View>
             <View style={styles.infoCell}>
+              <Text style={styles.infoLabel}>بداية الخطة (من الخادم)</Text>
+              <Text style={styles.infoValue}>
+                {new Date(license.activatedAt).toLocaleDateString('ar-EG')}
+              </Text>
+            </View>
+            <View style={styles.infoCell}>
               <Text style={styles.infoLabel}>تاريخ الانتهاء</Text>
               <Text style={styles.infoValue}>
                 {new Date(license.expiresAt).toLocaleDateString('ar-EG')}
               </Text>
             </View>
-            <View style={styles.infoCell}>
-              <Text style={styles.infoLabel}>فحص سيرفر منذ</Text>
-              <Text style={styles.infoValue}>
-                {status != null && status.offlineHours < 1
-                  ? 'الآن تقريباً'
-                  : `${Math.floor(status?.offlineHours ?? 0)} ساعة`}
-              </Text>
-            </View>
+          </View>
+          {/* v33 (round-41 #5): بداية الخطة من الخادم — أول تفعيل
+              للمفتاح على الإطلاق (موقّعة من الخادم)، فحذف التطبيق
+              وإعادة التفعيل بنفس المفتاح لا يعيد عدّاد المدة. */}
+          <View style={styles.serverAnchorNote}>
+            <Icon name="shield" size={13} color={c.success} />
+            <Text style={styles.serverAnchorText}>
+              نقطة بداية الاشتراك محفوظة على الخادم منذ أول تفعيل للمفتاح —
+              حذف التطبيق وإعادة التفعيل بنفس المفتاح لا يعيد المدة من
+              جديد، والمتبقي أعلاه هو الصحيح دائماً.
+            </Text>
           </View>
 
           {isGrace ? (
@@ -297,6 +307,22 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: 14.5,
       color: c.text,
+    },
+    /** v33 (round-41 #5): ملاحظة مرساة الخادم لبداية الخطة. */
+    serverAnchorNote: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: spacing.sm,
+      backgroundColor: c.successSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    serverAnchorText: {
+      flex: 1,
+      color: c.success,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 2,
+      lineHeight: 17,
     },
     graceNote: {
       flexDirection: 'row',

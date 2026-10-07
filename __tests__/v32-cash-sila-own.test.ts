@@ -26,9 +26,11 @@ describe('v32 — الخزينة: النقد المتاح والرصيد بعد 
 
   test('الرصيد بعد العملية حيّ يتبع المبلغ (خصم للسحب/المصروف وإضافة للإيداع)', () => {
     const src = read(CASH);
-    expect(src).toContain(
-      'isOut ? drawerMinor - amountMinor : drawerMinor + amountMinor',
-    );
+    // v33: نفس المعادلة — أعيد تنسيقها متعددة الأسطر داخل البطاقة
+    // العلوية؛ التحقق على أجزائها الثلاثة.
+    expect(src).toContain('drawerMinor - amountMinor');
+    expect(src).toContain('drawerMinor + amountMinor');
+    expect(src).toContain('overDrawer');
   });
 
   test('تحذير تجاوز المتاح يظهر في البطاقة نفسها', () => {
@@ -36,10 +38,46 @@ describe('v32 — الخزينة: النقد المتاح والرصيد بعد 
     expect(src).toContain('المبلغ أكبر من المتاح!');
   });
 
-  test('صف الملخص فوق زر التأكيد يكرر الرصيد بعد العملية', () => {
+  // v33 (round-41 #7): الصف الملخص حُذف بطلب التاجر («ثم زر التأكيد"
+  // مباشرة) — البطاقة الحيّة أعلى النافذة تعرض الرصيد بعد العملية
+  // لحظياً، والمبلغ مكتوب على زر التأكيد نفسه.
+  test('v33 — الترتيب الجديد: بطاقة رصيد أعلى النافذة ثم المبلغ ثم الملاحظة ثم الفئات ثم اللوحة ثم الزر', () => {
     const src = read(CASH);
-    expect(src).toContain('رصيد الخزينة بعد العملية');
-    expect(src).toContain('afterValue');
+    const formWrap = src.indexOf('formWrap');
+    const balance = src.indexOf('balanceStrip', formWrap);
+    const amount = src.indexOf('amountRow', balance);
+    const note = src.indexOf('noteInput', amount);
+    const cats = src.indexOf('catGrid', note);
+    const keypad = src.indexOf('keypad', cats);
+    const confirm = src.indexOf('تأكيد ${KIND_META[mode].label}', keypad);
+    expect(formWrap).toBeGreaterThan(-1);
+    expect(balance).toBeGreaterThan(formWrap);
+    expect(amount).toBeGreaterThan(balance);
+    expect(note).toBeGreaterThan(amount);
+    expect(cats).toBeGreaterThan(note);
+    expect(keypad).toBeGreaterThan(cats);
+    expect(confirm).toBeGreaterThan(keypad);
+    // المبلغ من اليمين ورمز العملة باليسار — غلاف جانب العملة.
+    expect(src).toContain('amountSideRow');
+    expect(src).toContain("justifyContent: 'space-between'");
+  });
+
+  test('v33 — ارتفاع النافذة مثبّت من لحظة الفتح فلا تقفز لوحة الأرقام', () => {
+    const src = read(CASH);
+    expect(src).toContain('const [sheetHeight] = useState(windowH)');
+    expect(src).toContain('height: sheetHeight');
+    expect(src).toContain("justifyContent: 'flex-start'");
+  });
+
+  test('v33 — كشف الفترة قبل سجل الحركات + آخر 10 حركات بتحميل تلقائي', () => {
+    const src = read(CASH);
+    const statement = src.indexOf('title="كشف الفترة"');
+    const ledger = src.indexOf('title="سجل الحركات"');
+    expect(statement).toBeGreaterThan(-1);
+    expect(statement).toBeLessThan(ledger);
+    expect(src).toContain('const LEDGER_PAGE = 10');
+    expect(src).toContain('LEDGER_AUTOSCROLL_PX');
+    expect(src).toContain('onLedgerScroll');
   });
 });
 

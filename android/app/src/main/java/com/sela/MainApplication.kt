@@ -13,6 +13,7 @@ import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
 import com.facebook.soloader.SoLoader
 import com.sela.native_modules.SelaPackage
+import com.sela.native_modules.StockAlertsWorker
 import java.util.Locale
 
 class MainApplication : Application(), ReactApplication {
@@ -61,6 +62,14 @@ class MainApplication : Application(), ReactApplication {
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
       // If you opted-in to the New Architecture, we load the native entry point for this app.
       load()
+    }
+    // v33 (round-41 #3): تنبيهات المخزون خارج التطبيق — عامل WorkManager
+    // دوري يقرأ قاعدة البيانات ويرسل إشعارات النظام حتى والتطبيق
+    // مغلق. الجدولة KEEP — تستمر عبر إعادة تشغيل الجهاز.
+    try {
+      StockAlertsWorker.ensureScheduled(this)
+    } catch (e: Exception) {
+      // WorkManager غير متاح على رومات نادرة — التطبيق يعمل بدونه.
     }
   }
 }

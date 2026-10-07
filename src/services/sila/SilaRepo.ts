@@ -64,6 +64,9 @@ function rowToCustomer(row: Record<string, unknown>): SilaCustomer {
     other_minor: Number(row.other_minor ?? 0),
     pos_purchases_minor: Number(row.pos_purchases_minor ?? 0),
     app_purchases_minor: Number(row.app_purchases_minor ?? 0),
+    device_outstanding_minor: Number(row.device_outstanding_minor ?? 0),
+    device_purchases_minor: Number(row.device_purchases_minor ?? 0),
+    device_payments_minor: Number(row.device_payments_minor ?? 0),
     last_payment_at: (row.last_payment_at as string) ?? null,
     last_payment_amount_minor:
       row.last_payment_amount_minor == null
@@ -594,6 +597,9 @@ export const SilaRepo = {
     posTotalMinor: number;
     appTotalMinor: number;
     otherTotalMinor: number;
+    /** v33 (round-41 #11 — 0075): إجمالي ديون هذه النقطة تحديداً
+     *  على الخادم (مجموع device_outstanding لكل الزبائن). */
+    deviceTotalMinor: number;
     debtorsCount: number;
     lastSyncedAt: string | null;
   }> {
@@ -610,6 +616,7 @@ export const SilaRepo = {
            COALESCE(SUM(pos_outstanding_minor), 0) AS pos_minor,
            COALESCE(SUM(app_outstanding_minor), 0) AS app_minor,
            COALESCE(SUM(other_minor), 0) AS other_minor,
+           COALESCE(SUM(device_outstanding_minor), 0) AS device_minor,
            COALESCE(SUM(CASE WHEN pos_outstanding_minor > 0 THEN 1 ELSE 0 END), 0) AS debtors,
            MAX(last_synced_at) AS last_sync
          FROM sila_customers`,
@@ -619,6 +626,7 @@ export const SilaRepo = {
         pos_minor?: number | null;
         app_minor?: number | null;
         other_minor?: number | null;
+        device_minor?: number | null;
         debtors?: number | null;
         last_sync?: string | null;
       };
@@ -627,6 +635,7 @@ export const SilaRepo = {
         posTotalMinor: Number(row.pos_minor ?? 0),
         appTotalMinor: Number(row.app_minor ?? 0),
         otherTotalMinor: Number(row.other_minor ?? 0),
+        deviceTotalMinor: Number(row.device_minor ?? 0),
         debtorsCount: Number(row.debtors ?? 0),
         lastSyncedAt: row.last_sync ?? null,
       };
@@ -637,6 +646,7 @@ export const SilaRepo = {
         posTotalMinor: 0,
         appTotalMinor: 0,
         otherTotalMinor: 0,
+        deviceTotalMinor: 0,
         debtorsCount: 0,
         lastSyncedAt: null,
       };
@@ -1116,6 +1126,10 @@ export const SilaRepo = {
       otherMinor?: number;
       posPurchasesMinor?: number;
       appPurchasesMinor?: number;
+      /** v33 (round-41 #11 — 0075): أرصدة هذه النقطة تحديداً. */
+      deviceOutstandingMinor?: number;
+      devicePurchasesMinor?: number;
+      devicePaymentsMinor?: number;
       lastPaymentAt?: string | null;
       lastPaymentAmountMinor?: number | null;
       /** v18 (round-24 #1): baseline anchor for NEW rows only. */
@@ -1139,9 +1153,10 @@ export const SilaRepo = {
              credit_minor,
              pos_outstanding_minor, app_outstanding_minor, other_minor,
              pos_purchases_minor, app_purchases_minor,
+             device_outstanding_minor, device_purchases_minor, device_payments_minor,
              last_payment_at, last_payment_amount_minor,
              reconcile_offset_minor, last_synced_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?)
            ON CONFLICT(customer_id) DO UPDATE SET
              name = excluded.name,
              phone_last4 = excluded.phone_last4,
@@ -1152,6 +1167,9 @@ export const SilaRepo = {
              other_minor = excluded.other_minor,
              pos_purchases_minor = excluded.pos_purchases_minor,
              app_purchases_minor = excluded.app_purchases_minor,
+             device_outstanding_minor = excluded.device_outstanding_minor,
+             device_purchases_minor = excluded.device_purchases_minor,
+             device_payments_minor = excluded.device_payments_minor,
              last_payment_at = excluded.last_payment_at,
              last_payment_amount_minor = excluded.last_payment_amount_minor,
              reconcile_offset_minor = CASE WHEN excluded.reconcile_offset_minor > 0 THEN excluded.reconcile_offset_minor ELSE sila_customers.reconcile_offset_minor END,
@@ -1160,9 +1178,10 @@ export const SilaRepo = {
              customer_id, name, phone_last4, outstanding_minor,
              pos_outstanding_minor, app_outstanding_minor, other_minor,
              pos_purchases_minor, app_purchases_minor,
+             device_outstanding_minor, device_purchases_minor, device_payments_minor,
              last_payment_at, last_payment_amount_minor,
              reconcile_offset_minor, last_synced_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?)
            ON CONFLICT(customer_id) DO UPDATE SET
              name = excluded.name,
              phone_last4 = excluded.phone_last4,
@@ -1172,6 +1191,9 @@ export const SilaRepo = {
              other_minor = excluded.other_minor,
              pos_purchases_minor = excluded.pos_purchases_minor,
              app_purchases_minor = excluded.app_purchases_minor,
+             device_outstanding_minor = excluded.device_outstanding_minor,
+             device_purchases_minor = excluded.device_purchases_minor,
+             device_payments_minor = excluded.device_payments_minor,
              last_payment_at = excluded.last_payment_at,
              last_payment_amount_minor = excluded.last_payment_amount_minor,
              reconcile_offset_minor = CASE WHEN excluded.reconcile_offset_minor > 0 THEN excluded.reconcile_offset_minor ELSE sila_customers.reconcile_offset_minor END,
@@ -1188,6 +1210,9 @@ export const SilaRepo = {
             row.otherMinor ?? 0,
             row.posPurchasesMinor ?? 0,
             row.appPurchasesMinor ?? 0,
+            row.deviceOutstandingMinor ?? 0,
+            row.devicePurchasesMinor ?? 0,
+            row.devicePaymentsMinor ?? 0,
             row.lastPaymentAt ?? null,
             row.lastPaymentAmountMinor ?? null,
             row.reconcileOffsetMinor ?? null,
@@ -1203,6 +1228,9 @@ export const SilaRepo = {
             row.otherMinor ?? 0,
             row.posPurchasesMinor ?? 0,
             row.appPurchasesMinor ?? 0,
+            row.deviceOutstandingMinor ?? 0,
+            row.devicePurchasesMinor ?? 0,
+            row.devicePaymentsMinor ?? 0,
             row.lastPaymentAt ?? null,
             row.lastPaymentAmountMinor ?? null,
             row.reconcileOffsetMinor ?? null,

@@ -305,6 +305,11 @@ async function syncCustomersCycle(): Promise<void> {
       otherMinor: row.other_minor ?? 0,
       posPurchasesMinor: row.pos_purchases_minor ?? 0,
       appPurchasesMinor: row.app_purchases_minor ?? 0,
+      // v33 (round-41 #11 — 0075): أرصدة هذه النقطة تحديداً (ثنائية
+      // المرحلة على الخادم) — غائبة على خوادم ما قبل 0075 → 0.
+      deviceOutstandingMinor: row.device_outstanding_minor ?? 0,
+      devicePurchasesMinor: row.device_purchases_minor ?? 0,
+      devicePaymentsMinor: row.device_payments_minor ?? 0,
       lastPaymentAt: row.last_payment_at ?? null,
       lastPaymentAmountMinor: row.last_payment_amount_minor ?? null,
       // v18: the write-once baseline anchor — only set for customers

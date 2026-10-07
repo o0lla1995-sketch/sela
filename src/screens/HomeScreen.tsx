@@ -253,31 +253,9 @@ export function HomeScreen() {
       <ScrollView
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}>
-        {/* ── ملخص اليوم — the hero block (net figures first) ── */}
-        {/* v32 (round-40 #1): بطاقتا «عدد الفواتير» و«متوسط الفاتورة»
-            حُذفتا بطلب التاجر («غير مهمين») — بطاقتا المبيعات وصافي
-            الربح فقط في صف واحد نظيف. */}
-        <SectionTitle title="اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
-        <View style={styles.statsGrid}>
-          <View style={styles.statsRow}>
-            <StatCard
-              label="مبيعات اليوم"
-              value={formatMoney(bundle?.summary.revenue ?? 0)}
-              tone="accent"
-              icon="wallet"
-            />
-            <StatCard
-              label="صافي الربح"
-              value={formatMoney(bundle?.summary.netProfit ?? 0)}
-              tone={
-                (bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'
-              }
-              icon="chart"
-            />
-          </View>
-        </View>
-
-        {/* ── الخزينة والديون — ONE clean card, never gated ──── */}
+        {/* ── الخزينة والديون — FIRST (v33 round-41 #10): طلب التاجر —
+            قسم الخزينة والديون بالأعلى ثم قسم اليوم أسفله (ماذا بعت
+            وكم ربحت يُقرأ بعد «كم في الخزينة وكم لي من دين»). ──── */}
         {/* v27 (round-35 #4): the header carries NO link chips
             anymore — «دفتر الديون» and «دفتر صِلة» live in the quick
             actions row above (always the same place, no
@@ -487,6 +465,30 @@ export function HomeScreen() {
           )}
         </Card>
 
+        {/* ── ملخص اليوم — v33 (round-41 #10): انتقل أسفل قسم
+            الخزينة والديون بطلب التاجر. v32: بطاقتا «عدد الفواتير»
+            و«متوسط الفاتورة» محذوفتان («غير مهمين») — المبيعات وصافي
+            الربح فقط في صف واحد نظيف. ── */}
+        <SectionTitle title="اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
+        <View style={styles.statsGrid}>
+          <View style={styles.statsRow}>
+            <StatCard
+              label="مبيعات اليوم"
+              value={formatMoney(bundle?.summary.revenue ?? 0)}
+              tone="accent"
+              icon="wallet"
+            />
+            <StatCard
+              label="صافي الربح"
+              value={formatMoney(bundle?.summary.netProfit ?? 0)}
+              tone={
+                (bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'
+              }
+              icon="chart"
+            />
+          </View>
+        </View>
+
         {/* ── Quick actions ──────────────────────────────────── */}
         <SectionTitle title="إجراءات سريعة" />
         <View style={styles.quickGrid}>
@@ -537,7 +539,9 @@ export function HomeScreen() {
               }
               action={
                 <TouchableOpacity
-                  onPress={() => navigation.navigate('Notifications' as never)}>
+                  /* v33 (round-41 #8): صفحة التنبيهات المخصصة بفلاتر
+                   *  النوع — لا صفحة الإشعارات. */
+                  onPress={() => navigation.navigate('StockAlerts' as never)}>
                   <Text style={styles.seeAll}>عرض الكل</Text>
                 </TouchableOpacity>
               }

@@ -44,6 +44,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import {useFocusEffect, useNavigation} from '@react-navigation/native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
@@ -98,11 +99,14 @@ const PERIOD_OPTIONS: {value: PeriodKey; label: string}[] = [
 
 type KindFilter = 'all' | CashMovementKind;
 
-/** v26 (round-34 #5): the ledger's page size — the on-screen list
- *  grows by one page per «تحميل المزيد» press instead of mounting
- *  the whole history (months of accumulated vouchers) in one shot,
- *  and the total counter tells the merchant there is more below. */
-const LEDGER_PAGE = 60;
+/** v33 (round-41 #7): الصفحة الأولى = آخر 10 حركات فقط («يظهر
+ *  اخر 10 حركات في المدة») — وكلما نزل التاجر للأسفل تُضاف صفحة
+ *  تلقائياً (onScroll قرب القاع) بلا أي زر. الصفحات اللاحقة أكبر
+ *  (30) كي يكبر السجل بسرعة عند التمرير الطويل. */
+const LEDGER_PAGE = 10;
+const LEDGER_PAGE_MORE = 30;
+/** المسافة من قاع الشاشة (px) التي تُطلق تحميل الصفحة التالية. */
+const LEDGER_AUTOSCROLL_PX = 520;
 
 const KIND_CHIPS: {key: KindFilter; label: string}[] = [
   {key: 'all', label: 'الكل'},
@@ -214,7 +218,7 @@ export function CashMovementsScreen() {
         from: range.from,
         to: range.to,
         kind: kindFilter,
-        limit: LEDGER_PAGE,
+        limit: rows.length === 0 ? LEDGER_PAGE : LEDGER_PAGE_MORE,
         offset: rows.length,
       });
       setRows(prev =>
@@ -222,7 +226,7 @@ export function CashMovementsScreen() {
           ? prev
           : [...prev, ...page.filter(r => !prev.some(p => p.local_id === r.local_id))],
       );
-      if (page.length < LEDGER_PAGE) {
+      if (page.length < LEDGER_PAGE_MORE) {
         // Everything loaded — pin the counter to the real total.
         const count = await CashRepo.countFor(range.from, range.to, kindFilter);
         setTotalCount(count);
@@ -353,13 +357,29 @@ export function CashMovementsScreen() {
     [load, toast],
   );
 
+  /** v33 (round-41 #7): التحميل التلقائي — كلما اقترب التمرير من
+   *  قاع الصفحة تُسحب الصفحة التالية من السجل تلقائياً بلا زر. */
+  const onLedgerScroll = useCallback(
+    (event: {nativeEvent: {contentOffset: {y: number}; contentSize: {height: number}; layoutMeasurement: {height: number}}}) => {
+      const {y} = event.nativeEvent.contentOffset;
+      const contentH = event.nativeEvent.contentSize.height;
+      const viewH = event.nativeEvent.layoutMeasurement.height;
+      if (contentH - viewH - y <= LEDGER_AUTOSCROLL_PX) {
+        void loadMore();
+      }
+    },
+    [loadMore],
+  );
+
   return (
     <View style={styles.screen}>
       <AppHeader title="الخزينة والمصروفات" showBack />
 
       <ScrollView
         contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}>
+        showsVerticalScrollIndicator={false}
+        scrollEventThrottle={120}
+        onScroll={onLedgerScroll}>
         {/* ── The drawer hero — expected cash NOW ── */}
         <Card style={styles.drawerCard}>
           <View style={styles.drawerRow}>
@@ -502,6 +522,57 @@ export function CashMovementsScreen() {
           </Card>
         ) : null}
 
+        {/* ── كشف الفترة — v33 (round-41 #7): انتقل فوق سجل
+            الحركات بطلب التاجر — الأدوات الأرشيفية قبل السجل. ── */}
+        <SectionTitle
+          title="كشف الفترة"
+          hint="PDF عربي A4 — يُحفظ في مجلد التنزيلات"
+        />
+        <Card style={styles.pdfCard}>
+          <View style={styles.pdfRow}>
+            <AppButton
+              title="إنشاء كشف PDF"
+              icon="download"
+              onPress={() => void exportPdf()}
+              loading={busy}
+              style={{flex: 1}}
+            />
+            <AppButton
+              title="طباعة حرارية"
+              icon="printer"
+              variant="secondary"
+              onPress={() => void printThermal()}
+              disabled={printerStatus !== 'connected'}
+              style={{flex: 1}}
+            />
+          </View>
+          {pdfReady ? (
+            <View style={styles.pdfRow}>
+              <AppButton
+                title="مشاركة الكشف"
+                icon="send"
+                variant="secondary"
+                small
+                onPress={() => void sharePdf()}
+                style={{flex: 1}}
+              />
+              <AppButton
+                title="طباعة الكشف (A4)"
+                icon="printer"
+                variant="secondary"
+                small
+                onPress={() => void printPdf()}
+                style={{flex: 1}}
+              />
+            </View>
+          ) : (
+            <Text style={styles.pdfHint}>
+              بعد الإنشاء: شاركه واتساب/إيميل أو اطبعه على أي طابعة A4 موصولة
+              بالهاتف — واطبع نسخة الجيب الحرارية فوراً
+            </Text>
+          )}
+        </Card>
+
         {/* ── The movements ledger ── */}
         <SectionTitle
           title="سجل الحركات"
@@ -590,7 +661,7 @@ export function CashMovementsScreen() {
                   <>
                     <Icon name="download" size={15} color={c.accent} />
                     <Text style={styles.loadMoreText}>
-                      تحميل المزيد ({totalCount - rows.length} سند متبقية)
+                      اسحب للأسفل للمزيد ({totalCount - rows.length} سند متبقية)
                     </Text>
                   </>
                 )}
@@ -603,55 +674,6 @@ export function CashMovementsScreen() {
           </View>
         )}
 
-        {/* ── The statement actions ── */}
-        <SectionTitle
-          title="كشف الفترة"
-          hint="PDF عربي A4 — يُحفظ في مجلد التنزيلات"
-        />
-        <Card style={styles.pdfCard}>
-          <View style={styles.pdfRow}>
-            <AppButton
-              title="إنشاء كشف PDF"
-              icon="download"
-              onPress={() => void exportPdf()}
-              loading={busy}
-              style={{flex: 1}}
-            />
-            <AppButton
-              title="طباعة حرارية"
-              icon="printer"
-              variant="secondary"
-              onPress={() => void printThermal()}
-              disabled={printerStatus !== 'connected'}
-              style={{flex: 1}}
-            />
-          </View>
-          {pdfReady ? (
-            <View style={styles.pdfRow}>
-              <AppButton
-                title="مشاركة الكشف"
-                icon="send"
-                variant="secondary"
-                small
-                onPress={() => void sharePdf()}
-                style={{flex: 1}}
-              />
-              <AppButton
-                title="طباعة الكشف (A4)"
-                icon="printer"
-                variant="secondary"
-                small
-                onPress={() => void printPdf()}
-                style={{flex: 1}}
-              />
-            </View>
-          ) : (
-            <Text style={styles.pdfHint}>
-              بعد الإنشاء: شاركه واتساب/إيميل أو اطبعه على أي طابعة A4 موصولة
-              بالهاتف — واطبع نسخة الجيب الحرارية فوراً
-            </Text>
-          )}
-        </Card>
       </ScrollView>
 
       {/* ── The entry sheet (INLINE overlay — never a Modal) ── */}
@@ -727,7 +749,17 @@ function MovementSheet({
   // (الفئات والملاحظة) يتمرر. ولا يزال صفر مستمعات Keyboard —
   // لوحة النظام لا تُستدعى للمبلغ أصلاً (لوحة أرقام مدمجة من v29)
   // فلا شيء يتحرك في الشجرة لحظة فتح أي لوحة.
+  // v33 (round-41 #7): ارتفاع النافذة يُلتقط مرة واحدة عند الفتح
+  // (بلوحة مفاتيح مغلقة — النافذة تُفتح من زر لا من حقل) ويُثبّت:
+  // عند الضغط على حقل الملاحظة وتفتح لوحة النظام، يتقلص جذر
+  // الشاشة (adjustResize) لكن النافذة تحتفظ بارتفاعها الكامل فلا
+  // يقفز أي عنصر — لوحة الأرقام وزر التأكيد يبقيان مكانهما تحت
+  // لوحة النظام تماماً ويظهران فور إغلاقها («لا تقفز لوحة الأرقام
+  // للأعلى وتبقى مكانها»). صفر مستمعات Keyboard كما هو.
   const insets = useSafeAreaInsets();
+  const windowH = useWindowDimensions().height;
+  // لقطة واحدة عند أول رسم — useState لا يُحدّثها لاحقاً.
+  const [sheetHeight] = useState(windowH);
 
   // v26 (round-34 #4): instant render (no entrance animation — the
   // ROM lesson from the return sheet) + a 400ms close-guard so a
@@ -930,7 +962,9 @@ function MovementSheet({
         style={[
           sheetStyles(c).sheet,
           {
-            height: '100%',
+            // v33 (round-41 #7): ارتفاع مثبّت يُلتقط عند الفتح — لا
+            // '100%' المتقلصة مع لوحة النظام.
+            height: sheetHeight,
             paddingTop: Math.max(insets.top, 10),
             paddingBottom: Math.max(insets.bottom, 10),
           },
@@ -1062,229 +1096,218 @@ function MovementSheet({
                   التاجر — التأمين نفسه يعمل كما هو (البوابة أعلاه)
                   دون أي إشارة داخل النافذة. */}
 
-              {/* v31 (round-39 #2): المبلغ — مثبّت كبطاقة POS، عرض
-                  فقط بلا TextInput (لوحة النظام لا تُستدعى للمبلغ
-                  إطلاقاً منذ v29). علامة ₪ وزر المسح داخل البطاقة
-                  فلا حاجة لسطر عنوان فوقها. */}
-              <View
-                style={[
-                  sheetStyles(c).amountRow,
-                  overDrawer ? {borderColor: c.danger} : null,
-                ]}>
-                <Text
-                  style={[
-                    sheetStyles(c).amountDisplay,
-                    amountText === '' ? {color: c.textFaint} : null,
-                  ]}>
-                  {amountText === '' ? '0.00' : amountText}
-                </Text>
-                <Text style={sheetStyles(c).amountSuffix}>₪</Text>
-                {amountText !== '' ? (
-                  <TouchableOpacity
-                    style={sheetStyles(c).amountClearBtn}
-                    onPress={() => setAmountText('')}
-                    disabled={busy}
-                    activeOpacity={0.75}>
-                    <Icon name="x" size={13} color={c.textDim} />
-                    <Text style={sheetStyles(c).amountClearText}>مسح</Text>
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-              {/* v32 (round-40 #5): بطاقة الرصيد — النقد المتاح
-                  الآن ورصيد الخزينة بعد العملية، يتحدثان لحظياً مع
-                  كل رقم يكتبه التاجر، بشكل احترافي واضح في نوافذ
-                  السحب والإيداع والمصروف الثلاث. */}
-              <View style={sheetStyles(c).balanceStrip}>
+              {/* v33 (round-41 #7): ترتيب النافذة بطلب التاجر —
+                  بطاقة رصيد حيّة أعلى النافذة ثم المبلغ (من اليمين
+                  و₪ باليسار) ثم الملاحظة ثم الفئات ثم لوحة الأرقام
+                  ثم زر التأكيد — كلها داخل غلاف واحد بمسافات
+                  متساوية (gap) فلا تداخل ولا التصاق. */}
+              <View style={sheetStyles(c).formWrap}>
+                {/* ① بطاقة الرصيد الحيّة — أعلى النافذة */}
                 <View
                   style={[
-                    sheetStyles(c).balanceCell,
+                    sheetStyles(c).balanceStrip,
                     overDrawer ? {borderColor: c.danger} : null,
                   ]}>
-                  <Text style={sheetStyles(c).balanceLabel}>
-                    {isOut ? 'النقد المتاح بالخزينة' : 'النقد الحالي بالخزينة'}
-                  </Text>
-                  <Text
-                    style={[
-                      sheetStyles(c).balanceValue,
-                      {color: overDrawer ? c.danger : c.text},
-                    ]}>
-                    {formatMoney(drawerMinor / 100)}
-                  </Text>
-                </View>
-                <View style={sheetStyles(c).balanceDivider} />
-                <View style={sheetStyles(c).balanceCell}>
-                  <Text style={sheetStyles(c).balanceLabel}>
-                    {isOut ? 'الرصيد بعد السحب' : 'الرصيد بعد الإيداع'}
-                  </Text>
-                  {overDrawer ? (
-                    <Text style={[sheetStyles(c).balanceValue, {color: c.danger}]}>
-                      المبلغ أكبر من المتاح!
+                  <View style={sheetStyles(c).balanceCell}>
+                    <Text style={sheetStyles(c).balanceLabel}>
+                      {isOut ? 'النقد المتاح بالخزينة' : 'النقد الحالي بالخزينة'}
                     </Text>
-                  ) : (
                     <Text
                       style={[
                         sheetStyles(c).balanceValue,
-                        {
-                          color: isOut ? c.danger : c.success,
-                        },
+                        {color: overDrawer ? c.danger : c.text},
                       ]}>
-                      {formatMoney(
-                        (isOut ? drawerMinor - amountMinor : drawerMinor + amountMinor) /
-                          100,
-                      )}
+                      {formatMoney(drawerMinor / 100)}
                     </Text>
-                  )}
-                </View>
-              </View>
-
-              {/* v31 (round-39 #2): الفئة المخصصة والملاحظة — مثبّتان
-                  مباشرة تحت المبلغ (سطر واحد مضغوط والعنوان داخل
-                  الحقل كـ placeholder) فيبقيان مرئيين دائماً حتى مع
-                  لوحة النظام مفتوحة، ولوحة الأرقام أسفلهما لا تختفي
-                  أبداً. */}
-              {mode === 'expense' && showCustom ? (
-                <TextInput
-                  style={sheetStyles(c).customInput}
-                  value={customCategory}
-                  onChangeText={setCustomCategory}
-                  placeholder="اكتب اسم الفئة…"
-                  placeholderTextColor={c.textFaint}
-                  maxLength={40}
-                  editable={!busy}
-                />
-              ) : null}
-              <TextInput
-                style={sheetStyles(c).noteInput}
-                value={note}
-                onChangeText={setNote}
-                placeholder="ملاحظة (اختياري) — مثال: فاتورة كهرباء شهر 10"
-                placeholderTextColor={c.textFaint}
-                maxLength={140}
-                editable={!busy}
-              />
-
-              {/* الوسط القابل للتمرير — فئات المصروف فقط (يرتصّ
-                  بهدوء عند فتح لوحة النظام والحقول المثبتة فوقه
-                  تبقى مرئية). */}
-              {mode === 'expense' ? (
-                <ScrollView
-                  style={{flex: 1}}
-                  contentContainerStyle={sheetStyles(c).form}
-                  showsVerticalScrollIndicator={false}
-                  keyboardShouldPersistTaps="handled">
-                  <View style={sheetStyles(c).catGrid}>
-                    {EXPENSE_CATEGORIES.map(cat => {
-                      const active = !showCustom && category === cat;
-                      return (
-                        <TouchableOpacity
-                          key={cat}
-                          style={[
-                            sheetStyles(c).catChip,
-                            active && {
-                              backgroundColor: c.accent,
-                              borderColor: c.accent,
-                            },
-                          ]}
-                          onPress={() => {
-                            setCategory(cat);
-                            setShowCustom(false);
-                          }}
-                          activeOpacity={0.7}>
-                          <Text
-                            style={[
-                              sheetStyles(c).catChipText,
-                              {color: active ? c.onAccent : c.textDim},
-                            ]}>
-                            {cat}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                    <TouchableOpacity
-                      style={[
-                        sheetStyles(c).catChip,
-                        showCustom && {
-                          backgroundColor: c.accent,
-                          borderColor: c.accent,
-                        },
-                      ]}
-                      onPress={() => setShowCustom(true)}
-                      activeOpacity={0.7}>
+                  </View>
+                  <View style={sheetStyles(c).balanceDivider} />
+                  <View style={sheetStyles(c).balanceCell}>
+                    <Text style={sheetStyles(c).balanceLabel}>
+                      {mode === 'withdrawal'
+                        ? 'الرصيد بعد السحب'
+                        : mode === 'expense'
+                        ? 'الرصيد بعد المصروف'
+                        : 'الرصيد بعد الإيداع'}
+                    </Text>
+                    {overDrawer ? (
                       <Text
                         style={[
-                          sheetStyles(c).catChipText,
-                          {color: showCustom ? c.onAccent : c.textDim},
+                          sheetStyles(c).balanceValue,
+                          {color: c.danger},
                         ]}>
-                        فئة أخرى…
+                        المبلغ أكبر من المتاح!
                       </Text>
-                    </TouchableOpacity>
-                  </View>
-                </ScrollView>
-              ) : (
-                <View style={{flex: 1}} />
-              )}
-
-              {/* v31 (round-39 #2): لوحة الأرقام المدمجة — تبقى
-                  مركّبة دائماً ولا تختفي أبداً (طلب التاجر الصريح):
-                  أرقام وفاصلة وحذف فقط بقواعد النقود الصارمة. أي
-                  إخفاء/إظهار مشروط بالتركيز هو بنمط قاتل الـ IME
-                  على روم الجهاز — الآن صفر تغيّرات في الشجرة عند
-                  تركيز الملاحظة أو الفئة المخصصة. */}
-              <View style={sheetStyles(c).keypad}>
-                {AMOUNT_KEYPAD_KEYS.map((row, rowIndex) => (
-                  <View key={rowIndex} style={sheetStyles(c).keypadRow}>
-                    {row.map(key => (
-                      <TouchableOpacity
-                        key={key}
+                    ) : (
+                      <Text
                         style={[
-                          sheetStyles(c).keypadKey,
-                          key === '⌫' ? sheetStyles(c).keypadKeyDanger : null,
-                        ]}
-                        onPress={() =>
-                          setAmountText(prev => applyAmountKey(prev, key))
-                        }
-                        disabled={busy}
-                        activeOpacity={0.65}>
-                        <Text style={sheetStyles(c).keypadKeyText}>{key}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                ))}
-              </View>
-
-              {/* ── Confirm ── */}
-              <View style={sheetStyles(c).summaryBox}>
-                {/* v32: صف الملخص — المبلغ واتجاهه + الرصيد بعد
-                    العملية مرة أخرى فوق زر التأكيد مباشرة. */}
-                <View style={sheetStyles(c).totalRow}>
-                  <Text style={sheetStyles(c).totalLabel}>
-                    {isOut ? 'سيُخصم من الخزينة' : 'سيُضاف إلى الخزينة'}
-                  </Text>
-                  <Text
-                    style={[
-                      sheetStyles(c).totalValue,
-                      {color: isOut ? c.danger : c.success},
-                    ]}>
-                    {formatMoney(amountMinor / 100)}
-                  </Text>
-                </View>
-                <View style={sheetStyles(c).totalRow}>
-                  <Text style={sheetStyles(c).afterLabel}>
-                    رصيد الخزينة بعد العملية
-                  </Text>
-                  <Text
-                    style={[
-                      sheetStyles(c).afterValue,
-                      {color: isOut ? c.danger : c.success},
-                    ]}>
-                    {formatMoney(
-                      (isOut ? drawerMinor - amountMinor : drawerMinor + amountMinor) /
-                        100,
+                          sheetStyles(c).balanceValue,
+                          {
+                            color:
+                              amountMinor > 0
+                                ? isOut
+                                  ? c.danger
+                                  : c.success
+                                : c.text,
+                          },
+                        ]}>
+                        {formatMoney(
+                          (isOut
+                            ? drawerMinor - amountMinor
+                            : drawerMinor + amountMinor) / 100,
+                        )}
+                      </Text>
                     )}
-                  </Text>
+                  </View>
                 </View>
+
+                {/* ② المبلغ — المبلغ من اليمين ورمز العملة باليسار
+                    (عرض فقط بلا TextInput — لوحة النظام لا تُستدعى
+                    للمبلغ إطلاقاً منذ v29). */}
+                <View
+                  style={[
+                    sheetStyles(c).amountRow,
+                    overDrawer ? {borderColor: c.danger} : null,
+                  ]}>
+                  <Text
+                    style={[
+                      sheetStyles(c).amountDisplay,
+                      amountText === '' ? {color: c.textFaint} : null,
+                    ]}>
+                    {amountText === '' ? '0.00' : amountText}
+                  </Text>
+                  <View style={sheetStyles(c).amountSideRow}>
+                    <Text style={sheetStyles(c).amountSuffix}>₪</Text>
+                    {amountText !== '' ? (
+                      <TouchableOpacity
+                        style={sheetStyles(c).amountClearBtn}
+                        onPress={() => setAmountText('')}
+                        disabled={busy}
+                        activeOpacity={0.75}>
+                        <Icon name="x" size={13} color={c.textDim} />
+                        <Text style={sheetStyles(c).amountClearText}>
+                          مسح
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                </View>
+
+                {/* ③ الملاحظة — سطر واحد فوق منطقة الفئات */}
+                <TextInput
+                  style={sheetStyles(c).noteInput}
+                  value={note}
+                  onChangeText={setNote}
+                  placeholder="ملاحظة (اختياري) — مثال: فاتورة كهرباء شهر 10"
+                  placeholderTextColor={c.textFaint}
+                  maxLength={140}
+                  editable={!busy}
+                />
+
+                {/* ④ الفئات — فئات المصروف فقط، وسط قابل للتمرير
+                    (الفئة المخصصة داخله). */}
+                {mode === 'expense' ? (
+                  <ScrollView
+                    style={{flex: 1}}
+                    contentContainerStyle={sheetStyles(c).form}
+                    showsVerticalScrollIndicator={false}
+                    keyboardShouldPersistTaps="handled">
+                    {showCustom ? (
+                      <TextInput
+                        style={sheetStyles(c).customInput}
+                        value={customCategory}
+                        onChangeText={setCustomCategory}
+                        placeholder="اكتب اسم الفئة…"
+                        placeholderTextColor={c.textFaint}
+                        maxLength={40}
+                        editable={!busy}
+                      />
+                    ) : null}
+                    <View style={sheetStyles(c).catGrid}>
+                      {EXPENSE_CATEGORIES.map(cat => {
+                        const active = !showCustom && category === cat;
+                        return (
+                          <TouchableOpacity
+                            key={cat}
+                            style={[
+                              sheetStyles(c).catChip,
+                              active && {
+                                backgroundColor: c.accent,
+                                borderColor: c.accent,
+                              },
+                            ]}
+                            onPress={() => {
+                              setCategory(cat);
+                              setShowCustom(false);
+                            }}
+                            activeOpacity={0.7}>
+                            <Text
+                              style={[
+                                sheetStyles(c).catChipText,
+                                {color: active ? c.onAccent : c.textDim},
+                              ]}>
+                              {cat}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                      <TouchableOpacity
+                        style={[
+                          sheetStyles(c).catChip,
+                          showCustom && {
+                            backgroundColor: c.accent,
+                            borderColor: c.accent,
+                          },
+                        ]}
+                        onPress={() => setShowCustom(true)}
+                        activeOpacity={0.7}>
+                        <Text
+                          style={[
+                            sheetStyles(c).catChipText,
+                            {color: showCustom ? c.onAccent : c.textDim},
+                          ]}>
+                          فئة أخرى…
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </ScrollView>
+                ) : (
+                  <View style={{flex: 1}} />
+                )}
+
+                {/* ⑤ لوحة الأرقام — تبقى مركّبة دائماً ولا تقفز
+                    أبداً (ارتفاع النافذة مثبّت من لحظة الفتح). */}
+                <View style={sheetStyles(c).keypad}>
+                  {AMOUNT_KEYPAD_KEYS.map((row, rowIndex) => (
+                    <View key={rowIndex} style={sheetStyles(c).keypadRow}>
+                      {row.map(key => (
+                        <TouchableOpacity
+                          key={key}
+                          style={[
+                            sheetStyles(c).keypadKey,
+                            key === '⌫' ? sheetStyles(c).keypadKeyDanger : null,
+                          ]}
+                          onPress={() =>
+                            setAmountText(prev => applyAmountKey(prev, key))
+                          }
+                          disabled={busy}
+                          activeOpacity={0.65}>
+                          <Text style={sheetStyles(c).keypadKeyText}>{key}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+
+                {/* ⑥ زر التأكيد — المبلغ مكتوب عليه والرصيد بعد
+                    العملية معروض لحظياً في البطاقة أعلاه. */}
                 <AppButton
-                  title="تأكيد وتسجيل السند"
+                  title={
+                    amountMinor > 0
+                      ? `تأكيد ${KIND_META[mode].label} — ${formatMoney(
+                          amountMinor / 100,
+                        )}`
+                      : 'أدخل المبلغ أولاً'
+                  }
                   icon={KIND_META[mode].icon}
                   onPress={() => void confirm()}
                   loading={busy}
@@ -1308,7 +1331,10 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       left: 0,
       right: 0,
       bottom: 0,
-      justifyContent: 'flex-end',
+      // v33 (round-41 #7): النافذة مثبتة الأعلى (ليست flex-end) —
+      // بارتفاع كامل مثبّت يتجاوز القاع المتقلص فتبقى عناصرها
+      // أماكنها تحت لوحة النظام بدل أن تُدفع للأعلى.
+      justifyContent: 'flex-start',
       zIndex: 70,
       elevation: 70,
     },
@@ -1435,9 +1461,17 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       gap: spacing.sm,
       paddingVertical: spacing.sm,
     },
+    /** v33 (round-41 #7): غلاف النموذج — مسافات متساوية (gap) بين
+     *  بطاقة الرصيد والمبلغ والملاحظة والفئات ولوحة الأرقام وزر
+     *  التأكيد، فلا التصاق ولا تداخل. */
+    formWrap: {
+      flex: 1,
+      gap: spacing.md,
+    },
     amountRow: {
       flexDirection: 'row',
       alignItems: 'center',
+      justifyContent: 'space-between',
       backgroundColor: c.surfaceAlt,
       borderWidth: 1,
       borderColor: c.border,
@@ -1461,6 +1495,12 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       fontFamily: fonts.bold,
       fontSize: typography.body,
     },
+    /** v33: جانب العملة — ₪ وزر المسح معاً في أقصى يسار البطاقة. */
+    amountSideRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
     amountClearBtn: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -1482,7 +1522,6 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
      *  فوقها مساحة كافية مهما ارتفعت لوحة النظام. */
     keypad: {
       gap: spacing.xs + 2,
-      marginTop: spacing.xs + 2,
     },
     keypadRow: {
       flexDirection: 'row',
@@ -1507,16 +1546,17 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       fontSize: 21,
       fontVariant: ['tabular-nums'],
     },
-    /** v32 (round-40 #5): بطاقة الرصيد — متاح الآن + بعد العملية. */
+    /** v33 (round-41 #7): بطاقة الرصيد الحيّة — أعلى النافذة،
+     *  أكبر قليلاً كي تُقرأ فوراً (المتاح الآن + بعد العملية). */
     balanceStrip: {
       flexDirection: 'row',
       alignItems: 'stretch',
       backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
+      borderWidth: 1.5,
       borderColor: c.border,
-      borderRadius: radius.sm,
-      paddingVertical: 8,
-      paddingHorizontal: spacing.sm,
+      borderRadius: radius.md,
+      paddingVertical: 10,
+      paddingHorizontal: spacing.md,
     },
     balanceCell: {
       flex: 1,
@@ -1531,21 +1571,11 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
     balanceLabel: {
       color: c.textDim,
       fontFamily: fonts.bold,
-      fontSize: typography.micro,
+      fontSize: typography.micro + 1,
     },
     balanceValue: {
       fontFamily: fonts.black,
-      fontSize: typography.small + 3,
-      fontVariant: ['tabular-nums'],
-    },
-    afterLabel: {
-      color: c.textFaint,
-      fontFamily: fonts.bold,
-      fontSize: typography.micro + 1,
-    },
-    afterValue: {
-      fontFamily: fonts.black,
-      fontSize: typography.small + 2,
+      fontSize: typography.body + 2,
       fontVariant: ['tabular-nums'],
     },
     drawerHint: {
@@ -1598,26 +1628,6 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       paddingVertical: 9,
       minHeight: 44,
       textAlignVertical: 'center',
-    },
-    summaryBox: {
-      borderTopWidth: 1,
-      borderTopColor: c.borderSoft,
-      paddingTop: spacing.sm,
-      gap: spacing.sm,
-    },
-    totalRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-    },
-    totalLabel: {
-      color: c.textDim,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-    },
-    totalValue: {
-      fontFamily: fonts.black,
-      fontSize: typography.heading,
     },
   });
 }

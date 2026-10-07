@@ -2624,75 +2624,57 @@ export function PosScreen({
           <View style={styles.debtModalSheet}>
             <View style={styles.unitModalHandle} />
             <Text style={styles.debtModalTitle}>بيع بالدين</Text>
-            <Text style={styles.chooserHint}>
-              {silaPaired
-                ? 'اختر كيفية تحديد الزبون المدين'
-                : 'دفتر المتجر يعمل دون صِلة — خيارات صِلة تحتاج ربط الحساب'}
-            </Text>
-            <TouchableOpacity
-              style={[styles.chooserBtn, !silaPaired && {opacity: 0.55}]}
-              onPress={() => {
-                setDebtChooser(false);
-                if (!silaPaired) {
-                  Alert.alert(
-                    'البيع بالدين عبر صِلة',
-                    'لتفعيل مسار صِلة، اربط حساب التاجر من شاشة صِلة — أو استخدم «زبون من دفتر المتجر» لتسجيل الدين محلياً.',
-                    [
-                      {text: 'لاحقاً', style: 'cancel'},
-                      {
-                        text: 'ربط الآن',
-                        onPress: () => navigation.navigate('Sila' as never),
-                      },
-                    ],
-                  );
-                  return;
-                }
-                void scanDebtQr();
-              }}
-              activeOpacity={0.85}>
-              <View style={styles.chooserIcon}>
-                <Icon name="qrFrame" size={22} color={c.accent} />
-              </View>
-              <View style={{flex: 1}}>
-                <Text style={styles.chooserTitle}>مسح رمز الزبون</Text>
-                <Text style={styles.chooserText}>
-                  بطاقة الزبون من تطبيق صِلة أو رمز موقّع بمبلغ الفاتورة
+            {/* v33 (round-41 #2): خيارا صِلة يظهران فقط عند الربط الفعلي —
+                بلا ربط لا يظهران إطلاقاً في النافذة (طلب التاجر الصريح)،
+                ويتقدّم «زبون من دفتر المتجر» وحده بلا تشويش. */}
+            {silaPaired ? (
+              <>
+                <Text style={styles.chooserHint}>
+                  اختر كيفية تحديد الزبون المدين
                 </Text>
-              </View>
-              <Icon name="chevronLeft" size={16} color={c.textFaint} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.chooserBtn, !silaPaired && {opacity: 0.55}]}
-              onPress={() => {
-                setDebtChooser(false);
-                if (!silaPaired) {
-                  Alert.alert(
-                    'البيع بالدين عبر صِلة',
-                    'لتفعيل مسار صِلة، اربط حساب التاجر من شاشة صِلة — أو استخدم «زبون من دفتر المتجر» لتسجيل الدين محلياً.',
-                    [
-                      {text: 'لاحقاً', style: 'cancel'},
-                      {
-                        text: 'ربط الآن',
-                        onPress: () => navigation.navigate('Sila' as never),
-                      },
-                    ],
-                  );
-                  return;
-                }
-                void openCustomerPicker();
-              }}
-              activeOpacity={0.85}>
-              <View style={styles.chooserIcon}>
-                <Icon name="list" size={22} color={c.accent} />
-              </View>
-              <View style={{flex: 1}}>
-                <Text style={styles.chooserTitle}>اختيار من الزبائن</Text>
-                <Text style={styles.chooserText}>
-                  زبائن صِلة المعروفون لدى متجرك — دين مباشر بقيمة الفاتورة
-                </Text>
-              </View>
-              <Icon name="chevronLeft" size={16} color={c.textFaint} />
-            </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.chooserBtn}
+                  onPress={() => {
+                    setDebtChooser(false);
+                    void scanDebtQr();
+                  }}
+                  activeOpacity={0.85}>
+                  <View style={styles.chooserIcon}>
+                    <Icon name="qrFrame" size={22} color={c.accent} />
+                  </View>
+                  <View style={{flex: 1}}>
+                    <Text style={styles.chooserTitle}>مسح رمز الزبون</Text>
+                    <Text style={styles.chooserText}>
+                      بطاقة الزبون من تطبيق صِلة أو رمز موقّع بمبلغ الفاتورة
+                    </Text>
+                  </View>
+                  <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.chooserBtn}
+                  onPress={() => {
+                    setDebtChooser(false);
+                    void openCustomerPicker();
+                  }}
+                  activeOpacity={0.85}>
+                  <View style={styles.chooserIcon}>
+                    <Icon name="list" size={22} color={c.accent} />
+                  </View>
+                  <View style={{flex: 1}}>
+                    <Text style={styles.chooserTitle}>اختيار من الزبائن</Text>
+                    <Text style={styles.chooserText}>
+                      زبائن صِلة المعروفون لدى متجرك — دين مباشر بقيمة الفاتورة
+                    </Text>
+                  </View>
+                  <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                </TouchableOpacity>
+              </>
+            ) : (
+              <Text style={styles.chooserHint}>
+                دفتر المتجر يعمل دون صِلة — اربط حساب التاجر من شاشة صِلة
+                لتسجيل ديون صِلة مباشرة
+              </Text>
+            )}
             {/* v16 (round-22 #4): the STORE-LOCAL debt book — customers
                 of this store only (ID number + name + phone), charged
                 locally, never uploaded to صِلة. */}

@@ -158,6 +158,8 @@ export function SilaScreen() {
     /** v32 (round-40 #6): دين هذا المتجر وعدد المدينين له — محلي. */
     ownMinor: number;
     ownDebtors: number;
+    /** v33 (round-41 #11 — 0075): إجمالي دين هذه النقطة على الخادم. */
+    deviceMinor: number;
   } | null>(null);
 
   // v15 (round-21 #3): the repayment sheet — inline absolute overlay
@@ -297,6 +299,8 @@ export function SilaScreen() {
         // v32: دين هذا المتجر من دفاتره المحلية.
         ownMinor: ownTotals.ownMinor,
         ownDebtors: ownTotals.debtorsCount,
+        // v33 (round-41 #11 — 0075): دين هذه النقطة على الخادم.
+        deviceMinor: silaTotals.deviceTotalMinor,
       });
       setCampaignDueMinor(campaignTotals.dueMinor);
       setCampaignSettledMinor(campaignTotals.settledMinorTotal);
@@ -577,7 +581,13 @@ export function SilaScreen() {
     // هذا المتجر) كي لا يُرفض الإيصال — الرفض الصريح دائماً بلا
     // مسار دفع زائد صامت.
     const ownMinor = ownByCustomer.get(customer.customer_id) ?? 0;
-    const serverCapMinor = Math.max(0, customer.pos_outstanding_minor);
+    // v33 (round-41 #11 — 0075): حد أمان الخادم من دين هذه النقطة
+    // تحديداً (device_outstanding_minor — إسناد ثنائي المرحلة)؛
+    // خوادم ما قبل 0075 ترسله 0 → الرجوع لسقف نقاط البيع المجمّع.
+    const serverCapMinor =
+      customer.device_outstanding_minor > 0
+        ? customer.device_outstanding_minor
+        : Math.max(0, customer.pos_outstanding_minor);
     const storeDebtMinor = Math.min(ownMinor, serverCapMinor);
     if (amountMinor > storeDebtMinor) {
       toast(
@@ -1059,12 +1069,20 @@ export function SilaScreen() {
       ) : (
         <>
           {filteredCustomers.slice(0, customersShown).map(customer => {
-            /* v32 (round-40 #6): الرقم الأساسي هو دين هذا المتجر من
-               الدفاتر المحلية (فواتيره هو) — ورصيد الخادم POS قد يجمع
-               فواتير كل متاجر التاجر، فيُعرض للمعلومية عند الاختلاف. */
+            /* v32 (round-40 #6) → v33 (round-41 #11 — 0075): الرقم
+               الأساسي هو دين هذا المتجر من الدفاتر المحلية (فواتيره
+               هو)، وسقف الخادم device_outstanding_minor (دين هذه
+               النقطة بإسناد المرحلتين). الفارق عن أرصدة الخادم
+               يُعرض للمعلومية مفصّلاً: متاجر التاجر الأخرى، وعمليات
+               تطبيق صِلة، والشامل — القاعدة الذهبية §4.5. */
             const ownMinor = ownByCustomer.get(customer.customer_id) ?? 0;
-            const serverExtraMinor =
-              customer.pos_outstanding_minor - ownMinor;
+            const deviceMinor = customer.device_outstanding_minor;
+            const otherStoresMinor = Math.max(
+              0,
+              customer.pos_outstanding_minor -
+                (deviceMinor > 0 ? deviceMinor : ownMinor),
+            );
+            const appOpsMinor = Math.max(0, customer.app_outstanding_minor);
             return (
             <Card key={customer.customer_id} style={styles.customerCard}>
               <View style={styles.customerRow}>
@@ -1109,19 +1127,38 @@ export function SilaScreen() {
                     دين هذا الزبون من فواتير أصدرها متجرك — يسدّده الكاشير من
                     هنا، وديون تطبيق صِلة تُسدّد من التطبيق نفسه
                   </Text>
-                  {Math.abs(serverExtraMinor) >= 100 ? (
+                  {otherStoresMinor >= 100 ? (
                     <Text
                       style={[
                         styles.splitNote,
                         {color: c.textFaint},
                       ]}>
-                      {serverExtraMinor > 0
-                        ? `للمعلومية: أرصدة صِلة تجمع ${formatMoney(
-                            customer.pos_outstanding_minor / 100,
-                          )} لديون فواتير كل متاجر التاجر — منها ${formatMoney(
-                            serverExtraMinor / 100,
-                          )} من فواتير متاجرك الأخرى`
-                        : `للمعلومية: ديونك المحلية أعلى بأقل من رصيد صِلة — قد سُدّد جزء منها في مكان آخر`}
+                      للمعلومية: {formatMoney(otherStoresMinor / 100)} ديون
+                      فواتير من متاجر التاجر الأخرى المرتبطة بنفس الحساب —
+                      لا يدخلها الكاشير ولا دفاتر هذا المتجر
+                    </Text>
+                  ) : null}
+                  {appOpsMinor >= 100 ? (
+                    <Text
+                      style={[
+                        styles.splitNote,
+                        {color: c.textFaint},
+                      ]}>
+                      للمعلومية: {formatMoney(appOpsMinor / 100)} ديون نشأت من
+                      عمليات تطبيق صِلة نفسه (شراء عبر التطبيق) — تُسدّد من
+                      التطبيق
+                    </Text>
+                  ) : null}
+                  {customer.outstanding_minor >= 100 &&
+                  otherStoresMinor >= 100 ? (
+                    <Text
+                      style={[
+                        styles.splitNote,
+                        {color: c.textFaint},
+                      ]}>
+                      الإجمالي الشامل لدى التاجر (كل النقاط + التطبيق):{' '}
+                      {formatMoney(customer.outstanding_minor / 100)} —
+                      للتسوية الشاملة فقط، لا لدفاتر النقطة
                     </Text>
                   ) : null}
                   {customer.last_payment_at ? (

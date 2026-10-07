@@ -14,6 +14,7 @@ import {
   type ScannerMode,
 } from '../core/config';
 import type {PricingMode} from '../core/types';
+import type {StoreMode} from '../core/storeModes';
 
 export interface AppSettings {
   storeName: string;
@@ -40,6 +41,10 @@ export interface AppSettings {
   /** Stock alerts */
   stockAlertsEnabled: boolean;
   lowStockDefaultThreshold: number;
+  /** v33 (round-41 #4): نمط المتجر — بقالة افتراضياً؛ يغيّر الأصناف
+   *  المقترحة ووحدات الإدخال وسلوك صفحة المنتج حسب المجال
+   *  (كافيتريا/ملابس/صيدلية/فواكه/مطعم). */
+  storeMode: StoreMode;
   /** v32 (round-40 #3): نافذة التنبيه قبل انتهاء الصلاحية (أيام). */
   expiryAlertDays: number;
   systemNotificationsEnabled: boolean;
@@ -64,6 +69,7 @@ const DEFAULTS: AppSettings = {
   printerName: null,
   stockAlertsEnabled: true,
   lowStockDefaultThreshold: DEFAULT_LOW_STOCK_THRESHOLD,
+  storeMode: 'grocery',
   expiryAlertDays: DEFAULT_EXPIRY_ALERT_DAYS,
   systemNotificationsEnabled: true,
 };
