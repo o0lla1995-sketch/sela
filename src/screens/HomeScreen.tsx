@@ -14,7 +14,6 @@
  */
 import React, {useCallback, useEffect, useState} from 'react';
 import {
-  Image,
   ScrollView,
   StyleSheet,
   Text,
@@ -25,20 +24,18 @@ import {useNavigation} from '@react-navigation/native';
 import {
   AppButton,
   AppHeader,
-  Badge,
   Card,
   EmptyState,
   SectionTitle,
   StatCard,
 } from '../components/ui';
-import {Icon, IconChip, type IconName} from '../components/Icon';
+import {Icon, type IconName} from '../components/Icon';
 import {
   ReportService,
   type ReportBundle,
   type TreasurySnapshot,
 } from '../services/ReportService';
 import {StockAlertsService} from '../services/StockAlertsService';
-import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
 import {useSilaStore} from '../stores/silaStore';
@@ -96,7 +93,6 @@ export function HomeScreen() {
   const navigation = useNavigation<any>();
   const settings = useSettingsStore(state => state.settings);
   const printerStatus = usePrinterStore(state => state.status);
-  const products = useCatalogStore(state => state.products);
   const silaPairing = useSilaStore(state => state.pairing);
   const silaPending = useSilaStore(state => state.pending);
   const toast = useToastStore(state => state.show);
@@ -151,21 +147,19 @@ export function HomeScreen() {
         debtorsCount: localTotals.debtorsCount,
       });
       // Sila-side figures — refreshed live, read only when paired.
-      // v26 (round-34 #3): pendingReversals — synced-debt returns not
-      // yet uploaded — are netted out so «الدين القائم» moves the
-      // MOMENT a return receipt is issued, not after the next sync.
-      const [silaTotals, queueTotals, pendingReversals] = await Promise.all([
+      // v32 (round-40 #6): الدين القائم من الدفاتر المحلية للمتجر —
+      // فواتير هذا المتجر مطروحاً منها سدادّاته وتحصيلات التطبيق
+      // وعكس المرتجعات — لا من أرصدة الخادم التي قد تجمع فواتير كل
+      // متاجر التاجر المرتبطة بنفس الحساب («يميز بين الديون الخاصة
+      // بالمتجر نفسه وليس بكل المتاجر»). المزامنة نفسها كما هي.
+      const [silaTotals, ownTotals, queueTotals] = await Promise.all([
         SilaRepo.customersOutstandingTotal(),
+        SilaRepo.storeOwnOutstandingTotal(),
         SilaRepo.totals(),
-        SilaRepo.pendingReversalsMinor(),
       ]);
       setSilaDebt({
-        outstandingMinor: Math.max(
-          0,
-          silaTotals.posTotalMinor + queueTotals.pendingMinor - pendingReversals,
-        ),
-        debtorsCount:
-          silaTotals.debtorsCount + (queueTotals.pendingCount > 0 ? 1 : 0),
+        outstandingMinor: Math.max(0, ownTotals.ownMinor),
+        debtorsCount: ownTotals.debtorsCount,
         lastSyncedAt: silaTotals.lastSyncedAt,
       });
       setPendingDebts({
@@ -243,57 +237,26 @@ export function HomeScreen() {
     (treasury?.cashierCollectionsAllTime ?? 0) +
     (treasury?.appCollectionsAllTime ?? 0) +
     (treasury?.prepaidCoveredAllTime ?? 0);
-  const invoicesCount = bundle?.summary.invoicesCount ?? 0;
-  const avgTicket =
-    invoicesCount > 0 ? (bundle?.summary.revenue ?? 0) / invoicesCount : 0;
 
   return (
     <View style={styles.screen}>
-      <AppHeader title={APP_NAME} subtitle="لوحة المتجر" showBack={false} />
+      {/* v32 (round-40 #1): بطاقة المتجر حُذفت بطلب التاجر — وشارة
+          الطابعة انتقلت للترويسة كبطاقة أنيقة مدمجة تلوّنها حالة
+          الاتصال (نقطة حالة + أيقونة + عنوان قصير) بجانب الجرس. */}
+      <AppHeader
+        title={APP_NAME}
+        subtitle={settings.storeName || 'لوحة المتجر'}
+        showBack={false}
+        right={<PrinterBadge status={printerStatus} />}
+      />
 
       <ScrollView
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}>
-        {/* ── Store welcome card ─────────────────────────────── */}
-        <Card style={styles.welcome}>
-          <View style={styles.welcomeRow}>
-            {settings.storeLogoPath ? (
-              <Image
-                source={{uri: `file://${settings.storeLogoPath}`}}
-                style={styles.storeLogo}
-              />
-            ) : (
-              <IconChip
-                name="store"
-                chipSize={46}
-                size={22}
-                bg={c.accentSoft}
-                color={c.accent}
-              />
-            )}
-            <View style={{flex: 1}}>
-              <Text style={styles.storeName} numberOfLines={1}>
-                {settings.storeName}
-              </Text>
-              <Text style={styles.storeMeta}>
-                {products.length} منتج · البيع الافتراضي{' '}
-                {settings.defaultPricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}
-              </Text>
-            </View>
-            <Badge
-              label={
-                printerStatus === 'connected'
-                  ? 'الطابعة متصلة'
-                  : printerStatus === 'connecting'
-                  ? 'جارٍ الاتصال'
-                  : 'بدون طابعة'
-              }
-              tone={printerStatus === 'connected' ? 'success' : 'neutral'}
-            />
-          </View>
-        </Card>
-
         {/* ── ملخص اليوم — the hero block (net figures first) ── */}
+        {/* v32 (round-40 #1): بطاقتا «عدد الفواتير» و«متوسط الفاتورة»
+            حُذفتا بطلب التاجر («غير مهمين») — بطاقتا المبيعات وصافي
+            الربح فقط في صف واحد نظيف. */}
         <SectionTitle title="اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
         <View style={styles.statsGrid}>
           <View style={styles.statsRow}>
@@ -310,18 +273,6 @@ export function HomeScreen() {
                 (bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'
               }
               icon="chart"
-            />
-          </View>
-          <View style={styles.statsRow}>
-            <StatCard
-              label="عدد الفواتير"
-              value={String(invoicesCount)}
-              icon="inbox"
-            />
-            <StatCard
-              label="متوسط الفاتورة"
-              value={formatMoney(avgTicket)}
-              icon="tag"
             />
           </View>
         </View>
@@ -473,7 +424,7 @@ export function HomeScreen() {
             {paired ? (
               <View style={styles.breakdownRow}>
                 <Text style={styles.breakdownLabel}>
-                  من الدين: فواتير عبر صِلة
+                  من الدين: فواتير صِلة (هذا المتجر فقط)
                 </Text>
                 <Text style={[styles.breakdownValue, {color: c.warning}]}>
                   {formatMoney(silaOutstandingShekels)}
@@ -574,12 +525,16 @@ export function HomeScreen() {
           )}
         </View>
 
-        {/* ── Stock alerts ───────────────────────────────────── */}
+        {/* ── Stock alerts (مخزون + صلاحية) ───────────────────── */}
         {alerts.length > 0 ? (
           <>
             <SectionTitle
               title="تنبيهات المخزون"
-              hint={`${alerts.length} منتج يحتاج إعادة تزويد`}
+              hint={
+                alerts.some(a => a.state === 'expired' || a.state === 'expiring')
+                  ? `${alerts.length} منتج يحتاج انتباهاً — مخزون أو صلاحية`
+                  : `${alerts.length} منتج يحتاج إعادة تزويد`
+              }
               action={
                 <TouchableOpacity
                   onPress={() => navigation.navigate('Notifications' as never)}>
@@ -588,45 +543,60 @@ export function HomeScreen() {
               }
             />
             <View style={styles.alertsCol}>
-              {alerts.slice(0, 3).map(({product, state}) => (
-                <TouchableOpacity
-                  key={product.id}
-                  style={[
-                    styles.alertCard,
-                    {
-                      borderRightWidth: 4,
-                      borderColor: state === 'out' ? c.danger : c.warning,
-                    },
-                  ]}
-                  onPress={() =>
-                    navigation.navigate('ProductForm', {productId: product.id})
-                  }
-                  activeOpacity={0.8}>
-                  <View style={styles.alertIconWrap}>
-                    <Icon
-                      name={state === 'out' ? 'packageMinus' : 'alert'}
-                      size={18}
-                      color={state === 'out' ? c.danger : c.warning}
-                    />
-                  </View>
-                  <View style={styles.alertTexts}>
-                    <Text style={styles.alertName} numberOfLines={1}>
-                      {product.name}
-                    </Text>
-                    <Text style={styles.alertQty}>
-                      {state === 'out'
-                        ? 'نفد المخزون'
-                        : `${formatQty(
-                            product.stock_quantity,
-                          )} ${baseUnitLabelOf(
-                            product,
-                            BASE_UNIT_NAME,
-                          )} متبقية`}
-                    </Text>
-                  </View>
-                  <Icon name="chevronLeft" size={16} color={c.textFaint} />
-                </TouchableOpacity>
-              ))}
+              {/* v32 (round-40 #3): أربع حالات — منتهي الصلاحية (أحمر)،
+                  نفد المخزون (أحمر)، قرب انتهاء الصلاحية (كهرماني)،
+                  مخزون منخفض (كهرماني) — بأيقونة ونص مناسب لكل حالة. */}
+              {alerts.slice(0, 3).map(({product, state, days}) => {
+                const danger =
+                  state === 'out' || state === 'expired';
+                const tone = danger ? c.danger : c.warning;
+                return (
+                  <TouchableOpacity
+                    key={product.id}
+                    style={[
+                      styles.alertCard,
+                      {borderRightWidth: 4, borderColor: tone},
+                    ]}
+                    onPress={() =>
+                      navigation.navigate('ProductForm', {productId: product.id})
+                    }
+                    activeOpacity={0.8}>
+                    <View style={styles.alertIconWrap}>
+                      <Icon
+                        name={
+                          state === 'out'
+                            ? 'packageMinus'
+                            : state === 'expired' || state === 'expiring'
+                            ? 'clock'
+                            : 'alert'
+                        }
+                        size={18}
+                        color={tone}
+                      />
+                    </View>
+                    <View style={styles.alertTexts}>
+                      <Text style={styles.alertName} numberOfLines={1}>
+                        {product.name}
+                      </Text>
+                      <Text style={styles.alertQty}>
+                        {state === 'out'
+                          ? 'نفد المخزون'
+                          : state === 'expired'
+                          ? days === 0
+                            ? 'تنتهي صلاحيته اليوم'
+                            : `منتهي الصلاحية منذ ${Math.abs(days ?? 0)} يوم`
+                          : state === 'expiring'
+                          ? `قرب انتهاء الصلاحية — باقي ${days ?? 0} يوم`
+                          : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(
+                              product,
+                              BASE_UNIT_NAME,
+                            )} متبقية`}
+                      </Text>
+                    </View>
+                    <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           </>
         ) : null}
@@ -696,34 +666,78 @@ export function HomeScreen() {
   );
 }
 
+/** v32 (round-40 #1): شارة الطابعة للترويسة — بطاقة أنيقة مدمجة
+ *  (أيقونة + نقطة حالة + عنوان قصير) بديل بطاقة المتجر المحذوفة.
+ *  متصل = أخضر، جارٍ الاتصال = كهرماني، بدون = رمادي هادئ. الضغط
+ *  عليها يفتح إعدادات الطابعة مباشرة. */
+function PrinterBadge({
+  status,
+}: {
+  status: 'disconnected' | 'connecting' | 'connected';
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  const navigation = useNavigation<any>();
+  const connected = status === 'connected';
+  const connecting = status === 'connecting';
+  const tone = connected ? c.success : connecting ? c.warning : c.textDim;
+  return (
+    <TouchableOpacity
+      style={[
+        styles.printerBadge,
+        {
+          backgroundColor: connected
+            ? c.successSoft
+            : connecting
+            ? c.warningSoft
+            : c.surface,
+          borderColor: connected
+            ? c.success
+            : connecting
+            ? c.warning
+            : c.border,
+        },
+      ]}
+      onPress={() => navigation.navigate('PrinterSettings' as never)}
+      activeOpacity={0.75}
+      hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+      <Icon name="printer" size={14} color={tone} />
+      <Text style={[styles.printerBadgeText, {color: tone}]} numberOfLines={1}>
+        {connected ? 'متصل' : connecting ? 'جارٍ الاتصال' : 'بدون طابعة'}
+      </Text>
+      <View style={[styles.printerBadgeDot, {backgroundColor: tone}]} />
+    </TouchableOpacity>
+  );
+}
+
 const useStyles = makeStyles(c =>
   StyleSheet.create({
     screen: {flex: 1, backgroundColor: c.bg},
-    storeLogo: {
-      width: 46,
-      height: 46,
-      borderRadius: 13,
-      backgroundColor: c.surfaceAlt,
+    /** v32 (round-40 #1): شارة الطابعة في الترويسة — حبّة مدمجة بحدّ
+     *  ناعم ونقطة حالة، محاذاة طبيعية مع زر الجرس (ارتفاع 32px). */
+    printerBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
       borderWidth: 1,
-      borderColor: c.border,
+      borderRadius: 16,
+      paddingHorizontal: 10,
+      height: 32,
+      maxWidth: 118,
+    },
+    printerBadgeText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    printerBadgeDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
     },
     content: {
       padding: spacing.lg,
       gap: spacing.md,
       paddingBottom: spacing.xxl,
-    },
-    welcome: {paddingVertical: spacing.md},
-    welcomeRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.md},
-    storeName: {
-      color: c.text,
-      fontFamily: fonts.black,
-      fontSize: typography.body,
-    },
-    storeMeta: {
-      color: c.textDim,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-      marginTop: 2,
     },
     allInvoicesLink: {
       color: c.accent,

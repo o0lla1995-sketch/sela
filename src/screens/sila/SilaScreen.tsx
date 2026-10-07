@@ -155,12 +155,21 @@ export function SilaScreen() {
     appMinor: number;
     debtors: number;
     queuePendingMinor: number;
+    /** v32 (round-40 #6): دين هذا المتجر وعدد المدينين له — محلي. */
+    ownMinor: number;
+    ownDebtors: number;
   } | null>(null);
 
   // v15 (round-21 #3): the repayment sheet — inline absolute overlay
   // (NEVER a Modal: this ROM blacks RN Modals after the native
   // scanner closes — the same lesson as the POS debt sheet).
   const [paySheet, setPaySheet] = useState<SilaCustomer | null>(null);
+  // v32 (round-40 #6): ديون هذا المتجر لكل زبون + الإجمالي — من
+  // الدفاتر المحلية (فواتير المتجر − السدادّات هنا − تحصيلات
+  // التطبيق − عكس المرتجعات).
+  const [ownByCustomer, setOwnByCustomer] = useState<Map<string, number>>(
+    new Map(),
+  );
   const [payAmountText, setPayAmountText] = useState('');
   const [payBusy, setPayBusy] = useState(false);
 
@@ -250,6 +259,11 @@ export function SilaScreen() {
         silaTotals,
         queueTotals,
         campaignTotals,
+        // v32 (round-40 #6): ديون هذا المتجر من الدفاتر المحلية —
+        // فواتير هذا المتجر فقط، لا أرصدة الخادم المختلطة بمتاجر
+        // التاجر الأخرى المرتبطة بنفس الحساب.
+        ownByCustomer,
+        ownTotals,
       ] = await Promise.all([
         SilaRepo.listCustomers(),
         SilaRepo.recentPayments(200),
@@ -258,7 +272,20 @@ export function SilaScreen() {
         SilaRepo.totals(),
         // v20: the campaigns headline for the overview card.
         VouchersRepo.campaignsTotals(),
+        SilaRepo.storeOwnOutstandingByCustomer(),
+        SilaRepo.storeOwnOutstandingTotal(),
       ]);
+      // v32: صفحة الزبائن هي دفتر هذا المتجر — الترتيب بدين المتجر
+      // نفسه (الأعلى ديناً أولاً) ثم بالاسم.
+      customersList.sort((a, b) => {
+        const ownA = ownByCustomer.get(a.customer_id) ?? 0;
+        const ownB = ownByCustomer.get(b.customer_id) ?? 0;
+        if (ownA !== ownB) {
+          return ownB - ownA;
+        }
+        return a.name.localeCompare(b.name, 'ar');
+      });
+      setOwnByCustomer(ownByCustomer);
       setCustomers(customersList);
       setPayments(payRows);
       setAppCollections(collections);
@@ -267,6 +294,9 @@ export function SilaScreen() {
         appMinor: silaTotals.appTotalMinor,
         debtors: silaTotals.debtorsCount,
         queuePendingMinor: queueTotals.pendingMinor,
+        // v32: دين هذا المتجر من دفاتره المحلية.
+        ownMinor: ownTotals.ownMinor,
+        ownDebtors: ownTotals.debtorsCount,
       });
       setCampaignDueMinor(campaignTotals.dueMinor);
       setCampaignSettledMinor(campaignTotals.settledMinorTotal);
@@ -541,24 +571,33 @@ export function SilaScreen() {
       return;
     }
     const amountMinor = Math.round(amount * 100);
-    // v24 (round-31 #2): the cashier repays STORE debts only — the
-    // ceiling is this store's own invoices (the pos part), NEVER the
-    // customer's total balance (which may carry app-origin debts
-    // this store has nothing to do with). A bigger amount is
-    // rejected outright — no silent overpayment path.
-    const storeDebtMinor = customer.pos_outstanding_minor;
+    // v24 (round-31 #2): the cashier repays STORE debts only.
+    // v32 (round-40 #6): السقف من دفاتر المتجر المحلية (فواتير هذا
+    // المتجر هو)، ومعه حد أمان الخادم إن كان أقل (سدادّات حدثت خارج
+    // هذا المتجر) كي لا يُرفض الإيصال — الرفض الصريح دائماً بلا
+    // مسار دفع زائد صامت.
+    const ownMinor = ownByCustomer.get(customer.customer_id) ?? 0;
+    const serverCapMinor = Math.max(0, customer.pos_outstanding_minor);
+    const storeDebtMinor = Math.min(ownMinor, serverCapMinor);
     if (amountMinor > storeDebtMinor) {
       toast(
-        `المبلغ أكبر من دين فواتير متجرك (${formatMoney(
+        `المبلغ أكبر من دين متجرك (${formatMoney(
           storeDebtMinor / 100,
-        )}) — السداد من المتجر يطفئ ديون متجرك فقط، وديون تطبيق صِلة الأخرى تُسدَّد من التطبيق نفسه`,
+        )}) — السداد من المتجر يطفئ ديون فواتير هذا المتجر فقط`,
         'error',
         5000,
       );
       return;
     }
     void doConfirmPayment(amount);
-  }, [doConfirmPayment, parsePayAmount, payAmountText, paySheet, toast]);
+  }, [
+    doConfirmPayment,
+    parsePayAmount,
+    payAmountText,
+    paySheet,
+    ownByCustomer,
+    toast,
+  ]);
 
   const requeuePaymentRow = useCallback(
     async (row: SilaPaymentRow) => {
@@ -730,21 +769,21 @@ export function SilaScreen() {
         </View>
       </Card>
 
-      {/* KPI row — what the store is owed + what came in. */}
+      {/* KPI row — what the store is owed + what came in.
+          v32 (round-40 #6): دين المتجر وعدد مدينيه من الدفاتر
+          المحلية — فواتير هذا المتجر هو، بلا خلط بأرصدة الخادم
+          التي قد تجمع فواتير كل متاجر التاجر. */}
       <View style={styles.kpiGrid}>
         <View style={styles.kpiCell}>
           <Icon name="book" size={15} color={c.warning} />
           <Text style={styles.kpiValue}>
-            {formatMoney(
-              ((totals?.posMinor ?? 0) + (totals?.queuePendingMinor ?? 0)) /
-                100,
-            )}
+            {formatMoney((totals?.ownMinor ?? 0) / 100)}
           </Text>
           <Text style={styles.kpiLabel}>دين فواتير متجرك (صِلة)</Text>
         </View>
         <View style={styles.kpiCell}>
           <Icon name="users" size={15} color={c.accent} />
-          <Text style={styles.kpiValue}>{totals?.debtors ?? 0}</Text>
+          <Text style={styles.kpiValue}>{totals?.ownDebtors ?? 0}</Text>
           <Text style={styles.kpiLabel}>زبون مدين لك</Text>
         </View>
         <View style={styles.kpiCell}>
@@ -775,6 +814,26 @@ export function SilaScreen() {
             يوجد لدى زبائنك {formatMoney((totals?.appMinor ?? 0) / 100)} ديون
             نشأت داخل تطبيق صِلة نفسه (شراء عبر التطبيق) — تظهر للمعلومية فقط
             وليست من مبيعات متجرك ولا تدخل خزينتك.
+          </Text>
+        </Card>
+      ) : null}
+
+      {/* v32 (round-40 #6): «هذا المتجر مقابل كل المتاجر» — عندما تجمع
+          أرصدة صِلة فواتير من متاجر التاجر الأخرى (المرتبطة بنفس
+          الحساب) فوق دين هذا المتجر، يُعرض الفارق هنا للمعلومية حتى
+          يعرف التاجر أن رقم «دين فواتير متجرك» أعلاه هو متجره هو
+          فقط، لا كل متاجره. */}
+      {(totals?.posMinor ?? 0) - (totals?.ownMinor ?? 0) >= 100 ? (
+        <Card style={styles.infoCard}>
+          <Icon name="store" size={15} color={c.info} />
+          <Text style={styles.infoText}>
+            أرصدة صِلة تجمع {formatMoney((totals?.posMinor ?? 0) / 100)}{' '}
+            ديون فواتير لكل متاجر التاجر المرتبطة بالحساب — منها{' '}
+            {formatMoney(
+              ((totals?.posMinor ?? 0) - (totals?.ownMinor ?? 0)) / 100,
+            )}{' '}
+            من فواتير متاجرك الأخرى. الرقم المعتمد أعلاه «دين فواتير
+            متجرك» هو فواتير هذا المتجر فقط.
           </Text>
         </Card>
       ) : null}
@@ -999,7 +1058,14 @@ export function SilaScreen() {
         </Card>
       ) : (
         <>
-          {filteredCustomers.slice(0, customersShown).map(customer => (
+          {filteredCustomers.slice(0, customersShown).map(customer => {
+            /* v32 (round-40 #6): الرقم الأساسي هو دين هذا المتجر من
+               الدفاتر المحلية (فواتيره هو) — ورصيد الخادم POS قد يجمع
+               فواتير كل متاجر التاجر، فيُعرض للمعلومية عند الاختلاف. */
+            const ownMinor = ownByCustomer.get(customer.customer_id) ?? 0;
+            const serverExtraMinor =
+              customer.pos_outstanding_minor - ownMinor;
+            return (
             <Card key={customer.customer_id} style={styles.customerCard}>
               <View style={styles.customerRow}>
                 <View style={{flex: 1}}>
@@ -1023,29 +1089,41 @@ export function SilaScreen() {
                   <Text
                     style={[
                       styles.customerBalanceNum,
-                      customer.pos_outstanding_minor > 0
-                        ? {color: c.danger}
-                        : {color: c.success},
+                      ownMinor > 0 ? {color: c.danger} : {color: c.success},
                     ]}>
-                    {formatMoney(customer.pos_outstanding_minor / 100)}
+                    {formatMoney(ownMinor / 100)}
                   </Text>
                   <Text style={styles.customerBalanceLabel}>
-                    دين فواتير متجرك
+                    دين متجرك (فواتير هذا المتجر)
                   </Text>
                 </View>
               </View>
 
               {/* v24 (round-31 #2): the customers page carries STORE
-                  debts ONLY — the app-origin split is gone (the
-                  merchant's rule: «يظهر فقط الديون الخاصة بفواتير
-                  متجري بدون ديون تطبيق صلة»). Last payment stays as
-                  context. */}
-              {customer.pos_outstanding_minor > 0 ? (
+                  debts ONLY. v32: الرقم من دفاتر المتجر المحلية،
+                  وفارق الخادم (فواتير متاجر التاجر الأخرى أو سدادّات
+                  حدثت خارج هذا المتجر) يُعرض للمعلومية فقط. */}
+              {ownMinor > 0 ? (
                 <View style={styles.splitBox}>
                   <Text style={styles.splitNote}>
-                    دين هذا الزبون من فواتير متجرك — يسدّده الكاشير من هنا بحدّه
-                    الأقصى فقط، وديون تطبيق صِلة الأخرى تُسدّد من التطبيق نفسه
+                    دين هذا الزبون من فواتير أصدرها متجرك — يسدّده الكاشير من
+                    هنا، وديون تطبيق صِلة تُسدّد من التطبيق نفسه
                   </Text>
+                  {Math.abs(serverExtraMinor) >= 100 ? (
+                    <Text
+                      style={[
+                        styles.splitNote,
+                        {color: c.textFaint},
+                      ]}>
+                      {serverExtraMinor > 0
+                        ? `للمعلومية: أرصدة صِلة تجمع ${formatMoney(
+                            customer.pos_outstanding_minor / 100,
+                          )} لديون فواتير كل متاجر التاجر — منها ${formatMoney(
+                            serverExtraMinor / 100,
+                          )} من فواتير متاجرك الأخرى`
+                        : `للمعلومية: ديونك المحلية أعلى بأقل من رصيد صِلة — قد سُدّد جزء منها في مكان آخر`}
+                    </Text>
+                  ) : null}
                   {customer.last_payment_at ? (
                     <Text style={styles.splitNote}>
                       آخر سداد:{' '}
@@ -1060,6 +1138,15 @@ export function SilaScreen() {
                     </Text>
                   ) : null}
                 </View>
+              ) : customer.pos_outstanding_minor > 0 ? (
+                <View style={styles.splitBox}>
+                  <Icon name="info" size={13} color={c.info} />
+                  <Text style={[styles.splitNote, {color: c.textDim}]}>
+                    لا دين لمتجرك على هذا الزبون — لكن أرصدة صِلة تجمع{' '}
+                    {formatMoney(customer.pos_outstanding_minor / 100)} ديون
+                    فواتير من متاجر التاجر الأخرى (ليست من هذا المتجر)
+                  </Text>
+                </View>
               ) : (
                 <View style={styles.settledRow}>
                   <Icon name="checkCircle" size={14} color={c.success} />
@@ -1071,9 +1158,10 @@ export function SilaScreen() {
 
               {/* v15 (§2.3): record a cashier repayment — v21
                   (round-27 #5): prominent by design. v24 (round-31
-                  #2): STORE debt only — the button appears only while
-                  this store's own invoices are still unpaid. */}
-              {customer.pos_outstanding_minor > 0 ? (
+                  #2): STORE debt only. v32 (round-40 #6): السقف
+                  والظهور من دفاتر المتجر المحلية — ديون هذا المتجر
+                  فقط، لا فواتير متاجر التاجر الأخرى. */}
+              {ownMinor > 0 ? (
                 <AppButton
                   title="تسجيل سداد نقدي"
                   icon="wallet"
@@ -1083,7 +1171,8 @@ export function SilaScreen() {
                 />
               ) : null}
             </Card>
-          ))}
+            );
+          })}
           {filteredCustomers.length > customersShown ? (
             <AppButton
               title={`عرض المزيد (${
@@ -1418,11 +1507,14 @@ export function SilaScreen() {
                 <Text style={styles.payCustomerName} numberOfLines={1}>
                   {paySheet.name}
                 </Text>
+                {/* v32 (round-40 #6): السقف من دفاتر المتجر المحلية. */}
                 <Text style={styles.payCustomerMeta}>
-                  دين فواتير متجرك:{' '}
-                  {formatMoney(paySheet.pos_outstanding_minor / 100)}
+                  دين متجرك:{' '}
+                  {formatMoney(
+                    (ownByCustomer.get(paySheet.customer_id) ?? 0) / 100,
+                  )}
                   <Text style={[styles.payCustomerMeta, {color: c.textFaint}]}>
-                    {'  '}— يسدّد هذا السداد ديون متجرك فقط
+                    {'  '}— فواتير هذا المتجر فقط
                   </Text>
                 </Text>
               </View>
@@ -1440,12 +1532,12 @@ export function SilaScreen() {
               keyboardType="decimal-pad"
               autoCorrect={false}
             />
-            {paySheet.pos_outstanding_minor > 0 ? (
+            {(ownByCustomer.get(paySheet.customer_id) ?? 0) > 0 ? (
               <TouchableOpacity
                 style={styles.payQuickBtn}
                 onPress={() =>
                   setPayAmountText(
-                    (paySheet.pos_outstanding_minor / 100)
+                    ((ownByCustomer.get(paySheet.customer_id) ?? 0) / 100)
                       .toFixed(2)
                       .replace(/\.00$/, ''),
                   )
@@ -1453,7 +1545,9 @@ export function SilaScreen() {
                 activeOpacity={0.8}>
                 <Text style={styles.payQuickText}>
                   السداد الكامل لدين المتجر (
-                  {formatMoney(paySheet.pos_outstanding_minor / 100)})
+                  {formatMoney(
+                    (ownByCustomer.get(paySheet.customer_id) ?? 0) / 100,
+                  )})
                 </Text>
               </TouchableOpacity>
             ) : null}

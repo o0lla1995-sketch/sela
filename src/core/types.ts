@@ -64,6 +64,10 @@ export interface Product {
   /** v23 (round-29 #1): 1 = ARCHIVED — hidden from POS/inventory/
    *  alerts but kept for invoice history, reports and returns. */
   is_archived: number;
+  /** v32 (round-40 #3): تاريخ انتهاء الصلاحية 'YYYY-MM-DD' (اختياري)
+   *  — يُغذّي تحذيرات «قرب الانتهاء/منتهي» في تنبيهات المخزون
+   *  والإشعارات. */
+  expiry_date: string | null;
   /** Unit rows loaded on demand (ProductForm / POS unit picker). */
   units?: ProductUnit[];
 }
@@ -86,6 +90,39 @@ export function baseUnitLabelOf(
 
 /** Stock state derived from quantity vs threshold. */
 export type StockState = 'out' | 'low' | 'ok';
+
+/** v32 (round-40 #3): حالة الصلاحية — منتهي / قرب الانتهاء / سليم. */
+export type ExpiryState = 'expired' | 'expiring' | 'ok';
+
+/** v32: كم يوماً بقي حتى تاريخ الانتهاء؟ (سالب = انتهى منذ N يوماً) */
+export function daysUntilExpiry(expiryDate: string): number {
+  const target = new Date(`${expiryDate}T00:00:00`);
+  if (Number.isNaN(target.getTime())) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const today = new Date();
+  const start = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
+  return Math.round((target.getTime() - start.getTime()) / 86_400_000);
+}
+
+/** v32: حالة الصلاحية من تاريخ الانتهاء ونافذة التنبيه (بالأيام). */
+export function expiryStateOf(
+  expiryDate: string | null | undefined,
+  alertDays: number,
+): ExpiryState {
+  if (expiryDate == null || expiryDate.length < 10) {
+    return 'ok';
+  }
+  const days = daysUntilExpiry(expiryDate);
+  if (days < 0) {
+    return 'expired';
+  }
+  return days <= alertDays ? 'expiring' : 'ok';
+}
 
 export type AngleLabel = 'front' | 'back' | 'side';
 
@@ -347,6 +384,8 @@ export interface VisionModelInfo {
 export type NotificationKind =
   | 'out_of_stock'
   | 'low_stock'
+  /** v32 (round-40 #3): صلاحية المنتج — منتهي أو قارب الانتهاء. */
+  | 'expiry'
   | 'info'
   | 'printer'
   | 'sale'

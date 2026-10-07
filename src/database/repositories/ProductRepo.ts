@@ -21,6 +21,10 @@ function rowToProduct(row: Record<string, unknown>): Product {
       row.barcode == null || row.barcode === '' ? null : String(row.barcode),
     sold_by_weight: Number(row.sold_by_weight ?? 0) === 1 ? 1 : 0,
     is_archived: Number(row.is_archived ?? 0) === 1 ? 1 : 0,
+    expiry_date:
+      row.expiry_date == null || String(row.expiry_date).length < 10
+        ? null
+        : String(row.expiry_date).slice(0, 10),
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -37,6 +41,8 @@ export interface ProductInput {
   barcode?: string | null;
   /** v8.3: 1 = sold by weight (kilo base). */
   sold_by_weight?: number;
+  /** v32 (round-40 #3): تاريخ انتهاء الصلاحية 'YYYY-MM-DD' أو null. */
+  expiry_date?: string | null;
 }
 
 export const ProductRepo = {
@@ -108,8 +114,8 @@ export const ProductRepo = {
     }
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
@@ -121,6 +127,7 @@ export const ProductRepo = {
         input.low_stock_threshold ?? null,
         input.barcode?.trim() ? input.barcode.trim() : null,
         input.sold_by_weight === 1 ? 1 : 0,
+        input.expiry_date ?? null,
         localNow(),
       ],
     );
@@ -144,7 +151,7 @@ export const ProductRepo = {
       `UPDATE products SET
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
         stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?,
-        barcode = ?, sold_by_weight = ?
+        barcode = ?, sold_by_weight = ?, expiry_date = ?
        WHERE id = ?`,
       [
         name,
@@ -157,6 +164,7 @@ export const ProductRepo = {
         input.low_stock_threshold ?? null,
         input.barcode?.trim() ? input.barcode.trim() : null,
         input.sold_by_weight === 1 ? 1 : 0,
+        input.expiry_date ?? null,
         id,
       ],
     );

@@ -9,6 +9,7 @@ import {
   DEFAULT_MATCH_THRESHOLD,
   DEFAULT_RECOGNITION_COOLDOWN_MS,
   CODEPAGE_CP1256,
+  DEFAULT_EXPIRY_ALERT_DAYS,
   DEFAULT_LOW_STOCK_THRESHOLD,
   type ScannerMode,
 } from '../core/config';
@@ -39,6 +40,8 @@ export interface AppSettings {
   /** Stock alerts */
   stockAlertsEnabled: boolean;
   lowStockDefaultThreshold: number;
+  /** v32 (round-40 #3): نافذة التنبيه قبل انتهاء الصلاحية (أيام). */
+  expiryAlertDays: number;
   systemNotificationsEnabled: boolean;
 }
 
@@ -61,6 +64,7 @@ const DEFAULTS: AppSettings = {
   printerName: null,
   stockAlertsEnabled: true,
   lowStockDefaultThreshold: DEFAULT_LOW_STOCK_THRESHOLD,
+  expiryAlertDays: DEFAULT_EXPIRY_ALERT_DAYS,
   systemNotificationsEnabled: true,
 };
 

@@ -1090,16 +1090,52 @@ function MovementSheet({
                   </TouchableOpacity>
                 ) : null}
               </View>
-              <Text
-                style={[
-                  sheetStyles(c).drawerHint,
-                  overDrawer ? {color: c.danger} : null,
-                ]}>
-                {isOut
-                  ? `النقد المتاح بالخزينة: ${formatMoney(drawerMinor / 100)}`
-                  : `النقد الحالي بالخزينة: ${formatMoney(drawerMinor / 100)}`}
-                {overDrawer ? ' — المبلغ أكبر من المتاح!' : ''}
-              </Text>
+              {/* v32 (round-40 #5): بطاقة الرصيد — النقد المتاح
+                  الآن ورصيد الخزينة بعد العملية، يتحدثان لحظياً مع
+                  كل رقم يكتبه التاجر، بشكل احترافي واضح في نوافذ
+                  السحب والإيداع والمصروف الثلاث. */}
+              <View style={sheetStyles(c).balanceStrip}>
+                <View
+                  style={[
+                    sheetStyles(c).balanceCell,
+                    overDrawer ? {borderColor: c.danger} : null,
+                  ]}>
+                  <Text style={sheetStyles(c).balanceLabel}>
+                    {isOut ? 'النقد المتاح بالخزينة' : 'النقد الحالي بالخزينة'}
+                  </Text>
+                  <Text
+                    style={[
+                      sheetStyles(c).balanceValue,
+                      {color: overDrawer ? c.danger : c.text},
+                    ]}>
+                    {formatMoney(drawerMinor / 100)}
+                  </Text>
+                </View>
+                <View style={sheetStyles(c).balanceDivider} />
+                <View style={sheetStyles(c).balanceCell}>
+                  <Text style={sheetStyles(c).balanceLabel}>
+                    {isOut ? 'الرصيد بعد السحب' : 'الرصيد بعد الإيداع'}
+                  </Text>
+                  {overDrawer ? (
+                    <Text style={[sheetStyles(c).balanceValue, {color: c.danger}]}>
+                      المبلغ أكبر من المتاح!
+                    </Text>
+                  ) : (
+                    <Text
+                      style={[
+                        sheetStyles(c).balanceValue,
+                        {
+                          color: isOut ? c.danger : c.success,
+                        },
+                      ]}>
+                      {formatMoney(
+                        (isOut ? drawerMinor - amountMinor : drawerMinor + amountMinor) /
+                          100,
+                      )}
+                    </Text>
+                  )}
+                </View>
+              </View>
 
               {/* v31 (round-39 #2): الفئة المخصصة والملاحظة — مثبّتان
                   مباشرة تحت المبلغ (سطر واحد مضغوط والعنوان داخل
@@ -1218,6 +1254,8 @@ function MovementSheet({
 
               {/* ── Confirm ── */}
               <View style={sheetStyles(c).summaryBox}>
+                {/* v32: صف الملخص — المبلغ واتجاهه + الرصيد بعد
+                    العملية مرة أخرى فوق زر التأكيد مباشرة. */}
                 <View style={sheetStyles(c).totalRow}>
                   <Text style={sheetStyles(c).totalLabel}>
                     {isOut ? 'سيُخصم من الخزينة' : 'سيُضاف إلى الخزينة'}
@@ -1228,6 +1266,21 @@ function MovementSheet({
                       {color: isOut ? c.danger : c.success},
                     ]}>
                     {formatMoney(amountMinor / 100)}
+                  </Text>
+                </View>
+                <View style={sheetStyles(c).totalRow}>
+                  <Text style={sheetStyles(c).afterLabel}>
+                    رصيد الخزينة بعد العملية
+                  </Text>
+                  <Text
+                    style={[
+                      sheetStyles(c).afterValue,
+                      {color: isOut ? c.danger : c.success},
+                    ]}>
+                    {formatMoney(
+                      (isOut ? drawerMinor - amountMinor : drawerMinor + amountMinor) /
+                        100,
+                    )}
                   </Text>
                 </View>
                 <AppButton
@@ -1452,6 +1505,47 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       color: c.text,
       fontFamily: fonts.black,
       fontSize: 21,
+      fontVariant: ['tabular-nums'],
+    },
+    /** v32 (round-40 #5): بطاقة الرصيد — متاح الآن + بعد العملية. */
+    balanceStrip: {
+      flexDirection: 'row',
+      alignItems: 'stretch',
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      paddingVertical: 8,
+      paddingHorizontal: spacing.sm,
+    },
+    balanceCell: {
+      flex: 1,
+      alignItems: 'center',
+      gap: 2,
+    },
+    balanceDivider: {
+      width: 1,
+      backgroundColor: c.borderSoft,
+      marginVertical: 2,
+    },
+    balanceLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+    },
+    balanceValue: {
+      fontFamily: fonts.black,
+      fontSize: typography.small + 3,
+      fontVariant: ['tabular-nums'],
+    },
+    afterLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    afterValue: {
+      fontFamily: fonts.black,
+      fontSize: typography.small + 2,
       fontVariant: ['tabular-nums'],
     },
     drawerHint: {

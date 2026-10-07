@@ -643,6 +643,102 @@ export const SilaRepo = {
     }
   },
 
+  /** v32 (round-40 #6): دين هذا المتجر تحديداً لكل زبون — من
+   *  الدفاتر المحلية، لا من أرصدة الخادم: فواتير الدين التي أصدرها
+   *  هذا المتجر (طابور الديون كاملاً بكل حالاته) مطروح منها ما
+   *  غطّاه الرصيد المسبق، وسدادّات الكاشير هنا، والعمليات العكسية
+   *  لمرتجعات ديون صِلة، وتحصيلات تطبيق صِلة على ديون المتجر.
+   *  هذا هو «دين المتجر نفسه» الذي طلبه التاجر مميّزاً عن أرصدة
+   *  الخادم التي قد تجمع فواتير كل المتاجر المرتبطة بنفس التاجر. */
+  async storeOwnOutstandingByCustomer(): Promise<Map<string, number>> {
+    try {
+      const result = await getDb().execute(
+        `SELECT customer_id, SUM(delta) AS own_minor FROM (
+           SELECT customer_id,
+                  SUM(amount_minor - COALESCE(credit_covered_minor, 0)) AS delta
+             FROM sila_debt_queue
+            WHERE customer_id IS NOT NULL
+            GROUP BY customer_id
+           UNION ALL
+           SELECT customer_id, -SUM(amount_minor) AS delta
+             FROM sila_payment_queue
+            WHERE customer_id IS NOT NULL
+            GROUP BY customer_id
+           UNION ALL
+           SELECT customer_id, -SUM(amount_minor) AS delta
+             FROM sila_app_collections
+            GROUP BY customer_id
+         )
+         GROUP BY customer_id`,
+      );
+      const map = new Map<string, number>();
+      for (const row of result.rows?._array ?? []) {
+        const r = row as {customer_id?: string; own_minor?: number | null};
+        if (r.customer_id != null && String(r.customer_id).length > 0) {
+          map.set(String(r.customer_id), Math.round(Number(r.own_minor ?? 0)));
+        }
+      }
+      return map;
+    } catch (error) {
+      logDiag(
+        'sila',
+        `تعذر حساب ديون المتجر لكل زبون: ${toMessage(error)}`,
+        'warn',
+      );
+      return new Map();
+    }
+  },
+
+  /** v32 (round-40 #6): إجمالي دين هذا المتجر + عدد المدينين له —
+   *  من الدفاتر المحلية (نفس معادلة storeOwnOutstandingByCustomer).
+   *  هذا هو الرقم الذي تقوده إحصائيات الرئيسية والتقارير ونظرة
+   *  عامة، بدل أرصدة الخادم المختلطة بمتاجر التاجر الأخرى. */
+  async storeOwnOutstandingTotal(): Promise<{
+    ownMinor: number;
+    debtorsCount: number;
+  }> {
+    try {
+      const result = await getDb().execute(
+        `SELECT COALESCE(SUM(own), 0) AS total_minor,
+                COALESCE(SUM(CASE WHEN own > 0 THEN 1 ELSE 0 END), 0) AS debtors
+         FROM (
+           SELECT customer_id, SUM(delta) AS own FROM (
+             SELECT customer_id,
+                    SUM(amount_minor - COALESCE(credit_covered_minor, 0)) AS delta
+               FROM sila_debt_queue
+              WHERE customer_id IS NOT NULL
+              GROUP BY customer_id
+             UNION ALL
+             SELECT customer_id, -SUM(amount_minor) AS delta
+               FROM sila_payment_queue
+              WHERE customer_id IS NOT NULL
+              GROUP BY customer_id
+             UNION ALL
+             SELECT customer_id, -SUM(amount_minor) AS delta
+               FROM sila_app_collections
+              GROUP BY customer_id
+           )
+           GROUP BY customer_id
+         )`,
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {
+        total_minor?: number | null;
+        debtors?: number | null;
+      };
+      return {
+        ownMinor: Math.round(Number(row.total_minor ?? 0)),
+        debtorsCount: Number(row.debtors ?? 0),
+      };
+    } catch (error) {
+      logDiag(
+        'sila',
+        `تعذر حساب إجمالي ديون المتجر: ${toMessage(error)}`,
+        'warn',
+      );
+      return {ownMinor: 0, debtorsCount: 0};
+    }
+  },
+
   // ── v15 (round-21 #3): repayments queue (§3.1 sila_payment_uploads) ──
 
   /** Creates a payment row at collection time — ONE idempotency key

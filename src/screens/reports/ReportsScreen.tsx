@@ -565,6 +565,24 @@ export function ReportsScreen() {
                 </View>
               </View>
 
+              {/* v32 (round-40 #6): تمييز هذا المتجر — عندما تجمع
+                  أرصدة صِلة فواتير من متاجر التاجر الأخرى فوق دين
+                  هذا المتجر، يظهر الفارق للمعلومية حتى تبقى الأرقام
+                  المعتمدة أعلاه «متجرك هو فقط». */}
+              {paired &&
+              (cash?.silaServerPosOutstandingMinor ?? 0) -
+                (cash?.silaOutstandingMinor ?? 0) >=
+                100 ? (
+                <Text style={styles.silaOwnNote}>
+                  ديون صِلة أعلاه ({formatMoney(
+                    (cash?.silaOutstandingMinor ?? 0) / 100,
+                  )}) هي فواتير هذا المتجر فقط من دفاترك المحلية — أرصدة صِلة
+                  الكاملة تجمع {formatMoney(
+                    (cash?.silaServerPosOutstandingMinor ?? 0) / 100,
+                  )} تشمل فواتير من متاجر التاجر الأخرى المرتبطة بنفس الحساب.
+                </Text>
+              ) : null}
+
               <Text style={styles.chartHint}>
                 المبيعات أعلاه تشمل فواتير الدين لأنها بضاعة خرجت من مخزونك؛
                 «النقد المحصّل» يطرحها ويعيد إضافة ما استلمته فعلاً من
@@ -809,6 +827,14 @@ const useStyles = makeStyles(c =>
     statsCell: {
       width: '47.5%',
       flexGrow: 1,
+    },
+    /** v32 (round-40 #6): ملاحظة تمييز ديون المتجر عن كل المتاجر. */
+    silaOwnNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 17,
+      marginTop: -spacing.xs,
     },
     chartHint: {
       color: c.textFaint,

@@ -42,6 +42,13 @@ function kindMeta(kind: NotificationKind, c: Palette) {
       color: c.warning,
       label: 'مخزون منخفض',
     },
+    // v32 (round-40 #3): صلاحية المنتج — منتهي أو قارب الانتهاء.
+    expiry: {
+      icon: 'clock',
+      bg: c.dangerSoft,
+      color: c.danger,
+      label: 'صلاحية منتج',
+    },
     info: {icon: 'info', bg: c.infoSoft, color: c.info, label: 'معلومة'},
     printer: {
       icon: 'printer',

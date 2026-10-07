@@ -37,6 +37,8 @@ import {
 import {formatMoney, formatQty} from '../../core/format';
 import {
   baseUnitLabelOf,
+  daysUntilExpiry,
+  expiryStateOf,
   isWeightProduct,
   stockStateOf,
   type Product,
@@ -69,6 +71,9 @@ export function InventoryScreen() {
   //  with one tap. Loaded on focus (cheap indexed query).
   const [showArchived, setShowArchived] = useState(false);
   const [archivedProducts, setArchivedProducts] = useState<Product[]>([]);
+  // v32 (round-40 #3): شريحة «الصلاحية» — منتجات قاربت صلاحيتها على
+  // الانتهاء أو انتهت فعلاً (نافذة التنبيه من الإعدادات).
+  const [showExpiring, setShowExpiring] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -114,6 +119,22 @@ export function InventoryScreen() {
     [products, settings.lowStockDefaultThreshold],
   );
 
+  /** v32: المنتجات قريبة الانتهاء أو المنتهية (لشريحة الصلاحية). */
+  const expiringProducts = useMemo(
+    () =>
+      products
+        .filter(
+          product =>
+            expiryStateOf(product.expiry_date, settings.expiryAlertDays) !==
+            'ok',
+        )
+        .sort(
+          (a, b) =>
+            daysUntilExpiry(a.expiry_date!) - daysUntilExpiry(b.expiry_date!),
+        ),
+    [products, settings.expiryAlertDays],
+  );
+
   return (
     <InventoryLayout
       products={filtered}
@@ -126,7 +147,12 @@ export function InventoryScreen() {
       setFilter={setFilter}
       countFor={countFor}
       lowCount={lowCount}
+      expiringCount={expiringProducts.length}
+      showExpiring={showExpiring}
+      setShowExpiring={setShowExpiring}
+      expiringProducts={expiringProducts}
       defaultThreshold={settings.lowStockDefaultThreshold}
+      expiryAlertDays={settings.expiryAlertDays}
       onRefresh={refresh}
       menuOpen={menuOpen}
       setMenuOpen={setMenuOpen}
@@ -155,6 +181,11 @@ function InventoryLayout({
   showArchived,
   setShowArchived,
   archivedProducts,
+  expiringCount,
+  showExpiring,
+  setShowExpiring,
+  expiringProducts,
+  expiryAlertDays,
 }: {
   products: Product[];
   allProducts: Product[];
@@ -173,6 +204,12 @@ function InventoryLayout({
   showArchived: boolean;
   setShowArchived: (value: boolean) => void;
   archivedProducts: Product[];
+  /** v32 (round-40 #3): شريحة الصلاحية وقائمتها. */
+  expiringCount: number;
+  showExpiring: boolean;
+  setShowExpiring: (value: boolean) => void;
+  expiringProducts: Product[];
+  expiryAlertDays: number;
 }) {
   const c = useThemeColors();
   const styles = useStyles();
@@ -350,9 +387,10 @@ function InventoryLayout({
           <FilterChip
             label="الكل"
             count={countFor('all')}
-            active={filter === 'all' && !showArchived}
+            active={filter === 'all' && !showArchived && !showExpiring}
             onPress={() => {
               setShowArchived(false);
+              setShowExpiring(false);
               setFilter('all');
             }}
           />
@@ -361,9 +399,10 @@ function InventoryLayout({
               key={category.id}
               label={category.name}
               count={countFor(category.id)}
-              active={filter === category.id && !showArchived}
+              active={filter === category.id && !showArchived && !showExpiring}
               onPress={() => {
                 setShowArchived(false);
+                setShowExpiring(false);
                 setFilter(category.id);
               }}
             />
@@ -373,12 +412,100 @@ function InventoryLayout({
               label="المؤرشفة"
               count={archivedProducts.length}
               active={showArchived}
-              onPress={() => setShowArchived(!showArchived)}
+              onPress={() => {
+                setShowExpiring(false);
+                setShowArchived(!showArchived);
+              }}
+            />
+          ) : null}
+          {/* v32 (round-40 #3): شريحة الصلاحية — قرب الانتهاء/منتهي. */}
+          {expiringCount > 0 ? (
+            <FilterChip
+              label="الصلاحية"
+              count={expiringCount}
+              active={showExpiring}
+              onPress={() => {
+                setShowArchived(false);
+                setShowExpiring(!showExpiring);
+              }}
             />
           ) : null}
         </ScrollView>
 
-        {showArchived ? (
+        {showExpiring ? (
+          /* v32 (round-40 #3): قائمة الصلاحية — الأقرب انتهاءً أولاً. */
+          expiringProducts.length === 0 ? (
+            <EmptyState
+              icon="clock"
+              title="لا منتجات قرب انتهاء الصلاحية"
+              subtitle="حدّد تاريخ انتهاء للمنتجات ذات الصلاحية لتظهر هنا قبل انتهائها"
+            />
+          ) : (
+            <FlatList
+              style={{flex: 1}}
+              data={expiringProducts}
+              keyExtractor={item => String(item.id)}
+              renderItem={({item: product}) => {
+                const days = daysUntilExpiry(product.expiry_date!);
+                const expired = days < 0;
+                return (
+                  <TouchableOpacity
+                    style={[
+                      styles.row,
+                      {borderColor: expired ? c.danger : c.warning},
+                    ]}
+                    activeOpacity={0.75}
+                    onPress={() =>
+                      navigation.navigate('ProductForm', {
+                        productId: product.id,
+                      })
+                    }>
+                    <View style={[styles.thumb, styles.thumbFallback]}>
+                      <Icon
+                        name="clock"
+                        size={18}
+                        color={expired ? c.danger : c.warning}
+                      />
+                    </View>
+                    <View style={{flex: 1}}>
+                      <Text style={styles.name} numberOfLines={1}>
+                        {product.name}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.meta,
+                          {color: expired ? c.danger : c.warning},
+                        ]}
+                        numberOfLines={1}>
+                        {expired
+                          ? days === 0
+                            ? 'تنتهي صلاحيته اليوم'
+                            : `منتهي الصلاحية منذ ${Math.abs(days)} يوم`
+                          : `باقي ${days} يوم على انتهاء الصلاحية`}
+                        {' — '}
+                        {product.expiry_date!.slice(8, 10)}/
+                        {product.expiry_date!.slice(5, 7)}/
+                        {product.expiry_date!.slice(0, 4)}
+                      </Text>
+                    </View>
+                    <View style={styles.rowEnd}>
+                      <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                    </View>
+                  </TouchableOpacity>
+                );
+              }}
+              contentContainerStyle={{
+                gap: spacing.sm,
+                paddingBottom: spacing.xxl,
+              }}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              initialNumToRender={14}
+              maxToRenderPerBatch={14}
+              windowSize={7}
+            />
+          )
+        ) : showArchived ? (
           archivedProducts.length === 0 ? (
             <EmptyState
               icon="archive"
@@ -508,6 +635,36 @@ function InventoryLayout({
                           <Text style={styles.miniTagText}>حد منخفض</Text>
                         </View>
                       ) : null}
+                      {/* v32: وسم حالة الصلاحية على الصف. */}
+                      {(() => {
+                        const expiry = expiryStateOf(
+                          product.expiry_date,
+                          expiryAlertDays,
+                        );
+                        if (expiry === 'ok') {
+                          return null;
+                        }
+                        return (
+                          <View
+                            style={[
+                              styles.miniTag,
+                              expiry === 'expired'
+                                ? {backgroundColor: c.dangerSoft}
+                                : {backgroundColor: c.warningSoft},
+                            ]}>
+                            <Text
+                              style={[
+                                styles.miniTagText,
+                                {
+                                  color:
+                                    expiry === 'expired' ? c.danger : c.warning,
+                                },
+                              ]}>
+                              {expiry === 'expired' ? 'منتهي' : 'قرب الانتهاء'}
+                            </Text>
+                          </View>
+                        );
+                      })()}
                     </View>
                   </View>
                   <View style={styles.rowEnd}>

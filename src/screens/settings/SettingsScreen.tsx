@@ -49,6 +49,7 @@ import {fonts, makeStyles, radius, spacing, typography} from '../../core/theme';
 import {
   APP_NAME,
   APP_VERSION_LABEL,
+  DEFAULT_EXPIRY_ALERT_DAYS,
   DEFAULT_LOW_STOCK_THRESHOLD,
 } from '../../core/config';
 import type {ScannerMode} from '../../core/config';
@@ -519,6 +520,19 @@ export function SettingsScreen() {
               const value = parseNumber(text);
               if (!Number.isNaN(value) && value >= 0 && value <= 1000) {
                 update({lowStockDefaultThreshold: Math.trunc(value)});
+              }
+            }}
+            keyboardType="numeric"
+          />
+          {/* v32 (round-40 #3): نافذة تنبيه الصلاحية — قبل كم يوم من
+              الانتهاء يبدأ المنتج بالظهور في تنبيهات المخزون. */}
+          <Field
+            label={`التنبيه قبل انتهاء الصلاحية بأيام (افتراضي ${DEFAULT_EXPIRY_ALERT_DAYS})`}
+            value={String(settings.expiryAlertDays)}
+            onChangeText={text => {
+              const value = parseNumber(text);
+              if (!Number.isNaN(value) && value >= 1 && value <= 365) {
+                update({expiryAlertDays: Math.trunc(value)});
               }
             }}
             keyboardType="numeric"

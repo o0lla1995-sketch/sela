@@ -14,6 +14,7 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
+  BackHandler,
   FlatList,
   Linking,
   ScrollView,
@@ -145,10 +146,25 @@ export function StocktakeScreen() {
    *  بلوحة المفاتيح إطلاقاً (لا مستمعات ولا ردود فعل onFocus) —
    *  التغيير يحدث بضغطة المنتج نفسها، وقبل فتح أي لوحة، فتستقر
    *  الشجرة ثم يُركّز الحقل بعد ~280ms. شريط البحث لا يتغير أبداً
-   *  بين الوضعين فيبقى ساكناً لحظة الضغط عليه (إصلاح v29.1 محفوظ). */
+   *  بين الوضعين فيبقى ساكناً لحظة الضغط عليه (إصلاح v29.1 محفوظ).
+   *
+   *  v32 (round-40 #2): وضع العدّ صار أحادي المنتج — «عند الضغط
+   *  على حقل إدخال الكمية يظهر المنتج المُعَدّ فقط دون باقي
+   *  المنتجات» — بطاقة تركيز واحدة تعرض المنتج الحالي بحقل عدّ
+   *  كبير ثابت (لا يُفكّك أبداً أثناء التنقل فلا تُغلق اللوحة)،
+   *  وزر «التالي» في لوحة المفاتيح ينقل للمنتج التالي مباشرة،
+   *  مع أزرار سابق/تالي على الشاشة ومؤشر موضع (٥/١٢٠) وزر
+   *  «عرض الكل» للعودة للقائمة الكاملة. */
   const [countMode, setCountMode] = useState(false);
+  /** فهرس المنتج المركّز داخل القائمة المفلترة (وضع العدّ الأحادي). */
+  const [focusIndex, setFocusIndex] = useState<number | null>(null);
+  /** نص حقل العدّ في بطاقة التركيز — في الأب ليتسنى التبديل بين
+   *  المنتجات دون إعادة تركيب الحقل (الحقل نفسه لا يُفكّك). */
+  const [focusText, setFocusText] = useState('');
+  const focusInputRef = useRef<TextInput>(null);
   const countFocusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countFocusTimer2 = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const matchAdvanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clean the delayed-focus chain on unmount.
   useEffect(
@@ -159,6 +175,9 @@ export function StocktakeScreen() {
       if (countFocusTimer2.current != null) {
         clearTimeout(countFocusTimer2.current);
       }
+      if (matchAdvanceTimer.current != null) {
+        clearTimeout(matchAdvanceTimer.current);
+      }
     },
     [],
   );
@@ -168,49 +187,6 @@ export function StocktakeScreen() {
    *  الجديد قبل تركيز الحقل — التركيز لحظة تغيّر الشجرة هو بالضبط
    *  ما كان يقتل لوحة المفاتيح على روم الجهاز (درس v29/v29.1)،
    *  فالترتيب هنا: اطمئ على الشجرة ← ركّز. */
-  const onPressProduct = useCallback(
-    (index: number) => {
-      if (countMode) {
-        // Already in counting layout — nothing moves; a plain focus
-        // switch between inputs is safe on every ROM.
-        countRefs.current[index]?.focus();
-        return;
-      }
-      // Blur whatever holds focus (e.g. the search box) so the
-      // collapse NEVER moves a focused input, then fold.
-      const focused = TextInput.State.currentlyFocusedInput();
-      focused?.blur?.();
-      setCountMode(true);
-      if (countFocusTimer.current != null) {
-        clearTimeout(countFocusTimer.current);
-      }
-      if (countFocusTimer2.current != null) {
-        clearTimeout(countFocusTimer2.current);
-      }
-      // Bring the row into the (now taller) list first…
-      countFocusTimer.current = setTimeout(() => {
-        listRef.current?.scrollToIndex({
-          index,
-          viewPosition: 0.3,
-          animated: false,
-        });
-        // …then focus its count input on the settled tree.
-        countFocusTimer2.current = setTimeout(() => {
-          countRefs.current[index]?.focus();
-        }, 140);
-      }, 280);
-    },
-    [countMode],
-  );
-
-  /** v31: الرجوع من وضع العدّ — يُفقد تركيز أي حقل أولاً (تُغلق
-   *  اللوحة بهدوء) ثم تُفتح الأقسام، فلا يتحرك حقل مركّز أبداً. */
-  const exitCountMode = useCallback(() => {
-    const focused = TextInput.State.currentlyFocusedInput();
-    focused?.blur?.();
-    setCountMode(false);
-  }, []);
-
   const startSession = useCallback(async () => {
     setStarting(true);
     setCountMode(false);
@@ -420,6 +396,135 @@ export function StocktakeScreen() {
     });
   }, [items, search, categoryFilter, onlyPending]);
 
+  /** المنتج المركّز الحالي في وضع العدّ (undefined = خارج الوضع). */
+  const focusedItem =
+    countMode && focusIndex != null ? filteredItems[focusIndex] : undefined;
+
+  /** v32: يعبّئ نص حقل التركيز من حالة العدّ المحفوظة للمنتج. */
+  const syncFocusText = useCallback((item: StocktakeItem | undefined) => {
+    setFocusText(item?.counted_qty == null ? '' : String(item.counted_qty));
+  }, []);
+
+  /** v32: يحفظ قيمة العدّ الحالية للمنتج المركّز (بلا انتظار). */
+  const commitFocusedCount = useCallback(() => {
+    if (focusIndex == null) {
+      return;
+    }
+    const item = filteredItems[focusIndex];
+    if (item != null) {
+      void setCounted(item, focusText);
+    }
+  }, [focusIndex, filteredItems, focusText, setCounted]);
+
+  /** v32: دخول وضع العدّ الأحادي — يُفقد تركيز أي حقل أولاً (تُغلق
+   *  اللوحة بهدوء) ثم يُبدّل التخطيط، وبعد ~280ms يُركّز حقل البطاقة
+   *  على شجرة مستقرة (نفس ترتيب v31: اطمئن على الشجرة ← ركّز). */
+  const enterCountMode = useCallback(
+    (index: number) => {
+      const focused = TextInput.State.currentlyFocusedInput();
+      focused?.blur?.();
+      const item = filteredItems[index];
+      setFocusIndex(index);
+      syncFocusText(item);
+      setCountMode(true);
+      if (countFocusTimer.current != null) {
+        clearTimeout(countFocusTimer.current);
+      }
+      if (countFocusTimer2.current != null) {
+        clearTimeout(countFocusTimer2.current);
+      }
+      countFocusTimer.current = setTimeout(() => {
+        focusInputRef.current?.focus();
+      }, 280);
+    },
+    [filteredItems, syncFocusText],
+  );
+
+  /** v32: الانتقال بين المنتجات في وضع العدّ — يحفظ الحالي ثم ينقل
+   *  البطاقة للمنتج المجاور. الحقل لا يُفكّك ولا يُفقد تركيزه فلا
+   *  تُغلق لوحة المفاتيح أبداً أثناء التنقل. */
+  const advanceFocus = useCallback(
+    (delta: 1 | -1) => {
+      if (focusIndex == null) {
+        return;
+      }
+      const next = focusIndex + delta;
+      if (next < 0 || next >= filteredItems.length) {
+        return;
+      }
+      commitFocusedCount();
+      setFocusIndex(next);
+      syncFocusText(filteredItems[next]);
+    },
+    [focusIndex, filteredItems, commitFocusedCount, syncFocusText],
+  );
+
+  /** v32: زر «مطابق» في بطاقة التركيز — يساوي العدّ بكمية النظام
+   *  ثم ينتقل تلقائياً للمنتج التالي بعد لحظة (تسريع العدّ المتواصل)
+   *  — آخر منتج يبقى مكانه. */
+  const markMatchedFocused = useCallback(() => {
+    if (focusIndex == null) {
+      return;
+    }
+    const item = filteredItems[focusIndex];
+    if (item == null) {
+      return;
+    }
+    setFocusText(String(item.system_qty));
+    void setCounted(item, String(item.system_qty));
+    if (matchAdvanceTimer.current != null) {
+      clearTimeout(matchAdvanceTimer.current);
+    }
+    if (focusIndex < filteredItems.length - 1) {
+      matchAdvanceTimer.current = setTimeout(() => {
+        advanceFocus(1);
+      }, 420);
+    }
+  }, [focusIndex, filteredItems, setCounted, advanceFocus]);
+
+  /** v31: الرجوع من وضع العدّ — يُفقد تركيز أي حقل أولاً (تُغلق
+   *  اللوحة بهدوء) ثم تُفتح الأقسام، فلا يتحرك حقل مركّز أبداً. */
+  const exitCountMode = useCallback(() => {
+    commitFocusedCount();
+    const focused = TextInput.State.currentlyFocusedInput();
+    focused?.blur?.();
+    setCountMode(false);
+    setFocusIndex(null);
+  }, [commitFocusedCount]);
+
+  /** v32: خروج صامت (بلا blur) — عند الكتابة في البحث أثناء وضع
+   *  العدّ: حقل البحث نفسه هو المركّز ولا يتحرك بين الوضعين
+   *  (نفس الارتفاع تماماً — انظر countModeBar)، فتبديل ما تحته
+   *  آمن تماماً حسب درس v28/v29.1. */
+  const silentExitCountMode = useCallback(() => {
+    setCountMode(false);
+    setFocusIndex(null);
+  }, []);
+
+  /** v32: زر الرجوع في وضع العدّ يخرج منه بدل مغادرة الشاشة. */
+  useEffect(() => {
+    if (!countMode) {
+      return;
+    }
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      exitCountMode();
+      return true;
+    });
+    return () => sub.remove();
+  }, [countMode, exitCountMode]);
+
+  /** v32: أي كتابة في البحث تُنهي وضع العدّ بصمت — النتائج تتحدث
+   *  تحت شريط بحث ثابت لا يتحرك. */
+  const onChangeSearch = useCallback(
+    (text: string) => {
+      if (countMode) {
+        silentExitCountMode();
+      }
+      setSearch(text);
+    },
+    [countMode, silentExitCountMode],
+  );
+
   // ── v30 (round-38 #2): scan-to-search beside the counting search ──
   const [scanBusy, setScanBusy] = useState(false);
   /** The product whose count input gets focused once the filtered
@@ -472,10 +577,11 @@ export function StocktakeScreen() {
     }
   }, [scanBusy, items, toast]);
 
-  // Focus the scanned product's count input as soon as it appears
-  // in the (virtualized) filtered list: the row may live far below
-  // the rendered window — scroll it into view first, THEN focus its
-  // input after the row has actually mounted (v30 round-38 #2).
+  // v32 (round-40 #2): after a barcode scan the matching product
+  // lands DIRECTLY in the single-product focus mode — the scanner
+  // overlay just closed (no keyboard, no focused input), so the
+  // layout swap is safe; the focus card's input is focused once the
+  // tree settles (same enterCountMode chain as a product press).
   useEffect(() => {
     if (pendingFocusId == null) {
       return;
@@ -486,17 +592,9 @@ export function StocktakeScreen() {
     if (index < 0) {
       return;
     }
-    listRef.current?.scrollToIndex({
-      index,
-      viewPosition: 0.4,
-      animated: false,
-    });
-    const timer = setTimeout(() => {
-      countRefs.current[index]?.focus();
-      setPendingFocusId(null);
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [pendingFocusId, filteredItems]);
+    setPendingFocusId(null);
+    enterCountMode(index);
+  }, [pendingFocusId, filteredItems, enterCountMode]);
 
   // ── Full report view (completed session) ─────────────────────
   if (reportSession != null && reportItems != null) {
@@ -639,7 +737,9 @@ export function StocktakeScreen() {
           <View style={styles.countModeBar}>
             <Icon name="clipboard" size={15} color={c.accent} />
             <Text style={styles.countModeText} numberOfLines={1}>
-              وضع العدّ — المنتجات بملء الشاشة
+              {`وضع العدّ — منتج ${(focusIndex ?? 0) + 1} من ${
+                filteredItems.length
+              }`}
             </Text>
             <TouchableOpacity
               style={styles.countModeExit}
@@ -677,9 +777,11 @@ export function StocktakeScreen() {
             المطابق مباشرة (نفس نمط المخزون). */}
         <View style={styles.searchRow}>
           <View style={{flex: 1}}>
+            {/* v32: الكتابة في البحث تُنهي وضع العدّ بصمت — شريط
+                البحث ثابت في نفس الموضع والارتفاع بين الوضعين. */}
             <SearchBar
               value={search}
-              onChangeText={setSearch}
+              onChangeText={onChangeSearch}
               placeholder="ابحث بالاسم أو امسح الباركود…"
             />
           </View>
@@ -742,7 +844,31 @@ export function StocktakeScreen() {
           </View>
         ) : null}
 
-        {filteredItems.length === 0 ? (
+        {countMode && focusedItem != null ? (
+          /* v32 (round-40 #2): بطاقة التركيز الأحادية — المنتج المضغوط
+           * فقط بحقل عدّ كبير واحد لا يُفكّك أبداً أثناء التنقل بين
+           * المنتجات (زر «التالي» في لوحة المفاتيح أو أزرار الشاشة)
+           * فلا تُغلق اللوحة إطلاقاً — والحقل داخل ScrollView بـ
+           * keyboardShouldPersistTaps="handled" فتلمس الأزرار مرة
+           * واحدة حتى واللوحة مفتوحة. */
+          <ScrollView
+            style={{flex: 1}}
+            contentContainerStyle={styles.focusCardScroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}>
+            <FocusCountCard
+              item={focusedItem}
+              position={(focusIndex ?? 0) + 1}
+              total={filteredItems.length}
+              text={focusText}
+              onChangeText={setFocusText}
+              inputRef={focusInputRef}
+              onMarkMatched={markMatchedFocused}
+              onAdvance={advanceFocus}
+              onExit={exitCountMode}
+            />
+          </ScrollView>
+        ) : filteredItems.length === 0 ? (
           <EmptyState
             icon="clipboard"
             title="لا نتائج"
@@ -792,7 +918,7 @@ export function StocktakeScreen() {
                 item={item}
                 onSetCounted={setCounted}
                 onMarkMatched={markMatched}
-                onPressRow={() => onPressProduct(index)}
+                onPressRow={() => enterCountMode(index)}
                 returnKeyType={
                   index === filteredItems.length - 1 ? 'done' : 'next'
                 }
@@ -882,6 +1008,17 @@ function CountRow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // v32 (round-40 #2): pressing the row's count INPUT itself enters
+  // the single-product focus mode too («عند الضغط على حقل إدخال
+  // كمية المنتج يظهر المنتج فقط») — the native focus fires first,
+  // then enterCountMode blurs it calmly, swaps the layout and
+  // re-focuses the focus card's input on the settled tree. The tree
+  // NEVER changes while an input holds focus.
+  const onInputFocus = useCallback(() => {
+    onPressRow?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onPressRow]);
+
   useEffect(() => {
     setText(item.counted_qty == null ? '' : String(item.counted_qty));
   }, [item.counted_qty]);
@@ -954,9 +1091,158 @@ function CountRow({
             void onSetCounted(item, text);
             onSubmitEditing?.();
           }}
+          onFocus={onInputFocus}
           blurOnSubmit={false}
         />
       </View>
+    </View>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────
+// v32 (round-40 #2): FocusCountCard — بطاقة العدّ أحادية المنتج.
+// تعرض المنتج الواحد المُعَدّ فقط (طلب التاجر الصريح): اسم كبير،
+// كمية النظام، حقل عدّ واحد كبير ثابت لا يُعاد تركيبه أبداً عند
+// الانتقال بين المنتجات (فلا تُغلق لوحة المفاتيح — درس روم الجهاز
+// v29+)، شارة فرق حيّة تتحدث أثناء الكتابة، وزر «مطابق» وزرا
+// «السابق/التالي» يعملان بلمسة واحدة حتى واللوحة مفتوحة (ScrollView
+// بـ keyboardShouldPersistTaps="handled" في الأب).
+// ────────────────────────────────────────────────────────────────
+
+function FocusCountCard({
+  item,
+  position,
+  total,
+  text,
+  onChangeText,
+  inputRef,
+  onMarkMatched,
+  onAdvance,
+  onExit,
+}: {
+  item: StocktakeItem;
+  position: number;
+  total: number;
+  text: string;
+  onChangeText: (value: string) => void;
+  inputRef: React.MutableRefObject<TextInput | null>;
+  onMarkMatched: () => void;
+  onAdvance: (delta: 1 | -1) => void;
+  onExit: () => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+
+  const parsed = text.trim() === '' ? null : parseNumber(text);
+  const counted = parsed == null || Number.isNaN(parsed) ? null : parsed;
+  const variance =
+    counted == null
+      ? null
+      : Math.round((counted - item.system_qty) * 1000) / 1000;
+  const tone =
+    variance == null
+      ? 'neutral'
+      : Math.abs(variance) < 0.0005
+      ? 'success'
+      : variance > 0
+      ? 'info'
+      : 'danger';
+  const toneLabel =
+    variance == null
+      ? 'لم يُعد بعد'
+      : Math.abs(variance) < 0.0005
+      ? 'مطابق تماماً'
+      : `${variance > 0 ? '+' : ''}${formatQty(variance)} عن النظام`;
+  const atFirst = position <= 1;
+  const atLast = position >= total;
+
+  return (
+    <View style={styles.focusCard}>
+      {/* الموضع + الرجوع للقائمة الكاملة */}
+      <View style={styles.focusHeaderRow}>
+        <Badge label={`${position} / ${total}`} tone="neutral" />
+        <TouchableOpacity
+          style={styles.focusExitBtn}
+          onPress={onExit}
+          activeOpacity={0.75}>
+          <Icon name="list" size={14} color={c.textDim} />
+          <Text style={styles.focusExitText}>عرض الكل</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* المنتج — الاسم كبيراً وكمية النظام تحته */}
+      <Text style={styles.focusName} numberOfLines={2}>
+        {item.productName}
+      </Text>
+      <View style={styles.focusMetaRow}>
+        <Text style={styles.focusMeta}>
+          بالنظام: {formatQty(item.system_qty)}
+          {item.soldByWeight === 1 ? ' كغ' : ''}
+        </Text>
+        {item.unitHint ? (
+          <Text style={styles.focusHint} numberOfLines={1}>
+            ({item.unitHint})
+          </Text>
+        ) : null}
+      </View>
+
+      {/* حقل العدّ — كبير ووحيد، لا يُفكّك أبداً بين المنتجات */}
+      <TextInput
+        ref={inputRef}
+        style={styles.focusInput}
+        value={text}
+        onChangeText={onChangeText}
+        keyboardType={item.soldByWeight === 1 ? 'decimal-pad' : 'numeric'}
+        placeholder={item.soldByWeight === 1 ? '0.0' : '0'}
+        placeholderTextColor={c.textFaint}
+        returnKeyType={atLast ? 'done' : 'next'}
+        onSubmitEditing={() => {
+          if (!atLast) {
+            onAdvance(1);
+          }
+        }}
+        blurOnSubmit={false}
+      />
+      <Text style={styles.focusInputLabel}>
+        {item.soldByWeight === 1 ? 'العدّ الفعلي (كغ)' : 'العدّ الفعلي'}
+      </Text>
+
+      {/* الفرق الحيّ + زر المطابقة */}
+      <View style={styles.focusFeedbackRow}>
+        <Badge label={toneLabel} tone={tone} />
+        <TouchableOpacity
+          style={styles.focusMatchBtn}
+          onPress={onMarkMatched}
+          activeOpacity={0.8}>
+          <Icon name="check" size={15} color={c.success} />
+          <Text style={styles.focusMatchText}>مطابق</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* التنقل: السابق / التالي */}
+      <View style={styles.focusNavRow}>
+        <AppButton
+          title="السابق"
+          icon="chevronRight"
+          variant="secondary"
+          small
+          disabled={atFirst}
+          onPress={() => onAdvance(-1)}
+          style={{flex: 1}}
+        />
+        <AppButton
+          title={atLast ? 'آخر منتج' : 'التالي'}
+          icon="chevronLeft"
+          variant="primary"
+          small
+          disabled={atLast}
+          onPress={() => onAdvance(1)}
+          style={{flex: 1}}
+        />
+      </View>
+      <Text style={styles.focusNavHint}>
+        زر «التالي» في لوحة المفاتيح ينقلك للمنتج التالي مباشرة
+      </Text>
     </View>
   );
 }
@@ -1151,6 +1437,10 @@ const useStyles = makeStyles(c =>
       borderRadius: radius.md,
       paddingVertical: 10,
       paddingHorizontal: spacing.sm,
+      // v32 (round-40 #2): نفس ارتفاع شريط وضع العدّ تماماً — شريط
+      // البحث لا يتحرك بكسلاً واحداً بين الوضعين (شرط الخروج الصامت
+      // الآمن عند الكتابة في البحث أثناء وضع العدّ).
+      minHeight: 44,
     },
     miniStat: {
       flex: 1,
@@ -1192,8 +1482,10 @@ const useStyles = makeStyles(c =>
       borderWidth: 1,
       borderColor: c.accentSoft,
       borderRadius: radius.md,
-      paddingVertical: 7,
+      paddingVertical: 10,
       paddingHorizontal: spacing.sm,
+      // v32: مطابق لارتفاع miniStats (44px) — انظر أعلاه.
+      minHeight: 44,
     },
     countModeText: {
       flex: 1,
@@ -1395,6 +1687,116 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
       textAlign: 'center',
       fontVariant: ['tabular-nums'],
+    },
+    /** v32 (round-40 #2): بطاقة التركيز الأحادية — تملأ قسم
+     *  المنتجات وتتمرر عند ضيق الشاشة مع لوحة مفتوحة. */
+    focusCardScroll: {
+      flexGrow: 1,
+      justifyContent: 'center',
+      paddingVertical: spacing.sm,
+      paddingBottom: spacing.lg,
+    },
+    focusCard: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      padding: spacing.lg,
+      gap: spacing.md,
+    },
+    focusHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    focusExitBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+    },
+    focusExitText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    focusName: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.title + 2,
+      lineHeight: 30,
+      textAlign: 'right',
+    },
+    focusMetaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    focusMeta: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    focusHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      flexShrink: 1,
+    },
+    focusInput: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading + 8,
+      textAlign: 'center',
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1.5,
+      borderColor: c.accentSoft,
+      borderRadius: radius.md,
+      paddingVertical: 12,
+    },
+    focusInputLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+      marginTop: -spacing.xs,
+    },
+    focusFeedbackRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    focusMatchBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      backgroundColor: c.successSoft,
+      borderWidth: 1,
+      borderColor: c.success,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 8,
+    },
+    focusMatchText: {
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    focusNavRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    focusNavHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      textAlign: 'center',
     },
     chip: {
       // v8.1: fixed 30dp height + tight padding — identical chip size

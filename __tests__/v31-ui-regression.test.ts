@@ -60,16 +60,38 @@ describe('v31 — الجرد الفعلي: وضع العدّ بضغط المنت
     expect(src).not.toContain('Keyboard.addListener');
   });
 
-  test('وضع العدّ يُفعَّل بضغط المنتج نفسه لا بأي رد فعل تركيز', () => {
+  test('v32 — وضع العدّ الأحادي: الضغط على منتج أو حقل عدّه يفتح بطاقة التركيز', () => {
     const src = read(STOCKTAKE);
     expect(src).toContain('onPressRow');
-    expect(src).toContain('onPressProduct');
-    // The count input keeps NO focus reactions.
-    const countInput = src.slice(
+    // v32: enterCountMode (كان onPressProduct) — بطاقة تركيز أحادية.
+    expect(src).toContain('enterCountMode');
+    expect(src).toContain('FocusCountCard');
+    // The v32 contract: pressing the ROW input focuses then delegates
+    // to enterCountMode (blur first → layout swap → delayed focus).
+    const rowInput = src.slice(
       src.indexOf('style={styles.countInput}'),
-      src.indexOf('style={styles.countInput}') + 500,
+      src.indexOf('style={styles.countInput}') + 700,
     );
-    expect(countInput).not.toContain('onFocus=');
+    expect(rowInput).toContain('onFocus={onInputFocus}');
+  });
+
+  test('v32 — حقل بطاقة التركيز ثابت لا يُفكّك ولا يحمل أي رد فعل تركيز', () => {
+    const src = read(STOCKTAKE);
+    const focusInput = src.slice(
+      src.indexOf('style={styles.focusInput}'),
+      src.indexOf('style={styles.focusInput}') + 700,
+    );
+    expect(focusInput).not.toContain('onFocus=');
+    // The text lives in the PARENT so the input is never remounted
+    // while navigating between products (keyboard never closes).
+    expect(src).toContain('const [focusText, setFocusText]');
+    expect(src).toContain('text={focusText}');
+  });
+
+  test('v32 — لوحة المفاتيح: زر التالي ينقل للمنتج التالي داخل البطاقة', () => {
+    const src = read(STOCKTAKE);
+    expect(src).toContain('onAdvance(1)');
+    expect(src).toContain('onSubmitEditing={() => {');
   });
 
   test('الطيّ يسبق التركيز — التركيز المؤجّل بعد استقرار الشجرة', () => {
@@ -79,6 +101,18 @@ describe('v31 — الجرد الفعلي: وضع العدّ بضغط المنت
     const timerPos = src.indexOf('countFocusTimer.current = setTimeout');
     expect(collapsePos).toBeGreaterThan(-1);
     expect(timerPos).toBeGreaterThan(collapsePos);
+  });
+
+  test('v32 — شريط البحث لا يتحرك بين الوضعين (نفس ارتفاع الشريطين)', () => {
+    const src = read(STOCKTAKE);
+    expect(src).toContain('minHeight: 44');
+    // The focus card sits inside a handled ScrollView so buttons
+    // work with a single tap while the keyboard is open.
+    const cardWrap = src.slice(
+      src.indexOf('focusCardScroll'),
+      src.indexOf('focusCardScroll') + 400,
+    );
+    expect(src).toContain('keyboardShouldPersistTaps="handled"');
   });
 });
 

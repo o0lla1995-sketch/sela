@@ -114,6 +114,8 @@ export interface BackupFile {
     sold_by_weight?: number;
     /** v23 (round-29 #1): 1 = archived (old backups: live). */
     is_archived?: number;
+    /** v32 (round-40 #3): expiry 'YYYY-MM-DD' (old backups: none). */
+    expiry_date?: string | null;
     created_at: string;
   }[];
   product_units: {
@@ -432,7 +434,7 @@ export const BackupService = {
       db.execute('SELECT id, name FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
       db.execute(
-        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, created_at FROM products',
+        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, created_at FROM products',
       ),
       db.execute(
         'SELECT product_id, unit_id, conversion, barcode, retail_price, wholesale_price FROM product_units',
@@ -615,6 +617,10 @@ export const BackupService = {
         barcode: row.barcode == null ? null : String(row.barcode),
         sold_by_weight: Number(row.sold_by_weight ?? 0) === 1 ? 1 : 0,
         is_archived: Number(row.is_archived ?? 0) === 1 ? 1 : 0,
+        expiry_date:
+          row.expiry_date == null || String(row.expiry_date).length < 10
+            ? null
+            : String(row.expiry_date).slice(0, 10),
         created_at: String(row.created_at ?? ''),
       })),
       product_units: rowsOf(productUnits).map(row => ({
@@ -1172,8 +1178,8 @@ export const BackupService = {
             : null;
         const inserted = await tx.execute(
           `INSERT INTO products
-            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             product.name,
             Number(product.cost_price ?? 0),
@@ -1188,6 +1194,7 @@ export const BackupService = {
             product.barcode ?? null,
             product.sold_by_weight === 1 ? 1 : 0,
             product.is_archived === 1 ? 1 : 0,
+            product.expiry_date ?? null,
             product.created_at || nowLocal(),
           ],
         );

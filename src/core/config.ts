@@ -187,6 +187,8 @@ export const ANGLE_LABELS_AR: Record<string, string> = {
 
 /** Default low-stock alert threshold when a product has no override. */
 export const DEFAULT_LOW_STOCK_THRESHOLD = 5;
+/** v32 (round-40 #3): نافذة التنبيه قبل انتهاء الصلاحية (بالأيام). */
+export const DEFAULT_EXPIRY_ALERT_DAYS = 14;
 
 /** Receipt paper widths in characters (default font). */
 export const RECEIPT_WIDTH_58 = 32;
@@ -215,9 +217,9 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '31.0.0';
+export const APP_VERSION = '32.0.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 39;
+export const APP_BUILD_CODE = 40;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
 

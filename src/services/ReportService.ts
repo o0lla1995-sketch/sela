@@ -66,6 +66,9 @@ export interface CashDebtsBundle {
   /** صِلة (عند الربط): جزء فواتير متجري القائم + غير المرفوع بعد. */
   silaOutstandingMinor: number;
   silaDebtorsCount: number;
+  /** v32 (round-40 #6): رصيد الخادم POS ككل (كل متاجر التاجر) —
+   *  للمعلومية، مقابل الرقم المعتمد من دفاتر هذا المتجر. */
+  silaServerPosOutstandingMinor: number;
   /** صِلة (عند الربط، للمعلومية): ديون وُلدت داخل التطبيق. */
   appOriginOutstandingMinor: number;
   /** الربط الفعلي الآن — يخفي كل صفوف صِلة عند فكّه. */
@@ -207,17 +210,17 @@ export const ReportService = {
       debtSales,
       silaPayments,
       silaTotals,
+      // v32 (round-40 #6): دين هذا المتجر من الدفاتر المحلية.
+      silaOwnTotals,
       localPayments,
       creditCovered,
       localBook,
       appCollections,
-      debtQueueTotals,
       voucherSales,
       voucherGoods,
       voucherSettlementsReceived,
       campaignTotals,
       cashMovements,
-      pendingReversals,
       treasuryNow,
     ] = await Promise.all([
       ReportRepo.summary(range),
@@ -227,13 +230,13 @@ export const ReportService = {
       ReportRepo.debtSalesSummary(range),
       SilaRepo.paymentsInRange(range.from, range.to),
       SilaRepo.customersOutstandingTotal(),
+      SilaRepo.storeOwnOutstandingTotal(),
       LocalDebtsRepo.paymentsInRange(range.from, range.to),
       SilaRepo.creditCoveredInRange(range.from, range.to),
       LocalDebtsRepo.totals(),
       // v18 (round-24 #1): money صِلة collected on the store's behalf
       // inside the range — the rows the reconciliation engine writes.
       SilaRepo.appCollectionsInRange(range.from, range.to),
-      SilaRepo.totals(),
       // v20: the voucher campaigns columns (§2 — sale at face value,
       // goods as INV-V invoices, confirmed settlements as receipts).
       VouchersRepo.okInRange(range.from, range.to),
@@ -245,10 +248,6 @@ export const ReportService = {
       VouchersRepo.campaignsTotals(),
       // v25 (round-32 #3): the cash-movements ledger of the period.
       CashRepo.totalsFor(range.from, range.to),
-      // v26 (round-34 #3): reversal payments not yet on the صِلة
-      // server — netted out of the LIVE standing debt so a return
-      // shows immediately (not only after the next sync cycle).
-      SilaRepo.pendingReversalsMinor(),
       // v26 (round-34 #6): the live «النقد بالخزينة الآن» cell in
       // the الدين القائم الآن grid of the reports page.
       this.treasurySnapshot(),
@@ -302,19 +301,14 @@ export const ReportService = {
         prepaidAmount: creditCovered / 100,
         localOutstandingMinor: localBook.outstandingMinor,
         localDebtorsCount: localBook.debtorsCount,
-        // Server pos part + this device's not-yet-uploaded debt rows
-        // (store-origin by definition — never understate offline).
-        // v26 (round-34 #3): NET OF PENDING RETURN REVERSALS — the
-        // merchant reads the LIVE debt a synced-debt return created,
-        // the moment the return receipt is issued.
-        silaOutstandingMinor: Math.max(
-          0,
-          silaTotals.posTotalMinor +
-            debtQueueTotals.pendingMinor -
-            pendingReversals,
-        ),
-        silaDebtorsCount:
-          silaTotals.debtorsCount + (debtQueueTotals.pendingCount > 0 ? 1 : 0),
+        // v32 (round-40 #6): الدين القائم من الدفاتر المحلية
+        // للمتجر — فواتير هذا المتجر مطروحاً منها سدادّاته وتحصيلات
+        // التطبيق وعكس المرتجعات (تشمل الصفوف غير المرفوعة بعد) —
+        // لا أرصدة الخادم المختلطة بفواتير كل متاجر التاجر.
+        silaOutstandingMinor: Math.max(0, silaOwnTotals.ownMinor),
+        silaDebtorsCount: silaOwnTotals.debtorsCount,
+        // v32: أرصدة الخادم للمعلومية (POS ككل + جزء التطبيق).
+        silaServerPosOutstandingMinor: silaTotals.posTotalMinor,
         appOriginOutstandingMinor: silaTotals.appTotalMinor,
         paired: isActuallyPaired(),
         lastSyncedAt: silaTotals.lastSyncedAt,

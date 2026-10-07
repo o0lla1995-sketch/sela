@@ -1186,6 +1186,22 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 16;
   }
 
+  if (version < 17) {
+    // ── v32 (round-40 #3): صلاحية المنتجات — تاريخ انتهاء اختياري
+    //  لكل منتج ('YYYY-MM-DD'). يُغذّي تحذيرات «قرب الانتهاء»
+    //  و«منتهي» في تنبيهات المخزون + إشعارات النظام، وشريحة
+    //  فلترة «الصلاحية» في شاشة المخزون.
+    const cols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'expiry_date'",
+    );
+    const hasExpiry = (cols.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasExpiry) {
+      await database.execute('ALTER TABLE products ADD COLUMN expiry_date TEXT');
+    }
+    logDiag('db', 'ترحيل v17: تاريخ انتهاء صلاحية المنتجات');
+    version = 17;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }

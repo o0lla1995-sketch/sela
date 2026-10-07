@@ -15,6 +15,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -65,6 +66,7 @@ import {
   WEIGHT_UNIT_NAME,
 } from '../../core/config';
 import type {AngleLabel, Category, ProductUnit, Unit} from '../../core/types';
+import {daysUntilExpiry, expiryStateOf} from '../../core/types';
 
 /** v9.1 (round-14 #4): one-tap weight packages for WEIGHT products —
  *  name + the kg amount it contains (وقية = 250غ the regional
@@ -173,6 +175,21 @@ export function ProductFormScreen() {
    *  kilo, fractional kg stock, weight pad at the POS). */
   const [saleMode, setSaleMode] = useState<'piece' | 'weight'>('piece');
   const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
+  // ── v32 (round-40 #3): تاريخ انتهاء الصلاحية — اختياري، بإحدى
+  //    طريقتين: تاريخ محدد (يوم/شهر/سنة) أو مدة من اليوم (أيام أو
+  //    أشهر) تُحسب إلى تاريخ فعلي وتُخزن 'YYYY-MM-DD'.
+  const [expiryMode, setExpiryMode] = useState<'none' | 'date' | 'duration'>(
+    'none',
+  );
+  const [expiryDay, setExpiryDay] = useState('');
+  const [expiryMonth, setExpiryMonth] = useState('');
+  const [expiryYear, setExpiryYear] = useState('');
+  const [durationValue, setDurationValue] = useState('');
+  const [durationUnit, setDurationUnit] = useState<'days' | 'months'>('days');
+  // ── v32 (round-40 #4): قسم وحدات البيع قابل للطي — مطوي افتراضياً
+  //    لتوفير مساحة الصفحة، بسطر ملخّص يعرض الوحدات الحالية، ويُفتح
+  //    بالضغط على الترويسة (أو زر «+ وحدة» الذي يفتح ويضيف معاً).
+  const [unitsOpen, setUnitsOpen] = useState(false);
   // ── v16 (round-22 #3): استلام البضاعة — quick receiving with
   // AUTO-FILL. The merchant picks how the goods arrived (by carton
   // or by weight-bag), enters counts + the package price, and the
@@ -239,6 +256,16 @@ export function ProductFormScreen() {
             setCategoryId(product.category_id ?? 'none');
             setSaleMode(product.sold_by_weight === 1 ? 'weight' : 'piece');
             setUnitRows(productUnits.map(unitRowToDraft));
+            // v32: تاريخ الانتهاء المحفوظ يُحمَّل في وضع «تاريخ محدد».
+            if (
+              product.expiry_date != null &&
+              product.expiry_date.length >= 10
+            ) {
+              setExpiryMode('date');
+              setExpiryDay(product.expiry_date.slice(8, 10));
+              setExpiryMonth(product.expiry_date.slice(5, 7));
+              setExpiryYear(product.expiry_date.slice(0, 4));
+            }
             // v14 (round-20 #4): the enrollment PHOTOS reload with the
             // fingerprints. The three angle tiles used to show empty
             // camera placeholders for a registered product («لا تظهر
@@ -337,6 +364,97 @@ export function ProductFormScreen() {
       ).length,
     [angles],
   );
+
+  /** v32 (round-40 #3): التاريخ المحسوب من المدخلات —
+   *  null = بلا صلاحية (صحيح)، undefined = إدخال ناقص/فاسد. */
+  const expiryDate = useMemo<string | null | undefined>(() => {
+    if (expiryMode === 'none') {
+      return null;
+    }
+    if (expiryMode === 'date') {
+      const d = expiryDay.trim();
+      const m = expiryMonth.trim();
+      const y = expiryYear.trim();
+      if (d === '' && m === '' && y === '') {
+        return null;
+      }
+      if (d === '' || m === '' || y === '') {
+        return undefined;
+      }
+      const day = parseNumber(d);
+      const month = parseNumber(m);
+      const year = parseNumber(y);
+      if (Number.isNaN(day) || Number.isNaN(month) || Number.isNaN(year)) {
+        return undefined;
+      }
+      if (year < 2000 || year > 2999 || month < 1 || month > 12) {
+        return undefined;
+      }
+      const lastDay = new Date(year, month, 0).getDate();
+      if (day < 1 || day > lastDay) {
+        return undefined;
+      }
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${
+        y.length === 2 ? `20${y}` : String(year)
+      }-${pad(month)}-${pad(day)}`;
+    }
+    // duration mode
+    const raw = durationValue.trim();
+    if (raw === '') {
+      return null;
+    }
+    const amount = parseNumber(raw);
+    if (Number.isNaN(amount) || amount <= 0 || amount > 3650) {
+      return undefined;
+    }
+    const now = new Date();
+    let target: Date;
+    if (durationUnit === 'months') {
+      target = new Date(
+        now.getFullYear(),
+        now.getMonth() + Math.round(amount),
+        now.getDate(),
+      );
+    } else {
+      target = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + Math.round(amount),
+      );
+    }
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(
+      target.getDate(),
+    )}`;
+  }, [
+    expiryMode,
+    expiryDay,
+    expiryMonth,
+    expiryYear,
+    durationValue,
+    durationUnit,
+  ]);
+
+  /** v32: حالة الصلاحية الحيّة للعرض أسفل الحقول. */
+  const expiryStatus = useMemo(() => {
+    if (expiryDate == null) {
+      return null;
+    }
+    const days = daysUntilExpiry(expiryDate);
+    const state = expiryStateOf(expiryDate, settings.expiryAlertDays);
+    const label =
+      state === 'expired'
+        ? days === 0
+          ? 'ينتهي اليوم'
+          : `منتهي منذ ${Math.abs(days)} يوم`
+        : days === 0
+        ? 'ينتهي اليوم'
+        : state === 'expiring'
+        ? `قرب الانتهاء — باقي ${days} يوم`
+        : `صالح — باقي ${days} يوم`;
+    return {state, label, days};
+  }, [expiryDate, settings.expiryAlertDays]);
 
   /** v8: native PHOTO engine → embed → this angle's fingerprint.
    *  The camera runs in its own native window (ScannerActivity):
@@ -1063,6 +1181,16 @@ export function ProductFormScreen() {
       toast('سعر الجملة غير صالح', 'error');
       return;
     }
+    // v32 (round-40 #3): صلاحية ناقصة/فاسدة تمنع الحفظ مع رسالة واضحة.
+    if (expiryDate === undefined) {
+      toast(
+        expiryMode === 'date'
+          ? 'أكمل تاريخ الانتهاء (يوم/شهر/سنة صحيحة) أو اختر «بلا صلاحية»'
+          : 'أدخل مدة صالحة (أيام أو أشهر، حتى 10 سنوات) أو اختر «بلا صلاحية»',
+        'error',
+      );
+      return;
+    }
 
     // Validate unit rows.
     const cleanedUnits: {
@@ -1120,6 +1248,8 @@ export function ProductFormScreen() {
             : null,
         barcode: barcode.trim() || null,
         sold_by_weight: weighted ? 1 : 0,
+        // v32 (round-40 #3): التاريخ المحسوب (تاريخ محدد أو مدة).
+        expiry_date: expiryDate ?? null,
       };
 
       let targetId = productId;
@@ -1193,6 +1323,8 @@ export function ProductFormScreen() {
     validConversion,
     angles,
     productId,
+    expiryDate,
+    expiryMode,
     refreshCatalog,
     toast,
     navigation,
@@ -1268,6 +1400,36 @@ export function ProductFormScreen() {
       setBusy(false);
     }
   }, [productId, refreshCatalog, toast]);
+
+  /** v32 (round-40 #4): طيّ/فتح وحدات البيع — يُفقد تركيز أي حقل
+   *  أولاً (درس روم الجهاز: لا تغيير شجرة فوق حقل مركّز) ثم يُبدّل
+   *  الحالة. */
+  const toggleUnits = useCallback((open?: boolean) => {
+    const focused = TextInput.State.currentlyFocusedInput();
+    focused?.blur?.();
+    setUnitsOpen(prev => open ?? !prev);
+  }, []);
+
+  /** v32: «+ وحدة» من الوضع المطوي — يفتح القسم ويضيف صفاً جديداً. */
+  const addUnitAndOpen = useCallback(() => {
+    const focused = TextInput.State.currentlyFocusedInput();
+    focused?.blur?.();
+    setUnitsOpen(true);
+    addUnitRow();
+  }, [addUnitRow]);
+
+  /** v32: سطر الملخّص المطوي — أسماء الوحدات ومعامِلاتها. */
+  const unitsSummary = useMemo(() => {
+    if (unitRows.length === 0) {
+      return 'لا وحدات — يُباع بالقطعة';
+    }
+    return unitRows
+      .map(
+        row =>
+          `${unitNameById.get(row.unit_id) ?? 'وحدة'} = ${row.conversion || '?'}`,
+      )
+      .join(' · ');
+  }, [unitRows, unitNameById]);
 
   if (loading) {
     return (
@@ -1864,6 +2026,161 @@ export function ProductFormScreen() {
             <Text style={styles.stockHintText}>{stockHint}</Text>
           ) : null}
 
+          {/* ── v32 (round-40 #3): تاريخ انتهاء الصلاحية — اختياري ──
+              بإحدى طريقتين: تاريخ محدد، أو مدة من اليوم (أيام/أشهر)
+              تُحسب إلى تاريخ فعلي. المنتجات قريبة الانتهاء أو المنتهية
+              تظهر في تنبيهات المخزون وإشعارات خاصة. */}
+          <View style={styles.categoryHeader}>
+            <Text style={styles.fieldLabelOuter}>
+              تاريخ انتهاء الصلاحية (اختياري)
+            </Text>
+            {expiryMode !== 'none' ? (
+              <TouchableOpacity
+                onPress={() => {
+                  setExpiryMode('none');
+                  setExpiryDay('');
+                  setExpiryMonth('');
+                  setExpiryYear('');
+                  setDurationValue('');
+                }}>
+                <Text style={styles.manageLink}>إزالة</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+          <View style={styles.expiryChipsRow}>
+            <ExpiryModeChip
+              label="بلا صلاحية"
+              active={expiryMode === 'none'}
+              onPress={() => setExpiryMode('none')}
+            />
+            <ExpiryModeChip
+              label="تاريخ محدد"
+              active={expiryMode === 'date'}
+              onPress={() => setExpiryMode('date')}
+            />
+            <ExpiryModeChip
+              label="مدة من اليوم"
+              active={expiryMode === 'duration'}
+              onPress={() => setExpiryMode('duration')}
+            />
+          </View>
+          {expiryMode === 'date' ? (
+            <View style={styles.expiryFieldsRow}>
+              <View style={{flex: 1}}>
+                <Field
+                  label="اليوم"
+                  value={expiryDay}
+                  onChangeText={text =>
+                    setExpiryDay(text.replace(/[^0-9]/g, '').slice(0, 2))
+                  }
+                  keyboardType="numeric"
+                  placeholder="21"
+                  returnKeyType="next"
+                />
+              </View>
+              <View style={{flex: 1}}>
+                <Field
+                  label="الشهر"
+                  value={expiryMonth}
+                  onChangeText={text =>
+                    setExpiryMonth(text.replace(/[^0-9]/g, '').slice(0, 2))
+                  }
+                  keyboardType="numeric"
+                  placeholder="12"
+                  returnKeyType="next"
+                />
+              </View>
+              <View style={{flex: 1.4}}>
+                <Field
+                  label="السنة"
+                  value={expiryYear}
+                  onChangeText={text =>
+                    setExpiryYear(text.replace(/[^0-9]/g, '').slice(0, 4))
+                  }
+                  keyboardType="numeric"
+                  placeholder="2026"
+                  returnKeyType="done"
+                />
+              </View>
+            </View>
+          ) : null}
+          {expiryMode === 'duration' ? (
+            <View style={styles.expiryFieldsRow}>
+              <View style={{flex: 1}}>
+                <Field
+                  label="المدة"
+                  value={durationValue}
+                  onChangeText={text =>
+                    setDurationValue(text.replace(/[^0-9]/g, '').slice(0, 4))
+                  }
+                  keyboardType="numeric"
+                  placeholder={durationUnit === 'days' ? '30' : '6'}
+                  returnKeyType="done"
+                />
+              </View>
+              <TouchableOpacity
+                style={[
+                  styles.durationUnitBtn,
+                  durationUnit === 'days'
+                    ? {backgroundColor: c.accent, borderColor: c.accent}
+                    : null,
+                ]}
+                onPress={() => setDurationUnit('days')}
+                activeOpacity={0.75}>
+                <Text
+                  style={[
+                    styles.durationUnitText,
+                    {color: durationUnit === 'days' ? c.onAccent : c.textDim},
+                  ]}>
+                  أيام
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.durationUnitBtn,
+                  durationUnit === 'months'
+                    ? {backgroundColor: c.accent, borderColor: c.accent}
+                    : null,
+                ]}
+                onPress={() => setDurationUnit('months')}
+                activeOpacity={0.75}>
+                <Text
+                  style={[
+                    styles.durationUnitText,
+                    {color: durationUnit === 'months' ? c.onAccent : c.textDim},
+                  ]}>
+                  أشهر
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+          {expiryDate != null && expiryStatus != null ? (
+            <View style={styles.expiryStatusRow}>
+              <Badge
+                label={expiryStatus.label}
+                tone={
+                  expiryStatus.state === 'expired'
+                    ? 'danger'
+                    : expiryStatus.state === 'expiring'
+                    ? 'warning'
+                    : 'success'
+                }
+              />
+              <Text style={styles.expiryStatusDate}>
+                {`ينتهي في ${expiryDate.slice(8, 10)}/${expiryDate.slice(
+                  5,
+                  7,
+                )}/${expiryDate.slice(0, 4)}`}
+              </Text>
+            </View>
+          ) : expiryDate === undefined ? (
+            <Text style={styles.expiryInvalidText}>
+              {expiryMode === 'date'
+                ? 'أكمل اليوم والشهر والسنة بصيغة صحيحة'
+                : 'أدخل مدة صالحة أكبر من صفر'}
+            </Text>
+          ) : null}
+
           {/* ── Category picker ──────────────────────────────── */}
           <View style={styles.categoryHeader}>
             <Text style={styles.fieldLabelOuter}>التصنيف</Text>
@@ -1913,21 +2230,48 @@ export function ProductFormScreen() {
             ))}
           </View>
 
-          {/* ── Units editor ─────────────────────────────────── */}
-          <SectionTitle
-            title="وحدات البيع"
-            hint={
-              saleMode === 'weight'
-                ? 'وحدات وزن جاهزة — الوقية 0.25 كغ والنصف 0.5 — والسعر يُحسب من سعر الكيلو تلقائياً'
-                : 'مثال: كرتونة = 24 قطعة — تُخصم من المخزون تلقائياً وتسهّل الجملة'
-            }
-            action={
-              <TouchableOpacity
-                onPress={() => navigation.navigate('ManageUnits' as never)}>
-                <Text style={styles.manageLink}>إدارة الوحدات</Text>
-              </TouchableOpacity>
-            }
-          />
+          {/* ── Units editor — v32 (round-40 #4): قابل للطي ──────
+              مطوي افتراضياً لتوفير مساحة الصفحة؛ الترويسة تعرض عدد
+              الوحدات وسطر ملخّص، والضغط يفتح المحرّر الكامل (الحزم
+              الجاهزة + بطاقات الوحدات + زر الإضافة). */}
+          <TouchableOpacity
+            style={styles.unitsFoldHeader}
+            onPress={() => toggleUnits()}
+            activeOpacity={0.75}>
+            <Icon
+              name={unitsOpen ? 'chevronDown' : 'chevronLeft'}
+              size={16}
+              color={c.accent}
+            />
+            <View style={{flex: 1}}>
+              <View style={styles.unitsFoldTitleRow}>
+                <Text style={styles.unitsFoldTitle}>وحدات البيع</Text>
+                <View style={styles.unitsFoldCount}>
+                  <Text style={styles.unitsFoldCountText}>
+                    {unitRows.length}
+                  </Text>
+                </View>
+              </View>
+              {!unitsOpen ? (
+                <Text style={styles.unitsFoldSummary} numberOfLines={1}>
+                  {unitsSummary}
+                </Text>
+              ) : (
+                <Text style={styles.unitsFoldHint} numberOfLines={1}>
+                  {saleMode === 'weight'
+                    ? 'حزم وزن جاهزة — الوقية 0.25 كغ — والسعر من سعر الكيلو'
+                    : 'مثال: كرتونة = 24 قطعة — تُخصم من المخزون تلقائياً'}
+                </Text>
+              )}
+            </View>
+            <TouchableOpacity
+              onPress={() => navigation.navigate('ManageUnits' as never)}
+              hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+              <Text style={styles.manageLink}>إدارة الوحدات</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+          {unitsOpen ? (
+            <>
           {/* v9.1 (round-14 #4): one-tap weight packages — the
               regional staples pre-wired with their kg amounts, so a
               weight product's units are ALWAYS suitable (the actual
@@ -2166,6 +2510,24 @@ export function ProductFormScreen() {
             small
             onPress={addUnitRow}
           />
+          {/* v32: زر طي القسم من الداخل — نفس عمل الترويسة. */}
+          <AppButton
+            title="طي قسم الوحدات"
+            variant="ghost"
+            icon="chevronDown"
+            small
+            onPress={() => toggleUnits(false)}
+          />
+            </>
+          ) : (
+            <AppButton
+              title="+ إضافة وحدة"
+              variant="secondary"
+              icon="plus"
+              small
+              onPress={addUnitAndOpen}
+            />
+          )}
 
           {productId != null ? (
             <View style={{marginTop: spacing.lg, gap: spacing.md}}>
@@ -2206,6 +2568,34 @@ export function ProductFormScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
     </View>
+  );
+}
+
+/** v32 (round-40 #3): شريط اختيار طريقة إدخال الصلاحية. */
+function ExpiryModeChip({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  return (
+    <TouchableOpacity
+      style={[
+        styles.expiryChip,
+        active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+      ]}
+      onPress={onPress}
+      activeOpacity={0.75}>
+      <Text
+        style={[styles.expiryChipText, {color: active ? c.onAccent : c.textDim}]}>
+        {label}
+      </Text>
+    </TouchableOpacity>
   );
 }
 
@@ -2445,6 +2835,115 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
       marginTop: -spacing.xs,
       fontVariant: ['tabular-nums'],
+    },
+    // ── v32 (round-40 #3): قسم صلاحية المنتج ─────────────────────
+    expiryChipsRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      marginBottom: spacing.xs,
+    },
+    expiryChip: {
+      flex: 1,
+      height: 38,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.sm,
+    },
+    expiryChipText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 2,
+      textAlign: 'center',
+    },
+    expiryFieldsRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      gap: spacing.sm,
+    },
+    durationUnitBtn: {
+      height: 46,
+      paddingHorizontal: spacing.md,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    durationUnitText: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    expiryStatusRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      marginTop: spacing.xs,
+    },
+    expiryStatusDate: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 2,
+      fontVariant: ['tabular-nums'],
+    },
+    expiryInvalidText: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+      marginTop: spacing.xs,
+    },
+    // ── v32 (round-40 #4): ترويسة وحدات البيع القابلة للطي ───────
+    unitsFoldHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    unitsFoldTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    unitsFoldTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    unitsFoldCount: {
+      minWidth: 22,
+      height: 22,
+      borderRadius: 11,
+      backgroundColor: c.accentSofter,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 6,
+    },
+    unitsFoldCountText: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.micro + 1,
+      fontVariant: ['tabular-nums'],
+    },
+    unitsFoldSummary: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 2,
+      marginTop: 2,
+    },
+    unitsFoldHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 2,
     },
     // ── v16 (round-22 #3): receiving card ─────────────────────────
     receiveCard: {
