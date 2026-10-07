@@ -634,6 +634,15 @@ export function SettingsScreen() {
             title="النسخ الاحتياطي والاستعادة"
             hint="ملف واحد يحمل كل شيء: المنتجات والوحدات والبصمات والفواتير والإعدادات"
           />
+          {/* v28 (round-36 #4): the Google Drive cloud-backup center —
+              linking, auto-upload every N days, the Drive backups
+              list + restore-from-Drive. */}
+          <SettingRow
+            icon="cloudUp"
+            label="النسخ السحابي على Google Drive"
+            hint="رفع تلقائي كل بضعة أيام إلى حسابك + استرجاع أي نسخة"
+            onPress={() => navigation.navigate('DriveBackup' as never)}
+          />
           <AppButton
             title="تنزيل نسخة احتياطية (ملف JSON)"
             variant="secondary"

@@ -2,24 +2,35 @@ package com.sela.native_modules
 
 import android.app.Activity
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import com.facebook.react.bridge.ActivityEventListener
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
+import com.facebook.react.modules.core.DeviceEventManagerModule
+import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStreamReader
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.SocketTimeoutException
 
 /**
  * PlatformUtilsModule
@@ -40,6 +51,22 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     const val NAME = "PlatformUtils"
     private const val EXPORT_DIR_NAME = "SmartVisionPOS"
     private const val PICK_FILE_REQUEST = 47123
+
+    /** v28 (round-36 #4): the Arabic success page the loopback
+     *  server answers the browser with after Google redirects back. */
+    private val LOOPBACK_SUCCESS_HTML = """
+      <!DOCTYPE html><html dir="rtl" lang="ar"><head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>سيلا — النسخ السحابي</title></head>
+      <body style="font-family:sans-serif;background:#0E0E12;color:#FFFFFF;
+        display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+      <div style="text-align:center;padding:24px">
+      <div style="font-size:46px;line-height:1">&#10004;</div>
+      <h2 style="margin:10px 0 6px">تم الربط بنجاح</h2>
+      <p style="opacity:.7;margin:0">يمكنك إغلاق هذه الصفحة والعودة إلى تطبيق سيلا</p>
+      </div></body></html>
+    """.trimIndent()
   }
 
   override fun getName(): String = NAME
@@ -219,6 +246,158 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     } catch (t: Throwable) {
       promise.reject("BEEP_FAILED", "تعذّر تشغيل النغمة: ${t.message}")
     }
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // v28 (round-36 #4): Google Drive backup — connectivity +
+  // OAuth loopback capture server
+  // ────────────────────────────────────────────────────────────────
+
+  /** True when the device has an active internet-capable network. */
+  @ReactMethod
+  fun isNetworkAvailable(promise: Promise) {
+    try {
+      val cm =
+        reactContext.getSystemService(Context.CONNECTIVITY_SERVICE)
+          as? ConnectivityManager
+      val network = cm?.activeNetwork
+      val caps = network?.let { cm.getNetworkCapabilities(it) }
+      promise.resolve(
+        caps != null &&
+          caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+      )
+    } catch (t: Throwable) {
+      promise.resolve(false)
+    }
+  }
+
+  /** The running loopback OAuth server (null = idle). */
+  @Volatile private var loopbackServer: ServerSocket? = null
+  @Volatile private var loopbackCancelled = false
+
+  /**
+   * v28 (round-36 #4): binds a ONE-SHOT HTTP server on the loopback
+   * interface (127.0.0.1, OS-assigned port) and resolves
+   * IMMEDIATELY with that port — JS needs it to build the Google
+   * OAuth redirect_uri (Desktop-client loopback flow; Google ignores
+   * the port when matching loopback redirects). When the browser
+   * finally redirects back with ?code=…&state=… the server answers
+   * a small Arabic success page, brings the app back to the front
+   * and emits "selaDriveAuth" with {query} — or {error:
+   * "timeout" | "cancelled"}. cancelLoopbackAuth() aborts the wait.
+   */
+  @ReactMethod
+  fun startLoopbackAuth(timeoutMs: Double, promise: Promise) {
+    if (loopbackServer != null) {
+      promise.reject("AUTH_BUSY", "هناك عملية ربط جارية بالفعل — انتظر انتهاءها")
+      return
+    }
+    try {
+      val server = ServerSocket()
+      server.reuseAddress = true
+      // EXPLICIT IPv4 loopback — Google's loopback redirect matching
+      // only accepts http://127.0.0.1 (an IPv6 ::1 bind would break it).
+      server.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
+      // The single accept deadline doubles as the whole-flow timeout.
+      server.soTimeout =
+        timeoutMs.toLong().coerceIn(10_000L, 600_000L).toInt()
+      loopbackServer = server
+      loopbackCancelled = false
+      Thread {
+        var query: String? = null
+        var error: String? = null
+        try {
+          server.accept().use { socket ->
+            socket.soTimeout = 10_000
+            val reader = BufferedReader(
+              InputStreamReader(socket.getInputStream(), Charsets.UTF_8)
+            )
+            val requestLine =
+              reader.readLine() ?: throw IllegalStateException("طلب فارغ")
+            // "GET /callback?code=4%2F0A…&state=xyz HTTP/1.1"
+            val path = requestLine.split(" ").getOrNull(1) ?: ""
+            val qAt = path.indexOf('?')
+            query = if (qAt >= 0) path.substring(qAt + 1) else ""
+            // Drain the remaining request headers.
+            while (true) {
+              val line = reader.readLine() ?: break
+              if (line.isEmpty()) break
+            }
+            val body = LOOPBACK_SUCCESS_HTML
+            val head =
+              "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: text/html; charset=utf-8\r\n" +
+                "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n" +
+                "Connection: close\r\n\r\n"
+            socket.getOutputStream().apply {
+              write((head + body).toByteArray(Charsets.UTF_8))
+              flush()
+            }
+          }
+        } catch (e: SocketTimeoutException) {
+          error = if (loopbackCancelled) "cancelled" else "timeout"
+        } catch (t: Throwable) {
+          error = if (loopbackCancelled) "cancelled" else (t.message ?: "error")
+        } finally {
+          try {
+            server.close()
+          } catch (ignored: Throwable) {
+          }
+          if (loopbackServer === server) {
+            loopbackServer = null
+          }
+          // Best effort: pull the app back in front of the browser.
+          try {
+            val launch = reactContext.packageManager
+              .getLaunchIntentForPackage(reactContext.packageName)
+            if (launch != null) {
+              launch.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                  Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+              )
+              reactContext.startActivity(launch)
+            }
+          } catch (ignored: Throwable) {
+          }
+          // Deliver the outcome to JS.
+          try {
+            val params = Arguments.createMap()
+            if (query != null) {
+              params.putString("query", query)
+            }
+            if (error != null) {
+              params.putString("error", error)
+            }
+            reactContext
+              .getJSModule(
+                DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
+              )
+              .emit("selaDriveAuth", params)
+          } catch (ignored: Throwable) {
+          }
+        }
+      }.apply {
+        isDaemon = true
+        start()
+      }
+      promise.resolve(server.localPort.toDouble())
+    } catch (t: Throwable) {
+      loopbackServer = null
+      promise.reject("AUTH_START_FAILED", "تعذّر بدء خادم الربط: ${t.message}")
+    }
+  }
+
+  /** Aborts a running loopback auth wait (user backed out). */
+  @ReactMethod
+  fun cancelLoopbackAuth(promise: Promise) {
+    loopbackCancelled = true
+    val server = loopbackServer
+    loopbackServer = null
+    try {
+      server?.close()
+    } catch (ignored: Throwable) {
+    }
+    promise.resolve(true)
   }
 
   // ────────────────────────────────────────────────────────────────

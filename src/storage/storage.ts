@@ -71,6 +71,19 @@ export const KEYS = {
   /** v20 §6: when the last settlements sync succeeded (shown on the
    *  campaigns screen as «آخر مزامنة»). */
   silaSettlementsSyncedAt: 'sila_settlements_synced_at_v1',
+  /** v28 (round-36 #4): Google Drive cloud-backup link + auto-upload
+   *  state (OAuth credentials, tokens, folder, schedule, history). */
+  driveClientId: 'drive_client_id_v1',
+  driveClientSecret: 'drive_client_secret_v1',
+  driveRefreshToken: 'drive_refresh_token_v1',
+  driveAccessToken: 'drive_access_token_v1',
+  driveAccessExpiresAt: 'drive_access_expires_at_v1',
+  driveAccountEmail: 'drive_account_email_v1',
+  driveFolderId: 'drive_folder_id_v1',
+  driveAutoEnabled: 'drive_auto_enabled_v1',
+  driveAutoIntervalDays: 'drive_auto_interval_days_v1',
+  driveLastUploadAt: 'drive_last_upload_at_v1',
+  driveHistory: 'drive_history_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {
@@ -125,6 +138,24 @@ export function setString(key: string, value: string): void {
     storage.set(key, value);
   } catch (error) {
     logDiag('storage', `فشل حفظ نص ${key}: ${String(error)}`, 'warn');
+  }
+}
+
+/** v28 (round-36 #4): booleans (Google Drive auto-backup switches). */
+export function getBoolean(key: string, fallback: boolean): boolean {
+  try {
+    const value = storage.getBoolean(key);
+    return value == null ? fallback : value;
+  } catch {
+    return fallback;
+  }
+}
+
+export function setBoolean(key: string, value: boolean): void {
+  try {
+    storage.set(key, value);
+  } catch (error) {
+    logDiag('storage', `فشل حفظ منطقي ${key}: ${String(error)}`, 'warn');
   }
 }
 

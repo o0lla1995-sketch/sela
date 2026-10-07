@@ -37,6 +37,9 @@ import {useSilaStore} from './src/stores/silaStore';
 import {SilaSync} from './src/services/sila/SilaSync';
 import {VisionRecognitionService} from './src/services/vision/VisionRecognitionService';
 import {StockAlertsService} from './src/services/StockAlertsService';
+// v28 (round-36 #4): Google Drive auto-backup scheduler — a no-op
+// until the merchant links an account AND enables auto-upload.
+import {startAutoScheduler} from './src/services/GoogleDriveService';
 import {logDiag} from './src/core/diagnostics';
 import {
   colors,
@@ -91,6 +94,12 @@ export default function App(): React.JSX.Element {
         if (useSilaStore.getState().pairing != null) {
           SilaSync.start();
         }
+
+        // 8. v28 (round-36 #4): Google Drive auto-backup scheduler —
+        //    first check ~25s after boot, then every 15 minutes.
+        //    Fully silent no-op while not linked / not enabled /
+        //    not due / offline.
+        startAutoScheduler();
 
         if (mounted) {
           setBoot('ready');

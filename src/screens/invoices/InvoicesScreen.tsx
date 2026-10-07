@@ -262,31 +262,36 @@ export function InvoicesScreen() {
 
   return (
     <View style={styles.screen}>
+      {/* v28 (round-36 #3): the barcode reader left the header — it
+          now sits BESIDE the search field (icon only, no text), one
+          tap from the exact place merchants scan from. */}
       <AppHeader
         title="الفواتير"
         subtitle={`${rows.length} فاتورة معروضة`}
         showBack
-        right={
+      />
+      <View style={styles.content}>
+        <View style={styles.searchRow}>
+          <View style={{flex: 1}}>
+            <SearchBar
+              value={search}
+              onChangeText={onSearch}
+              placeholder="ابحث برقم الفاتورة أو الزبون أو الصنف أو المبلغ…"
+            />
+          </View>
           <TouchableOpacity
-            style={styles.scanChip}
+            style={styles.scanBtn}
             onPress={() => void scanInvoice()}
             disabled={scanBusy}
-            activeOpacity={0.7}>
+            activeOpacity={0.7}
+            hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
             {scanBusy ? (
               <ActivityIndicator size="small" color={c.accent} />
             ) : (
-              <Icon name="barcode" size={16} color={c.accent} />
+              <Icon name="barcode" size={22} color={c.accent} />
             )}
-            <Text style={styles.scanChipText}>قارئ الباركود</Text>
           </TouchableOpacity>
-        }
-      />
-      <View style={styles.content}>
-        <SearchBar
-          value={search}
-          onChangeText={onSearch}
-          placeholder="ابحث برقم الفاتورة أو الزبون أو الصنف أو المبلغ…"
-        />
+        </View>
 
         {/* v23 (round-29 #3): the FILTER row — kind + quick date
             ranges, horizontally scrollable, tiny rectangles. */}
@@ -1935,22 +1940,22 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
 
 const useStyles = makeStyles(c =>
   StyleSheet.create({
-    // v25 (round-32 #4): the scan-to-open chip in the header.
-    scanChip: {
+    // v28 (round-36 #3): text search + icon-only barcode reader in
+    // one row (moved here from the header text chip).
+    searchRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
-      minHeight: 38,
-      paddingHorizontal: spacing.md,
-      borderRadius: radius.sm,
-      backgroundColor: c.accentSofter,
-      borderWidth: 1,
-      borderColor: c.accent,
+      gap: spacing.sm,
     },
-    scanChipText: {
-      color: c.accent,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
+    scanBtn: {
+      width: 46,
+      height: 46,
+      borderRadius: radius.md,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     screen: {flex: 1, backgroundColor: c.bg},
     content: {flex: 1, padding: spacing.lg, gap: spacing.md},

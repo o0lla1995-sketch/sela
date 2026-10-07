@@ -32,6 +32,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import {useFocusEffect, useNavigation} from '@react-navigation/native';
@@ -129,48 +130,84 @@ function periodRange(key: PeriodKey): {from: string; to: string} {
   }
 }
 
-/** v27 (round-35 #3): keeps a bottom sheet ABOVE the keyboard —
- * REWRITTEN WITH ZERO ANIMATED. The v26 implementation animated the
- * sheet HEIGHT with `Animated.add(sheetHeight, shrink)` on the same
- * Animated.View that carried a native-driven translateY — and that
- * mixed-driver composite height crashed the app the moment the
- * keyboard opened («التطبيق يغلق بسرعة عند فتح او الضغط علي حقل
- * إدخال المبلغ»). Plain React state + plain numeric styles can
- * never crash: the sheet rises by the exact keyboard height and
- * shrinks by the same amount (the form scrolls inside), applied
- * INSTANTLY (no animation to drop frames on this ROM). On ROMs
- * where adjustResize already shrinks the window (measured height
- * drops with the keyboard open), the lift self-disarms so the
- * sheet is never compensated twice. Deterministic on both worlds. */
-function useKeyboardLift(): {lift: number} {
+/** v28 (round-36 #1): keeps the movement sheet ABOVE the keyboard —
+ * REWRITTEN AROUND THE LIVE WINDOW HEIGHT. The story so far:
+ *
+ *  v26 animated the sheet height (Animated.add) — instant crash.
+ *  v27 switched to plain state + `alreadyResized` detection — but the
+ *  detection read `Dimensions.get('window').height` synchronously
+ *  inside `keyboardDidShow`, where the value is STILL the pre-keyboard
+ *  height (the dimensions change event arrives in the same native
+ *  layout pass, ordering unspecified) — so on adjustResize ROMs the
+ *  lift was ALWAYS applied ON TOP of the window resize (double
+ *  compensation): the sheet flew past the window top, the focused
+ *  amount field landed OUTSIDE the visible window, and Android's
+ *  InputMethodManager gave up on serving an invisible view →
+ *  «تفتح لوحة المفاتيح وتغلق بسرعة».
+ *
+ *  v28 is deterministic in BOTH worlds:
+ *   • The sheet's HEIGHT is a fraction of the LIVE window height
+ *     (useWindowDimensions) — when adjustResize shrinks the window,
+ *     the sheet re-flows to 72% of the VISIBLE height and stays fully
+ *     inside the window, anchored above the keyboard. No transform,
+ *     nothing to fight, the keyboard stays.
+ *   • A delayed, race-free check (300ms after keyboardDidShow — long
+ *     after any dimensions event has landed) applies a plain
+ *     translateY lift ONLY when the window did NOT shrink (exotic
+ *     overlay-keyboard ROMs). */
+function useKeyboardSheetLift(): {lift: number} {
+  const windowH = Dimensions.get('window').height;
   const [lift, setLift] = useState(0);
-  const kbOpen = useRef(false);
-  const closedWindowH = useRef(Dimensions.get('window').height);
+  /** Live mirrors readable inside timers (state closures go stale). */
+  const liveWindowH = useRef(windowH);
+  const closedWindowH = useRef(windowH);
+  const kbOpenRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  liveWindowH.current = windowH;
 
   useEffect(() => {
-    const show = Keyboard.addListener('keyboardDidShow', e => {
-      kbOpen.current = true;
-      const kbHeight = e.endCoordinates.height;
-      const nowWindowH = Dimensions.get('window').height;
-      const alreadyResized =
-        closedWindowH.current - nowWindowH >= kbHeight * 0.6;
-      setLift(alreadyResized ? 0 : kbHeight);
-    });
-    const hide = Keyboard.addListener('keyboardDidHide', () => {
-      kbOpen.current = false;
-      // Re-baseline in case the device rotated while typing.
-      closedWindowH.current = Dimensions.get('window').height;
-      setLift(0);
-    });
     const dims = Dimensions.addEventListener('change', ({window}) => {
-      if (!kbOpen.current) {
+      if (!kbOpenRef.current) {
+        // Keyboard closed — this is the true "closed" baseline.
         closedWindowH.current = window.height;
       }
+      liveWindowH.current = window.height;
+    });
+    const show = Keyboard.addListener('keyboardDidShow', e => {
+      kbOpenRef.current = true;
+      const kbHeight = e.endCoordinates.height;
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+      }
+      // Decide AFTER the dust settles — by now the dimensions event
+      // (if this ROM resizes) has arrived and liveWindowH is final.
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        if (!kbOpenRef.current) {
+          return;
+        }
+        const resizedDown =
+          closedWindowH.current - liveWindowH.current >= kbHeight * 0.5;
+        setLift(resizedDown ? 0 : Math.round(kbHeight));
+      }, 300);
+    });
+    const hide = Keyboard.addListener('keyboardDidHide', () => {
+      kbOpenRef.current = false;
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      closedWindowH.current = liveWindowH.current;
+      setLift(0);
     });
     return () => {
       show.remove();
       hide.remove();
       dims.remove();
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+      }
     };
   }, []);
 
@@ -753,14 +790,16 @@ function MovementSheet({
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
 
-  // v27 (round-35 #3): the keyboard lift — PLAIN STATE (zero
-  // Animated): the sheet rises above the IME on overlay-keyboard
-  // ROMs and shrinks by the same height (the form scrolls inside),
-  // so the amount field, the note and the confirm button stay
-  // reachable. On adjustResize ROMs the lift self-disarms (see
-  // useKeyboardLift). v26's Animated.add height crashed the app —
-  // see the hook's header for the full story.
-  const {lift} = useKeyboardLift();
+  // v28 (round-36 #1): the keyboard lift — LIVE window sizing (zero
+  // Animated): the sheet's height is 72% of the CURRENT visible
+  // window, so on adjustResize ROMs (this device) it simply re-flows
+  // to 72% of the keyboard-free area and stays fully inside the
+  // window — the focused amount field is always visible and the
+  // keyboard stays open. Only on exotic overlay-keyboard ROMs does
+  // the race-free delayed check apply a plain translateY (see
+  // useKeyboardSheetLift — the v26/v27 history lives there).
+  const {lift} = useKeyboardSheetLift();
+  const liveWindowH = useWindowDimensions().height;
 
   // v26 (round-34 #4): instant render (no entrance animation — the
   // ROM lesson from the return sheet) + a 400ms close-guard so a
@@ -945,31 +984,39 @@ function MovementSheet({
     toast,
   ]);
 
-  const sheetHeight = Math.round(Dimensions.get('window').height * 0.72);
+  // v28 (round-36 #1): 72% of the LIVE window height — when the
+  // keyboard opens (adjustResize) the window shrinks and the sheet
+  // re-computes against the VISIBLE height, so it always fits above
+  // the keyboard with its bottom anchored at the IME top. Never
+  // smaller than 240px so the confirm box survives a huge IME.
+  const sheetHeight = Math.round(
+    Math.max(240, Math.min(liveWindowH * 0.72, liveWindowH - 16)),
+  );
   // v27 (round-35 #3): the gate applies to ALL THREE movements.
   const gate = securityMode !== 'none' && authStage !== 'passed';
-  // v27: plain numbers — the sheet stays fully visible above the
-  // keyboard (never smaller than 260px so the confirm box survives
-  // even a huge IME).
-  const visibleSheetHeight = Math.max(260, sheetHeight - lift);
+  // v28: plain numbers — zero Animated, zero stale Dimension reads.
+  // The lift is non-zero ONLY on overlay-keyboard ROMs (delayed
+  // race-free detection); on this device's adjustResize ROM it is
+  // always 0 — the sheet just re-flows with the live window height.
+  const visibleSheetHeight = Math.max(240, sheetHeight - lift);
 
   return (
     <View style={sheetStyles(c).backdrop}>
       <Pressable style={{flex: 1}} onPress={backdropPressGuarded} />
-      {/* v27 (round-35 #3): a PLAIN View with numeric height +
-          translateY — zero Animated nodes, zero drivers. v26's
-          `height: Animated.add(sheetHeight, shrink)` (a JS-driven
-          composite height on the same view carrying a native-driven
-          transform) crashed the app the instant the keyboard opened;
-          plain numbers cannot. The sheet rises by the keyboard
-          height and shrinks by the same amount (form scrolls
-          inside). */}
+      {/* v28 (round-36 #1): a PLAIN View sized against the LIVE
+          window — when adjustResize shrinks the window this height
+          re-computes to 72% of the VISIBLE area, the backdrop's
+          flex-end anchors the sheet at the keyboard's top edge and
+          the whole form stays INSIDE the window (a view pushed
+          outside the window is what made Android's IME give up and
+          flash-close in v27). translateY applies only on exotic
+          overlay-keyboard ROMs (see useKeyboardSheetLift). */}
       <View
         style={[
           sheetStyles(c).sheet,
           {
             height: visibleSheetHeight,
-            transform: [{translateY: -lift}],
+            ...(lift > 0 ? {transform: [{translateY: -lift}]} : null),
           },
         ]}>
         <Pressable style={{flex: 1}} onPress={() => undefined} disabled={busy}>

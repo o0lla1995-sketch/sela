@@ -80,7 +80,8 @@ export interface BackupSummary {
   skippedSales?: number;
 }
 
-interface BackupFile {
+/** v28 (round-36 #4): exported for the Google Drive restore path. */
+export interface BackupFile {
   app: string;
   backupVersion: number;
   createdAt: string;
@@ -397,8 +398,13 @@ function nowLocal(): string {
 }
 
 export const BackupService = {
-  /** Builds the backup JSON document from the live database. */
-  async buildBackupJson(): Promise<{json: string; summary: BackupSummary}> {
+  /** Builds the backup JSON document from the live database.
+   *  v28 (round-36 #4): `compact` skips the pretty indentation —
+   *  the Google Drive upload path uses it to shave ~15% off the
+   *  uploaded bytes (the local Downloads export stays pretty). */
+  async buildBackupJson(
+    options?: {compact?: boolean},
+  ): Promise<{json: string; summary: BackupSummary}> {
     const db = getDb();
 
     const [
@@ -915,7 +921,7 @@ export const BackupService = {
     };
 
     return {
-      json: JSON.stringify(doc, null, 2),
+      json: JSON.stringify(doc, null, options?.compact ? 0 : 2),
       summary: {
         categories: doc.categories.length,
         units: doc.units.length,
@@ -952,6 +958,12 @@ export const BackupService = {
       'application/octet-stream',
       'text/plain',
     ]);
+    return BackupService.parseAndValidateBackup(content);
+  },
+
+  /** v28 (round-36 #4): parses + validates backup CONTENT — shared
+   *  by the local file picker and the Google Drive download path. */
+  parseAndValidateBackup(content: string): BackupFile {
     let doc: BackupFile;
     try {
       doc = JSON.parse(content) as BackupFile;

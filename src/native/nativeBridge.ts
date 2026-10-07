@@ -98,6 +98,15 @@ interface PlatformUtilsNative {
   /** v25: prints an exported PDF via Android's system print
    *  framework (every printer app the merchant configured). */
   printExportedPdf(fileName: string, jobName: string): Promise<boolean>;
+  /** v28 (round-36 #4): true when the device has an active
+   *  internet-capable network (Google Drive auto-backup gate). */
+  isNetworkAvailable(): Promise<boolean>;
+  /** v28: binds the one-shot OAuth loopback server and resolves the
+   *  bound port IMMEDIATELY; the redirect outcome arrives later as
+   *  the "selaDriveAuth" DeviceEvent ({query} | {error}). */
+  startLoopbackAuth(timeoutMs: number): Promise<number>;
+  /** v28: aborts a running loopback auth wait. */
+  cancelLoopbackAuth(): Promise<boolean>;
 }
 
 /**

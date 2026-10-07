@@ -91,7 +91,11 @@ export type IconName =
   | 'pause'
   // v23 (round-29): archived products + the returns system.
   | 'archive'
-  | 'undo';
+  | 'undo'
+  /** v28 (round-36 #4): Google Drive cloud backups. */
+  | 'cloud'
+  | 'cloudUp'
+  | 'cloudDown';
 
 interface IconProps {
   name: IconName;
@@ -568,6 +572,29 @@ const P: Record<IconName, React.ReactNode> = {
     <G>
       <Path d="M4 9h9.5a5 5 0 0 1 0 10H8" />
       <Path d="m7.5 5.5-3.5 3.5 3.5 3.5" />
+    </G>
+  ),
+  /** v28 (round-36 #4): Google Drive cloud backups — cloud glyph
+   *  from the standard 24×24 line family (2px stroke, round caps). */
+  cloud: (
+    <G>
+      <Path d="M7 18.5a4.5 4.5 0 1 1 .7-8.95A6 6 0 0 1 19.4 11.4a3.55 3.55 0 0 1-.9 7.1H7z" />
+    </G>
+  ),
+  /** Cloud + up arrow — uploading a backup to Drive. */
+  cloudUp: (
+    <G>
+      <Path d="M7 18.5a4.5 4.5 0 1 1 .7-8.95A6 6 0 0 1 19.4 11.4a3.55 3.55 0 0 1-.9 7.1H7z" />
+      <Path d="M12 16v-4.5" />
+      <Path d="m9.8 13.2 2.2-2.2 2.2 2.2" />
+    </G>
+  ),
+  /** Cloud + down arrow — restoring a backup from Drive. */
+  cloudDown: (
+    <G>
+      <Path d="M7 18.5a4.5 4.5 0 1 1 .7-8.95A6 6 0 0 1 19.4 11.4a3.55 3.55 0 0 1-.9 7.1H7z" />
+      <Path d="M12 11.5V16" />
+      <Path d="m9.8 14.3 2.2 2.2 2.2-2.2" />
     </G>
   ),
 };

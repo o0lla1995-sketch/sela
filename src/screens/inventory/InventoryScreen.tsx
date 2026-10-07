@@ -7,8 +7,12 @@
  */
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
   Image,
   Keyboard,
+  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -21,6 +25,7 @@ import {AppButton, AppHeader, EmptyState, SearchBar} from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useSettingsStore} from '../../stores/settingsStore';
+import {useToastStore} from '../../stores/toastStore';
 import {BASE_UNIT_NAME} from '../../core/config';
 import {
   fonts,
@@ -38,6 +43,11 @@ import {
   type Product,
 } from '../../core/types';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
+import {
+  cameraPermissionMessage,
+  ensureCameraPermission,
+  scanBarcode,
+} from '../../services/vision/scanFlow';
 
 type CategoryFilter = number | 'all';
 
@@ -169,6 +179,56 @@ function InventoryLayout({
   const styles = useStyles();
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
+  const toast = useToastStore(state => state.show);
+
+  // v28 (round-36 #2): barcode SEARCH beside the text search — one
+  // native scan fills the search box with the code; a UNIQUE exact
+  // barcode match opens the product straight away (what scanning a
+  // specific item is for), otherwise the list simply filters.
+  const [scanBusy, setScanBusy] = useState(false);
+  const scanForProduct = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    const permission = await ensureCameraPermission();
+    if (permission !== 'granted') {
+      Alert.alert('إذن الكاميرا مطلوب', cameraPermissionMessage(permission), [
+        {text: 'إغلاق', style: 'cancel'},
+        {
+          text: 'فتح الإعدادات',
+          onPress: () => {
+            void Linking.openSettings();
+          },
+        },
+      ]);
+      return;
+    }
+    setScanBusy(true);
+    try {
+      const code = await scanBarcode();
+      if (code == null) {
+        return; // scanner closed without a read.
+      }
+      setSearch(code);
+      const exact = allProducts.filter(product => product.barcode === code);
+      if (exact.length === 1) {
+        navigation.navigate('ProductForm', {productId: exact[0].id});
+      } else if (exact.length === 0) {
+        toast(
+          `لا يوجد منتج بهذا الباركود (${code}) — تحقق من الكود أو أضفه لمنتج`,
+          'info',
+          4500,
+        );
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل مسح الباركود',
+        'error',
+      );
+    } finally {
+      setScanBusy(false);
+    }
+  }, [scanBusy, allProducts, navigation, toast, setSearch]);
 
   // v8.3 (round-12 #2): while the search keyboard is open the
   // category chips fold away — the search field stays fully visible
@@ -257,11 +317,30 @@ function InventoryLayout({
       ) : null}
 
       <View style={styles.body}>
-        <SearchBar
-          value={search}
-          onChangeText={setSearch}
-          placeholder="ابحث بالاسم أو الباركود…"
-        />
+        {/* v28 (round-36 #2): the search row — text search + the
+            icon-only barcode scanner button (same pattern as the
+            invoices center). */}
+        <View style={styles.searchRow}>
+          <View style={{flex: 1}}>
+            <SearchBar
+              value={search}
+              onChangeText={setSearch}
+              placeholder="ابحث بالاسم أو الباركود…"
+            />
+          </View>
+          <TouchableOpacity
+            style={styles.scanBtn}
+            onPress={() => void scanForProduct()}
+            disabled={scanBusy}
+            activeOpacity={0.7}
+            hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
+            {scanBusy ? (
+              <ActivityIndicator size="small" color={c.accent} />
+            ) : (
+              <Icon name="barcode" size={22} color={c.accent} />
+            )}
+          </TouchableOpacity>
+        </View>
 
         {/* ── Category chips — compact, horizontally scrollable.
             v8.3 (round-12 #2): hidden while the search keyboard is
@@ -318,18 +397,15 @@ function InventoryLayout({
               subtitle="المنتجات المحذوفة ذات سجل مبيعات أو جرد تُؤرشف هنا بدل حذفها نهائياً"
             />
           ) : (
-            <ScrollView
+            /* v28 (round-36 #2): FlatList — virtualized, so a keyboard
+             * resize re-lays-out only the visible window of rows
+             * instead of the ENTIRE archived catalog. */
+            <FlatList
               style={{flex: 1}}
-              contentContainerStyle={{
-                gap: spacing.sm,
-                paddingBottom: spacing.xxl,
-              }}
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode="on-drag">
-              {archivedProducts.map(product => (
+              data={archivedProducts}
+              keyExtractor={item => String(item.id)}
+              renderItem={({item: product}) => (
                 <TouchableOpacity
-                  key={product.id}
                   style={[styles.row, {borderColor: c.warning}]}
                   activeOpacity={0.75}
                   onPress={() =>
@@ -352,8 +428,17 @@ function InventoryLayout({
                     <Icon name="chevronLeft" size={16} color={c.textFaint} />
                   </View>
                 </TouchableOpacity>
-              ))}
-            </ScrollView>
+              )}
+              contentContainerStyle={{
+                gap: spacing.sm,
+                paddingBottom: spacing.xxl,
+              }}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              initialNumToRender={14}
+              maxToRenderPerBatch={14}
+              windowSize={7}
+            />
           )
         ) : products.length === 0 ? (
           <EmptyState
@@ -376,21 +461,24 @@ function InventoryLayout({
             }
           />
         ) : (
-          <ScrollView
+          /* v28 (round-36 #2): FlatList instead of the giant plain
+           * ScrollView. THE keyboard fix: with the whole catalog in
+           * one non-virtualized ScrollView, opening the keyboard
+           * (adjustResize) re-laid-out THOUSANDS of product views on
+           * the main thread while the IME show sequence was still
+           * settling — Android gave up and flash-closed the keyboard
+           * («تفتح لوحة المفاتيح وتغلق بسبب ارتفاع المنتجات»).
+           * Virtualization keeps only the visible window mounted, the
+           * resize pass stays tiny and the keyboard stays open. */
+          <FlatList
             style={{flex: 1}}
-            contentContainerStyle={{
-              gap: spacing.sm,
-              paddingBottom: spacing.xxl,
-            }}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode="on-drag">
-            {products.map(product => {
+            data={products}
+            keyExtractor={item => String(item.id)}
+            renderItem={({item: product}) => {
               const state = stockStateOf(product, defaultThreshold);
               const weighted = isWeightProduct(product);
               return (
                 <TouchableOpacity
-                  key={product.id}
                   style={styles.row}
                   activeOpacity={0.75}
                   onPress={() =>
@@ -469,8 +557,17 @@ function InventoryLayout({
                   </View>
                 </TouchableOpacity>
               );
-            })}
-          </ScrollView>
+            }}
+            contentContainerStyle={{
+              gap: spacing.sm,
+              paddingBottom: spacing.xxl,
+            }}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            initialNumToRender={14}
+            maxToRenderPerBatch={14}
+            windowSize={7}
+          />
         )}
       </View>
     </View>
@@ -569,6 +666,23 @@ const useStyles = makeStyles(c =>
     // can never stretch between the search bar and the product list.
     chipsRow: {
       flexGrow: 0,
+    },
+    // v28 (round-36 #2): text search + icon-only barcode scanner in
+    // one row (same pattern as the invoices center).
+    searchRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    scanBtn: {
+      width: 46,
+      height: 46,
+      borderRadius: radius.md,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     // v8.2 (round-11 #4): header overflow menu — replaces the three
     // tall quick-action cards that used to push the list down.

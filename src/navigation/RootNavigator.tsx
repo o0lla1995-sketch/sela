@@ -40,6 +40,7 @@ import {SilaScreen} from '../screens/sila/SilaScreen';
 import {LocalDebtsScreen} from '../screens/debts/LocalDebtsScreen';
 import {SecuritySettingsScreen} from '../screens/settings/SecuritySettingsScreen';
 import {CashMovementsScreen} from '../screens/cash/CashMovementsScreen';
+import {DriveBackupScreen} from '../screens/settings/DriveBackupScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -63,6 +64,9 @@ export type RootStackParamList = {
   /** v25 (round-32 #3): الخزينة والمصروفات — the cash movements
    *  ledger (expenses / withdrawals / deposits + PDF statement). */
   CashMovements: undefined;
+  /** v28 (round-36 #4): Google Drive cloud backups — linking,
+   *  auto-upload schedule, the Drive backups list + restore. */
+  DriveBackup: undefined;
 };
 
 export type MainTabParamList = {
@@ -194,6 +198,7 @@ export function RootNavigator() {
         <Stack.Screen name="Security" component={SecuritySettingsScreen} />
         {/* v25 (round-32 #3): الخزينة والمصروفات — from Reports. */}
         <Stack.Screen name="CashMovements" component={CashMovementsScreen} />
+        <Stack.Screen name="DriveBackup" component={DriveBackupScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
