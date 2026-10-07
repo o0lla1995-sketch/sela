@@ -106,6 +106,47 @@ describe('sila debt queue accounting', () => {
     expect((await SilaRepo.paymentsTotals()).syncedMinor).toBe(2000);
     expect(await SilaRepo.returnReversalsTotal()).toBe(1200);
   });
+
+  test('v27: the cashier payments LIST also excludes return reversals', async () => {
+    const app = freshApp();
+    await app.connection.initDatabase();
+    const {SilaRepo} = load('src/services/sila/SilaRepo');
+
+    // A real repayment + a return reversal — the reversal must
+    // never surface in the السدادّات book nor in the «سدادّات عند
+    // الكاشير» KPI («اصلا هو مرتجع وليس مسدد»).
+    await SilaRepo.enqueuePayment({
+      idempotencyKey: 'pay-a',
+      customerId: 'cus-1',
+      customerName: 'أحمد',
+      customerPhoneLast4: '1234',
+      amountMinor: 5000,
+      paymentMethod: 'cash',
+      posReceiptRef: 'RCP-20260101-0001',
+      description: 'سداد نقدي',
+      paidAt: new Date().toISOString(),
+    });
+    await SilaRepo.enqueuePayment({
+      idempotencyKey: 'rev-a',
+      customerId: 'cus-1',
+      customerName: 'أحمد',
+      customerPhoneLast4: '1234',
+      amountMinor: 3300,
+      paymentMethod: 'other',
+      posReceiptRef: 'RCP-20260101-0002',
+      description: 'عكس قيمة مرتجع بضاعة',
+      paidAt: new Date().toISOString(),
+      kind: 'return_reversal',
+    });
+
+    const list = await SilaRepo.recentPayments(40, 0);
+    expect(list).toHaveLength(1);
+    expect(list[0].pos_receipt_ref).toBe('RCP-20260101-0001');
+    // The KPI sums the same array — 5000 only, never 8300.
+    expect(
+      list.reduce((sum, row) => sum + row.amount_minor, 0),
+    ).toBe(5000);
+  });
 });
 
 describe('sila customers cache (origin-split outstanding)', () => {
@@ -147,6 +188,30 @@ describe('sila customers cache (origin-split outstanding)', () => {
     expect(totals.posTotalMinor).toBe(6000); // the STORE's own share
     expect(totals.appTotalMinor).toBe(2000); // informational only
     expect(totals.debtorsCount).toBe(1);
+
+    // v27 (round-35 #1): the debtors KPI counts STORE debtors only.
+    // A customer whose debts all originated INSIDE the Sila app
+    // (pos_outstanding = 0, app_outstanding > 0) owes this store
+    // NOTHING — the customers page shows no debt, so the KPI must
+    // not count him either («زبون مدين لك» والصفحة تقول لا ديون).
+    await SilaRepo.upsertCustomers(
+      [
+        {
+          customerId: 'cus-3',
+          name: 'زياد',
+          phoneLast4: '9090',
+          outstandingMinor: 4500,
+          creditMinor: 0,
+          posOutstandingMinor: 0,
+          appOutstandingMinor: 4500,
+        },
+      ],
+      new Date().toISOString(),
+    );
+    const afterAppOnly = await SilaRepo.customersOutstandingTotal();
+    expect(afterAppOnly.debtorsCount).toBe(1); // still only أحمد
+    expect(afterAppOnly.totalMinor).toBe(12500);
+    expect(afterAppOnly.posTotalMinor).toBe(6000);
 
     // Consume cached credit at sale time (v17 rule).
     await SilaRepo.consumeCachedCredit('cus-1', 1000);

@@ -598,13 +598,19 @@ export const SilaRepo = {
     lastSyncedAt: string | null;
   }> {
     try {
+      // v27 (round-35 #1): the debtors KPI counts STORE debtors only
+      // (pos_outstanding_minor > 0) — the same number the customers
+      // page shows («في صفحة الزبائن لا ديون لأي زبون» while the KPI
+      // said «زبون مدين لك»). The mixed outstanding_minor includes
+      // debts the customer made INSIDE the Sila app itself — they are
+      // not owed to this store and never enter its books.
       const result = await getDb().execute(
         `SELECT
            COALESCE(SUM(outstanding_minor), 0) AS total_minor,
            COALESCE(SUM(pos_outstanding_minor), 0) AS pos_minor,
            COALESCE(SUM(app_outstanding_minor), 0) AS app_minor,
            COALESCE(SUM(other_minor), 0) AS other_minor,
-           COALESCE(SUM(CASE WHEN outstanding_minor > 0 THEN 1 ELSE 0 END), 0) AS debtors,
+           COALESCE(SUM(CASE WHEN pos_outstanding_minor > 0 THEN 1 ELSE 0 END), 0) AS debtors,
            MAX(last_synced_at) AS last_sync
          FROM sila_customers`,
       );
@@ -808,8 +814,16 @@ export const SilaRepo = {
 
   async recentPayments(limit = 40, offset = 0): Promise<SilaPaymentRow[]> {
     try {
+      // v27 (round-35 #1): return_reversal rows are EXCLUDED — a
+      // goods return is NOT a cashier settlement («اصلا هو مرتجع
+      // وليس مسدد»). The reversal still reduces the customer's debt
+      // on the صلة server (its whole purpose), but it must never
+      // surface in the السدادّات book nor in the «سدادّات عند
+      // الكاشير» KPI. The return itself lives in the invoice's
+      // returns history and the returns report, where it belongs.
       const result = await getDb().execute(
         `SELECT * FROM sila_payment_queue
+         WHERE COALESCE(kind, 'repayment') = 'repayment'
          ORDER BY CASE state WHEN 'failed' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
                   local_id DESC
          LIMIT ? OFFSET ?`,

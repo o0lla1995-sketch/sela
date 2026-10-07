@@ -58,12 +58,15 @@ export const EXPENSE_CATEGORIES: string[] = [
   'متفرقات',
 ];
 
-/** v25 (round-32 #3): which security method guards withdrawals on
- *  THIS device — the fingerprint has the explicit priority (the
- *  merchant's words: «الأولوية للبصمة»), the PIN is the fallback,
- *  and 'none' means nothing is configured yet (allowed, recorded,
- *  and warned about). */
-export function withdrawalSecurityMode(): 'biometric' | 'pin' | 'none' {
+/** v25 (round-32 #3) → v27 (round-35 #3): which security method
+ *  guards ALL THREE treasury movements (deposit, withdrawal,
+ *  expense) on THIS device — the fingerprint has the explicit
+ *  priority (the merchant's words: «الأولوية للبصمة»), the PIN is
+ *  the fallback, and 'none' means nothing is configured yet. The
+ *  sheet then shows a prominent alert telling the merchant to
+ *  enable protection from the security settings (the operation
+ *  stays possible, recorded «بدون تأمين»). */
+export function movementSecurityMode(): 'biometric' | 'pin' | 'none' {
   const lock = useAppLockStore.getState();
   if (lock.biometricEnabled) {
     return 'biometric';
@@ -74,15 +77,20 @@ export function withdrawalSecurityMode(): 'biometric' | 'pin' | 'none' {
   return 'none';
 }
 
-/** v25 (round-32 #3): ONE biometric prompt for the withdrawal —
- *  resolves true only on a verified fingerprint. Cancel/lockout is
- *  false (the screen then offers the PIN pad when a PIN exists). */
-export async function authorizeWithBiometric(): Promise<boolean> {
-  return biometricAuthenticate(
-    'سحب رصيد من الخزينة',
-    'أكّد هويتك بالبصمة لإتمام السحب',
-    'إلغاء السحب',
-  );
+/** v25 legacy alias — the withdrawal gate was the first (and until
+ *  v27 the only) secured movement. */
+export const withdrawalSecurityMode = movementSecurityMode;
+
+/** v27 (round-35 #3): ONE biometric prompt for the treasury movement
+ *  being made — resolves true only on a verified fingerprint.
+ *  Cancel/lockout is false (the sheet then offers the PIN pad when a
+ *  PIN exists). */
+export async function authorizeWithBiometric(
+  title = 'تأكيد عملية الخزينة',
+  subtitle = 'أكّد هويتك بالبصمة لإتمام العملية',
+  cancelLabel = 'إلغاء العملية',
+): Promise<boolean> {
+  return biometricAuthenticate(title, subtitle, cancelLabel);
 }
 
 /** Verifies a typed 4-digit PIN against the stored salted hash. */
@@ -130,11 +138,13 @@ async function printMovementSlip(
 }
 
 export const CashService = {
-  /** Records a business EXPENSE paid from the drawer. */
+  /** Records a business EXPENSE paid from the drawer. v27: the
+   *  caller's passed security gate lands in the audit trail. */
   async recordExpense(input: {
     category: string;
     note?: string | null;
     amountMinor: number;
+    authMethod?: CashAuthMethod;
   }): Promise<CashMovementRecord> {
     const treasury = await ReportService.treasurySnapshot();
     if (input.amountMinor > Math.round(treasury.cashTotal * 100)) {
@@ -149,7 +159,7 @@ export const CashService = {
       category: input.category,
       note: input.note,
       amountMinor: input.amountMinor,
-      authMethod: 'none',
+      authMethod: input.authMethod ?? 'none',
     });
     await printMovementSlip(movement);
     return movement;
@@ -183,17 +193,19 @@ export const CashService = {
     return movement;
   },
 
-  /** Records cash put BACK into the drawer (تغذية خزينة). */
+  /** Records cash put BACK into the drawer (تغذية خزينة). v27: the
+   *  caller's passed security gate lands in the audit trail. */
   async recordDeposit(input: {
     note?: string | null;
     amountMinor: number;
+    authMethod?: CashAuthMethod;
   }): Promise<CashMovementRecord> {
     const movement = await CashRepo.add({
       kind: 'deposit',
       category: 'إيداع نقدي',
       note: input.note,
       amountMinor: input.amountMinor,
-      authMethod: 'none',
+      authMethod: input.authMethod ?? 'none',
     });
     await printMovementSlip(movement);
     return movement;

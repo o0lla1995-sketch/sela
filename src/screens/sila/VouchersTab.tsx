@@ -220,9 +220,14 @@ export function VouchersTab({
   const syncNow = useCallback(async () => {
     setSyncing(true);
     try {
-      await SilaSync.refreshVouchers();
+      // v27 (round-35 #2): the manual button is ALWAYS a FULL
+      // refresh (no updated_since cursor) — a campaign a new
+      // merchant joined but never delivered/redempted anything in
+      // never changes server-side, so the light cursor sync can
+      // miss it forever. «زامن الآن» means «bring me everything».
+      await SilaSync.refreshVouchersFull();
       await loadAll();
-      toast('تمت مزامنة الحملات والقسائم', 'success');
+      toast('تمت مزامنة كل الحملات والقسائم من صِلة', 'success');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'تعذرت المزامنة';
       toast(message, 'error');

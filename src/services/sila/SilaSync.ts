@@ -69,6 +69,14 @@ const VALIDATION_REQUEUE_FLAG = 'sila_requeued_validation_fix_v1';
  *  the campaigns screen as «آخر مزامنة». */
 const KEYS_CURSOR = 'sila_settlements_cursor_v1';
 const KEYS_SYNCED_AT = 'sila_settlements_synced_at_v1';
+/** v27 (round-35 #2): the last time a FULL settlements refresh ran —
+ *  a light (updated_since) sync only returns campaigns the SERVER
+ *  sees as changed, so a campaign a NEW merchant just joined (with
+ *  zero redemptions/settlements — nothing ever updates its row) can
+ *  stay invisible for days. A full pass every 12h guarantees every
+ *  contracted campaign reaches the campaigns screen. */
+const KEYS_FULL_AT = 'sila_settlements_full_at_v1';
+const FULL_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
 /** v19 (round-25 #1): one-time baseline freeze — the FIRST v19
  *  customers pass anchors every existing customer's current
  *  reconciliation gap as HISTORY, so old app payments from before
@@ -452,12 +460,29 @@ async function settlementsSyncCycle(full = false): Promise<void> {
   if (pairing == null) {
     return;
   }
+  // v27 (round-35 #2): AUTO-FULL every 12h — the light cursor sync
+  // never delivers a campaign whose server row hasn't changed since
+  // the cursor (a newly joined merchant with zero redemptions and
+  // zero settlements has nothing to update), so without a periodic
+  // full pass the campaign would never appear in قسم الحملات. The
+  // manual «زامن الحملات الآن» button always runs a FULL pass too.
+  if (!full) {
+    const lastFullAt = getString(KEYS_FULL_AT, '');
+    const lastFullMs =
+      Number(Date.parse(lastFullAt)) > 0 ? Date.parse(lastFullAt) : 0;
+    if (Date.now() - lastFullMs >= FULL_REFRESH_INTERVAL_MS) {
+      full = true;
+    }
+  }
   const cursor = full ? '' : getString(KEYS_CURSOR, '');
   try {
     const feed = await silaFetchSettlements(
       pairing,
       cursor.length > 0 ? cursor : null,
     );
+    if (full) {
+      setString(KEYS_FULL_AT, new Date().toISOString());
+    }
     for (const server of feed.campaigns ?? []) {
       const before = await VouchersRepo.upsertCampaignFromFeed(server);
       // v22 (round-28 #4): the merchant's lifecycle decides what

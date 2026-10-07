@@ -78,7 +78,7 @@ const QUICK_ACTIONS: {
   {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
   {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
   {key: 'invoices', label: 'الفواتير', icon: 'inbox', target: 'Invoices'},
-  {key: 'debts', label: 'الديون', icon: 'book', target: 'LocalDebts'},
+  {key: 'debts', label: 'دفتر الديون', icon: 'book', target: 'LocalDebts'},
   // v26 (round-34 #6): الخزينة gets its own shortcut — the expenses /
   // withdrawals / deposits center is one tap away from the dashboard
   // (it left the reports header to live HERE).
@@ -327,29 +327,14 @@ export function HomeScreen() {
         </View>
 
         {/* ── الخزينة والديون — ONE clean card, never gated ──── */}
+        {/* v27 (round-35 #4): the header carries NO link chips
+            anymore — «دفتر الديون» and «دفتر صِلة» live in the quick
+            actions row above (always the same place, no
+            duplication), and the debts button is renamed
+            «دفتر الديون» there. */}
         <SectionTitle
           title="الخزينة والديون"
           hint="النقد الفعلي لديك + الديون المستحقة لك"
-          action={
-            /* v19 (round-25 #5): while the store is actually paired,
-             * «دفتر صِلة» sits NEXT to «دفتر الديون» — one tap from
-             * the dashboard to the صِلة debts/receipts center. */
-            <View style={styles.ledgerLinksRow}>
-              <TouchableOpacity
-                onPress={() => navigation.navigate('LocalDebts' as never)}>
-                <Text style={styles.seeAll}>دفتر الديون</Text>
-              </TouchableOpacity>
-              {paired ? (
-                <>
-                  <View style={styles.ledgerLinksDivider} />
-                  <TouchableOpacity
-                    onPress={() => navigation.navigate('Sila' as never)}>
-                    <Text style={styles.seeAll}>دفتر صِلة</Text>
-                  </TouchableOpacity>
-                </>
-              ) : null}
-            </View>
-          }
         />
         <Card style={styles.moneyCard}>
           <View style={styles.moneyRow}>
@@ -750,17 +735,8 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },
-    // v19 (round-25 #5): the paired dashboard links row.
-    ledgerLinksRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-    },
-    ledgerLinksDivider: {
-      width: 1,
-      height: 12,
-      backgroundColor: c.borderSoft,
-    },
+    // (v27 round-35 #4: the dashboard ledger links moved out — the
+    // quick actions row is their only home now.)
     statsGrid: {
       gap: spacing.md,
     },

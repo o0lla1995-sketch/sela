@@ -448,13 +448,27 @@ describe('SILA debt returns (the reverse operation)', () => {
     expect(Number(debt?.amount_minor)).toBe(4800);
 
     // …and a return_reversal payment was enqueued for the refund.
-    const payments = await SilaRepo.recentPayments(10);
-    const reversal = payments.find(p => p.kind === 'return_reversal');
+    // v27 (round-35 #1): the cashier payments LIST never shows
+    // reversals («اصلا هو مرتجع وليس مسدد») — the row is verified
+    // straight from the queue table instead.
+    const queueRows = await app.connection
+      .getDb()
+      .execute(
+        "SELECT * FROM sila_payment_queue WHERE COALESCE(kind,'repayment') = 'return_reversal'",
+      );
+    const reversal = (queueRows.rows?._array ?? [])[0] as {
+      amount_minor?: number;
+      payment_method?: string;
+      state?: string;
+    };
     expect(reversal).toBeDefined();
     expect(Number(reversal!.amount_minor)).toBe(1200);
     expect(reversal!.payment_method).toBe('other');
     expect(reversal!.state).toBe('pending');
     expect(ret.debt_adjusted_minor).toBe(1200);
+    // And the cashier book itself stays clean of it.
+    const payments = await SilaRepo.recentPayments(10);
+    expect(payments.find(p => p.kind === 'return_reversal')).toBeUndefined();
 
     // The reversal must NEVER enter the collections statistics.
     const {SilaRepo: SR} = load('src/services/sila/SilaRepo');

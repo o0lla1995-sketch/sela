@@ -7,7 +7,9 @@
  *   • النقد المتوقع بالدرج الآن — بعد خصم كل المصروفات والمسحوبات
  *     وإضافة الإيداعات (نفس معادلة الرئيسية، لحظة بلحظة).
  *   • ثلاث حركات موثقة بسندات مرقمة: مصروف (EXP-) بسلة فئات،
- *     سحب رصيد (WD-) مؤمَّن بالبصمة أولاً ثم برمز PIN، وإيداع (DEP-).
+ *     سحب رصيد (WD-)، وإيداع (DEP-) — وكل واحدة منها (v27)
+ *     مؤمّنة بالبصمة أولاً ثم برمز PIN، مع تنبيه واضح للتاجر
+ *     لتفعيل الحماية حين لا يكون أي منها مفعّلاً.
  *   • لا حركة تتجاوز ما في الدرج فعلياً — سقف صارم يمنع أي فقدان.
  *   • السجل غير قابل للتعديل (مسار تدقيق) — كل سند يعرض طريقة
  *     التأمين المستخدمة عند السحب.
@@ -20,7 +22,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
-  Animated,
   BackHandler,
   Dimensions,
   I18nManager,
@@ -33,7 +34,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import {useFocusEffect} from '@react-navigation/native';
+import {useFocusEffect, useNavigation} from '@react-navigation/native';
 import {
   AppButton,
   AppHeader,
@@ -45,7 +46,7 @@ import {
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {PinPad} from '../../components/PinPad';
-import {CashService, EXPENSE_CATEGORIES, authorizeWithBiometric, verifyWithdrawalPin, withdrawalSecurityMode} from '../../services/CashService';
+import {CashService, EXPENSE_CATEGORIES, authorizeWithBiometric, verifyWithdrawalPin, movementSecurityMode} from '../../services/CashService';
 import {CashRepo} from '../../database/repositories/CashRepo';
 import {useAppLockStore} from '../../stores/appLockStore';
 import {useToastStore} from '../../stores/toastStore';
@@ -128,63 +129,38 @@ function periodRange(key: PeriodKey): {from: string; to: string} {
   }
 }
 
-/** v26 (round-34 #5): keeps a bottom sheet ABOVE the keyboard on
- * ROMs whose IME never resizes the window (overlay keyboards — the
- * «تختفي النافذة عند فتح لوحة المفاتيح» complaint): listens to the
- * REAL keyboard events, lifts the sheet by the exact keyboard height
- * and shrinks it by the same amount (the form scrolls inside). On
- * ROMs where adjustResize DOES shrink the window (the window height
- * measured while the keyboard was open drops by the keyboard's
- * height), the lift is skipped so the sheet is never compensated
- * twice. Deterministic on both worlds. */
-function useKeyboardLift(): {liftY: Animated.Value; shrink: Animated.Value} {
-  const liftY = useRef(new Animated.Value(0)).current;
-  const shrink = useRef(new Animated.Value(0)).current;
+/** v27 (round-35 #3): keeps a bottom sheet ABOVE the keyboard —
+ * REWRITTEN WITH ZERO ANIMATED. The v26 implementation animated the
+ * sheet HEIGHT with `Animated.add(sheetHeight, shrink)` on the same
+ * Animated.View that carried a native-driven translateY — and that
+ * mixed-driver composite height crashed the app the moment the
+ * keyboard opened («التطبيق يغلق بسرعة عند فتح او الضغط علي حقل
+ * إدخال المبلغ»). Plain React state + plain numeric styles can
+ * never crash: the sheet rises by the exact keyboard height and
+ * shrinks by the same amount (the form scrolls inside), applied
+ * INSTANTLY (no animation to drop frames on this ROM). On ROMs
+ * where adjustResize already shrinks the window (measured height
+ * drops with the keyboard open), the lift self-disarms so the
+ * sheet is never compensated twice. Deterministic on both worlds. */
+function useKeyboardLift(): {lift: number} {
+  const [lift, setLift] = useState(0);
   const kbOpen = useRef(false);
   const closedWindowH = useRef(Dimensions.get('window').height);
 
   useEffect(() => {
-    const apply = (kbHeight: number) => {
+    const show = Keyboard.addListener('keyboardDidShow', e => {
+      kbOpen.current = true;
+      const kbHeight = e.endCoordinates.height;
       const nowWindowH = Dimensions.get('window').height;
       const alreadyResized =
         closedWindowH.current - nowWindowH >= kbHeight * 0.6;
-      const lift = alreadyResized ? 0 : -kbHeight;
-      Animated.parallel([
-        Animated.timing(liftY, {
-          toValue: lift,
-          duration: 180,
-          useNativeDriver: true,
-        }),
-        Animated.timing(shrink, {
-          toValue: lift,
-          duration: 180,
-          useNativeDriver: false,
-        }),
-      ]).start();
-    };
-    const reset = () => {
-      Animated.parallel([
-        Animated.timing(liftY, {
-          toValue: 0,
-          duration: 160,
-          useNativeDriver: true,
-        }),
-        Animated.timing(shrink, {
-          toValue: 0,
-          duration: 160,
-          useNativeDriver: false,
-        }),
-      ]).start();
-    };
-    const show = Keyboard.addListener('keyboardDidShow', e => {
-      kbOpen.current = true;
-      apply(e.endCoordinates.height);
+      setLift(alreadyResized ? 0 : kbHeight);
     });
     const hide = Keyboard.addListener('keyboardDidHide', () => {
       kbOpen.current = false;
       // Re-baseline in case the device rotated while typing.
       closedWindowH.current = Dimensions.get('window').height;
-      reset();
+      setLift(0);
     });
     const dims = Dimensions.addEventListener('change', ({window}) => {
       if (!kbOpen.current) {
@@ -196,9 +172,9 @@ function useKeyboardLift(): {liftY: Animated.Value; shrink: Animated.Value} {
       hide.remove();
       dims.remove();
     };
-  }, [liftY, shrink]);
+  }, []);
 
-  return {liftY, shrink};
+  return {lift};
 }
 
 export function CashMovementsScreen() {
@@ -206,6 +182,9 @@ export function CashMovementsScreen() {
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
   const printerStatus = usePrinterStore(state => state.status);
+  // v27 (round-35 #3): the unsecured badge jumps to the security
+  // settings («تنبيه التاجر لتفعيلهم»).
+  const navigation = useNavigation<any>();
 
   const [period, setPeriod] = useState<PeriodKey>('month');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
@@ -430,22 +409,28 @@ export function CashMovementsScreen() {
               </Text>
             </View>
           </View>
-          {withdrawalSecurityMode() === 'none' ? (
-            <View style={styles.securityHint}>
+          {/* v27 (round-35 #3): the badge covers ALL THREE operations
+              now — and the unsecured state is a tappable alert that
+              jumps straight to the security settings. */}
+          {movementSecurityMode() === 'none' ? (
+            <TouchableOpacity
+              style={styles.securityHint}
+              onPress={() => navigation.navigate('Security')}
+              activeOpacity={0.8}>
               <Icon name="alert" size={14} color={c.warning} />
               <Text style={styles.securityHintText}>
-                سحب الرصيد غير مؤمَّن — فعّل البصمة أو رمز PIN من إعدادات
-                الأمان لحماية الخزينة
+                عمليات الخزينة غير مؤمَّنة (إيداع/سحب/مصروف) — فعّل البصمة
+                أو رمز PIN من إعدادات الأمان. اضغط هنا للتفعيل
               </Text>
-            </View>
+            </TouchableOpacity>
           ) : (
             <View
               style={[styles.securityHint, {backgroundColor: c.successSoft}]}>
               <Icon name="fingerprint" size={14} color={c.success} />
               <Text style={[styles.securityHintText, {color: c.success}]}>
-                {withdrawalSecurityMode() === 'biometric'
-                  ? 'سحب الرصيد مؤمَّن بالبصمة'
-                  : 'سحب الرصيد مؤمَّن برمز PIN'}
+                {movementSecurityMode() === 'biometric'
+                  ? 'عمليات الخزينة الثلاث مؤمَّنة بالبصمة'
+                  : 'عمليات الخزينة الثلاث مؤمَّنة برمز PIN'}
               </Text>
             </View>
           )}
@@ -608,7 +593,13 @@ export function CashMovementsScreen() {
                       </Text>
                     ) : null}
                   </View>
-                  {row.kind === 'withdrawal' ? (
+                  {/* v27: every movement can carry a security method —
+                      fingerprint/PIN badges show for all kinds; the
+                      withdrawal keeps its explicit «بدون تأمين» audit
+                      badge from v25. */}
+                  {row.kind === 'withdrawal' ||
+                  row.auth_method === 'fingerprint' ||
+                  row.auth_method === 'pin' ? (
                     <Badge
                       label={AUTH_LABEL[row.auth_method] ?? '—'}
                       tone="neutral"
@@ -712,8 +703,8 @@ export function CashMovementsScreen() {
 // ────────────────────────────────────────────────────────────────
 // MovementSheet — نافذة تسجيل الحركة (INLINE overlay، ارتفاع ثابت
 // 72%، ظهور تدريجي — نفس انضباط نافذة الإرجاع v25 round-32 #1).
-// للسحب: بوابة الأمان — البصمة تلقائياً أولاً، وإلا لوحة PIN،
-// وإلا تحذير مع تسجيل «بدون تأمين».
+// للعمليات الثلاث: بوابة الأمان — البصمة تلقائياً أولاً، وإلا
+// لوحة PIN، وإلا تحذير بارز مع زر تفعيل الحماية وتسجيل «بدون تأمين».
 // ────────────────────────────────────────────────────────────────
 
 const SHEET_TITLES: Record<CashMovementKind, string> = {
@@ -723,9 +714,28 @@ const SHEET_TITLES: Record<CashMovementKind, string> = {
 };
 
 const SHEET_SUBS: Record<CashMovementKind, string> = {
-  expense: 'يُخصم المبلغ من النقد المتوقع ويُطبع سنده فوراً',
-  withdrawal: 'مؤمَّن بالبصمة أو رمز PIN — السقف ما في الدرج فقط',
-  deposit: 'يُضاف المبلغ إلى الخزينة ويُطبع سنده فوراً',
+  expense: 'مؤمّن بالبصمة أو رمز PIN — يُخصم من الخزينة ويُطبع سنده فوراً',
+  withdrawal: 'مؤمّن بالبصمة أو رمز PIN — السقف ما في الدرج فقط',
+  deposit: 'مؤمّن بالبصمة أو رمز PIN — يُضاف للخزينة ويُطبع سنده فوراً',
+};
+
+/** v27 (round-35 #3): the biometric prompt copy per movement. */
+const BIO_PROMPTS: Record<CashMovementKind, {title: string; sub: string; cancel: string}> = {
+  expense: {
+    title: 'تسجيل مصروف من الخزينة',
+    sub: 'أكّد هويتك بالبصمة لإتمام المصروف',
+    cancel: 'إلغاء المصروف',
+  },
+  withdrawal: {
+    title: 'سحب رصيد من الخزينة',
+    sub: 'أكّد هويتك بالبصمة لإتمام السحب',
+    cancel: 'إلغاء السحب',
+  },
+  deposit: {
+    title: 'إيداع نقدي في الخزينة',
+    sub: 'أكّد هويتك بالبصمة لإتمام الإيداع',
+    cancel: 'إلغاء الإيداع',
+  },
 };
 
 function MovementSheet({
@@ -743,12 +753,14 @@ function MovementSheet({
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
 
-  // v26 (round-34 #5): the keyboard lift — the sheet rises above the
-  // IME on overlay-keyboard ROMs and shrinks by the same height (the
-  // form scrolls inside), so the amount field, the note and the
-  // confirm button stay reachable. On adjustResize ROMs the lift
-  // self-disarms (see useKeyboardLift).
-  const {liftY, shrink} = useKeyboardLift();
+  // v27 (round-35 #3): the keyboard lift — PLAIN STATE (zero
+  // Animated): the sheet rises above the IME on overlay-keyboard
+  // ROMs and shrinks by the same height (the form scrolls inside),
+  // so the amount field, the note and the confirm button stay
+  // reachable. On adjustResize ROMs the lift self-disarms (see
+  // useKeyboardLift). v26's Animated.add height crashed the app —
+  // see the hook's header for the full story.
+  const {lift} = useKeyboardLift();
 
   // v26 (round-34 #4): instant render (no entrance animation — the
   // ROM lesson from the return sheet) + a 400ms close-guard so a
@@ -777,7 +789,8 @@ function MovementSheet({
   const [pinError, setPinError] = useState<string | null>(null);
   const [shakeSignal, setShakeSignal] = useState(0);
   const bioBusy = useRef(false);
-  const securityMode = withdrawalSecurityMode();
+  const navigation = useNavigation<any>();
+  const securityMode = movementSecurityMode();
   const hasPin = useAppLockStore(s => s.pinHash != null);
 
   // v26: the guarded backdrop close (needs busy/authStage above).
@@ -808,9 +821,12 @@ function MovementSheet({
     return () => sub.remove();
   }, [busy, authStage, onClose]);
 
-  // The withdrawal gate — fingerprint FIRST (auto-prompt the moment
-  // the sheet opens), PIN pad when the device has no biometrics,
-  // and a documented unsecured pass when nothing is configured.
+  // v27 (round-35 #3): the security gate — ALL THREE movements
+  // (expense, withdrawal, deposit) pass it. Fingerprint FIRST
+  // (auto-prompted the moment the sheet opens when enabled), the
+  // PIN pad when the device has no biometrics, and a documented
+  // unsecured pass (with a loud warning) when nothing is
+  // configured.
   const runBiometric = useCallback(async () => {
     if (bioBusy.current) {
       return;
@@ -818,31 +834,31 @@ function MovementSheet({
     bioBusy.current = true;
     setAuthStage('authorizing');
     try {
-      const ok = await authorizeWithBiometric();
+      const prompt = BIO_PROMPTS[mode];
+      const ok = await authorizeWithBiometric(
+        prompt.title,
+        prompt.sub,
+        prompt.cancel,
+      );
       if (ok) {
         setAuthMethod('fingerprint');
         setAuthStage('passed');
-      } else if (securityMode === 'biometric') {
+      } else {
         // Cancelled — stay on the gate; the PIN fallback button is
         // there when a PIN exists, otherwise try again.
-        setAuthStage('idle');
-      } else {
         setAuthStage('idle');
       }
     } finally {
       bioBusy.current = false;
     }
-  }, [securityMode]);
+  }, [mode]);
 
   useEffect(() => {
-    if (mode !== 'withdrawal') {
-      return;
-    }
     if (securityMode === 'biometric') {
       void runBiometric();
     }
-    // 'pin' → the pad below collects it; 'none' → passes unsecured.
-  }, [mode, securityMode, runBiometric]);
+    // 'pin' → the pad below collects it; 'none' → warned + unsecured.
+  }, [securityMode, runBiometric]);
 
   const handlePinSubmit = useCallback(
     (pin: string) => {
@@ -877,7 +893,9 @@ function MovementSheet({
     if (busy || amountMinor <= 0 || overDrawer) {
       return;
     }
-    if (mode === 'withdrawal' && securityMode !== 'none' && authStage !== 'passed') {
+    // v27: the gate guards ALL THREE movements — expense and
+    // deposit are money operations exactly like the withdrawal.
+    if (securityMode !== 'none' && authStage !== 'passed') {
       toast('أكّد هويتك أولاً — البصمة أو رمز PIN', 'info');
       return;
     }
@@ -889,6 +907,7 @@ function MovementSheet({
           category: effectiveCategory,
           note: note.trim() || null,
           amountMinor,
+          authMethod,
         });
       } else if (mode === 'withdrawal') {
         movement = await CashService.recordWithdrawal({
@@ -900,6 +919,7 @@ function MovementSheet({
         movement = await CashService.recordDeposit({
           note: note.trim() || null,
           amountMinor,
+          authMethod,
         });
       }
       await onDone(movement);
@@ -926,21 +946,30 @@ function MovementSheet({
   ]);
 
   const sheetHeight = Math.round(Dimensions.get('window').height * 0.72);
-  const gate = mode === 'withdrawal' && securityMode !== 'none' && authStage !== 'passed';
+  // v27 (round-35 #3): the gate applies to ALL THREE movements.
+  const gate = securityMode !== 'none' && authStage !== 'passed';
+  // v27: plain numbers — the sheet stays fully visible above the
+  // keyboard (never smaller than 260px so the confirm box survives
+  // even a huge IME).
+  const visibleSheetHeight = Math.max(260, sheetHeight - lift);
 
   return (
     <View style={sheetStyles(c).backdrop}>
       <Pressable style={{flex: 1}} onPress={backdropPressGuarded} />
-      {/* v26 (round-34 #5): AnimatedHeight via the shrink value — the
-          sheet rises by liftY and its height shrinks by the same
-          amount while the keyboard is open, so the form stays fully
-          visible and scrollable above the IME. */}
-      <Animated.View
+      {/* v27 (round-35 #3): a PLAIN View with numeric height +
+          translateY — zero Animated nodes, zero drivers. v26's
+          `height: Animated.add(sheetHeight, shrink)` (a JS-driven
+          composite height on the same view carrying a native-driven
+          transform) crashed the app the instant the keyboard opened;
+          plain numbers cannot. The sheet rises by the keyboard
+          height and shrinks by the same amount (form scrolls
+          inside). */}
+      <View
         style={[
           sheetStyles(c).sheet,
           {
-            height: Animated.add(sheetHeight, shrink),
-            transform: [{translateY: liftY}],
+            height: visibleSheetHeight,
+            transform: [{translateY: -lift}],
           },
         ]}>
         <Pressable style={{flex: 1}} onPress={() => undefined} disabled={busy}>
@@ -994,8 +1023,7 @@ function MovementSheet({
                     أكّد هويتك بالبصمة
                   </Text>
                   <Text style={sheetStyles(c).gateSub}>
-                    سحب الرصيد من الخزينة يتطلب تأكيد البصمة — الأولوية
-                    للبصمة دائماً
+                    {BIO_PROMPTS[mode].sub} — الأولوية للبصمة دائماً
                   </Text>
                   {authStage === 'authorizing' ? (
                     <ActivityIndicator size="large" color={c.accent} />
@@ -1022,7 +1050,7 @@ function MovementSheet({
                   <Text style={sheetStyles(c).gateTitle}>
                     {securityMode === 'biometric'
                       ? 'أدخل رمز PIN — بديل البصمة'
-                      : 'أدخل رمز PIN لإتمام السحب'}
+                      : 'أدخل رمز PIN لإتمام العملية'}
                   </Text>
                   <PinPad
                     title="رمز التأمين"
@@ -1037,21 +1065,41 @@ function MovementSheet({
           ) : (
             /* ── The entry form ── */
             <>
-              {mode === 'withdrawal' && securityMode === 'none' ? (
+              {/* v27 (round-35 #3): the unsecured alert — ALL THREE
+                  movements now pass the gate, so when NOTHING is
+                  configured the merchant is told loudly to enable
+                  protection (with a one-tap jump to the security
+                  settings); the operation stays possible, recorded
+                  «بدون تأمين». */}
+              {securityMode === 'none' ? (
                 <View style={sheetStyles(c).warnBox}>
                   <Icon name="alert" size={14} color={c.warning} />
-                  <Text style={sheetStyles(c).warnText}>
-                    لا بصمة ولا رمز PIN مفعّل — سيُسجّل السحب «بدون تأمين».
-                    فعّل الحماية من إعدادات الأمان.
-                  </Text>
+                  <View style={{flex: 1}}>
+                    <Text style={sheetStyles(c).warnText}>
+                      لا بصمة ولا رمز PIN مفعّل — سيُسجّل السند «بدون تأمين».
+                      فعّل الحماية من إعدادات الأمان لضمان عمليات الخزينة.
+                    </Text>
+                    <TouchableOpacity
+                      style={sheetStyles(c).enableSecurityBtn}
+                      onPress={() => {
+                        onClose();
+                        navigation.navigate('Security');
+                      }}
+                      activeOpacity={0.8}>
+                      <Icon name="shield" size={13} color={c.warning} />
+                      <Text style={sheetStyles(c).enableSecurityText}>
+                        تفعيل الحماية الآن
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               ) : null}
-              {mode === 'withdrawal' && authStage === 'passed' ? (
+              {authStage === 'passed' ? (
                 <View style={[sheetStyles(c).warnBox, {backgroundColor: c.successSoft}]}>
                   <Icon name="checkCircle" size={14} color={c.success} />
                   <Text style={[sheetStyles(c).warnText, {color: c.success}]}>
                     تم التأمين {authMethod === 'fingerprint' ? 'بالبصمة' : 'برمز PIN'} —
-                    أكمل السحب
+                    أكمل العملية
                   </Text>
                 </View>
               ) : null}
@@ -1193,7 +1241,7 @@ function MovementSheet({
             </>
           )}
         </Pressable>
-      </Animated.View>
+      </View>
     </View>
   );
 }
@@ -1309,6 +1357,27 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       fontFamily: fonts.regular,
       fontSize: typography.small,
       lineHeight: 18,
+    },
+    /** v27 (round-35 #3): the «تفعيل الحماية الآن» jump button —
+     *  shown inside the unsecured alert when no biometric and no
+     *  PIN are configured. */
+    enableSecurityBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs,
+      alignSelf: 'flex-start',
+      marginTop: spacing.sm,
+      paddingVertical: spacing.xs + 2,
+      paddingHorizontal: spacing.sm,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.warning,
+      backgroundColor: c.surfaceHi,
+    },
+    enableSecurityText: {
+      color: c.warning,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
     form: {
       gap: spacing.sm,

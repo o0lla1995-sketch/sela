@@ -278,6 +278,30 @@ describe('v25 — treasurySnapshot: expenses/withdrawals leave the drawer', () =
     const treasury = await ReportService.treasurySnapshot();
     expect(treasury.cashTotal).toBeCloseTo(0, 2);
   });
+
+  test('v27: expense and deposit carry the passed security method into the voucher', async () => {
+    await seedCashSale(40000); // 400 ₪.
+    const {CashService} = load('src/services/CashService');
+    // The gate now guards ALL THREE movements — the audit trail on
+    // the voucher must say HOW each one was approved.
+    const expense = await CashService.recordExpense({
+      category: 'نقل وشحن',
+      amountMinor: 10000,
+      authMethod: 'fingerprint',
+    });
+    expect(expense.auth_method).toBe('fingerprint');
+    const deposit = await CashService.recordDeposit({
+      amountMinor: 5000,
+      authMethod: 'pin',
+    });
+    expect(deposit.auth_method).toBe('pin');
+    // Backwards compatibility: omitted → «بدون تأمين».
+    const plain = await CashService.recordExpense({
+      category: 'ضيافة',
+      amountMinor: 2000,
+    });
+    expect(plain.auth_method).toBe('none');
+  });
 });
 
 describe('v25 — the scan-to-open receipt barcode', () => {
