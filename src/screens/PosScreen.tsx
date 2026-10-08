@@ -60,6 +60,7 @@ import type {LocalCustomerBalance, SilaCustomer} from '../core/types';
 import {VisionRecognitionService} from '../services/vision/VisionRecognitionService';
 import {
   cameraPermissionMessage,
+  closeScannerNow,
   ensureCameraPermission,
   notifyScanResult,
   openAppSettings,
@@ -528,23 +529,11 @@ export function PosScreen({
     }
   }, [saleSheet, pendingSheets, openSaleSheet]);
 
-  /** v35: أضف منتجاً ممسوحاً — المتغيرات تنتظر نافذتها بعد إغلاق
-   *  الماسح، والبقية تضاف مباشرة كما كانت. */
-  const addScanned = useCallback(
-    (product: Product) => {
-      const variants = product.variants ?? [];
-      if (variants.some(v => v.kind === 'variant')) {
-        setPendingSheets(prev => [...prev, product]);
-        return;
-      }
-      tryAdd(product);
-    },
-    [tryAdd],
-  );
-
   // v8.3: queued weight pads — one scanner session can recognize
   // several weight products; each gets its pad in turn when the
   // native window closes.
+  // v39 (الجولة 47): مع الإغلاق الفوري عند التعرف على منتج وزن،
+  //  اللوحة تفتح فوق شاشة البيع مباشرة لحظة إغلاق نافذة الماسح.
   useEffect(() => {
     if (weightProduct == null && pendingWeight.length > 0) {
       const [next, ...rest] = pendingWeight;
@@ -693,8 +682,20 @@ export function PosScreen({
             if (!session.weightQueue.some(entry => entry.id === product.id)) {
               session.weightQueue.push(product);
             }
+            // v39 (الجولة 47 #7): منتج وزن (فواكه/خضار) — سعره لا
+            //  يُعرف إلا بإدخال وزنه من نافذة البيع؛ فور التعرف عليه
+            //  بصرياً تُغلق نافذة الماسح وتفتح لوحة وزنه فوقها مباشرة
+            //  (طلب التاجر حرفياً: «فور التقاطه والتعرف عليه أن يفتح
+            //  نافذة البيع الخاصة به»). الكشف عن باقي الأصناف في
+            //  الصورة نفسها يكتمل أولاً ثم تُغلق النافذة.
+            setPendingWeight(prev =>
+              prev.some(entry => entry.id === product.id)
+                ? prev
+                : [...prev, product],
+            );
+            void closeScannerNow();
             return {
-              part: `${product.name} — وزنه عند الإغلاق`,
+              part: `${product.name} — أدخل وزنه الآن`,
               ok: true,
               added: 1,
             };
@@ -1056,17 +1057,27 @@ export function PosScreen({
                 : [...prev, product],
             );
             beep();
+            // v39 (الجولة 47 #2+#7): منتج وزن — سعره لا يعرفه إلا
+            //  لوحة الوزن (الوزن يُدخل يدوياً والباركود لا يستطيع
+            //  تسعيره) — نافذة الماسح تُغلق فور التعرف فتفتح لوحة
+            //  الوزن فوقها مباشرة بدل انتظار إغلاق التاجر للماسح.
+            await closeScannerNow();
             return {status: 'queued', name: product.name};
           }
           const mode = useCartStore.getState().pricingMode;
           // v35 (الجولة 43): منتج بمتغيرات (ملابس) — نافذة اللون
           //  والمقاس تنتظر إغلاق الماسح ثم تفتح (المسار المباشر
           //  يبيع كل مقاس كيف؟).
+          //  v39 (الجولة 47 #2): تفتح فوراً — الماسح يُغلق نفسه لحظة
+          //  التعرف على منتج متعدد الخصائص (ملابس/أحذية) فيختار
+          //  الكاشير اللون والمقاس ويضاف للسلة في الحال (طلب التاجر
+          //  نصاً: «يجب أن يفتح مباشرة الخصائص للمنتج»).
           if ((product.variants ?? []).some(v => v.kind === 'variant')) {
             setPendingSheets(prev =>
               prev.some(p => p.id === product.id) ? prev : [...prev, product],
             );
             beep();
+            await closeScannerNow();
             return {status: 'queued', name: product.name};
           }
           const result = addProduct(product, mode, null);
@@ -1183,7 +1194,7 @@ export function PosScreen({
             session.confirmed++;
             await notifyScanResult(
               true,
-              `منتج وزن — أدخل وزنه عند الإغلاق: ${outcome.name}`,
+              `منتج وزن — نافذة الوزن فُتحت له: ${outcome.name}`,
             );
           } else if (outcome.status === 'error' && outcome.reason != null) {
             // v10 (round-16 #3): stock-out / lookup failures show IN
@@ -1291,7 +1302,7 @@ export function PosScreen({
             session.confirmed++;
             await notifyScanResult(
               true,
-              `منتج وزن — أدخل وزنه عند الإغلاق: ${outcome.name}`,
+              `منتج وزن — نافذة الوزن فُتحت له: ${outcome.name}`,
             );
           } else if (outcome.status === 'error' && outcome.reason != null) {
             // v10 (round-16 #3): stock-out / lookup failures show IN
@@ -4251,11 +4262,16 @@ const useStyles = makeStyles(c =>
       borderColor: c.borderSoft,
       borderRadius: radius.md,
       padding: spacing.sm,
-      gap: 4,
+      gap: 3,
     },
+    /** v39 (الجولة 47): تكبير صورة المنتج قليلاً — المساحة المحجوزة
+     *  للنصوص (الاسم + السعر + المخزون) ضُغطت من 62 إلى 54 والحشو
+     *  الداخلي قلّ قليلاً فكسبت الصورة ~9 بكسل إضافية بارتفاع أوضح
+     *  للصورة دون تغيير عدد الأعمدة (طلب التاجر: «كبّر حجم الصورة
+     *  الخاصة بالمنتجات في السلة قليلاً»). */
     tileImage: {
       width: GRID_TILE - spacing.sm * 2,
-      height: GRID_TILE - spacing.sm * 2 - 62,
+      height: GRID_TILE - spacing.sm * 2 - 54,
       borderRadius: radius.sm,
       backgroundColor: c.surfaceAlt,
     },

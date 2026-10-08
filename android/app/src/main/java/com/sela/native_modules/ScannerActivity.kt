@@ -162,6 +162,22 @@ class ScannerActivity : Activity() {
         /** True when at least one scanner window is alive. */
         @JvmStatic fun isLive(): Boolean = liveInstances.get() > 0
 
+        /** v39 (الجولة 47): JS-requested immediate close — when a
+         *  scanned product NEEDS its sale window (a weight product
+         *  whose price is typed by weight, or a variant product that
+         *  needs color/size), the scanner closes itself the moment
+         *  recognition lands so the window opens INSTANTLY (طلب
+         *  التاجر: «فور التقاطه والتعرف عليه أن يفتح نافذة البيع
+         *  الخاصة به»). Same path as the merchant's own close —
+         *  settles the session promise with cancelled so the JS
+         *  settle step runs its normal flow. */
+        @JvmStatic fun requestClose() {
+            val activity = liveInstance?.get() ?: return
+            activity.runOnUiThread {
+                runCatching { activity.finishCancelled() }
+            }
+        }
+
         /** Camera permission request code (round-11 #1). */
         private const val REQUEST_CAMERA = 71020
 

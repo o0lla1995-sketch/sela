@@ -45,7 +45,9 @@ describe('v31 — نوافذ الخزينة: لوحة الأرقام دائمة'
     const src = read(CASH);
     // Both inputs sit BEFORE the collapsible ScrollView (pinned
     // under the amount) so they stay visible above the system IME.
-    const notePos = src.indexOf('style={sheetStyles(c).noteInput}');
+    // v39 (الجولة 47): style الملاحظة صار مصفوفة (النسخة الكبيرة
+    // للسحب/الإيداع) — البحث عن مفتاح noteInput داخل المصفوفة.
+    const notePos = src.indexOf('sheetStyles(c).noteInput');
     const scrollPos = src.indexOf('contentContainerStyle={sheetStyles(c).form}');
     expect(notePos).toBeGreaterThan(-1);
     expect(scrollPos).toBeGreaterThan(notePos);

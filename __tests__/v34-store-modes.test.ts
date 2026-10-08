@@ -332,7 +332,10 @@ describe('v35 — شبكة البيع: نافذة البيع لكل منتج ق�
     expect(read('src/database/repositories/ProductRepo.ts')).toContain(
       'findByBarcode',
     );
-    expect(src).toContain('addScanned');
+    // v39 (الجولة 47): مسار المسح صار فورياً — منتج المتغيرات يغلق
+    // الماسح لحظة التعرف (closeScannerNow) فتفتح نافذة اللون والمقاس
+    // فوق شاشة البيع مباشرة (addScanned القديمة حُذفت).
+    expect(src).toContain('closeScannerNow');
     void src;
   });
 });

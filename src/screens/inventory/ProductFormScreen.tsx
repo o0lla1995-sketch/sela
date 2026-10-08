@@ -52,7 +52,10 @@ import {useSettingsStore} from '../../stores/settingsStore';
 import {useToastStore} from '../../stores/toastStore';
 import {VisionRecognitionService} from '../../services/vision/VisionRecognitionService';
 import {scanBarcode, capturePhoto} from '../../services/vision/scanFlow';
-import {PlatformUtilsNative} from '../../native/nativeBridge';
+import {
+  PlatformUtilsNative,
+  SelaImagePickerNative,
+} from '../../native/nativeBridge';
 import {BarcodeView} from '../../components/BarcodeView';
 import {
   generateInternalEan13,
@@ -144,6 +147,9 @@ export function ProductFormScreen() {
   const route = useRoute<any>();
   const productId: number | undefined = route.params?.productId;
   const presetBarcode: string | undefined = route.params?.barcode;
+  // v39 (الجولة 47): «حفظ وإضافة آخر» يفتح نسخة جديدة بنفس
+  //  التصنيف — الدفعات المتتالية (صيدلية) بلا إعادة اختياره كل مرة.
+  const presetCategoryId: number | undefined = route.params?.categoryId;
 
   const toast = useToastStore(state => state.show);
   const refreshCatalog = useCatalogStore(state => state.refresh);
@@ -200,7 +206,9 @@ export function ProductFormScreen() {
   const [threshold, setThreshold] = useState('');
   /** Which unit the merchant is entering stock in (null = base قطعة). */
   const [stockUnitId, setStockUnitId] = useState<number | null>(null);
-  const [categoryId, setCategoryId] = useState<number | 'none'>('none');
+  const [categoryId, setCategoryId] = useState<number | 'none'>(
+    presetCategoryId ?? 'none',
+  );
   const [imageUri, setImageUri] = useState<string | null>(null);
   /** v8.3 (round-12 #4): قطعة (counted) or وزن (weighed — prices per
    *  kilo, fractional kg stock, weight pad at the POS). */
@@ -571,6 +579,49 @@ export function ProductFormScreen() {
     return {state, label, days};
   }, [expiryDate, settings.expiryAlertDays]);
 
+  /** v39 (الجولة 47): جوهر تسجيل البصمة من أي مسار صورة — الكاميرا
+   *  أو المعرض: تضمين + مرآة + مصغّرة، واعتمادها صورة للمنتج إن
+   *  لم توجد صورة حية (نفس منطق v8.3). يُعرَّف قبل مستخدميه. */
+  const enrollAngleFromPath = useCallback(
+    async (angle: AngleLabel, photoPath: string) => {
+      await VisionRecognitionService.loadModel();
+      const embedding = await VisionRecognitionService.embedPhoto(photoPath);
+      let mirrored: Float32Array | null = null;
+      try {
+        mirrored = await VisionRecognitionService.embedPhotoEx(photoPath, {
+          flip: true,
+        });
+      } catch {
+        // The mirror is a bonus — never block enrollment on it.
+      }
+      const thumbnailPath = await VisionRecognitionService.saveThumbnail(
+        photoPath,
+      );
+      setAngles(prev => ({
+        ...prev,
+        [angle]: {embedding, thumbnailPath, mirrored},
+      }));
+      // v8.3: adopt the new photo when there is no image OR the
+      // current one points at a file that no longer exists (a
+      // restored backup left dead paths — they used to block new
+      // images from appearing).
+      if (thumbnailPath != null) {
+        let currentIsDead = imageUri == null;
+        if (imageUri != null && PlatformUtilsNative != null) {
+          try {
+            currentIsDead = !(await PlatformUtilsNative.fileExists(imageUri));
+          } catch {
+            currentIsDead = false;
+          }
+        }
+        if (currentIsDead) {
+          setImageUri(thumbnailPath);
+        }
+      }
+    },
+    [imageUri],
+  );
+
   /** v8: native PHOTO engine → embed → this angle's fingerprint.
    *  The camera runs in its own native window (ScannerActivity):
    *  fill-frame preview, real torch, correct dimensions — every
@@ -590,41 +641,7 @@ export function ProductFormScreen() {
         if (photoPath == null) {
           return; // Merchant closed the scanner.
         }
-        await VisionRecognitionService.loadModel();
-        const embedding = await VisionRecognitionService.embedPhoto(photoPath);
-        let mirrored: Float32Array | null = null;
-        try {
-          mirrored = await VisionRecognitionService.embedPhotoEx(photoPath, {
-            flip: true,
-          });
-        } catch {
-          // The mirror is a bonus — never block enrollment on it.
-        }
-        const thumbnailPath = await VisionRecognitionService.saveThumbnail(
-          photoPath,
-        );
-        setAngles(prev => ({
-          ...prev,
-          [angle]: {embedding, thumbnailPath, mirrored},
-        }));
-        // v8.3: adopt the new photo when there is no image OR the
-        // current one points at a file that no longer exists (a
-        // restored backup left dead paths — they used to block new
-        // images from appearing).
-        if (thumbnailPath != null) {
-          let currentIsDead = imageUri == null;
-          if (imageUri != null && PlatformUtilsNative != null) {
-            try {
-              currentIsDead = !(await PlatformUtilsNative.fileExists(imageUri));
-            } catch {
-              currentIsDead = false;
-            }
-          }
-          if (currentIsDead) {
-            setImageUri(thumbnailPath);
-          }
-        }
-        toast(`تم حفظ البصمة ${ANGLE_LABELS_AR[angle]}`, 'success');
+        await enrollAngleFromPath(angle, photoPath);
       } catch (error) {
         toast(
           error instanceof Error ? error.message : 'فشل التقاط البصمة',
@@ -632,12 +649,65 @@ export function ProductFormScreen() {
         );
       }
     },
-    [imageUri, toast],
+    [enrollAngleFromPath, toast],
   );
+
+  /** v39 (الجولة 47): تسجيل بصمة الزاوية من صورة بالمعرض — نفس
+   *  خط التصوير تماماً (تضمين + مرآة + مصغّرة) لكن مصدر الصورة
+   *  منتقي النظام بدل الكاميرا (طلب التاجر: «أريد خيار أيضا رفع
+   *  صورة للمنتج»). صورة غلاف المصنّع أو لقطة هاتف سابقة تكفي. */
+  const pickAngleFromGallery = useCallback(
+    async (angle: AngleLabel) => {
+      if (photoBusy) {
+        return;
+      }
+      if (SelaImagePickerNative == null) {
+        toast('منتقي الصور غير متوفر في هذا الإصدار', 'error');
+        return;
+      }
+      setPhotoBusy(true);
+      try {
+        const picked = await SelaImagePickerNative.pickStoreLogo(1024);
+        await enrollAngleFromPath(angle, picked);
+        toast(`تم حفظ البصمة ${ANGLE_LABELS_AR[angle]} من المعرض`, 'success');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/CANCELLED|أُغلق|لم يتم اختيار/i.test(message)) {
+          return; // أغلق التاجر المنتقي — ليس خطأً.
+        }
+        toast(
+          error instanceof Error ? error.message : 'فشل رفع الصورة',
+          'error',
+        );
+      } finally {
+        setPhotoBusy(false);
+      }
+    },
+    [photoBusy, enrollAngleFromPath, toast],
+  );
+
+  /** v39: اعتماد مسار صورة كصورة المنتج (تصغير إن أمكن) — يُعرَّف
+   *  قبل مستخدميه (takeProductPhoto / رفع المعرض). */
+  const adoptProductPhoto = useCallback(async (photoPath: string) => {
+    let finalPath = photoPath;
+    if (VisionRecognitionService.saveThumbnail != null) {
+      try {
+        const thumb = await VisionRecognitionService.saveThumbnail(photoPath);
+        if (thumb != null) {
+          finalPath = thumb;
+        }
+      } catch {
+        // الصورة الأصلية تكفي — التصغير تحسين فقط.
+      }
+    }
+    setImageUri(finalPath);
+  }, []);
 
   /** v35 (الجولة 43): صورة المنتج للمجالات التي لا تنفعها البصمة
    *  البصرية (ملابس/صيدلية/مطعم/كافيتريا) — صورة واحدة بالكاميرا
-   *  الأصلية تظهر في تجان البيع وتُخزن كصورة المنتج. */
+   *  الأصلية تظهر في تجان البيع وتُخزن كصورة المنتج.
+   *  v39 (الجولة 47): من المعرض أيضاً — زر «رفع صورة» بجانب التصوير
+   *  (طلب التاجر نصاً: «اريد خيار أيضا رفع صورة للمنتج»). */
   const takeProductPhoto = useCallback(async () => {
     if (photoBusy) {
       return;
@@ -648,20 +718,7 @@ export function ProductFormScreen() {
       if (photoPath == null) {
         return; // أغلق التاجر الكاميرا.
       }
-      let finalPath = photoPath;
-      if (VisionRecognitionService.saveThumbnail != null) {
-        try {
-          const thumb = await VisionRecognitionService.saveThumbnail(
-            photoPath,
-          );
-          if (thumb != null) {
-            finalPath = thumb;
-          }
-        } catch {
-          // الصورة الأصلية تكفي — التصغير تحسين فقط.
-        }
-      }
-      setImageUri(finalPath);
+      await adoptProductPhoto(photoPath);
       toast('تم حفظ الصورة', 'success');
     } catch (error) {
       toast(
@@ -671,7 +728,36 @@ export function ProductFormScreen() {
     } finally {
       setPhotoBusy(false);
     }
-  }, [photoBusy, toast]);
+  }, [photoBusy, adoptProductPhoto, toast]);
+
+  /** v39 (الجولة 47): رفع صورة المنتج من المعرض — منتقي النظام
+   *  (SAF) يحفظ نسخة خاصة بالتطبيق فلا تنكسر المسارات أبداً. */
+  const pickProductPhotoFromGallery = useCallback(async () => {
+    if (photoBusy) {
+      return;
+    }
+    if (SelaImagePickerNative == null) {
+      toast('منتقي الصور غير متوفر في هذا الإصدار', 'error');
+      return;
+    }
+    setPhotoBusy(true);
+    try {
+      const picked = await SelaImagePickerNative.pickStoreLogo(1024);
+      await adoptProductPhoto(picked);
+      toast('تم رفع الصورة من المعرض', 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/CANCELLED|أُغلق|لم يتم اختيار/i.test(message)) {
+        return; // أغلق التاجر المنتقي — ليس خطأً.
+      }
+      toast(
+        error instanceof Error ? error.message : 'فشل رفع الصورة',
+        'error',
+      );
+    } finally {
+      setPhotoBusy(false);
+    }
+  }, [photoBusy, adoptProductPhoto, toast]);
 
   /** v8: native BARCODE engine → fill the barcode field. */
   const scanBarcodeField = useCallback(async () => {
@@ -1497,7 +1583,7 @@ export function ProductFormScreen() {
     navigation,
   ]);
 
-  const save = useCallback(async () => {
+  const save = useCallback(async (next: boolean = false) => {
     // v35 (الجولة 43): الملابس عند الإنشاء = موديل واحد بمتغيرات
     //  من الربطة — مسار حفظ خاص بها. التعديل يمر المسار الطبيعي
     //  مع حفظ متغيراته كما عُدّلت بمحرّر المتغيرات.
@@ -1551,7 +1637,10 @@ export function ProductFormScreen() {
         ? loadedStockRef.current
         : 0
       : isClothingModel
-      ? variantDrafts.reduce((sum, v) => sum + Math.max(0, v.stock), 0)
+      ? variantDrafts.reduce(
+          (sum, v) => sum + Math.max(0, Math.round(v.stock)),
+          0,
+        )
       : weighted
       ? Math.round(stockRaw * 1000) / 1000
       : Math.round(stockRaw);
@@ -1708,34 +1797,15 @@ export function ProductFormScreen() {
         throw new Error('فشل حفظ المنتج');
       }
 
-      // v37 (الجولة 45 #1أ): التتبع الدائم المطلوب نصاً — «تتبع دائم
-      //  لعمليات الحفظ والتعديل في الكود للتحقق من وصول قيم
-      //  stock_quantity وتحديثها بدقة في قاعدة البيانات عبر جميع
-      //  مودات المتجر»: بعد كل حفظ/تعديل يُعاد قراءة السطر من
-      //  القاعدة نفسها ويُطابَق مع القيمة المقصودة. أي انحراف
-      //  (ولو كسرياً صغيراً) يفشل العملية برسالة خطأ عربية — لن
-      //  تظهر رسالة نجاح أبداً فوق حفظ لم يصل فعلاً إلى القاعدة.
-      //  المسار مشترك لكل المودات (بقالة/كافيتريا/ملابس/صيدلية/
-      //  فواكه/مطعم) لأنه هنا في جذر الحفظ نفسه.
-      const verify = await ProductRepo.getById(targetId);
-      if (verify == null) {
-        throw new Error('فشل التحقق: المنتج غير موجود بعد الحفظ');
-      }
-      if (Math.abs((verify.stock_quantity ?? 0) - stockValue) > 0.0001) {
-        throw new Error(
-          `تعذر تحديث المخزون بدقة — القصد ${stockValue} والمحفوظ فعلاً ${
-            verify.stock_quantity ?? 0
-          }. أعد المحاولة`,
-        );
-      }
-      if ((verify.stock_untracked ?? 0) !== (untrackedStock ? 1 : 0)) {
-        throw new Error('تعذر تحديث حالة تتبع المخزون — أعد المحاولة');
-      }
-
       await UnitRepo.replaceForProduct(targetId, cleanedUnits);
 
       // v35 (الجولة 43): متغيرات الموديل — ملابس (لون × مقاس بمخزون
       //  معدّل) وأحجام المطعم/الكافيتريا (حجم بسعره وتكلفته).
+      //  v39 (الجولة 47 — جذر تصفير المخزون): الملابس فقط تزامن
+      //  مخزون الموديل مع مجموع متغيراته (sync=true)؛ الأحجام
+      //  تحمل أسعارها فقط فلا تلمس المخزون، ومسار التنظيف الفارغ
+      //  يحذف صفوف المتغيرات فقط — كان يكتب صفراً فوق الكمية بعد
+      //  أي تعديل («تم الحفظ بنجاح» والمخزون نفذ!).
       if (isClothingModel) {
         await VariantRepo.replaceForProduct(
           targetId,
@@ -1745,6 +1815,7 @@ export function ProductFormScreen() {
             size: v.size,
             stock_quantity: Math.max(0, Math.round(v.stock)),
           })),
+          true,
         );
       } else if (sizesEnabled && sizeDrafts.length > 0) {
         await VariantRepo.replaceForProduct(
@@ -1759,7 +1830,8 @@ export function ProductFormScreen() {
           })),
         );
       } else if (productId != null && !isClothingModel && !sizesEnabled) {
-        // أُطفئت الأحجام أو نُزعت المتغيرات — نظّف صفوفها.
+        // أُطفئت الأحجام أو نُزعت المتغيرات — نظّف صفوفها فقط؛
+        //  المخزون المحفوظ أعلاه لا يُمس (v39).
         await VariantRepo.replaceForProduct(targetId, []);
       }
 
@@ -1795,7 +1867,39 @@ export function ProductFormScreen() {
         }
       }
 
+      // v39 (الجولة 47): التحقق النهائي — بعد كل الكتابات (المنتج
+      //  + الوحدات + المتغيرات + البصمات)، لا قبلها. كان يجري قبل
+      //  استبدال المتغيرات فمضى وهو أخضر ثم صُفّر المخزون بعده
+      //  بصمت. الآن أي انحراف (ولو كسرياً صغيراً) في أي مسار يفشل
+      //  الحفظ برسالة عربية واضحة — لن تظهر رسالة نجاح فوق قاعدة
+      //  لم تستلم قيمتها فعلاً. المسار مشترك لكل المودات.
+      const verify = await ProductRepo.getById(targetId);
+      if (verify == null) {
+        throw new Error('فشل التحقق: المنتج غير موجود بعد الحفظ');
+      }
+      if (Math.abs((verify.stock_quantity ?? 0) - stockValue) > 0.0001) {
+        throw new Error(
+          `تعذر تحديث المخزون بدقة — القصد ${stockValue} والمحفوظ فعلاً ${
+            verify.stock_quantity ?? 0
+          }. أعد المحاولة`,
+        );
+      }
+      if ((verify.stock_untracked ?? 0) !== (untrackedStock ? 1 : 0)) {
+        throw new Error('تعذر تحديث حالة تتبع المخزون — أعد المحاولة');
+      }
+
       await refreshCatalog();
+      // v39 (الجولة 47): «حفظ وإضافة آخر» — إدخال الدفعات المتتالية
+      //  (خصوصاً الصيدلية): بعد النجاح تُستبدل الشاشة بنسخة فارغة
+      //  جديدة بنفس التصنيف بدل العودة للقائمة ثم فتح الإضافة من
+      //  جديد — نصف النقرات لكل منتج.
+      if (next && productId == null) {
+        toast('تمت الإضافة — أدخل المنتج التالي', 'success');
+        navigation.replace('ProductForm' as never, {
+          categoryId: categoryId === 'none' ? undefined : categoryId,
+        } as never);
+        return;
+      }
       toast(
         productId != null ? 'تم تحديث المنتج' : 'تمت إضافة المنتج',
         'success',
@@ -1964,7 +2068,7 @@ export function ProductFormScreen() {
             small
             title="حفظ"
             icon="save"
-            onPress={save}
+            onPress={() => void save(false)}
             loading={busy}
           />
         }
@@ -2052,6 +2156,28 @@ export function ProductFormScreen() {
                   void captureAngle(firstEmpty);
                 }}
               />
+              {/* v39 (الجولة 47): رفع بصمة من المعرض — صورة غلاف
+                  المصنّع أو لقطة هاتف سابقة بلا كاميرا (طلب التاجر:
+                  «اريد خيار أيضا رفع صورة للمنتج»). */}
+              <AppButton
+                title="رفع بصمة من المعرض"
+                variant="secondary"
+                icon="image"
+                small
+                onPress={() => {
+                  const firstEmpty = ANGLE_LABELS.find(
+                    angle => angles[angle]?.embedding == null,
+                  );
+                  if (firstEmpty == null) {
+                    toast(
+                      'كل الزوايا مسجّلة — المس أي بطاقة زاوية لاستبدالها',
+                      'info',
+                    );
+                    return;
+                  }
+                  void pickAngleFromGallery(firstEmpty);
+                }}
+              />
             </FoldSection>
           ) : modeConfig.photo ? (
             /* v35: صورة المنتج للمجالات التي لا تنفعها البصمة —
@@ -2092,6 +2218,17 @@ export function ProductFormScreen() {
                     </Text>
                   </TouchableOpacity>
                 )}
+                {/* v39 (الجولة 47): رفع صورة المنتج من المعرض — نفس
+                    طلب التاجر («اريد خيار أيضا رفع صورة للمنتج»):
+                    غلاف العلبة من المعرض أسرع من تصويره، والمنتقي
+                    يحفظ نسخة داخل التطبيق فلا تنكسر أبداً. */}
+                <AppButton
+                  title="رفع صورة من المعرض"
+                  variant="secondary"
+                  icon="image"
+                  small
+                  onPress={() => void pickProductPhotoFromGallery()}
+                />
               </View>
             </View>
           ) : null}
@@ -3962,6 +4099,27 @@ export function ProductFormScreen() {
           ) : null}
 
         </ScrollView>
+        {/* v39 (الجولة 47): شريط الحفظ السفلي الثابت — «حفظ وإضافة
+            آخر» لإدخال دفعات المتتالية (خصوصاً الصيدلية: رفّ كامل
+            من المستحضرات بلا عودة للقائمة بين كل منتج والذي بعده)،
+            و«حفظ» العادي للتعديل والإغلاق. */}
+        <View style={styles.saveBar}>
+          <AppButton
+            title={productId != null ? 'حفظ التعديلات' : 'حفظ'}
+            icon="save"
+            onPress={() => void save(false)}
+            loading={busy}
+          />
+          {productId == null ? (
+            <AppButton
+              title="حفظ وإضافة آخر"
+              variant="secondary"
+              icon="plus"
+              onPress={() => void save(true)}
+              loading={busy}
+            />
+          ) : null}
+        </View>
       </KeyboardAvoidingView>
     </View>
   );
@@ -4092,6 +4250,18 @@ const useStyles = makeStyles(c =>
   StyleSheet.create({
     screen: {flex: 1, backgroundColor: c.bg},
     center: {flex: 1, alignItems: 'center', justifyContent: 'center'},
+    /** v39 (الجولة 47): شريط الحفظ السفلي الثابت — زران جنباً إلى
+     *  جنب (حفظ + حفظ وإضافة آخر) فوق منطقة التنقل دائماً. */
+    saveBar: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      paddingHorizontal: spacing.lg,
+      paddingTop: spacing.sm,
+      paddingBottom: spacing.md,
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+      backgroundColor: c.bg,
+    },
     // v23 (round-29 #1): the archived state card.
     archivedCard: {
       flexDirection: 'row',

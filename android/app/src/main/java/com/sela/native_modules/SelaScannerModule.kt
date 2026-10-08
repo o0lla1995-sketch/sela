@@ -154,6 +154,23 @@ class SelaScannerModule(reactContext: ReactApplicationContext) :
         promise.resolve(true)
     }
 
+    /**
+     * v39 (الجولة 47): JS-requested IMMEDIATE scanner close. When a
+     * streamed read recognizes a product that needs its own sale
+     * window — a WEIGHT product (price is typed by weight from the
+     * weight pad; the scanner itself cannot price it) or a VARIANT
+     * product (color/size must be picked) — JS calls this the moment
+     * recognition lands. The live window finishes exactly like a
+     * merchant close (session promise settles cancelled → the
+     * pending weight-pad/sale-sheet opens instantly on top).
+     * No-op when no window is alive.
+     */
+    @ReactMethod
+    fun closeScanner(promise: Promise) {
+        runCatching { ScannerActivity.requestClose() }
+        promise.resolve(ScannerActivity.isLive())
+    }
+
     private fun launchScanner(mode: String, continuous: Boolean, multi: Boolean, promise: Promise) {
         val activity: Activity? = currentActivity
         if (activity == null) {

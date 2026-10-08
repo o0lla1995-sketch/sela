@@ -45,7 +45,13 @@ import {DriveBackupScreen} from '../screens/settings/DriveBackupScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
-  ProductForm: {productId?: number; barcode?: string} | undefined;
+  ProductForm: {
+    productId?: number;
+    barcode?: string;
+    /** v39 (الجولة 47): «حفظ وإضافة آخر» يعيد فتح النموذج الفارغ
+     *  بنفس التصنيف — إدخال دفعات متتالية بلا إعادة اختياره. */
+    categoryId?: number;
+  } | undefined;
   Stocktake: undefined;
   /** v33 (round-41 #8): صفحة تنبيهات المخزون المخصصة — كل التنبيهات
    *  بفلاتر النوع (تنبيهات لا إشعارات). */

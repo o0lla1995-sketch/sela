@@ -65,10 +65,26 @@ export const VariantRepo = {
   },
 
   /** v35: يستبدل متغيرات منتج كاملة (حفظ صفحة المنتج) داخل
-   *  معاملة واحدة، ويُحدّث مجموع مخزون المنتج ليطابق متغيراته. */
+   *  معاملة واحدة.
+   *  v39 (الجولة 47 — السبب الجذري لتصفير المخزون): المعامل
+   *  syncProductStock يقرر هل يُحدَّث مخزون المنتج بمجموع
+   *  متغيراته. كان هذا التحديث ينفذ دائماً، فأي تعديل لمنتج
+   *  قائم يستدعي replaceForProduct(targetId, []) (مسار «نظّف
+   *  صفوف المتغيرات») كان يكتب stock_quantity = 0 فوق الكمية
+   *  المحفوظة للتو — «حفظ بنجاح» فوق مخزون مصفَّر، في كل مود.
+   *  الآن:
+   *   • ملابس (kind='variant'): sync=true — مخزون الموديل = مجموع
+   *     متغيراته فعلاً (هذا تصميمه الصحيح).
+   *   • أحجام مطعم/كافيتريا (kind='size'): sync=false — الأحجام
+   *     تحمل أسعارها فقط (مخزونها دائماً 0)، والكمية مصدرها حقل
+   *     الكمية في صفحة المنتج.
+   *   • التنظيف (مصفوفة فارغة): sync=false — حذف صفوف المتغيرات
+   *     فقط، والمخزون القائم لا يُمس.
+   */
   async replaceForProduct(
     productId: number,
     variants: VariantInput[],
+    syncProductStock = false,
   ): Promise<void> {
     const db = getDb();
     await db.transaction(async tx => {
@@ -99,10 +115,12 @@ export const VariantRepo = {
         );
         total += Math.max(0, variant.stock_quantity);
       }
-      await tx.execute(
-        'UPDATE products SET stock_quantity = ? WHERE id = ?',
-        [total, productId],
-      );
+      if (syncProductStock) {
+        await tx.execute(
+          'UPDATE products SET stock_quantity = ? WHERE id = ?',
+          [total, productId],
+        );
+      }
     });
   },
 

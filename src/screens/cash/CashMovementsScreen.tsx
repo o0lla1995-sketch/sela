@@ -115,6 +115,15 @@ const KIND_CHIPS: {key: KindFilter; label: string}[] = [
   {key: 'deposit', label: 'إيداعات'},
 ];
 
+/** v39 (الجولة 47): شرائح فلترة الفئة — نقاط المصروف كاملة (طلب
+ *  التاجر: «البحث في سجل الحركات من خلال... ما اختاره من نقاط في
+ *  اصرف») مع فئتي السحب والإيداع الثابتتين. */
+const FILTER_CATEGORIES: string[] = [
+  ...EXPENSE_CATEGORIES,
+  'سحب رصيد',
+  'إيداع نقدي',
+];
+
 const KIND_META: Record<
   CashMovementKind,
   {
@@ -159,6 +168,15 @@ export function CashMovementsScreen() {
 
   const [period, setPeriod] = useState<PeriodKey>('month');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
+  // v39 (الجولة 47): البحث في سجل الحركات — نص حر (الملاحظة/السند/
+  //  الفئة) وفلتر فئة (نقاط الاصرف) — طلب التاجر نصاً: «البحث في
+  //  سجل الحركات من خلال الملاحظة او ما اختاره من نقاط في اصرف».
+  const [searchText, setSearchText] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  /** v39: نافذة مراجعة حركة من السجل — تفتح بالضغط على صف السند. */
+  const [detailRow, setDetailRow] = useState<CashMovementRecord | null>(null);
+  const [reprintBusy, setReprintBusy] = useState(false);
   const [rows, setRows] = useState<CashMovementRecord[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -181,6 +199,7 @@ export function CashMovementsScreen() {
       // plus the period's TOTAL count — years of accumulated
       // vouchers no longer mount in one shot; «تحميل المزيد» appends
       // the next page on demand.
+      // v39: البحث الحر وفلتر الفئة يسريان على الصفحة والعدّ معاً.
       const [page, count, totalsAll, drawer] = await Promise.all([
         CashRepo.list({
           from: range.from,
@@ -188,8 +207,16 @@ export function CashMovementsScreen() {
           kind: kindFilter,
           limit: LEDGER_PAGE,
           offset: 0,
+          search: appliedSearch,
+          category: categoryFilter,
         }),
-        CashRepo.countFor(range.from, range.to, kindFilter),
+        CashRepo.countFor(
+          range.from,
+          range.to,
+          kindFilter,
+          appliedSearch,
+          categoryFilter,
+        ),
         CashService.statement(range.from, range.to),
         CashService.drawerNowMinor(),
       ]);
@@ -205,7 +232,16 @@ export function CashMovementsScreen() {
     } finally {
       setLoading(false);
     }
-  }, [range, kindFilter, toast]);
+  }, [range, kindFilter, appliedSearch, categoryFilter, toast]);
+
+  /** v39 (الجولة 47): مهلة قصيرة للبحث — الكتابة الهادئة تطلق
+   *  البحث تلقائياً بعد 450ms بلا زر (بلا استعجال على كل حرف). */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAppliedSearch(searchText.trim());
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [searchText]);
 
   /** v26 (round-34 #5): appends the next page of the ledger. */
   const loadMore = useCallback(async () => {
@@ -220,6 +256,8 @@ export function CashMovementsScreen() {
         kind: kindFilter,
         limit: rows.length === 0 ? LEDGER_PAGE : LEDGER_PAGE_MORE,
         offset: rows.length,
+        search: appliedSearch,
+        category: categoryFilter,
       });
       setRows(prev =>
         page.length === 0
@@ -228,7 +266,13 @@ export function CashMovementsScreen() {
       );
       if (page.length < LEDGER_PAGE_MORE) {
         // Everything loaded — pin the counter to the real total.
-        const count = await CashRepo.countFor(range.from, range.to, kindFilter);
+        const count = await CashRepo.countFor(
+          range.from,
+          range.to,
+          kindFilter,
+          appliedSearch,
+          categoryFilter,
+        );
         setTotalCount(count);
       }
     } catch (error) {
@@ -239,7 +283,17 @@ export function CashMovementsScreen() {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, loading, rows.length, totalCount, range, kindFilter, toast]);
+  }, [
+    loadingMore,
+    loading,
+    rows.length,
+    totalCount,
+    range,
+    kindFilter,
+    appliedSearch,
+    categoryFilter,
+    toast,
+  ]);
 
   useFocusEffect(
     useCallback(() => {
@@ -582,6 +636,81 @@ export function CashMovementsScreen() {
               : 'سندات مرقمة غير قابلة للتعديل — مسار تدقيق كامل'
           }
         />
+        {/* v39 (الجولة 47): البحث في السجل — نص حر يطابق الملاحظة أو
+            رقم السند أو الفئة (طلب التاجر: «البحث في سجل الحركات من
+            خلال الملاحظة»)، وشرائح فئات المصروف (نقاط الاصرف) تحتته.
+            الضغط على أي سند يفتح نافذة مراجعته. */}
+        <View style={styles.searchCard}>
+          <Icon name="search" size={16} color={c.textDim} />
+          <TextInput
+            style={styles.searchInput}
+            value={searchText}
+            onChangeText={setSearchText}
+            placeholder="ابحث بالملاحظة أو رقم السند أو الفئة…"
+            placeholderTextColor={c.textFaint}
+            returnKeyType="search"
+            onSubmitEditing={() => setAppliedSearch(searchText.trim())}
+          />
+          {searchText.length > 0 ? (
+            <TouchableOpacity
+              onPress={() => {
+                setSearchText('');
+                setAppliedSearch('');
+              }}
+              hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+              <Icon name="x" size={15} color={c.textDim} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.categoryChips}>
+          <TouchableOpacity
+            style={[
+              styles.categoryChip,
+              categoryFilter == null ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+            ]}
+            onPress={() => setCategoryFilter(null)}
+            activeOpacity={0.75}>
+            <Text
+              style={[
+                styles.categoryChipText,
+                {color: categoryFilter == null ? c.onAccent : c.textDim},
+              ]}>
+              كل الفئات
+            </Text>
+          </TouchableOpacity>
+          {FILTER_CATEGORIES.map(cat => {
+            const active = categoryFilter === cat;
+            return (
+              <TouchableOpacity
+                key={cat}
+                style={[
+                  styles.categoryChip,
+                  active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+                ]}
+                onPress={() => setCategoryFilter(active ? null : cat)}
+                activeOpacity={0.75}>
+                <Text
+                  style={[
+                    styles.categoryChipText,
+                    {color: active ? c.onAccent : c.textDim},
+                  ]}>
+                  {cat}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+        {(appliedSearch.length > 0 || categoryFilter != null) && !loading ? (
+          <Text style={styles.filterNote}>
+            نتائج مرشّحة
+            {categoryFilter != null ? ` — فئة «${categoryFilter}»` : ''}
+            {appliedSearch.length > 0 ? ` — بحث «${appliedSearch}»` : ''} · اضغط
+            «كل الفئات» وامسح البحث للعودة للسجل الكامل
+          </Text>
+        ) : null}
         {loading ? (
           <View style={styles.centerBox}>
             <ActivityIndicator size="large" color={c.accent} />
@@ -598,7 +727,13 @@ export function CashMovementsScreen() {
               const meta = KIND_META[row.kind];
               const isOut = row.kind !== 'deposit';
               return (
-                <View key={row.local_id} style={styles.ledgerRow}>
+                /* v39 (الجولة 47): الصف يُفتح للمراجعة — طلب التاجر:
+                   «يمكن فتح الحركة من سجل العملية ومراجعتها». */
+                <TouchableOpacity
+                  key={row.local_id}
+                  style={styles.ledgerRow}
+                  onPress={() => setDetailRow(row)}
+                  activeOpacity={0.75}>
                   <View
                     style={[
                       styles.ledgerIcon,
@@ -643,7 +778,7 @@ export function CashMovementsScreen() {
                       tone="neutral"
                     />
                   ) : null}
-                </View>
+                </TouchableOpacity>
               );
             })}
             {/* v26 (round-34 #5): the next page — big periods grow on
@@ -685,6 +820,148 @@ export function CashMovementsScreen() {
           onDone={onMovementDone}
         />
       ) : null}
+
+      {/* v39 (الجولة 47): نافذة مراجعة حركة من السجل — طلب التاجر
+          نصاً: «يمكن فتح الحركة من سجل العملية ومراجعتها». عرض كامل
+          تفاصيل السند (نوعه/رقمه/فئته/ملاحظته/مبلغه/طريقة التأمين/
+          تاريخه) مع إعادة طباعة السند — INLINE overlay كالعادة. */}
+      {detailRow != null ? (
+        <MovementDetailSheet
+          movement={detailRow}
+          busy={reprintBusy}
+          onClose={() => setDetailRow(null)}
+          onReprint={() => {
+            if (reprintBusy) {
+              return;
+            }
+            setReprintBusy(true);
+            CashService.reprintSlip(detailRow)
+              .then(() => {
+                toast(`أُعيد طبع سند ${detailRow.ref}`, 'success');
+              })
+              .catch(error => {
+                toast(
+                  error instanceof Error
+                    ? error.message
+                    : 'فشلت طباعة السند',
+                  'error',
+                );
+              })
+              .finally(() => setReprintBusy(false));
+          }}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────
+// v39 (الجولة 47): MovementDetailSheet — نافذة مراجعة سند قائم من
+// السجل. السندات غير قابلة للتعديل بالتصميم (مسار تدقيق كامل) —
+// المراجعة عرض كامل التفاصيل + إعادة طباعة السند فقط.
+// ────────────────────────────────────────────────────────────────
+function MovementDetailSheet({
+  movement,
+  busy,
+  onClose,
+  onReprint,
+}: {
+  movement: CashMovementRecord;
+  busy: boolean;
+  onClose: () => void;
+  onReprint: () => void;
+}) {
+  const c = useThemeColors();
+  const meta = KIND_META[movement.kind];
+  const isOut = movement.kind !== 'deposit';
+  return (
+    <View style={detailStyles(c).backdrop}>
+      <Pressable style={{flex: 1}} onPress={onClose} />
+      <View style={detailStyles(c).sheet}>
+        <View style={detailStyles(c).head}>
+          <View
+            style={[
+              detailStyles(c).headIcon,
+              {backgroundColor: isOut ? c.dangerSoft : c.successSoft},
+            ]}>
+            <Icon
+              name={meta.icon}
+              size={20}
+              color={isOut ? c.danger : c.success}
+            />
+          </View>
+          <View style={{flex: 1}}>
+            <Text style={detailStyles(c).headTitle}>{meta.label}</Text>
+            <Text style={detailStyles(c).headSub}>{movement.ref}</Text>
+          </View>
+          <TouchableOpacity
+            onPress={onClose}
+            style={detailStyles(c).closeBtn}>
+            <Icon name="x" size={16} color={c.textDim} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={detailStyles(c).amountRow}>
+          <Text style={detailStyles(c).amountLabel}>مبلغ السند</Text>
+          <Text
+            style={[
+              detailStyles(c).amountValue,
+              {color: isOut ? c.danger : c.success},
+            ]}>
+            {isOut ? '−' : '+'} {formatMoney(movement.amount_minor / 100)}
+          </Text>
+        </View>
+
+        <View style={detailStyles(c).rows}>
+          <View style={detailStyles(c).row}>
+            <Text style={detailStyles(c).rowLabel}>الفئة</Text>
+            <Text style={detailStyles(c).rowValue}>{movement.category}</Text>
+          </View>
+          <View style={detailStyles(c).row}>
+            <Text style={detailStyles(c).rowLabel}>الملاحظة</Text>
+            <Text style={detailStyles(c).rowValue}>
+              {movement.note ?? 'بلا ملاحظة'}
+            </Text>
+          </View>
+          <View style={detailStyles(c).row}>
+            <Text style={detailStyles(c).rowLabel}>التاريخ والوقت</Text>
+            <Text style={detailStyles(c).rowValue}>
+              {formatDateTime(movement.created_at)}
+            </Text>
+          </View>
+          <View style={detailStyles(c).row}>
+            <Text style={detailStyles(c).rowLabel}>التأمين</Text>
+            <Text style={detailStyles(c).rowValue}>
+              {AUTH_LABEL[movement.auth_method] ?? '—'}
+            </Text>
+          </View>
+        </View>
+
+        <View style={detailStyles(c).noteBox}>
+          <Icon name="info" size={14} color={c.warning} />
+          <Text style={detailStyles(c).noteText}>
+            سند مرقّم غير قابل للتعديل — خطأ القيد يُصحّح بحركة معاكسة
+            (إيداع/مصروف) لا بالحذف، فيبقى مسار التدقيق كاملاً
+          </Text>
+        </View>
+
+        <View style={detailStyles(c).actions}>
+          <AppButton
+            title="إعادة طباعة السند"
+            icon="printer"
+            variant="secondary"
+            onPress={onReprint}
+            loading={busy}
+            style={{flex: 1}}
+          />
+          <AppButton
+            title="إغلاق"
+            icon="x"
+            onPress={onClose}
+            style={{flex: 1}}
+          />
+        </View>
+      </View>
     </View>
   );
 }
@@ -1192,15 +1469,27 @@ function MovementSheet({
                   </View>
                 </View>
 
-                {/* ③ الملاحظة — سطر واحد فوق منطقة الفئات */}
+                {/* ③ الملاحظة — سطر واحد فوق منطقة الفئات.
+                    v39 (الجولة 47): في نافذتي السحب والإيداع فقط —
+                    حقل أكبر متعدد الأسطر لوصف العملية براحتها (طلب
+                    التاجر صريح بهاتين النافذتين فقط)؛ المصروف يبقى
+                    سطراً مضغوطاً فوق شبكة الفئات. */}
                 <TextInput
-                  style={sheetStyles(c).noteInput}
+                  style={[
+                    sheetStyles(c).noteInput,
+                    mode !== 'expense' ? sheetStyles(c).noteInputBig : null,
+                  ]}
                   value={note}
                   onChangeText={setNote}
-                  placeholder="ملاحظة (اختياري) — مثال: فاتورة كهرباء شهر 10"
+                  placeholder={
+                    mode === 'expense'
+                      ? 'ملاحظة (اختياري) — مثال: فاتورة كهرباء شهر 10'
+                      : 'ملاحظة العملية (اختياري) — مثال: سحب لتسديد المورد أبو محمد، إيداع فائق يوم البيع'
+                  }
                   placeholderTextColor={c.textFaint}
                   maxLength={140}
                   editable={!busy}
+                  multiline={mode !== 'expense'}
                 />
 
                 {/* ④ الفئات — فئات المصروف فقط، وسط قابل للتمرير
@@ -1615,7 +1904,11 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
     },
     /** v31 (round-39 #2): الملاحظة — سطر واحد مضغوط مثبّت تحت
      *  المبلغ (بلا label — العنوان placeholder داخل الحقل)، يبقى
-     *  مرئياً ومكتوباً دائماً حتى مع لوحة النظام مفتوحة. */
+     *  مرئياً ومكتوباً دائماً حتى مع لوحة النظام مفتوحة.
+     *  v39 (الجولة 47): نافذتا السحب والإيداع فقط — حقل ملاحظة
+     *  أكبر متعدد الأسطر (طلب التاجر: «قم في نافذتي السحب والايداع
+     *  فقط بتكبير حقل إدخال الملاحظات»)؛ نافذة المصروف تبقى سطراً
+     *  واحداً مضغوطاً كي لا تزاحم شبكة الفئات. */
     noteInput: {
       color: c.text,
       fontFamily: fonts.regular,
@@ -1628,6 +1921,136 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       paddingVertical: 9,
       minHeight: 44,
       textAlignVertical: 'center',
+    },
+    /** v39: النسخة الكبيرة — سحب/إيداع فقط. */
+    noteInputBig: {
+      minHeight: 84,
+      textAlignVertical: 'top',
+      paddingVertical: spacing.sm,
+    },
+  });
+}
+
+/** v39 (الجولة 47): أنماط نافذة مراجعة السند — نفس لغة نافذة
+ *  الإدخال (INLINE overlay، بلا Modal أبداً — درس هذا الروم). */
+function detailStyles(c: ReturnType<typeof useThemeColors>) {
+  return StyleSheet.create({
+    backdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      justifyContent: 'flex-end',
+      zIndex: 90,
+    },
+    sheet: {
+      backgroundColor: c.bg,
+      borderTopLeftRadius: radius.lg,
+      borderTopRightRadius: radius.lg,
+      padding: spacing.lg,
+      gap: spacing.md,
+      borderTopWidth: 3,
+      borderColor: c.accent,
+    },
+    head: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+    },
+    headIcon: {
+      width: 44,
+      height: 44,
+      borderRadius: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    headTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body + 1,
+    },
+    headSub: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    closeBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 12,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    amountRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.md,
+    },
+    amountLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    amountValue: {
+      fontFamily: fonts.black,
+      fontSize: 24,
+      fontVariant: ['tabular-nums'],
+    },
+    rows: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      overflow: 'hidden',
+    },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+      gap: spacing.md,
+    },
+    rowLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    rowValue: {
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      flex: 1,
+      textAlign: 'left',
+    },
+    noteBox: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      alignItems: 'flex-start',
+      backgroundColor: c.warningSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    noteText: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 18,
+    },
+    actions: {
+      flexDirection: 'row',
+      gap: spacing.sm,
     },
   });
 }
@@ -1830,6 +2253,49 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.small,
       marginTop: 2,
+    },
+    /** v39 (الجولة 47): البحث في السجل + شرائح الفئات. */
+    searchCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      height: 46,
+    },
+    searchInput: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.body,
+      paddingVertical: 0,
+      textAlign: I18nManager.isRTL ? 'right' : 'left',
+    },
+    categoryChips: {
+      gap: 6,
+      paddingBottom: 2,
+    },
+    categoryChip: {
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      minHeight: 28,
+      justifyContent: 'center',
+      backgroundColor: c.surface,
+    },
+    categoryChipText: {
+      fontFamily: fonts.bold,
+      fontSize: 11.5,
+    },
+    filterNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
     },
     pdfCard: {padding: spacing.lg, gap: spacing.sm},
     pdfRow: {

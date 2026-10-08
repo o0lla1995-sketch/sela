@@ -1451,46 +1451,11 @@ function ReturnSheet({
   );
   const exchangeModeOn = exchangePicks.length > 0;
 
-  // The debt action label — the merchant confirms the EXACT effect.
-  const debtAction: string = (() => {
-    if (exchangeModeOn) {
-      return `استبدال بضاعة بلا أثر مالي — المرتجع يعود للمخزون والبديل (${
-        exchangePicks.length
-      } صنف بقيمة ${formatMoney(
-        exchangeTotal,
-      )}) يخرج منه. لا استرداد نقدي ولا خصم دين ولا عكس رفع لصلة`;
-    }
-    if (book === 'sila') {
-      if (debtState.kind === 'sila-synced') {
-        return `يُخصم ${formatMoney(refundTotal)} من دين ${
-          debtLabel ?? 'الزبون'
-        } في تطبيق صِلة (عملية عكسية تُرفع للخادم)`;
-      }
-      if (debtState.kind === 'sila-pending') {
-        return `يُخصم ${formatMoney(refundTotal)} من دين ${
-          debtLabel ?? 'الزبون'
-        } قبل رفعه لصِلة (لم يصل للخادم بعد)`;
-      }
-      if (debtState.kind === 'missing') {
-        return 'تنبيه: سجل الدين غير موجود محلياً — لن يُخصم شيء تلقائياً من صِلة، راجع دفتر صِلة يدوياً';
-      }
-      return '';
-    }
-    if (book === 'local') {
-      if (debtState.kind === 'local') {
-        return `يُخصم ${formatMoney(refundTotal)} من دين ${
-          debtLabel ?? 'الزبون'
-        } في دفتر المتجر`;
-      }
-      if (debtState.kind === 'migrated') {
-        return 'تنبيه: هذا الدين رُحّل إلى صِلة — خصم المرتجع يحتاج معالجة يدوية في دفتر صِلة';
-      }
-      if (debtState.kind === 'missing') {
-        return 'تنبيه: سجل الدين غير موجود في دفتر المتجر — لن يُخصم شيء تلقائياً';
-      }
-    }
-    return '';
-  })();
+  /* v39 (الجولة 47): ملاحظة الإرجاع (debtAction) حُذفت من نافذة
+   *  التأكيد بطلب التاجر نصاً — صندوق «يُخصم من دين الزبون…» لم
+   *  يعد يُعرض؛ أثر العملية في confirm/createReturn كما هو تماماً،
+   *  وتحذيرا الحواف الحرجة (سجل دين مفقود/مُرحّل) انتقلا توست
+   *  لحظة التأكيد داخل confirm أعلاه. */
 
   const confirm = useCallback(async () => {
     if (busy || refundTotal <= 0) {
@@ -1513,6 +1478,22 @@ function ReturnSheet({
         );
         return;
       }
+    }
+    // v39 (الجولة 47): ملاحظة الإرجاع حُذفت من النافذة — تحذيرا
+    //  الحواف الحرجة فقط (سجل دين مفقود/مُرحّل لصِلة) يظهران توست
+    //  لحظة التأكيد كي لا يفاجأ التاجر بدين لم يُخصم تلقائياً.
+    if (
+      book !== 'cash' &&
+      !exchangeModeOn &&
+      (debtState.kind === 'missing' || debtState.kind === 'migrated')
+    ) {
+      toast(
+        debtState.kind === 'missing'
+          ? 'تنبيه: سجل الدين غير موجود — لن يُخصم شيء تلقائياً، راجع الدفتر يدوياً'
+          : 'تنبيه: هذا الدين مُرحّل إلى صِلة — عالج خصم المرتجع في دفتر صِلة يدوياً',
+        'info',
+        6000,
+      );
     }
     setBusy(true);
     try {
@@ -1600,6 +1581,10 @@ function ReturnSheet({
     settings,
     toast,
     onDone,
+    // v39: تحذيرا الحواف (missing/migrated) يُعرضان توست لحظة
+    //  التأكيد بعد حذف ملاحظة الإرجاع من النافذة.
+    debtState,
+    exchangeModeOn,
   ]);
 
   // v24 (round-31 #1): hardware back closes the sheet — the
@@ -1872,16 +1857,15 @@ function ReturnSheet({
                   </TouchableOpacity>
                 </View>
               ) : null}
-              {debtAction.length > 0 ? (
-                <View style={retStyles(c).debtActionBox}>
-                  <Icon
-                    name={debtAction.startsWith('تنبيه') ? 'alert' : 'info'}
-                    size={15}
-                    color={c.warning}
-                  />
-                  <Text style={retStyles(c).debtActionText}>{debtAction}</Text>
-                </View>
-              ) : null}
+              {/*
+                v39 (الجولة 47): حُذفت ملاحظة الإرجاع من نافذة التأكيد
+                بطلب التاجر نصاً («في نافذة تأكيد الارجاع لا اريد
+                الملاحظة الخاصة بالارجاع احذفها») — صندوق شرح أثر
+                الإرجاع (يُخصم من دين الزبون…) لم يعد يُعرض هنا؛ أثر
+                العملية نفسه لم يتغير إطلاقاً، وتحذيرا الحواف الحرجة
+                (سجل دين مفقود/مُرحّل) يظهران توست لحظة التأكيد
+                بدل شغل مساحة النافذة دائماً.
+              */}
               <View style={retStyles(c).totalRow}>
                 <Text style={retStyles(c).totalLabel}>
                   {exchangeModeOn
@@ -3052,21 +3036,7 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
       fontSize: typography.small,
       textAlign: 'center',
     },
-    debtActionBox: {
-      flexDirection: 'row',
-      gap: spacing.sm,
-      alignItems: 'flex-start',
-      backgroundColor: c.warningSoft,
-      borderRadius: radius.md,
-      padding: spacing.md,
-    },
-    debtActionText: {
-      flex: 1,
-      color: c.text,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-      lineHeight: 18,
-    },
+    /* v39 (الجولة 47): أنماط ملاحظة الإرجاع حُذفت معها من النافذة. */
     totalRow: {
       flexDirection: 'row',
       alignItems: 'center',

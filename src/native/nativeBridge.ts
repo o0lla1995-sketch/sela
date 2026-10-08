@@ -165,6 +165,12 @@ interface SelaScannerNativeModule {
    *  "✓ added" banner + bumps the CONFIRMED counter; ok=false shows
    *  the red informational banner (غير مسجل / لم يتم التعرف). */
   notifyScanResult(ok: boolean, message: string): Promise<boolean>;
+  /** v39 (الجولة 47): إغلاق فوري لنافذة الماسح المفتوحة — يُستدعى
+   *  لحظة التعرف على منتج يحتاج نافذته الخاصة (منتج وزن يُسعّر
+   *  من لوحة الوزن، أو منتج متغيرات يُختار لونه ومقاسه) فتفتح
+   *  نافذة البيع فور التعرف بدل انتظار إغلاق الماسح يدوياً.
+   *  يعيد true إن كانت نافذة حية أُغلقت. */
+  closeScanner(): Promise<boolean>;
   /** Headless camera self-test → every step's outcome. */
   runDiagnostics(): Promise<{
     permissionGranted: boolean;

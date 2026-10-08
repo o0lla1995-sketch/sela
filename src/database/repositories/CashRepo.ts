@@ -148,19 +148,37 @@ export const CashRepo = {
     return rowToRecord(record as Record<string, unknown>);
   },
 
-  /** The period statement list (newest first). */
+  /** The period statement list (newest first).
+   *  v39 (الجولة 47): البحث في سجل الحركات — نص حر يطابق الملاحظة
+   *  أو السند أو الفئة (LIKE)، وفلتر فئة صريح (نقاط المصروف). */
   async list(input: {
     from: string;
     to: string;
     kind?: CashMovementKind | 'all';
     limit?: number;
     offset?: number;
+    /** v39: نص بحث حر — يطابق الملاحظة/السند/الفئة (اختياري). */
+    search?: string;
+    /** v39: فئة بعينها (مثل «كهرباء») أو null للكل (اختياري). */
+    category?: string | null;
   }): Promise<CashMovementRecord[]> {
     const clauses = ["date(created_at) BETWEEN date(?) AND date(?)"];
     const params: (string | number)[] = [input.from, input.to];
     if (input.kind != null && input.kind !== 'all') {
       clauses.push('kind = ?');
       params.push(input.kind);
+    }
+    const search = input.search?.trim();
+    if (search != null && search.length > 0) {
+      clauses.push(
+        '(note LIKE ? OR ref LIKE ? OR category LIKE ?)',
+      );
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+    if (input.category != null && input.category.length > 0) {
+      clauses.push('category = ?');
+      params.push(input.category);
     }
     // v26 (round-34 #5): the cap rose to 10,000 — the EXPORT paths
     // (PDF A4 / thermal statement) must carry EVERY row of the
@@ -182,11 +200,15 @@ export const CashRepo = {
 
   /** v26 (round-34 #5): how many movements the period+filter
    *  holds IN TOTAL — the paged ledger's «عرض X من Y سند» counter
-   *  and its «load more» visibility. */
+   *  and its «load more» visibility.
+   *  v39 (الجولة 47): نفس البحث الحر وفلتر الفئة يعملان على العدّ
+   *  كي يبقى العداد صادقاً مع النتائج المرشّحة. */
   async countFor(
     from: string,
     to: string,
     kind: CashMovementKind | 'all' = 'all',
+    search?: string,
+    category?: string | null,
   ): Promise<number> {
     try {
       const clauses = ['date(created_at) BETWEEN date(?) AND date(?)'];
@@ -194,6 +216,16 @@ export const CashRepo = {
       if (kind !== 'all') {
         clauses.push('kind = ?');
         params.push(kind);
+      }
+      const text = search?.trim();
+      if (text != null && text.length > 0) {
+        clauses.push('(note LIKE ? OR ref LIKE ? OR category LIKE ?)');
+        const like = `%${text}%`;
+        params.push(like, like, like);
+      }
+      if (category != null && category.length > 0) {
+        clauses.push('category = ?');
+        params.push(category);
       }
       const result = await getDb().execute(
         `SELECT COUNT(*) AS cnt FROM cash_movements WHERE ${clauses.join(' AND ')}`,

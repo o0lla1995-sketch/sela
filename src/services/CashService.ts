@@ -138,6 +138,23 @@ async function printMovementSlip(
 }
 
 export const CashService = {
+  /** v39 (الجولة 47): إعادة طباعة سند حركة قائمة — من نافذة
+   *  مراجعة الحركة في سجل الخزينة. تختلف عن printMovementSlip
+   *  الداخلية: لا تتجاهل غياب الطابعة بل ترمي خطأ عربياً واضحاً
+   *  كي تعرض الواجهة التوست المناسب. */
+  async reprintSlip(movement: CashMovementRecord): Promise<void> {
+    const status = usePrinterStore.getState().status;
+    if (status !== 'connected') {
+      throw new Error('لا توجد طابعة متصلة — أوصل الطابعة أولاً');
+    }
+    const treasury = await ReportService.treasurySnapshot();
+    const job = buildCashMovementJob(
+      {movement, drawerAfterMinor: Math.round(treasury.cashTotal * 100)},
+      receiptSettings(),
+    );
+    await ThermalPrinterService.printJob(job);
+  },
+
   /** Records a business EXPENSE paid from the drawer. v27: the
    *  caller's passed security gate lands in the audit trail. */
   async recordExpense(input: {

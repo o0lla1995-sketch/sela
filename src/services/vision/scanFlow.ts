@@ -54,6 +54,22 @@ export async function notifyScanResult(
   }
 }
 
+/**
+ * v39 (الجولة 47): إغلاق نافذة الماسح فوراً من JS. عند التعرف على
+ * منتج يحتاج نافذة بيع خاصة — منتج وزن (سعره يُدخل من لوحة الوزن
+ * ولا يستطيع الماسح تسعيره) أو منتج متغيرات (لون/مقاس يُختاران) —
+ * تُستدعى هذه لحظة التعرف فتُغلق النافذة الأصلية بنفس مسار إغلاق
+ * التاجر، وتفتح نافذة البيع/الوزن فوراً فوقها (طلب التاجر حرفياً:
+ * «فور التقاطه والتعرف عليه أن يفتح نافذة البيع الخاصة به»).
+ */
+export async function closeScannerNow(): Promise<void> {
+  try {
+    await SelaScannerNative?.closeScanner();
+  } catch {
+    // No live window (already closed) — nothing to do.
+  }
+}
+
 export type CameraPermissionResult = 'granted' | 'denied' | 'never_ask_again';
 
 /**
