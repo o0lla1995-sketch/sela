@@ -88,7 +88,11 @@ export const StocktakeRepo = {
     const id = created.insertId ?? -1;
     await db.execute(
       `INSERT INTO stocktake_items (stocktake_id, product_id, system_qty)
-       SELECT ?, p.id, p.stock_quantity FROM products p`,
+       SELECT ?, p.id, p.stock_quantity FROM products p
+        WHERE p.is_archived = 0
+          -- v35 (الجولة 43): المخزون بلا تتبع (مطعم/كافيتريا) لا
+          --  شيء يُعدّ فيه — الطبق خدمة لا مخزون.
+          AND p.stock_untracked = 0`,
       [id],
     );
     const result = await db.execute('SELECT * FROM stocktakes WHERE id = ?', [

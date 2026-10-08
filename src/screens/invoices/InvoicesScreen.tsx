@@ -1485,6 +1485,11 @@ function ReturnSheet({
               : 1,
           unitPrice: line.item.unit_price,
           costPrice: line.item.cost_price,
+          // v35: استرجاع مخزون المتغير تحديداً (لون × مقاس / حجم)
+          //  أو كل مقاسات لون الربطة المرتجعة.
+          variantId: line.item.variant_id ?? null,
+          variantColor: line.item.variant_color ?? null,
+          variantLabel: line.item.variant_label ?? null,
         }));
       await InvoiceService.createReturn({
         saleId,

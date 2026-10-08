@@ -241,12 +241,25 @@ export const LocalDebtsRepo = {
     return created;
   },
 
+  /** v35 (الجولة 43): تعديل بيانات الزبون من نافذته — الاسم والجوال
+   *  ورقم الهوية (مع تفرد الهوية داخل الجدول UNIQUE؛ التحقق
+   *  المنطقي والتكرار يفحصهما المتصل قبل النداء، والقيد يمنع
+   *  التكرار في أسوأ الأحوال). */
   async updateCustomer(
     id: number,
-    patch: {name?: string; phone?: string | null; notes?: string | null},
+    patch: {
+      idNumber?: string;
+      name?: string;
+      phone?: string | null;
+      notes?: string | null;
+    },
   ): Promise<void> {
     const sets: string[] = [];
     const args: unknown[] = [];
+    if (patch.idNumber != null) {
+      sets.push('id_number = ?');
+      args.push(patch.idNumber.trim());
+    }
     if (patch.name != null) {
       sets.push('name = ?');
       args.push(patch.name.trim());

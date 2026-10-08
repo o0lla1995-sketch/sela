@@ -124,6 +124,12 @@ export interface BackupFile {
     style_group?: string | null;
     variant_size?: string | null;
     variant_color?: string | null;
+    /** v35 (الجولة 43): متغيرات المنتج + وحدة الأساس + المخزون
+     *  بلا تتبع + مقاسات الربطة (نسخ قديمة: القيم الافتراضية). */
+    has_variants?: number;
+    base_unit_name?: string | null;
+    stock_untracked?: number;
+    sizes_count?: number | null;
     created_at: string;
   }[];
   product_units: {
@@ -133,6 +139,18 @@ export interface BackupFile {
     barcode: string | null;
     retail_price: number | null;
     wholesale_price: number | null;
+  }[];
+  /** v35 (الجولة 43): متغيرات المنتجات (ملابس لون×مقاس، مطعم
+   *  أحجام بأسعارها) — اختيارية كي تُستعاد النسخ الأقدم. */
+  product_variants?: {
+    id: number;
+    product_id: number;
+    kind: 'variant' | 'size';
+    color: string;
+    size: string;
+    stock_quantity: number;
+    retail_price: number | null;
+    cost_price: number | null;
   }[];
   embeddings: {
     product_id: number;
@@ -173,6 +191,10 @@ export interface BackupFile {
      * files still restore. */
     unit_name?: string | null;
     base_quantity?: number | null;
+    /** v35 (الجولة 43): وصف المتغير ومعرّفه (استرجاع المخزون
+     *  الدقيق عند إرجاع نسخة مستعادة). */
+    variant_label?: string | null;
+    variant_id?: number | null;
   }[];
   /** v23 (round-29 #2): the RETURNS — RET receipts (and their own
   // negative sales rows above) with the line snapshots. Optional
@@ -422,6 +444,7 @@ export const BackupService = {
       units,
       products,
       productUnits,
+      productVariants,
       embeddings,
       sales,
       saleItems,
@@ -442,11 +465,18 @@ export const BackupService = {
       db.execute('SELECT id, name, store_mode FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind, store_mode FROM units'),
       db.execute(
-        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, style_group, variant_size, variant_color, created_at FROM products',
+        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at FROM products',
       ),
       db.execute(
         'SELECT product_id, unit_id, conversion, barcode, retail_price, wholesale_price FROM product_units',
       ),
+      // v35 (الجولة 43): متغيرات المنتجات — تنتقل وتُعاد بترقيم
+      //  جديد مع منتجاتها (ملابس لون×مقاس، مطعم أحجام بأسعارها).
+      db
+        .execute(
+          'SELECT id, product_id, kind, color, size, stock_quantity, retail_price, cost_price FROM product_variants',
+        )
+        .catch(() => ({rows: {_array: []}})),
       db.execute(
         'SELECT product_id, angle_label, embedding_data, thumbnail_path FROM product_embeddings',
       ),
@@ -454,7 +484,7 @@ export const BackupService = {
         'SELECT id, invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, returned_minor, return_kind FROM sales',
       ),
       db.execute(
-        'SELECT id, sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity FROM sale_items',
+        'SELECT id, sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity, variant_label, variant_id FROM sale_items',
       ),
       // v23 (round-29 #2): the RETURNS — with the ORIGINAL invoice
       //  number (invoice_ref), NOT the internal sale id (ids get
@@ -637,6 +667,15 @@ export const BackupService = {
         variant_size: row.variant_size == null ? null : String(row.variant_size),
         variant_color:
           row.variant_color == null ? null : String(row.variant_color),
+        // v35 (الجولة 43): متغيرات المنتج + وحدة الأساس + المخزون
+        //  بلا تتبع + مقاسات الربطة.
+        has_variants: Number(row.has_variants ?? 0) === 1 ? 1 : 0,
+        base_unit_name:
+          row.base_unit_name == null || String(row.base_unit_name).length === 0
+            ? null
+            : String(row.base_unit_name),
+        stock_untracked: Number(row.stock_untracked ?? 0) === 1 ? 1 : 0,
+        sizes_count: row.sizes_count == null ? null : Number(row.sizes_count),
         created_at: String(row.created_at ?? ''),
       })),
       product_units: rowsOf(productUnits).map(row => ({
@@ -648,6 +687,18 @@ export const BackupService = {
           row.retail_price == null ? null : Number(row.retail_price),
         wholesale_price:
           row.wholesale_price == null ? null : Number(row.wholesale_price),
+      })),
+      // v35 (الجولة 43): متغيرات المنتجات — تنتقل كما هي وتُعاد
+      //  بترقيم جديد مع منتجها في الاسترجاع.
+      product_variants: rowsOf(productVariants).map(row => ({
+        id: Number(row.id),
+        product_id: Number(row.product_id),
+        kind: String(row.kind ?? 'variant') === 'size' ? 'size' : 'variant',
+        color: String(row.color ?? ''),
+        size: String(row.size ?? ''),
+        stock_quantity: Number(row.stock_quantity ?? 0),
+        retail_price: row.retail_price == null ? null : Number(row.retail_price),
+        cost_price: row.cost_price == null ? null : Number(row.cost_price),
       })),
       embeddings: rowsOf(embeddings).map(row => ({
         product_id: Number(row.product_id),
@@ -682,6 +733,11 @@ export const BackupService = {
         unit_name: row.unit_name == null ? null : String(row.unit_name),
         base_quantity:
           row.base_quantity == null ? null : Number(row.base_quantity),
+        variant_label:
+          row.variant_label == null || String(row.variant_label).length === 0
+            ? null
+            : String(row.variant_label),
+        variant_id: row.variant_id == null ? null : Number(row.variant_id),
       })),
       // v23 (round-29 #2): the returns, grouped one entry per RET
       //  receipt with its line snapshots (the export's LEFT JOIN
@@ -1197,8 +1253,8 @@ export const BackupService = {
             : null;
         const inserted = await tx.execute(
           `INSERT INTO products
-            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, style_group, variant_size, variant_color, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             product.name,
             Number(product.cost_price ?? 0),
@@ -1214,15 +1270,47 @@ export const BackupService = {
             product.sold_by_weight === 1 ? 1 : 0,
             product.is_archived === 1 ? 1 : 0,
             product.expiry_date ?? null,
-            // v34: ربطة الملابس — تُستعاد كما كانت فتبقى الموديلات
-            // مجمّعة في شبكة البيع.
+            // v34: ربطة الملابس — تُستعاد كما كانت.
             product.style_group ?? null,
             product.variant_size ?? null,
             product.variant_color ?? null,
+            // v35 (الجولة 43): متغيرات المنتج + وحدة الأساس +
+            // المخزون بلا تتبع + مقاسات الربطة.
+            product.has_variants === 1 ? 1 : 0,
+            product.base_unit_name ?? null,
+            product.stock_untracked === 1 ? 1 : 0,
+            product.sizes_count ?? null,
             product.created_at || nowLocal(),
           ],
         );
         productMap.set(Number(product.id), Number(inserted.insertId));
+      }
+
+      // v35 (الجولة 43): متغيرات المنتجات — تُستعاد بترقيم جديد
+      //  مع منتجها؛ خريطة المعرّفات تُعيد ربط أسطر البيع
+      //  بمتغيراتها (استرجاع المخزون الدقيق عند الإرجاع).
+      const variantIdMap = new Map<number, number>();
+      for (const row of doc.product_variants ?? []) {
+        const newProductId = productMap.get(Number(row.product_id));
+        if (newProductId == null) {
+          continue;
+        }
+        const inserted = await tx.execute(
+          `INSERT INTO product_variants
+            (product_id, kind, color, size, stock_quantity, retail_price, cost_price, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newProductId,
+            row.kind === 'size' ? 'size' : 'variant',
+            String(row.color ?? ''),
+            String(row.size ?? ''),
+            Number(row.stock_quantity ?? 0),
+            row.retail_price ?? null,
+            row.cost_price ?? null,
+            nowLocal(),
+          ],
+        );
+        variantIdMap.set(Number(row.id), Number(inserted.insertId));
       }
 
       // Sellable units per product.
@@ -1338,8 +1426,8 @@ export const BackupService = {
         }
         const inserted = await tx.execute(
           `INSERT INTO sale_items
-            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity, variant_label, variant_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             newSaleId,
             newProductId,
@@ -1349,6 +1437,17 @@ export const BackupService = {
             Number(item.total_line_price ?? 0),
             item.unit_name ?? null,
             item.base_quantity == null ? null : Number(item.base_quantity),
+            // v35 (الجولة 43): وصف المتغير ينتقل نصاً، والمعرّف
+            //  يُعاد ربطه بمتغيره الجديد (أو يُترك بلا متغير إن
+            //  غاب عن النسخة الاحتياطية).
+            (item as {variant_label?: string | null}).variant_label ?? null,
+            (item as {variant_id?: number | null}).variant_id != null
+              ? variantIdMap.get(
+                  Number(
+                    (item as {variant_id?: number | null}).variant_id,
+                  ),
+                ) ?? null
+              : null,
           ],
         );
         if (item.id != null) {

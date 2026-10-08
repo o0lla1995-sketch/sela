@@ -137,6 +137,86 @@ export interface EnqueuePaymentInput {
   kind?: 'repayment' | 'return_reversal';
 }
 
+/** v35 (الجولة 43): تشذيب التحصيلات الوهمية (المطابقة الهابطة).
+ *  ─────────────────────────────────────────────────────────────────
+ *  دفاتر المتجر تدّعي من التحصيلات أكثر مما يعرفه خادم صِلة عن
+ *  ديون هذه النقطة (device_purchases − device_outstanding) → الفارق
+ *  تحصيل مسجَّل بلا برهان — غالباً من عصر مطابقة أرقام POS الشاملة
+ *  التي كانت تجمع سدادّات وتحصيلات متاجر التاجر الأخرى فتأكل
+ *  فواتير هذا المتجر (شكوى «فاتورة 20₪ سُجّل منها 5 دين فقط»).
+ *
+ *  التشذيب يحذف الفارق من أحدث صفوف sila_app_collections (الوهمي
+ *  دائماً الأحدث — دفعات عصر POS الكبيرة)، ويقصّ الصف الحدودي جزئياً
+ *  إن لزم، ثم يمتص المبلغ في أساس المطابقة (reconcile_offset_minor)
+ *  حتى لا يعيد المحرك الصاعد تسجيله في التمريرة التالية — نفس
+ *  انضباط حذف التاجر اليدوي (deleteAppCollection) تماماً.
+ *
+ *  لا يمس سدادّات الكاشير ولا تغطية الرصيد إطلاقاً — نقدٌ استلمه
+ *  التاجر بيده لا يُحذف بقرار محرك. يُرجع المبلغ المشذَّب فعلياً. */
+async function trimOverRecordedCollections(
+  customerId: string,
+  customerName: string,
+  excessMinor: number,
+): Promise<number> {
+  const db = getDb();
+  let remaining = Math.round(excessMinor);
+  if (remaining <= 0) {
+    return 0;
+  }
+  const rows = await db.execute(
+    `SELECT local_id, amount_minor FROM sila_app_collections
+      WHERE customer_id = ?
+      ORDER BY local_id DESC`,
+    [customerId],
+  );
+  let trimmedTotal = 0;
+  for (const raw of rows.rows?._array ?? []) {
+    if (remaining <= 0) {
+      break;
+    }
+    const hit = raw as {local_id?: number; amount_minor?: number};
+    const localId = Number(hit.local_id ?? 0);
+    const amount = Math.round(Number(hit.amount_minor ?? 0));
+    if (amount <= 0) {
+      continue;
+    }
+    if (amount <= remaining) {
+      await db.execute(
+        'DELETE FROM sila_app_collections WHERE local_id = ?',
+        [localId],
+      );
+      trimmedTotal += amount;
+      remaining -= amount;
+    } else {
+      await db.execute(
+        'UPDATE sila_app_collections SET amount_minor = ? WHERE local_id = ?',
+        [amount - remaining, localId],
+      );
+      trimmedTotal += remaining;
+      remaining = 0;
+    }
+  }
+  if (trimmedTotal > 0) {
+    // امتصاص المشذَّب في الأساس (زيادةً كما الحذف اليدوي) — إيديموتية
+    //  القرار: بدونها يقفز «غير المسجل» بمقدار المشذَّب في التمريرة
+    //  التالية فيعيد المحرك تسجيله ولا تستقر الدفاتر أبداً.
+    await db.execute(
+      `UPDATE sila_customers
+         SET reconcile_offset_minor = reconcile_offset_minor + ?
+       WHERE customer_id = ?`,
+      [trimmedTotal, customerId],
+    );
+    logDiag(
+      'sila',
+      `شُذِّبت تحصيلات وهمية لـ ${customerName}: ${(
+        trimmedTotal / 100
+      ).toFixed(2)}₪ — لا يعرفها خادم صِلة لديون هذه النقطة`,
+      'warn',
+    );
+  }
+  return trimmedTotal;
+}
+
 export const SilaRepo = {
   /** Creates the queue row at sale time (§7 rule 1). */
   async enqueue(input: EnqueueDebtInput): Promise<SilaDebtRow> {
@@ -1391,7 +1471,21 @@ export const SilaRepo = {
    * (كل ما طُفئ من ديون هذه النقطة — بإسناد الخادم ثنائي المرحلة)،
    * والفارق عن الحصة المحلية هو ما جمعه تطبيق صلة على ديون هذه
    * النقطة بالتحديد. الخوادم قبل 0075 لا ترسل الحقول → الرجوع
-   * الآمن لأرقام POS الشاملة كما كان.
+   * الآمن لأرقام POS الشاملة كما كان. **v35 (الجولة 43): أُلغي هذا
+   * الرجوع نهائياً** — شكوى التاجر: «فاتورة دين 20₪ على زبون صلة
+   * أول مرة ورصيده صفر سُجّل منها 5 دين فقط والباقي عُوّض بتحصيلات
+   * وهمية عبر التطبيق، كأن هناك تداخلاً بفواتير متاجر أخرى أو
+   * قديمة». في حساب التاجر متعدد المتاجر، فارق POS الشامل يجمع
+   * سدادّات وتحصيلات متاجر التاجر الأخرى — لا يمكن إثبات أنه يخص
+   * هذه النقطة، وتسجيله كان يأكل الفواتير الجديدة ويعكس الأرصدة.
+   * الآن ثلاث طبقات: (①) لا مطابقة إلا بأرقام الجهاز 0075 — غابت
+   * → تخطّي كامل بلا تسجيل وبلا تجميد أساس، وأول مشاهدة بلا أرقام
+   * تُعلَّم بأساس حارس ‎-1‎ يُجمَّد عند أول مشاهدة حاملة للأرقام؛
+   * (②) سقف الدين المحلي: التحصيل المسجّل لا يتجاوز دين الزبون في
+   * دفاتر هذه النقطة أبداً؛ (③) المطابقة الهابطة: ادّعت الدفاتر
+   * فوق ما جمعه الخادم على ديون هذه النقطة فعلاً → الفارق وهمي
+   * يُشذَّب من أحدث التحصيلات ويُمتص في الأساس (شفاء ذاتي شامل
+   * لكل تلوث عصر POS — وفاتورة الـ20 المستهدمة تعود كاملة).
    *
    * The server knows the full stock per customer:
    *   collectedOnStoreDebts = pos_purchases_minor − pos_outstanding_minor
@@ -1465,51 +1559,142 @@ export const SilaRepo = {
      *  داخلها)؛ إبقاؤها كما هي كان سيبتلع تحصيلات حقيقية على
      *  ديون هذه النقطة لأن الأسس أعلى من الفارق الجهازي الصحيح. */
     deviceBaselineReset = false,
-  ): Promise<number> {
+  ): Promise<{recordedMinor: number; trimmedMinor: number}> {
     if (rows.length === 0) {
-      return 0;
+      return {recordedMinor: 0, trimmedMinor: 0};
     }
     const db = getDb();
     let recordedTotal = 0;
     let recordedCount = 0;
+    let trimmedTotal = 0;
+    let skippedNoDevice = 0;
     for (const row of rows) {
       try {
-        // v34: أولوية أرقام هذه النقطة (0075) — وفقط عند غيابها
-        // الرجوع لأرقام POS الشاملة (توافق رجعي مع الخوادم الأقدم).
+        // v35 ①: أرقام هذه النقطة (0075) فقط — غيابها يعني أن أي
+        //  فارق لا يمكن إثبات نسبته لهذه النقطة (فارق POS الشامل
+        //  يجمع تحصيلات متاجر التاجر الأخرى وسدادّاتها — تسجيله
+        //  هنا كان يأكل فواتير هذا المتجر). تخطٍّ كامل: لا تسجيل
+        //  ولا تجميد أساس من مشاهدة عمياء.
         const hasDeviceNumbers =
           row.devicePurchasesMinor != null &&
           row.deviceOutstandingMinor != null;
-        const purchasesBase = hasDeviceNumbers
-          ? Number(row.devicePurchasesMinor)
-          : row.posPurchasesMinor;
-        const outstandingBase = hasDeviceNumbers
-          ? Number(row.deviceOutstandingMinor)
-          : row.posOutstandingMinor;
+        if (!hasDeviceNumbers) {
+          skippedNoDevice += 1;
+          // أول مشاهدة بلا أرقام جهاز: علِّم بأساس حارس -1 حتى
+          // يُجمَّد عند أول مشاهدة تحمل الأرقام — لا يُخلق الصف
+          // بأساس صفر مسلّح لفراغ تاريخي لاحق.
+          const seen = await db.execute(
+            'SELECT 1 AS x FROM sila_customers WHERE customer_id = ?',
+            [row.customerId],
+          );
+          if ((seen.rows?._array?.length ?? 0) === 0) {
+            newCustomerOffsets.set(row.customerId, -1);
+          }
+          continue;
+        }
+        const purchasesBase = Number(row.devicePurchasesMinor);
+        const outstandingBase = Number(row.deviceOutstandingMinor);
         const collectedOnStoreDebts = purchasesBase - outstandingBase;
-        // The store's own share of that stock (see header).
+        // The store's own share of that stock (see header) — plus the
+        // v35 extras: payments the server has CONFIRMED (synced only)
+        // for the downward trim, and the full local books (all
+        // payment states + effective debt) for the local-debt cap.
         const aggResult = await db.execute(
           `SELECT
              (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_payment_queue
                WHERE customer_id = ? AND state IN ('synced','syncing')) AS cashier_minor,
+             (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_payment_queue
+               WHERE customer_id = ? AND state = 'synced') AS cashier_synced_minor,
+             (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_payment_queue
+               WHERE customer_id = ?) AS payments_all_minor,
+             (SELECT COALESCE(SUM(amount_minor - COALESCE(credit_covered_minor, 0)), 0) FROM sila_debt_queue
+               WHERE customer_id = ?) AS effective_debt_minor,
              (SELECT COALESCE(SUM(credit_covered_minor), 0) FROM sila_debt_queue
                WHERE customer_id = ?) AS credit_minor,
              (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_app_collections
                WHERE customer_id = ?) AS app_minor`,
-          [row.customerId, row.customerId, row.customerId],
+          [
+            row.customerId,
+            row.customerId,
+            row.customerId,
+            row.customerId,
+            row.customerId,
+            row.customerId,
+          ],
         );
         const agg = (aggResult.rows?._array?.[0] ?? {}) as {
           cashier_minor?: number | null;
+          cashier_synced_minor?: number | null;
+          payments_all_minor?: number | null;
+          effective_debt_minor?: number | null;
           credit_minor?: number | null;
           app_minor?: number | null;
         };
-        const localShare =
-          Number(agg.cashier_minor ?? 0) +
-          Number(agg.credit_minor ?? 0) +
-          Number(agg.app_minor ?? 0);
+        const cashierSyncedMinor = Number(agg.cashier_synced_minor ?? 0);
+        const creditMinor = Number(agg.credit_minor ?? 0);
+        const appMinor = Number(agg.app_minor ?? 0);
+        let localShare =
+          Number(agg.cashier_minor ?? 0) + creditMinor + appMinor;
+        // v35 ②: دين الزبون الحالي في دفاتر هذه النقطة (كل حالات
+        //  السداد — النقد استُلم فعلاً ولو تأجل الرفع) — سقف لا
+        //  يتجاوزه أي تحصيل يُسجَّل، فلا ينقلب الرصيد سالباً أبداً.
+        const localOutstanding = Math.max(
+          0,
+          Number(agg.effective_debt_minor ?? 0) -
+            Number(agg.payments_all_minor ?? 0) -
+            appMinor,
+        );
         const currentGap = Math.max(
           0,
           Math.round(collectedOnStoreDebts - localShare),
         );
+
+        // v35 ③: المطابقة الهابطة — الدفاتر تدّعي (سدادّات مؤكدة +
+        //  تغطية رصيد + تحصيلات مسجلة) أكثر مما جمع الخادم فعلاً
+        //  على ديون هذه النقطة → الفارق تحصيل وهمي (غالباً من عصر
+        //  مطابقة POS) يُشذَّب من أحدث صفوف التحصيل ويُمتص في الأساس
+        //  حتى لا يعود. سدادّات الكاشير «المؤكدة» فقط في المقارنة:
+        //  ما لم يصله الخادم بعد (pending/failed) لا يُحسب عليها.
+        const booksClaim =
+          cashierSyncedMinor + creditMinor + appMinor;
+        const overRecorded = Math.round(booksClaim - collectedOnStoreDebts);
+        if (overRecorded > 0) {
+          const trimmed = await trimOverRecordedCollections(
+            row.customerId,
+            row.name,
+            overRecorded,
+          );
+          if (trimmed > 0) {
+            trimmedTotal += trimmed;
+            logDiag(
+              'sila',
+              `شُذِّب ${row.name}: حُذف ${(trimmed / 100).toFixed(
+                2,
+              )}₪ تحصيلات وهمية لا يعرفها خادم صِلة لديون هذه النقطة — دين المتجر استعاد قيمته الصحيحة`,
+            );
+          }
+          // بعد التشذيب أعد قراءة الحصة المحلية (انخفضت بالمشذَّب)
+          //  حتى لا يتضخع الفارق غير المسجل في هذه التمريرة نفسها.
+          const reagg = await db.execute(
+            `SELECT
+               (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_payment_queue
+                 WHERE customer_id = ? AND state IN ('synced','syncing')) AS cashier_minor,
+               (SELECT COALESCE(SUM(credit_covered_minor), 0) FROM sila_debt_queue
+                 WHERE customer_id = ?) AS credit_minor,
+               (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_app_collections
+                 WHERE customer_id = ?) AS app_minor`,
+            [row.customerId, row.customerId, row.customerId],
+          );
+          const re = (reagg.rows?._array?.[0] ?? {}) as {
+            cashier_minor?: number | null;
+            credit_minor?: number | null;
+            app_minor?: number | null;
+          };
+          localShare =
+            Number(re.cashier_minor ?? 0) +
+            Number(re.credit_minor ?? 0) +
+            Number(re.app_minor ?? 0);
+        }
 
         // First full sight of this customer? Freeze the historical
         // gap as the baseline — pre-existing history (another
@@ -1526,6 +1711,23 @@ export const SilaRepo = {
           continue; // nothing to record on the very first sight
         }
         const offset = Number(cached.reconcile_offset_minor ?? 0);
+        // v35: أساس حارس -1 = شُوهد الزبون أول مرة بلا أرقام جهاز —
+        //  هذه أول مشاهدة حاملة للأرقام: جمِّد الفارق الجهازي الحالي
+        //  أساساً (لا تاريخ يتسرب ولا صفر مسلّح) وسجل لا شيء الآن.
+        if (offset < 0) {
+          await db.execute(
+            `UPDATE sila_customers SET reconcile_offset_minor = ?
+             WHERE customer_id = ?`,
+            [currentGap, row.customerId],
+          );
+          logDiag(
+            'sila',
+            `جُمّد أساس مطابقة تحصيلات ${row.name} عند أول أرقام جهاز: ${(
+              currentGap / 100
+            ).toFixed(2)}₪`,
+          );
+          continue;
+        }
         // v34 (الجولة 42 #2): إعادة التجميد الأحادية على الأرقام
         // الجهازية — تُستبدل (لأعلى أو لأسفل) مرة واحدة، لأن أسس
         // v19 كانت بأرقام POS الشاملة (تاريخ متاجر أخرى داخلها)
@@ -1566,9 +1768,18 @@ export const SilaRepo = {
           );
           continue;
         }
-        const unrecorded = collectedOnStoreDebts - localShare - offset;
+        let unrecorded = collectedOnStoreDebts - localShare - offset;
         if (unrecorded <= 0) {
           continue; // books already know everything above the anchor
+        }
+        // v35 ②: سقف الدين المحلي — التحصيل لا يتجاوز دين الزبون في
+        //  دفاتر هذه النقطة أبداً (يستحيل رصيد سالب حتى لو أخطأ
+        //  الخادم في الإسناد أو فقدت الدفاتر تاريخاً).
+        if (unrecorded > localOutstanding) {
+          unrecorded = localOutstanding;
+        }
+        if (unrecorded <= 0) {
+          continue;
         }
         await db.execute(
           `INSERT INTO sila_app_collections (
@@ -1610,7 +1821,107 @@ export const SilaRepo = {
         ).toFixed(2)}₪`,
       );
     }
-    return recordedTotal;
+    if (skippedNoDevice > 0) {
+      logDiag(
+        'sila',
+        `تخطّي مطابقة ${skippedNoDevice} زبوناً بلا أرقام جهاز (0075) — لا يُسجّل لهم تحصيل إلا ببُرهان هذه النقطة`,
+      );
+    }
+    return {recordedMinor: recordedTotal, trimmedMinor: trimmedTotal};
+  },
+
+  /** v35 (الجولة 43): التدقيق الشامل أحادي المرة — شفاء كل تلوث
+   *  التحصيلات التاريخي دفعة واحدة.
+   *  ─────────────────────────────────────────────────────────────────
+   *  تغذية الزبائن تدريجية (updated_since) — زبون لم يتغير لدى
+   *  الخادم لا يعود فيظهر، فلو اكتفينا بتشذيب التمريرات العادية
+   *  لبقي التلوث القديم (تحصيلات عصر POS الوهمية) جاثماً على دفاتر
+   *  من لا يتحرك حسابهم. هذا التدقيق يمسح كل زبائن الكاش مرة واحدة
+   *  بعد التحديث، بأرقام الجهاز المخزنة آخر مرة، ويشذِّب كل ادعاء
+   *  فوق ما يعرفه الخادم عن ديون هذه النقطة — فاتورة الـ20₪
+   *  المستهدمة تعود 20 ديناً كاملة، والرصيد السالب يستقيم.
+   *
+   *  يعمل فقط حين عرف التطبيق يوماً أرقام جهاز (0075 حي) — كاش
+   *  ما قبل 0075 يخزن أصفاراً لا تفرّق بين «لا تاريخ» و«مجهول»،
+   *  والتشذيب الأعمى فيها خطر. يُرجع إجمالي ما شذَّبه. */
+  async auditAppCollections(): Promise<number> {
+    const db = getDb();
+    let trimmedGrand = 0;
+    let audited = 0;
+    try {
+      const customers = await db.execute(
+        `SELECT customer_id, name,
+                device_purchases_minor, device_outstanding_minor,
+                reconcile_offset_minor
+           FROM sila_customers`,
+      );
+      for (const raw of customers.rows?._array ?? []) {
+        const c = raw as {
+          customer_id?: string;
+          name?: string | null;
+          device_purchases_minor?: number | null;
+          device_outstanding_minor?: number | null;
+        };
+        const customerId = String(c.customer_id ?? '');
+        if (customerId.length === 0) {
+          continue;
+        }
+        const devicePurchases = Number(c.device_purchases_minor ?? 0);
+        const deviceOutstanding = Number(c.device_outstanding_minor ?? 0);
+        // أرقام الجهاز المخزنة صفر/صفر قد تكون «لا تاريخ جهاز»
+        //  حقيقة — والدفاتر فوقها وهم بامتياز (الخادم لا يعرف
+        //  لديون هذه النقطة شيئاً غير الصفر) — أو «مجهولة» لكاش
+        //  ما قبل 0075؛ الفارق يفصل بينهما علم V34 (رأينا الأرقام
+        //  يوماً) الذي يفترض المتصل فحصه قبل النداء.
+        const serverGap = devicePurchases - deviceOutstanding;
+        const agg = await db.execute(
+          `SELECT
+             (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_payment_queue
+               WHERE customer_id = ? AND state = 'synced') AS cashier_synced_minor,
+             (SELECT COALESCE(SUM(credit_covered_minor), 0) FROM sila_debt_queue
+               WHERE customer_id = ?) AS credit_minor,
+             (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_app_collections
+               WHERE customer_id = ?) AS app_minor`,
+          [customerId, customerId, customerId],
+        );
+        const a = (agg.rows?._array?.[0] ?? {}) as {
+          cashier_synced_minor?: number | null;
+          credit_minor?: number | null;
+          app_minor?: number | null;
+        };
+        const booksClaim =
+          Number(a.cashier_synced_minor ?? 0) +
+          Number(a.credit_minor ?? 0) +
+          Number(a.app_minor ?? 0);
+        const excess = Math.round(booksClaim - serverGap);
+        if (excess > 0) {
+          const trimmed = await trimOverRecordedCollections(
+            customerId,
+            c.name ?? 'زبون صِلة',
+            excess,
+          );
+          trimmedGrand += trimmed;
+          audited += 1;
+        }
+      }
+      if (trimmedGrand > 0) {
+        logDiag(
+          'sila',
+          `التدقيق الشامل: شُذِّبت تحصيلات وهمية لـ ${audited} زبوناً بإجمالي ${(
+            trimmedGrand / 100
+          ).toFixed(2)}₪ — كل تحصيل لا يعرفه خادم صِلة لديون هذه النقطة خرج من الدفاتر`,
+        );
+      } else {
+        logDiag('sila', 'التدقيق الشامل للتحصيلات: الدفاتر نظيفة');
+      }
+    } catch (error) {
+      logDiag(
+        'sila',
+        `تعذر التدقيق الشامل للتحصيلات: ${toMessage(error)}`,
+        'warn',
+      );
+    }
+    return trimmedGrand;
   },
 
   /** v18 (round-24 #1): store-wide totals of the Sila-app collections

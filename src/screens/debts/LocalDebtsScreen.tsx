@@ -111,6 +111,23 @@ export function LocalDebtsScreen() {
   const [payBusy, setPayBusy] = useState(false);
   /** v17 (round-23 #8): the link+scan flow's busy flag. */
   const [linkBusy, setLinkBusy] = useState(false);
+  /** v35 (الجولة 43): تعديل بيانات الزبون من نافذته — طلب التاجر:
+   *  «لا يوجد خيار تعديل بيانات الزبون في نافذة الزبون». نفس
+   *  معايير التسجيل (هوية 9 أرقام، جوال 056/059) وتحقق فوري
+   *  داخل الحقول، وتفرد الهوية يُفحص قبل الحفظ. */
+  const [editOpen, setEditOpen] = useState(false);
+  const [editId, setEditId] = useState('');
+  const [editName, setEditName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
+  const [editErrors, setEditErrors] = useState<{
+    id?: string;
+    name?: string;
+    phone?: string;
+  }>({});
+  const editIdFieldRef = useRef<FieldHandle>(null);
+  const editNameFieldRef = useRef<FieldHandle>(null);
+  const editPhoneFieldRef = useRef<FieldHandle>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -213,6 +230,87 @@ export function LocalDebtsScreen() {
       setAddBusy(false);
     }
   }, [addBusy, addId, addName, addPhone, reload, toast]);
+
+  /** v35: فتح نافذة التعديل ببيانات الزبون الحالية. */
+  const openEdit = useCallback((entry: LocalCustomerBalance) => {
+    setEditId(entry.customer.id_number ?? '');
+    setEditName(entry.customer.name ?? '');
+    setEditPhone(entry.customer.phone ?? '');
+    setEditErrors({});
+    setEditOpen(true);
+  }, []);
+
+  /** v35: حفظ التعديل — نفس معايير التسجيل + تفرد الهوية. */
+  const saveEdit = useCallback(async () => {
+    if (editBusy || detail == null) {
+      return;
+    }
+    const errors: {id?: string; name?: string; phone?: string} = {};
+    if (!isValidIdNumber(editId)) {
+      errors.id =
+        editId.length === 0
+          ? 'رقم الهوية مطلوب'
+          : `رقم الهوية 9 أرقام بالضبط (${editId.length} حالياً)`;
+    }
+    if (editName.trim().length === 0) {
+      errors.name = 'اسم الزبون مطلوب';
+    }
+    if (!isValidLocalPhone(editPhone)) {
+      errors.phone =
+        editPhone.length === 0
+          ? 'رقم الجوال مطلوب'
+          : editPhone.length !== 10
+          ? `رقم الجوال 10 أرقام بالضبط (${editPhone.length} حالياً)`
+          : 'يبدأ بـ 056 أو 059 فقط';
+    }
+    // الهوية وحدها إن تغيّرت: لا يجوز أن يملكها زبون آخر.
+    if (
+      errors.id == null &&
+      editId.trim() !== detail.customer.id_number
+    ) {
+      const holder = await LocalDebtsRepo.byIdNumber(editId.trim());
+      if (holder != null && holder.id !== detail.customer.id) {
+        errors.id = `رقم الهوية مسجّل لزبون آخر (${holder.name})`;
+      }
+    }
+    setEditErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      if (errors.id) {
+        editIdFieldRef.current?.focus();
+      } else if (errors.name) {
+        editNameFieldRef.current?.focus();
+      } else {
+        editPhoneFieldRef.current?.focus();
+      }
+      return;
+    }
+    setEditBusy(true);
+    try {
+      await LocalDebtsRepo.updateCustomer(detail.customer.id, {
+        idNumber: editId.trim(),
+        name: editName,
+        phone: editPhone,
+      });
+      setEditOpen(false);
+      await refreshDetail(detail.customer.id);
+      toast('حُدّثت بيانات الزبون', 'success');
+    } catch (error) {
+      Alert.alert(
+        'لا يمكن حفظ التعديل',
+        error instanceof Error ? error.message : 'خطأ غير متوقع',
+      );
+    } finally {
+      setEditBusy(false);
+    }
+  }, [
+    editBusy,
+    detail,
+    editId,
+    editName,
+    editPhone,
+    refreshDetail,
+    toast,
+  ]);
 
   const confirmDelete = useCallback(
     (entry: LocalCustomerBalance) => {
@@ -806,6 +904,14 @@ export function LocalDebtsScreen() {
                   </View>
                 ) : null}
               </View>
+              {/* v35: تعديل بيانات الزبون من نافذته — طلب التاجر. */}
+              <TouchableOpacity
+                style={styles.editHeadBtn}
+                activeOpacity={0.7}
+                onPress={() => openEdit(detail)}>
+                <Icon name="edit" size={16} color={c.accent} />
+                <Text style={styles.editHeadBtnText}>تعديل</Text>
+              </TouchableOpacity>
             </View>
 
             <View style={styles.detailStats}>
@@ -931,6 +1037,107 @@ export function LocalDebtsScreen() {
               variant="secondary"
               onPress={() => setDetail(null)}
             />
+          </View>
+        </View>
+      ) : null}
+
+      {/* ── v35: Edit-customer sheet ── */}
+      {editOpen && detail != null ? (
+        <View style={styles.overlay}>
+          <TouchableOpacity
+            style={styles.overlayDim}
+            activeOpacity={1}
+            onPress={() => setEditOpen(false)}
+          />
+          <BackHandlerCloser
+            active={editOpen}
+            onClose={() => setEditOpen(false)}
+          />
+          <View style={styles.detailSheet}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.detailName}>تعديل بيانات الزبون</Text>
+            <Text style={styles.detailMeta}>
+              {detail.customer.name} — الديون والسدادّات لا تتأثر بالتعديل
+            </Text>
+            <ScrollView
+              style={styles.historyList}
+              keyboardShouldPersistTaps="handled">
+              <Field
+                ref={editIdFieldRef}
+                label="رقم الهوية (9 أرقام) *"
+                value={editId}
+                onChangeText={text => {
+                  setEditId(text.replace(/\D/g, '').slice(0, 9));
+                  if (editErrors.id) {
+                    setEditErrors({...editErrors, id: undefined});
+                  }
+                }}
+                keyboardType="number-pad"
+                placeholder="مثال: 401234567"
+                returnKeyType="next"
+                onSubmitEditing={() => editNameFieldRef.current?.focus()}
+              />
+              {editErrors.id ? (
+                <Text style={styles.fieldError}>{editErrors.id}</Text>
+              ) : null}
+              <Field
+                ref={editNameFieldRef}
+                label="الاسم الكامل *"
+                value={editName}
+                onChangeText={text => {
+                  setEditName(text);
+                  if (editErrors.name) {
+                    setEditErrors({...editErrors, name: undefined});
+                  }
+                }}
+                placeholder="اسم الزبون الكامل"
+                returnKeyType="next"
+                onSubmitEditing={() => editPhoneFieldRef.current?.focus()}
+              />
+              {editErrors.name ? (
+                <Text style={styles.fieldError}>{editErrors.name}</Text>
+              ) : null}
+              <Field
+                ref={editPhoneFieldRef}
+                label="رقم الجوال (056 / 059) *"
+                value={editPhone}
+                onChangeText={text => {
+                  setEditPhone(text.replace(/\D/g, '').slice(0, 10));
+                  if (editErrors.phone) {
+                    setEditErrors({...editErrors, phone: undefined});
+                  }
+                }}
+                keyboardType="phone-pad"
+                placeholder="0591234567"
+                returnKeyType="done"
+                onSubmitEditing={() => {
+                  Keyboard.dismiss();
+                  void saveEdit();
+                }}
+              />
+              {editErrors.phone ? (
+                <Text style={styles.fieldError}>{editErrors.phone}</Text>
+              ) : null}
+              <Text style={styles.sheetHint}>
+                نفس معايير التسجيل: هوية 9 أرقام بالضبط وجوال 10 أرقام يبدأ
+                بـ 056 أو 059. رقم الهوية لا يُقبل إن كان مسجّلاً لزبون آخر
+                — وسجل الديون والسدادّات يبقى كما هو تماماً.
+              </Text>
+              <AppButton
+                title="حفظ التعديل"
+                icon="check"
+                onPress={() => {
+                  Keyboard.dismiss();
+                  void saveEdit();
+                }}
+                loading={editBusy}
+              />
+              <AppButton
+                title="إلغاء"
+                variant="secondary"
+                onPress={() => setEditOpen(false)}
+              />
+            </ScrollView>
           </View>
         </View>
       ) : null}
@@ -1170,6 +1377,23 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
+    },
+    /** v35: زر التعديل في رأس نافذة الزبون. */
+    editHeadBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingVertical: 7,
+      paddingHorizontal: 11,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    editHeadBtnText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: 12.5,
     },
     avatarBig: {
       width: 54,

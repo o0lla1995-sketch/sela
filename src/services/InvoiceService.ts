@@ -918,7 +918,11 @@ export const InvoiceService = {
     const lines = items
       .map(item => ({
         item,
-        productName: nameMap.get(item.product_id) ?? `#${item.product_id}`,
+        // v35 (الجولة 43): وصف المتغير مع الاسم — «تيشيرت (أسود · L)»
+        //  أو «شاي (كبير)» — كي يميز التاجر الأصناف المتشابهة.
+        productName:
+          (nameMap.get(item.product_id) ?? `#${item.product_id}`) +
+          (item.variant_label ? ` (${item.variant_label})` : ''),
         remaining: Math.max(0, item.quantity - (returnedQty.get(item.id) ?? 0)),
       }))
       .filter(line => line.remaining > 0.0001);

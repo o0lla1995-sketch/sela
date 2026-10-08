@@ -44,6 +44,7 @@ import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
 import {EmbeddingRepo} from '../../database/repositories/EmbeddingRepo';
 import {UnitRepo} from '../../database/repositories/UnitRepo';
+import {VariantRepo} from '../../database/repositories/VariantRepo';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {usePrinterStore} from '../../stores/printerStore';
 import {storeModeConfig} from '../../core/storeModes';
@@ -197,21 +198,35 @@ export function ProductFormScreen() {
     modeConfig.defaultSaleMode,
   );
   const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
-  // ── v34 (الجولة 42 #3): ربطة الملابس — إدخال الموديل دفعة واحدة:
-  //    لون واحد + مقاسات متعددة بكمية لكل مقاس → منتج مستقل لكل
-  //    مقاس بباركود داخلي، مرتبطة بمجموعة style_group واحدة.
-  const [lotColor, setLotColor] = useState('');
+  // ── v35 (الجولة 43): ربطة الملابس — الموديل منتج واحد بمتغيرات:
+  //    المقاسات التي بالربطة × الألوان المتعددة × عدد الربط — كل
+  //    (لون، مقاس) متغير مخزونه = عدد الربط، والإجمالي =
+  //    ألوان × مقاسات × ربط (طلب التاجر حرفياً).
   const [lotSizes, setLotSizes] = useState<string[]>([]);
-  const [lotQtyBySize, setLotQtyBySize] = useState<Record<string, number>>({});
+  const [lotColors, setLotColors] = useState<string[]>([]);
+  const [lotBundles, setLotBundles] = useState('1');
   const [lotCustomColor, setLotCustomColor] = useState('');
   const [lotCustomSize, setLotCustomSize] = useState('');
-  /** بيانات الربطة للمنتج المحمّل للتعديل (ملابس) — تُحفظ كما هي
-   *  حتى لا ينفصل المنتج عن مجموعته عند تعديل السعر أو الاسم. */
-  const [variantInfo, setVariantInfo] = useState<{
-    color: string | null;
-    size: string | null;
-    group: string | null;
-  } | null>(null);
+  /** تعديل موديل ملابس: متغيراته المحمّلة (لون × مقاس × مخزون)
+  *  بعدّادات — وزر «إضافة ربطة» يزيد كل مقاسات لونٍ بعدد الربط. */
+  const [variantDrafts, setVariantDrafts] = useState<
+    {color: string; size: string; stock: number}[]
+  >([]);
+  /** v35: أحجام المطعم/الكافيتريا — حجم بسعره الخاص وتكلفته
+   *  الاختيارية (صغير/وسط/كبير + مخصص). */
+  const [sizesEnabled, setSizesEnabled] = useState(false);
+  const [sizeDrafts, setSizeDrafts] = useState<
+    {size: string; price: string; cost: string}[]
+  >([]);
+  const [customSizeName, setCustomSizeName] = useState('');
+  /** v35: وحدة الأساس بلغة المجال (شريط/علبة/حصة/صحن/كوب). */
+  const [baseUnitName, setBaseUnitName] = useState<string | null>(null);
+  /** v35: مخزون بلا تتبع (مطعم/كافيتريا افتراضياً). */
+  const [untrackedStock, setUntrackedStock] = useState(
+    modeConfig.productCopy.untrackedStockDefault === true,
+  );
+  /** v35: التقاط صورة المنتج (مودات الصورة بدل البصمة). */
+  const [photoBusy, setPhotoBusy] = useState(false);
   // ── v32 (round-40 #3): تاريخ انتهاء الصلاحية — اختياري، بإحدى
   //    طريقتين: تاريخ محدد (يوم/شهر/سنة) أو مدة من اليوم (أيام أو
   //    أشهر) تُحسب إلى تاريخ فعلي وتُخزن 'YYYY-MM-DD'.
@@ -301,19 +316,37 @@ export function ProductFormScreen() {
             setCategoryId(product.category_id ?? 'none');
             setSaleMode(product.sold_by_weight === 1 ? 'weight' : 'piece');
             setUnitRows(productUnits.map(unitRowToDraft));
-            // v34: بيانات الربطة تُحمَّل وتُحفظ كما هي — تعديل السعر
-            // أو الاسم لا ينفصل المنتج عن مجموعته ومقاسه.
-            if (
-              product.style_group != null ||
-              product.variant_size != null ||
-              product.variant_color != null
-            ) {
-              setVariantInfo({
-                color: product.variant_color,
-                size: product.variant_size,
-                group: product.style_group,
-              });
-              setLotColor(product.variant_color ?? '');
+            // v35 (الجولة 43): وحدة الأساس + المخزون بلا تتبع
+            //  يُحمّلان كما حفظا — بلغة المجال نفسها.
+            setBaseUnitName(product.base_unit_name ?? null);
+            setUntrackedStock(product.stock_untracked === 1);
+            // v35: متغيرات الموديل (ملابس لون×مقاس أو أحجام
+            //  مطعم/كافيتريا) تُحمّل لمحرّر المتغيرات أدناه.
+            const savedVariants = await VariantRepo.listByProduct(productId);
+            if (savedVariants.length > 0 && mounted) {
+              const clothingVariants = savedVariants.filter(
+                v => v.kind === 'variant',
+              );
+              const sizeVariants = savedVariants.filter(v => v.kind === 'size');
+              if (clothingVariants.length > 0) {
+                setVariantDrafts(
+                  clothingVariants.map(v => ({
+                    color: v.color,
+                    size: v.size,
+                    stock: Math.round(v.stock_quantity),
+                  })),
+                );
+              }
+              if (sizeVariants.length > 0) {
+                setSizesEnabled(true);
+                setSizeDrafts(
+                  sizeVariants.map(v => ({
+                    size: v.size,
+                    price: v.retail_price != null ? String(v.retail_price) : '',
+                    cost: v.cost_price != null ? String(v.cost_price) : '',
+                  })),
+                );
+              }
             }
             // v32: تاريخ الانتهاء المحفوظ يُحمَّل في وضع «تاريخ محدد».
             if (
@@ -579,6 +612,44 @@ export function ProductFormScreen() {
     },
     [imageUri, toast],
   );
+
+  /** v35 (الجولة 43): صورة المنتج للمجالات التي لا تنفعها البصمة
+   *  البصرية (ملابس/صيدلية/مطعم/كافيتريا) — صورة واحدة بالكاميرا
+   *  الأصلية تظهر في تجان البيع وتُخزن كصورة المنتج. */
+  const takeProductPhoto = useCallback(async () => {
+    if (photoBusy) {
+      return;
+    }
+    setPhotoBusy(true);
+    try {
+      const photoPath = await capturePhoto();
+      if (photoPath == null) {
+        return; // أغلق التاجر الكاميرا.
+      }
+      let finalPath = photoPath;
+      if (VisionRecognitionService.saveThumbnail != null) {
+        try {
+          const thumb = await VisionRecognitionService.saveThumbnail(
+            photoPath,
+          );
+          if (thumb != null) {
+            finalPath = thumb;
+          }
+        } catch {
+          // الصورة الأصلية تكفي — التصغير تحسين فقط.
+        }
+      }
+      setImageUri(finalPath);
+      toast('تم حفظ الصورة', 'success');
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل التقاط الصورة',
+        'error',
+      );
+    } finally {
+      setPhotoBusy(false);
+    }
+  }, [photoBusy, toast]);
 
   /** v8: native BARCODE engine → fill the barcode field. */
   const scanBarcodeField = useCallback(async () => {
@@ -1216,101 +1287,108 @@ export function ProductFormScreen() {
     ensureReceivingUnit,
   ]);
 
-  /** v34 (الجولة 42 #3): حفظ ربطة الملابس — الموديل مرة واحدة:
-   *  لون + مقاسات متعددة بكمية لكل مقاس → منتج مستقل لكل مقاس
-   *  بباركود داخلي فريد، وكلها تحمل style_group واحداً
-   *  (`الموديل|اللون`) فتُباع من نافذة اختيار المقاس في الشبكة.
-   *  الربطة اللاحقة للموديل نفسه بلون آخر تنشئ مجموعة أخرى؛
-   *  والموديل نفسه باللون نفسه تنضم للمجموعة ذاتها (مقاسات
-   *  إضافية لاحقاً بلا تكرار). */
+  /** v35 (الجولة 43): حفظ موديل الملابس — منتج واحد بمتغيرات:
+   *  الربطة (المقاسات المختارة × الألوان المتعددة × عدد الربط)
+   *  تُنشئ متغيراً لكل (لون، مقاس) مخزونه = عدد الربط، وإجمالي
+   *  القطع = ألوان × مقاسات × ربط — طلب التاجر حرفياً:
+   *  «إدخال الملابس يتم بالربط واضافة المقاسات بالربطة والألوان
+   *  متعددة وعدد الربط ويضرب في الكمية علي حسب عدد المقاسات
+   *  الموجودة بالربط وهكذا فقط». لا توزيع على عدة منتجات بعد
+   *  اليوم — الموديل تجان واحد يُباع من نافذة اللون والمقاس. */
   const saveLot = useCallback(async () => {
     const modelName = name.trim();
-    const color = (lotColor || lotCustomColor).trim();
+    const colors = [...lotColors];
+    const customColor = lotCustomColor.trim();
+    if (customColor.length > 0 && !colors.includes(customColor)) {
+      colors.push(customColor);
+    }
     const cost = parseNumber(costPrice);
     const retail = parseNumber(retailPrice);
     const wholesale = wholesalePrice.trim()
       ? parseNumber(wholesalePrice)
       : retail;
+    const bundles = Math.max(1, Math.round(parseNumber(lotBundles) || 1));
     const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
 
     if (!modelName) {
-      toast('اسم الموديل مطلوب (مثال: بنطال جينز)', 'error');
+      toast('اسم الموديل مطلوب (مثال: تيشيرت قطن)', 'error');
       return;
     }
-    if (!color) {
-      toast('اختر لون الربطة أو اكتبه', 'error');
+    if (colors.length === 0) {
+      toast('اختر لوناً واحداً على الأقل للربطة', 'error');
       return;
     }
     if (lotSizes.length === 0) {
-      toast('اختر مقاساً واحداً على الأقل للربطة', 'error');
+      toast('اختر مقاساً واحداً على الأقل داخل الربطة', 'error');
       return;
     }
-    const sizes = lotSizes
-      .map(size => ({size, qty: Math.max(1, Math.round(lotQtyBySize[size] ?? 1))}))
-      .filter(entry => entry.qty > 0);
-    if (sizes.length === 0) {
-      toast('أدخل كمية صالحة لمقاس واحد على الأقل', 'error');
+    if (Number.isNaN(bundles) || bundles < 1 || bundles > 999) {
+      toast('عدد الربط يجب أن يكون بين 1 و 999', 'error');
       return;
     }
     if (Number.isNaN(cost) || cost < 0) {
-      toast('أدخل سعر تكلفة صالحاً للقطعة', 'error');
+      toast('أدخل تكلفة القطعة', 'error');
       return;
     }
     if (Number.isNaN(retail) || retail <= 0) {
-      toast('أدخل سعر مبيع صالحاً للقطعة', 'error');
+      toast('أدخل سعر القطعة (مفرق)', 'error');
       return;
     }
     if (Number.isNaN(wholesale) || wholesale < 0) {
-      toast('سعر الجملة غير صالح', 'error');
+      toast('سعر القطعة بالجملة غير صالح', 'error');
       return;
     }
 
     setBusy(true);
     try {
-      const styleGroup = `${modelName}|${color}`;
-      let created = 0;
-      for (const entry of sizes) {
-        // باركود داخلي فريد لكل مقاس — الرمز هو هوية القطعة على الرف.
-        const barcode = await generateInternalEan13(async candidate => {
-          const productHit = await ProductRepo.findByBarcode(candidate);
-          if (productHit != null) {
-            return true;
-          }
-          return (await UnitRepo.findByBarcode(candidate)) != null;
-        });
-        await ProductRepo.create({
-          name: `${modelName} — ${color} · ${entry.size}`,
-          cost_price: cost,
-          retail_price: retail,
-          wholesale_price: wholesale,
-          stock_quantity: entry.qty,
-          category_id: categoryId === 'none' ? null : categoryId,
-          image_uri: imageUri,
-          low_stock_threshold:
-            thresholdValue != null && !Number.isNaN(thresholdValue)
-              ? Math.trunc(thresholdValue)
-              : null,
-          barcode,
-          sold_by_weight: 0,
-          expiry_date: null,
-          style_group: styleGroup,
-          variant_size: entry.size,
-          variant_color: color,
-        });
-        created += 1;
+      // الموديل منتج واحد — مخزونه مجموع متغيراته.
+      const totalPieces = colors.length * lotSizes.length * bundles;
+      const productIdNew = await ProductRepo.create({
+        name: modelName,
+        cost_price: cost,
+        retail_price: retail,
+        wholesale_price: wholesale,
+        stock_quantity: totalPieces,
+        category_id: categoryId === 'none' ? null : categoryId,
+        image_uri: imageUri,
+        low_stock_threshold:
+          thresholdValue != null && !Number.isNaN(thresholdValue)
+            ? Math.trunc(thresholdValue)
+            : null,
+        barcode: barcode.trim() || null,
+        sold_by_weight: 0,
+        expiry_date: null,
+        has_variants: 1,
+        base_unit_name: 'قطعة',
+        stock_untracked: 0,
+        sizes_count: lotSizes.length,
+      });
+      if (productIdNew < 0) {
+        throw new Error('فشل حفظ الموديل');
       }
+      // المتغيرات: كل (لون × مقاس) مخزونه = عدد الربط.
+      const variantInputs = colors.flatMap(color =>
+        lotSizes.map(size => ({
+          kind: 'variant' as const,
+          color,
+          size,
+          stock_quantity: bundles,
+        })),
+      );
+      await VariantRepo.replaceForProduct(productIdNew, variantInputs);
       await refreshCatalog();
       toast(
-        `تمت إضافة ربطة ${modelName} — ${color}: ${created} منتج` +
-          ` (${sizes.map(e => `${e.size}×${e.qty}`).join('، ')})` +
-          ' بباركود داخلي لكل مقاس',
+        `تمت إضافة موديل ${modelName}: ${colors.length} لون × ${
+          lotSizes.length
+        } مقاس × ${bundles} ربط = ${totalPieces} قطعة` +
+          ` — ربطة الجملة ${retail > 0 ? '' : ''}تُباع من نافذة الموديل`,
         'success',
         6000,
       );
       navigation.goBack();
     } catch (error) {
       toast(
-        error instanceof Error ? error.message : 'فشل حفظ الربطة',
+        error instanceof Error ? error.message : 'فشل حفظ الموديل',
         'error',
       );
     } finally {
@@ -1318,25 +1396,26 @@ export function ProductFormScreen() {
     }
   }, [
     name,
-    lotColor,
+    lotColors,
     lotCustomColor,
     lotSizes,
-    lotQtyBySize,
+    lotBundles,
     costPrice,
     retailPrice,
     wholesalePrice,
     threshold,
     categoryId,
     imageUri,
+    barcode,
     refreshCatalog,
     toast,
     navigation,
   ]);
 
   const save = useCallback(async () => {
-    // v34 (الجولة 42 #3): الملابس عند الإنشاء = ربطة (دفعة مقاسات
-    //  بمنتج لكل مقاس) — مسار حفظ خاص بها. عند التعديل يمر المسار
-    //  الطبيعي مع الحفاظ على بيانات الربطة كما حُمّلت.
+    // v35 (الجولة 43): الملابس عند الإنشاء = موديل واحد بمتغيرات
+    //  من الربطة — مسار حفظ خاص بها. التعديل يمر المسار الطبيعي
+    //  مع حفظ متغيراته كما عُدّلت بمحرّر المتغيرات.
     if (modeConfig.lotEntry === true && productId == null) {
       await saveLot();
       return;
@@ -1344,7 +1423,12 @@ export function ProductFormScreen() {
     const trimmedName = name.trim();
     const cost = parseNumber(costPrice);
     const retail = parseNumber(retailPrice);
-    const wholesale = wholesalePrice.trim()
+    // v35: المجالات بلا جملة (فواكه/مطعم/كافيتريا) — سعر واحد
+    //  يساوي المفرق؛ حقل الجملة مخفي أصلاً.
+    const noWholesale = modeConfig.productCopy.wholesaleLabel == null;
+    const wholesale = noWholesale
+      ? retail
+      : wholesalePrice.trim()
       ? parseNumber(wholesalePrice)
       : retail;
     const weighted = saleMode === 'weight';
@@ -1352,7 +1436,15 @@ export function ProductFormScreen() {
     // only PIECE products round the entered stock to whole units.
     const stockConversion = weighted ? 1 : validConversion(stockUnitId) ?? 1;
     const stockRaw = stock.trim() ? parseNumber(stock) * stockConversion : 0;
-    const stockValue = weighted
+    // v35: مخزون بلا تتبع أو موديل ملابس — الكمية من المتغيرات
+    //  لا من حقل يدوي.
+    const isClothingModel =
+      modeConfig.lotEntry === true && variantDrafts.length > 0;
+    const stockValue = untrackedStock
+      ? 0
+      : isClothingModel
+      ? variantDrafts.reduce((sum, v) => sum + Math.max(0, v.stock), 0)
+      : weighted
       ? Math.round((Number.isNaN(stockRaw) ? 0 : stockRaw) * 1000) / 1000
       : Number.isNaN(stockRaw)
       ? 0
@@ -1360,7 +1452,7 @@ export function ProductFormScreen() {
     const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
 
     if (!trimmedName) {
-      toast('اسم المنتج مطلوب', 'error');
+      toast(`${modeConfig.productCopy.nameLabel} مطلوب`, 'error');
       return;
     }
     if (Number.isNaN(cost) || cost < 0) {
@@ -1380,6 +1472,27 @@ export function ProductFormScreen() {
     if (Number.isNaN(wholesale) || wholesale < 0) {
       toast('سعر الجملة غير صالح', 'error');
       return;
+    }
+    // v35: أحجام مطعم مفعّلة — سعر كل حجم مطلوب وصالح.
+    if (sizesEnabled) {
+      if (sizeDrafts.length === 0) {
+        toast('أضف حجماً واحداً على الأقل أو أطفئ الأحجام', 'error');
+        return;
+      }
+      for (const draft of sizeDrafts) {
+        const price = parseNumber(draft.price);
+        if (draft.price.trim() === '' || Number.isNaN(price) || price <= 0) {
+          toast(`أدخل سعراً صالحاً للحجم ${draft.size}`, 'error');
+          return;
+        }
+        if (
+          draft.cost.trim() !== '' &&
+          (Number.isNaN(parseNumber(draft.cost)) || parseNumber(draft.cost) < 0)
+        ) {
+          toast(`تكلفة الحجم ${draft.size} غير صالحة`, 'error');
+          return;
+        }
+      }
     }
     // v32 (round-40 #3): صلاحية ناقصة/فاسدة تمنع الحفظ مع رسالة واضحة.
     if (expiryDate === undefined) {
@@ -1450,11 +1563,15 @@ export function ProductFormScreen() {
         sold_by_weight: weighted ? 1 : 0,
         // v32 (round-40 #3): التاريخ المحسوب (تاريخ محدد أو مدة).
         expiry_date: expiryDate ?? null,
-        // v34 (الجولة 42 #3): بيانات الربطة تُحفظ كما حُمّلت — تعديل
-        //  السعر أو الاسم لا ينفصل المنتج عن مجموعته ومقاسه.
-        style_group: variantInfo?.group ?? null,
-        variant_size: variantInfo?.size ?? null,
-        variant_color: variantInfo?.color ?? null,
+        // v35 (الجولة 43): وحدة الأساس بلغة المجال + المخزون بلا
+        //  تتبع + علم المتغيرات (موديل ملابس أو صنف بأحجام).
+        base_unit_name: baseUnitName,
+        stock_untracked: untrackedStock ? 1 : 0,
+        has_variants:
+          isClothingModel || (sizesEnabled && sizeDrafts.length > 0) ? 1 : 0,
+        sizes_count: isClothingModel
+          ? new Set(variantDrafts.map(v => v.size)).size
+          : null,
       };
 
       let targetId = productId;
@@ -1468,6 +1585,35 @@ export function ProductFormScreen() {
       }
 
       await UnitRepo.replaceForProduct(targetId, cleanedUnits);
+
+      // v35 (الجولة 43): متغيرات الموديل — ملابس (لون × مقاس بمخزون
+      //  معدّل) وأحجام المطعم/الكافيتريا (حجم بسعره وتكلفته).
+      if (isClothingModel) {
+        await VariantRepo.replaceForProduct(
+          targetId,
+          variantDrafts.map(v => ({
+            kind: 'variant' as const,
+            color: v.color,
+            size: v.size,
+            stock_quantity: Math.max(0, Math.round(v.stock)),
+          })),
+        );
+      } else if (sizesEnabled && sizeDrafts.length > 0) {
+        await VariantRepo.replaceForProduct(
+          targetId,
+          sizeDrafts.map(d => ({
+            kind: 'size' as const,
+            color: '',
+            size: d.size,
+            stock_quantity: 0,
+            retail_price: parseNumber(d.price),
+            cost_price: d.cost.trim() !== '' ? parseNumber(d.cost) : null,
+          })),
+        );
+      } else if (productId != null && !isClothingModel && !sizesEnabled) {
+        // أُطفئت الأحجام أو نُزعت المتغيرات — نظّف صفوفها.
+        await VariantRepo.replaceForProduct(targetId, []);
+      }
 
       // Save the captured embeddings. v9.1 (round-14 #2):
       //  - only angles PRESENT in the form state are touched - an
@@ -1530,7 +1676,12 @@ export function ProductFormScreen() {
     productId,
     expiryDate,
     expiryMode,
-    variantInfo,
+    // v35 (الجولة 43): مدخلات المتغيرات والأحجام ووحدة الأساس.
+    variantDrafts,
+    sizesEnabled,
+    sizeDrafts,
+    baseUnitName,
+    untrackedStock,
     modeConfig,
     saveLot,
     refreshCatalog,
@@ -1678,14 +1829,133 @@ export function ProductFormScreen() {
           contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled">
+          {/* ── v35 (الجولة 43): الهوية البصرية أعلى الصفحة — طلب
+              التاجر حرفياً: «التعرف البصري علي المنتج يجب أن يكون
+              في اعلي صفحة المنتج واذا كان المنتج لا يحتاج تعرف
+              بصري يمكن بدلا منه إضافة صورى للمنتج». البقالة
+              والفواكه بصمة (٣ زوايا)، والبقية صورة واحدة. ── */}
+          {modeConfig.vision ? (
+            <FoldSection
+              title={modeConfig.productCopy.visualLabel}
+              hint={
+                capturedCount > 0
+                  ? `${capturedCount}/3 بصمة محفوظة`
+                  : 'اختياري — للبيع بالتعرف البصري'
+              }
+              icon="camera"
+              open={visionOpen}
+              onToggle={() => setVisionOpen(open => !open)}
+              badge={capturedCount > 0 ? `${capturedCount}/3` : null}>
+              <View style={styles.anglesRow}>
+                {ANGLE_LABELS.map(angle => {
+                  const state = angles[angle];
+                  return (
+                    <TouchableOpacity
+                      key={angle}
+                      style={[
+                        styles.angleCard,
+                        state.embedding != null
+                          ? {borderColor: c.success}
+                          : null,
+                      ]}
+                      onPress={() => void captureAngle(angle)}
+                      activeOpacity={0.8}>
+                      {state.thumbnailPath != null ? (
+                        <Image
+                          source={{
+                            uri: `file://${state.thumbnailPath}`,
+                          }}
+                          style={styles.angleImage}
+                        />
+                      ) : (
+                        <View
+                          style={[styles.angleImage, styles.angleFallback]}>
+                          <Icon name="camera" size={22} color={c.textDim} />
+                        </View>
+                      )}
+                      <Text style={styles.angleLabel}>
+                        {ANGLE_LABELS_AR[angle]}
+                      </Text>
+                      {state.embedding != null ? (
+                        <Badge label="مسجّلة" tone="success" />
+                      ) : (
+                        <Badge label="فارغة" tone="neutral" />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <AppButton
+                title="تصوير بصمة المنتج بالكاميرا"
+                variant="secondary"
+                icon="camera"
+                small
+                onPress={() => {
+                  const firstEmpty = ANGLE_LABELS.find(
+                    angle => angles[angle]?.embedding == null,
+                  );
+                  if (firstEmpty == null) {
+                    toast(
+                      'كل الزوايا مسجّلة — المس أي بطاقة زاوية لإعادة تصويرها',
+                      'info',
+                    );
+                    return;
+                  }
+                  void captureAngle(firstEmpty);
+                }}
+              />
+            </FoldSection>
+          ) : modeConfig.photo ? (
+            /* v35: صورة المنتج للمجالات التي لا تنفعها البصمة —
+             *  صورة واحدة تظهر في تجان البيع وتُخزن كصورة المنتج. */
+            <View style={styles.photoCard}>
+              <View style={styles.photoHeader}>
+                <Icon name="image" size={17} color={c.accent} />
+                <Text style={styles.photoTitle}>
+                  {modeConfig.productCopy.visualLabel}
+                </Text>
+              </View>
+              <View style={styles.photoBody}>
+                {imageUri != null ? (
+                  <TouchableOpacity
+                    style={styles.photoPreviewBox}
+                    onPress={() => void takeProductPhoto()}
+                    activeOpacity={0.85}>
+                    <Image
+                      source={{uri: `file://${imageUri}`}}
+                      style={styles.photoPreview}
+                    />
+                    <View style={styles.photoRetakeChip}>
+                      <Icon name="camera" size={13} color={c.onAccent} />
+                      <Text style={styles.photoRetakeText}>إعادة التصوير</Text>
+                    </View>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.photoEmptyBox}
+                    onPress={() => void takeProductPhoto()}
+                    activeOpacity={0.85}>
+                    <Icon name="camera" size={26} color={c.textDim} />
+                    <Text style={styles.photoEmptyText}>
+                      تصوير {modeConfig.productCopy.nameLabel.replace('اسم ', '')}
+                    </Text>
+                    <Text style={styles.photoEmptyHint}>
+                      {modeConfig.productCopy.visualHint}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          ) : null}
+
           {/* ── Details form ──────────────────────────────────── */}
           <SectionTitle title="بيانات المنتج" />
           <Field
             ref={nameRef}
-            label="اسم المنتج *"
+            label={`${modeConfig.productCopy.nameLabel} *`}
             value={name}
             onChangeText={setName}
-            placeholder="مثال: شوكولاتة دوف 100غ"
+            placeholder={modeConfig.productCopy.nameHint}
             returnKeyType="next"
             onSubmitEditing={() => {
               // v34: سلسلة التالي المنطقية — الباركود إن كان أساس
@@ -1711,7 +1981,7 @@ export function ProductFormScreen() {
                 ref={barcodeRef}
                 label={
                   modeConfig.lotEntry
-                    ? 'الباركود (اختياري — لكل مقاس رمز مولّد تلقائياً)'
+                    ? 'الباركود (اختياري — رمز واحد للموديل كله)'
                     : 'الباركود (اختياري)'
                 }
                 value={barcode}
@@ -1786,74 +2056,29 @@ export function ProductFormScreen() {
             </Card>
           ) : null}
 
-{/* ── v34 (الجولة 42 #3): ربطة الملابس — إدخال الموديل دفعة
-              واحدة: لون واحد + مقاسات متعددة بكمية لكل مقاس،
-              والاسم يبقى اسم الموديل فقط (بلا مقاس/لون). عند الحفظ
-              يُنشأ منتج مستقل لكل مقاس بباركود داخلي، مرتبطة
-              بمجموعة واحدة تُباع من نافذة المقاس في الشبكة. ── */}
+{/* ── v35 (الجولة 43): ربطة الملابس — الموديل منتج واحد:
+              المقاسات التي بالربطة × الألوان المتعددة × عدد الربط،
+              وكل (لون، مقاس) متغير مخزونه = عدد الربط. طلب التاجر
+              حرفياً — لا توزيع على عدة منتجات. ── */}
 {modeConfig.lotEntry === true ? (
   productId == null ? (
   <View style={styles.variantBox}>
     <View style={styles.categoryHeader}>
-      <Text style={styles.fieldLabelOuter}>ربطة الملابس (المقاسات واللون)</Text>
+      <Text style={styles.fieldLabelOuter}>الربطة (المقاسات والألوان وعدد الربط)</Text>
       <Text style={styles.variantHint}>
-        {lotSizes.length > 0
-          ? `${lotSizes.length} مقاس — ${lotSizes.reduce(
-              (sum, size) => sum + Math.max(1, Math.round(lotQtyBySize[size] ?? 1)),
-              0,
-            )} قطعة إجمالاً`
-          : 'الاسم أعلاه اسم الموديل — بلا مقاس أو لون'}
+        {lotSizes.length > 0 && lotColors.length > 0
+          ? `${lotColors.length} لون × ${lotSizes.length} مقاس × ${Math.max(
+              1,
+              Math.round(parseNumber(lotBundles) || 1),
+            )} ربط = ${lotColors.length *
+              lotSizes.length *
+              Math.max(1, Math.round(parseNumber(lotBundles) || 1))} قطعة`
+          : 'حدد المقاسات والألوان وعدد الربط — الكمية تُحسب تلقائياً'}
       </Text>
     </View>
 
-    {/* اللون: رقائق مفردة الاختيار + مخصص */}
-    <Text style={styles.lotSubLabel}>اللون (اختر واحداً)</Text>
-    <View style={styles.variantChipsRow}>
-      {(modeConfig.variantColors ?? []).map(color => (
-        <TouchableOpacity
-          key={`color-${color}`}
-          style={[
-            styles.catChip,
-            lotColor === color
-              ? {backgroundColor: c.accent, borderColor: c.accent}
-              : null,
-          ]}
-          onPress={() => {
-            setLotColor(color);
-            setLotCustomColor('');
-          }}
-          activeOpacity={0.75}>
-          <Text
-            style={[
-              styles.catChipText,
-              {color: lotColor === color ? c.onAccent : c.textDim},
-            ]}>
-            {color}
-          </Text>
-        </TouchableOpacity>
-      ))}
-    </View>
-    <View style={styles.lotCustomRow}>
-      <TextInput
-        style={styles.lotCustomInput}
-        value={lotCustomColor}
-        onChangeText={text => {
-          setLotCustomColor(text);
-          if (text.trim().length > 0) {
-            setLotColor('');
-          }
-        }}
-        placeholder="لون آخر…"
-        placeholderTextColor={c.textFaint}
-        returnKeyType="done"
-      />
-      {lotCustomColor.trim().length > 0 ? (
-        <Icon name="check" size={15} color={c.success} />
-      ) : null}
-    </View>
-
-    {/* المقاسات: رقائق متعددة الاختيار + مخصص */}
-    <Text style={styles.lotSubLabel}>المقاسات (اختر كل ما بالربطة)</Text>
+    {/* المقاسات التي تأتي بها الربطة — متعددة الاختيار */}
+    <Text style={styles.lotSubLabel}>المقاسات بالربطة (اختر كل ما فيها)</Text>
     <View style={styles.variantChipsRow}>
       {(modeConfig.variantSizes ?? []).map(size => (
         <TouchableOpacity
@@ -1912,61 +2137,242 @@ export function ProductFormScreen() {
       </TouchableOpacity>
     </View>
 
-    {/* كمية كل مقاس — سطر لكل مقاس مختار بعدّاد */}
-    {lotSizes.length > 0 ? (
-      <View style={styles.lotQtyList}>
-        {lotSizes.map(size => (
-          <View key={`qty-${size}`} style={styles.lotQtyRow}>
-            <Text style={styles.lotQtySize}>{size}</Text>
-            <View style={{flex: 1}} />
-            <Stepper
-              compact
-              value={Math.max(1, Math.round(lotQtyBySize[size] ?? 1))}
-              onIncrement={() =>
-                setLotQtyBySize(prev => ({
-                  ...prev,
-                  [size]: Math.min(999, Math.max(1, Math.round(prev[size] ?? 1)) + 1),
-                }))
-              }
-              onDecrement={() =>
-                setLotQtyBySize(prev => ({
-                  ...prev,
-                  [size]: Math.max(1, Math.max(1, Math.round(prev[size] ?? 1)) - 1),
-                }))
-              }
-            />
-            <TouchableOpacity
-              onPress={() =>
-                setLotSizes(prev => prev.filter(entry => entry !== size))
-              }
-              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-              <Icon name="trash" size={15} color={c.danger} />
-            </TouchableOpacity>
-          </View>
-        ))}
+    {/* الألوان — متعددة الاختيار: كل لون يدخل بعدد الربط نفسه */}
+    <Text style={styles.lotSubLabel}>الألوان (اختر كل ما وصلك)</Text>
+    <View style={styles.variantChipsRow}>
+      {(modeConfig.variantColors ?? []).map(color => (
+        <TouchableOpacity
+          key={`color-${color}`}
+          style={[
+            styles.catChip,
+            lotColors.includes(color)
+              ? {backgroundColor: c.accent, borderColor: c.accent}
+              : null,
+          ]}
+          onPress={() =>
+            setLotColors(prev =>
+              prev.includes(color)
+                ? prev.filter(entry => entry !== color)
+                : [...prev, color],
+            )
+          }
+          activeOpacity={0.75}>
+          <Text
+            style={[
+              styles.catChipText,
+              {color: lotColors.includes(color) ? c.onAccent : c.textDim},
+            ]}>
+            {color}
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+    <View style={styles.lotCustomRow}>
+      <TextInput
+        style={styles.lotCustomInput}
+        value={lotCustomColor}
+        onChangeText={text => {
+          setLotCustomColor(text);
+        }}
+        placeholder="لون آخر واضغط إضافة…"
+        placeholderTextColor={c.textFaint}
+        returnKeyType="done"
+        onSubmitEditing={() => {
+          const custom = lotCustomColor.trim();
+          if (custom.length > 0 && !lotColors.includes(custom)) {
+            setLotColors(prev => [...prev, custom]);
+          }
+          setLotCustomColor('');
+        }}
+      />
+      <TouchableOpacity
+        style={styles.lotAddBtn}
+        onPress={() => {
+          const custom = lotCustomColor.trim();
+          if (custom.length > 0 && !lotColors.includes(custom)) {
+            setLotColors(prev => [...prev, custom]);
+          }
+          setLotCustomColor('');
+        }}
+        activeOpacity={0.8}>
+        <Icon name="plus" size={16} color={c.onAccent} />
+      </TouchableOpacity>
+    </View>
+
+    {/* عدد الربط — كل ربطة تحمل قطعة من كل مقاس، والكمية تُضرب
+        تلقائياً حسب عدد المقاسات بالربطة (طلب التاجر). */}
+    <View style={styles.lotBundlesRow}>
+      <Text style={styles.lotSubLabel}>عدد الربط</Text>
+      <View style={styles.lotBundlesStepper}>
+        <Stepper
+          compact
+          value={Math.max(1, Math.round(parseNumber(lotBundles) || 1))}
+          onIncrement={() =>
+            setLotBundles(prev =>
+              String(
+                Math.min(999, Math.max(1, Math.round(parseNumber(prev) || 1)) + 1),
+              ),
+            )
+          }
+          onDecrement={() =>
+            setLotBundles(prev =>
+              String(
+                Math.max(1, Math.max(1, Math.round(parseNumber(prev) || 1)) - 1),
+              ),
+            )
+          }
+        />
+        <TextInput
+          style={styles.lotBundlesInput}
+          value={lotBundles}
+          onChangeText={text => setLotBundles(text.replace(/[^0-9]/g, ''))}
+          keyboardType="numeric"
+          placeholder="1"
+          placeholderTextColor={c.textFaint}
+        />
+      </View>
+    </View>
+
+    {/* معاينة حية للمخزون الناتج */}
+    {lotSizes.length > 0 && lotColors.length > 0 ? (
+      <View style={styles.receiveSummary}>
+        <Text style={styles.receiveSummaryText}>
+          كل لون: {lotSizes.length} مقاسات ×{' '}
+          {Math.max(1, Math.round(parseNumber(lotBundles) || 1))} ربط ={' '}
+          {lotSizes.length * Math.max(1, Math.round(parseNumber(lotBundles) || 1))} قطعة
+          {lotColors.length > 1
+            ? ` · الإجمالي (${lotColors.length} ألوان): ${
+                lotColors.length *
+                lotSizes.length *
+                Math.max(1, Math.round(parseNumber(lotBundles) || 1))
+              } قطعة`
+            : ''}
+        </Text>
         <Text style={styles.variantFootnote}>
-          سيُنشأ منتج مستقل لكل مقاس بباركوده الداخلي ومخزونه — وفي شبكة
-          البيع يظهر الموديل تجاناً واحداً يفتح نافذة اختيار المقاس.
+          الموديل يُحفظ منتجاً واحداً — عند البيع تختار اللون والمقاس من
+          نافذة الموديل، وربطة الجملة (قطعة من كل مقاس) تُباع بوضع الجملة
+          فيها.
         </Text>
       </View>
     ) : null}
   </View>
   ) : (
-    /* تعديل منتج من ربطة — بيانات الربطة كما هي (لا تنفصل المجموعة). */
-    <View style={styles.variantInfoCard}>
-      <Icon name="tag" size={16} color={c.accent} />
-      <View style={{flex: 1}}>
-        <Text style={styles.variantInfoTitle}>
-          {variantInfo?.color != null ? `لون الربطة: ${variantInfo.color}` : 'منتج ملابس'}
-          {variantInfo?.size != null ? ` · المقاس: ${variantInfo.size}` : ''}
-        </Text>
-        <Text style={styles.variantInfoMeta}>
-          هذا المنتج فرع من ربطة — عدّل سعره أو مخزونه بحرية، وهويته
-          (اللون والمقاس والمجموعة) تبقى كما هي كي لا تنفصل عن باقي
-          مقاسات الموديل في شبكة البيع.
-        </Text>
+    /* تعديل موديل ملابس — محرّر المتغيرات: مخزون كل (لون × مقاس)
+     *  بعدّاد، و«إضافة ربطة» ترفع كل مقاسات لونٍ بعدد الربط دفعة
+     *  واحدة (استلام ربط جديدة من المورد). */
+    variantDrafts.length > 0 ? (
+      <View style={styles.variantBox}>
+        <View style={styles.categoryHeader}>
+          <Text style={styles.fieldLabelOuter}>مخزون الموديل (لون × مقاس)</Text>
+          <Text style={styles.variantHint}>
+            {variantDrafts.reduce((sum, v) => sum + Math.max(0, v.stock), 0)}{' '}
+            قطعة إجمالاً · {new Set(variantDrafts.map(v => v.color)).size} لون ·{' '}
+            {new Set(variantDrafts.map(v => v.size)).size} مقاس
+          </Text>
+        </View>
+        {(() => {
+          const colors = [...new Set(variantDrafts.map(v => v.color))];
+          return colors.map(color => {
+            const rows = variantDrafts.filter(v => v.color === color);
+            const minStock = Math.min(...rows.map(v => v.stock));
+            return (
+              <View key={`edit-color-${color}`} style={styles.lotColorGroup}>
+                <View style={styles.lotColorGroupHead}>
+                  <Text style={styles.lotColorName}>{color}</Text>
+                  <Text style={styles.lotColorMeta}>
+                    أقل مقاس: {minStock} — ربطة الجملة المتاحة {minStock}
+                  </Text>
+                </View>
+                {rows.map(row => (
+                  <View key={`edit-${row.color}-${row.size}`} style={styles.lotQtyRow}>
+                    <View style={styles.variantSizeChip}>
+                      <Text style={styles.lotQtySize}>{row.size}</Text>
+                    </View>
+                    <View style={{flex: 1}} />
+                    <Stepper
+                      compact
+                      value={Math.max(0, row.stock)}
+                      onIncrement={() =>
+                        setVariantDrafts(prev =>
+                          prev.map(v =>
+                            v.color === row.color && v.size === row.size
+                              ? {...v, stock: Math.min(9999, v.stock + 1)}
+                              : v,
+                          ),
+                        )
+                      }
+                      onDecrement={() =>
+                        setVariantDrafts(prev =>
+                          prev.map(v =>
+                            v.color === row.color && v.size === row.size
+                              ? {...v, stock: Math.max(0, v.stock - 1)}
+                              : v,
+                          ),
+                        )
+                      }
+                    />
+                  </View>
+                ))}
+                <TouchableOpacity
+                  style={styles.lotAddBundleBtn}
+                  onPress={() => {
+                    const bundles = Math.max(
+                      1,
+                      Math.round(parseNumber(lotBundles) || 1),
+                    );
+                    setVariantDrafts(prev =>
+                      prev.map(v =>
+                        v.color === color ? {...v, stock: v.stock + bundles} : v,
+                      ),
+                    );
+                  }}
+                  activeOpacity={0.8}>
+                  <Icon name="plus" size={14} color={c.onAccent} />
+                  <Text style={styles.lotAddBundleText}>
+                    إضافة ربطة ({lotSizes.length > 0 ? lotSizes.length : rows.length}{' '}
+                    مقاسات × {Math.max(1, Math.round(parseNumber(lotBundles) || 1))})
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            );
+          });
+        })()}
+        <View style={styles.lotBundlesRow}>
+          <Text style={styles.lotSubLabel}>عدد الربط عند الإضافة</Text>
+          <View style={styles.lotBundlesStepper}>
+            <Stepper
+              compact
+              value={Math.max(1, Math.round(parseNumber(lotBundles) || 1))}
+              onIncrement={() =>
+                setLotBundles(prev =>
+                  String(
+                    Math.min(
+                      999,
+                      Math.max(1, Math.round(parseNumber(prev) || 1)) + 1,
+                    ),
+                  ),
+                )
+              }
+              onDecrement={() =>
+                setLotBundles(prev =>
+                  String(
+                    Math.max(1, Math.max(1, Math.round(parseNumber(prev) || 1)) - 1),
+                  ),
+                )
+              }
+            />
+            <TextInput
+              style={styles.lotBundlesInput}
+              value={lotBundles}
+              onChangeText={text => setLotBundles(text.replace(/[^0-9]/g, ''))}
+              keyboardType="numeric"
+              placeholder="1"
+              placeholderTextColor={c.textFaint}
+            />
+          </View>
+        </View>
       </View>
-    </View>
+    ) : null
   )
 ) : null}
           {/* ── Category picker ──────────────────────────────── */}
@@ -2078,6 +2484,222 @@ export function ProductFormScreen() {
                 بالوزن (كغ)
               </Text>
             </TouchableOpacity>
+          </View>
+  </>
+) : modeConfig.defaultSaleMode === 'weight' ? (
+  /* v35 (الجولة 43): الفواكه بالوزن دائماً — لا مبدّل أصلاً
+   *  (طلب التاجر: «المنتج طبيعي يكون فقط بالوزن بدون قطعة»). */
+  <View style={styles.saleModeRow}>
+    <View style={[styles.saleModeChip, styles.saleModeChipActive]}>
+      <Icon name="scale" size={18} color={c.onAccent} />
+      <Text style={[styles.saleModeText, {color: c.onAccent}]}>
+        بالوزن (كغ) — دائماً
+      </Text>
+    </View>
+  </View>
+) : modeConfig.productCopy.baseUnitChoices != null ? (
+  /* v35: وحدة الأساس بلغة المجال — الصيدلية بالشريط أو العلبة،
+   *  والمطعم/الكافيتريا بالحصة أو الصحن أو الكوب. الأسعار
+   *  والتسميات وشاري البيع تتبعها. */
+  <>
+          <SectionTitle
+            title="طريقة البيع"
+            hint={`يُباع افتراضياً بالوحدة الأساس — ${modeConfig.productCopy.priceHint}`}
+          />
+          <View style={styles.saleModeRow}>
+            {modeConfig.productCopy.baseUnitChoices.map(unit => (
+              <TouchableOpacity
+                key={`base-${unit}`}
+                style={[
+                  styles.saleModeChip,
+                  (baseUnitName ?? modeConfig.productCopy.baseUnitChoices![0]) ===
+                  unit
+                    ? styles.saleModeChipActive
+                    : null,
+                ]}
+                onPress={() => setBaseUnitName(unit)}
+                activeOpacity={0.8}>
+                <Icon
+                  name="box"
+                  size={18}
+                  color={
+                    (baseUnitName ?? modeConfig.productCopy.baseUnitChoices![0]) ===
+                    unit
+                      ? c.onAccent
+                      : c.textDim
+                  }
+                />
+                <Text
+                  style={[
+                    styles.saleModeText,
+                    (baseUnitName ?? modeConfig.productCopy.baseUnitChoices![0]) ===
+                    unit
+                      ? {color: c.onAccent}
+                      : {color: c.textDim},
+                  ]}>
+                  بال{unit}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* v35: أحجام المطعم/الكافيتريا — صغير/وسط/كبير بأسعار
+           *  مستقلة لكل حجم (طلب التاجر: «ثم بالحجم ولا يعامل عادي
+           *  كمنتج عادي»). */}
+          <View style={styles.variantBox}>
+            <TouchableOpacity
+              style={styles.sizesToggleRow}
+              onPress={() => setSizesEnabled(prev => !prev)}
+              activeOpacity={0.8}>
+              <Icon
+                name={sizesEnabled ? 'check' : 'plus'}
+                size={20}
+                color={sizesEnabled ? c.accent : c.textDim}
+              />
+              <View style={{flex: 1}}>
+                <Text style={styles.sizesToggleTitle}>
+                  هذا الصنف بأحجام (صغير/وسط/كبير…)
+                </Text>
+                <Text style={styles.sizesToggleHint}>
+                  {sizesEnabled
+                    ? 'أدخل سعر كل حجم أدناه — البيع من نافذة الحجم'
+                    : 'بدون أحجام — سعر واحد للحصة تدخله في الأسعار'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+            {sizesEnabled ? (
+              <>
+                <View style={styles.variantChipsRow}>
+                  {(modeConfig.productCopy.sizeSeeds ?? []).map(seed => (
+                    <TouchableOpacity
+                      key={`sizesize-${seed}`}
+                      style={[
+                        styles.catChip,
+                        sizeDrafts.some(d => d.size === seed)
+                          ? {backgroundColor: c.accent, borderColor: c.accent}
+                          : null,
+                      ]}
+                      onPress={() =>
+                        setSizeDrafts(prev =>
+                          prev.some(d => d.size === seed)
+                            ? prev.filter(d => d.size !== seed)
+                            : [...prev, {size: seed, price: '', cost: ''}],
+                        )
+                      }
+                      activeOpacity={0.75}>
+                      <Text
+                        style={[
+                          styles.catChipText,
+                          {
+                            color: sizeDrafts.some(d => d.size === seed)
+                              ? c.onAccent
+                              : c.textDim,
+                          },
+                        ]}>
+                        {seed}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <View style={styles.lotCustomRow}>
+                  <TextInput
+                    style={styles.lotCustomInput}
+                    value={customSizeName}
+                    onChangeText={setCustomSizeName}
+                    placeholder="حجم آخر واضغط إضافة…"
+                    placeholderTextColor={c.textFaint}
+                    returnKeyType="done"
+                    onSubmitEditing={() => {
+                      const custom = customSizeName.trim();
+                      if (
+                        custom.length > 0 &&
+                        !sizeDrafts.some(d => d.size === custom)
+                      ) {
+                        setSizeDrafts(prev => [
+                          ...prev,
+                          {size: custom, price: '', cost: ''},
+                        ]);
+                      }
+                      setCustomSizeName('');
+                    }}
+                  />
+                  <TouchableOpacity
+                    style={styles.lotAddBtn}
+                    onPress={() => {
+                      const custom = customSizeName.trim();
+                      if (
+                        custom.length > 0 &&
+                        !sizeDrafts.some(d => d.size === custom)
+                      ) {
+                        setSizeDrafts(prev => [
+                          ...prev,
+                          {size: custom, price: '', cost: ''},
+                        ]);
+                      }
+                      setCustomSizeName('');
+                    }}
+                    activeOpacity={0.8}>
+                    <Icon name="plus" size={16} color={c.onAccent} />
+                  </TouchableOpacity>
+                </View>
+                {sizeDrafts.length > 0 ? (
+                  <View style={styles.lotQtyList}>
+                    {sizeDrafts.map((draft, index) => (
+                      <View key={`sizedraft-${draft.size}`} style={styles.sizePriceRow}>
+                        <View style={styles.variantSizeChip}>
+                          <Text style={styles.lotQtySize}>{draft.size}</Text>
+                        </View>
+                        <TextInput
+                          style={styles.sizePriceInput}
+                          value={draft.price}
+                          onChangeText={text =>
+                            setSizeDrafts(prev =>
+                              prev.map((d, i) =>
+                                i === index
+                                  ? {...d, price: text.replace(/[^0-9.]/g, '')}
+                                  : d,
+                              ),
+                            )
+                          }
+                          keyboardType="numeric"
+                          placeholder="السعر ₪"
+                          placeholderTextColor={c.textFaint}
+                        />
+                        <TextInput
+                          style={[styles.sizePriceInput, {opacity: 0.75}]}
+                          value={draft.cost}
+                          onChangeText={text =>
+                            setSizeDrafts(prev =>
+                              prev.map((d, i) =>
+                                i === index
+                                  ? {...d, cost: text.replace(/[^0-9.]/g, '')}
+                                  : d,
+                              ),
+                            )
+                          }
+                          keyboardType="numeric"
+                          placeholder="تكلفة (اختياري)"
+                          placeholderTextColor={c.textFaint}
+                        />
+                        <TouchableOpacity
+                          onPress={() =>
+                            setSizeDrafts(prev =>
+                              prev.filter((_, i) => i !== index),
+                            )
+                          }
+                          hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                          <Icon name="trash" size={15} color={c.danger} />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                    <Text style={styles.variantFootnote}>
+                      سعر كل حجم يظهر في نافذة البيع وفي الفاتورة — تكلفته
+                      اختيارية وتبقى تكلفة الحصة إن تُركت فارغة.
+                    </Text>
+                  </View>
+                ) : null}
+              </>
+            ) : null}
           </View>
   </>
 ) : null}
@@ -2340,8 +2962,13 @@ export function ProductFormScreen() {
             ref={costRef}
             label={
               saleMode === 'weight'
-                ? 'سعر التكلفة للكيلو (₪) *'
-                : 'سعر التكلفة للقطعة (₪) *'
+                ? modeConfig.productCopy.costLabel.replace('(₪)', '(₪) *')
+                : baseUnitName != null
+                ? `${modeConfig.productCopy.costLabel.replace(
+                    '(₪)',
+                    '',
+                  )}لل${baseUnitName} (₪) *`
+                : `${modeConfig.productCopy.costLabel} *`
             }
             value={costPrice}
             onChangeText={setCostPrice}
@@ -2350,6 +2977,34 @@ export function ProductFormScreen() {
             returnKeyType="next"
             onSubmitEditing={() => retailRef.current?.focus()}
           />
+          {/* v35 (الجولة 43): منطق الأسعار بلغة المجال — الفواكه
+              سعر واحد للكيلو بلا جملة، والمطعم/الكافيتريا بلا جملة،
+              والباقي مفرق وجملة. */}
+          {modeConfig.productCopy.wholesaleLabel == null ? (
+            <View style={styles.priceRow}>
+              <View style={{flex: 1}}>
+                <Field
+                  ref={retailRef}
+                  label={
+                    saleMode === 'weight'
+                      ? `${modeConfig.productCopy.retailLabel} *`
+                      : `${modeConfig.productCopy.retailLabel} *`
+                  }
+                  value={retailPrice}
+                  onChangeText={setRetailPrice}
+                  keyboardType="numeric"
+                  placeholder="0.00"
+                  returnKeyType="next"
+                  onSubmitEditing={() => stockRef.current?.focus()}
+                />
+              </View>
+              <View style={{flex: 1, justifyContent: 'center'}}>
+                <Text style={styles.stockHintText}>
+                  {modeConfig.productCopy.priceHint}
+                </Text>
+              </View>
+            </View>
+          ) : (
           <View style={styles.priceRow}>
             <View style={{flex: 1}}>
               <Field
@@ -2357,7 +3012,12 @@ export function ProductFormScreen() {
                 label={
                   saleMode === 'weight'
                     ? 'سعر المفرق للكيلو (₪) *'
-                    : 'سعر المفرق (₪) *'
+                    : modeConfig.lotEntry
+                    ? modeConfig.productCopy.retailLabel
+                    : `${modeConfig.productCopy.retailLabel.replace(
+                        '(₪)',
+                        '',
+                      )} (₪) *`
                 }
                 value={retailPrice}
                 onChangeText={setRetailPrice}
@@ -2373,7 +3033,12 @@ export function ProductFormScreen() {
                 label={
                   saleMode === 'weight'
                     ? 'سعر الجملة للكيلو (₪)'
-                    : 'سعر الجملة (₪)'
+                    : modeConfig.lotEntry
+                    ? modeConfig.productCopy.wholesaleLabel
+                    : `${modeConfig.productCopy.wholesaleLabel?.replace(
+                        '(₪)',
+                        '',
+                      )} (₪)`
                 }
                 value={wholesalePrice}
                 onChangeText={setWholesalePrice}
@@ -2384,14 +3049,58 @@ export function ProductFormScreen() {
               />
             </View>
           </View>
+          )}
+          {/* v35: ملابس — سعر ربطة الجملة يُحتسب تلقائياً من سعر
+              القطعة × عدد مقاسات الربطة (طلب التاجر). */}
+          {modeConfig.lotEntry === true &&
+          lotSizes.length > 0 &&
+          wholesalePrice.trim() !== '' ? (
+            <Text style={styles.stockHintText}>
+              ربطة الجملة = {wholesalePrice}₪ × {lotSizes.length} مقاسات ={' '}
+              {(
+                Math.round(
+                  parseNumber(wholesalePrice) * lotSizes.length * 100,
+                ) / 100
+              ).toFixed(2)}
+              ₪ للربطة — تُباع من نافذة الموديل بوضع الجملة.
+            </Text>
+          ) : null}
           {/* ── Stock entry: weight = fractional kg directly; piece
               = type in any unit, stored in pieces.
               v34 (الجولة 42 #3): في وضع الربطة (إنشاء ملابس) الكمية
               تأتي من قائمة المقاسات أعلاه — حقل الكمية مخفي ويبقى
-              حد التنبيه فقط (يُطبق على كل مقاسات الربطة). ── */}
+              حد التنبيه فقط (يُطبق على كل مقاسات الربطة).
+              v35 (الجولة 43): مطعم/كافيتريا — تتبع المخزون خيار
+              (الخدمة لا تُعدّ افتراضياً)، وبلا تتبع لا كمية ولا
+              حداً ولا حجب بيع بالنفاد. ── */}
+          {modeConfig.productCopy.untrackedStockDefault === true ? (
+            <TouchableOpacity
+              style={styles.sizesToggleRow}
+              onPress={() => setUntrackedStock(prev => !prev)}
+              activeOpacity={0.8}>
+              <Icon
+                name={untrackedStock ? 'x' : 'check'}
+                size={20}
+                color={untrackedStock ? c.textDim : c.accent}
+              />
+              <View style={{flex: 1}}>
+                <Text style={styles.sizesToggleTitle}>
+                  {untrackedStock
+                    ? 'مخزون بلا تتبع (افتراضي المطعم)'
+                    : 'تتبع المخزون — عدّ الحصص'}
+                </Text>
+                <Text style={styles.sizesToggleHint}>
+                  {untrackedStock
+                    ? 'البيع لا يُحجب أبداً بنفاد ولا تُخصم كميات — الصنف خدمة لا مخزون'
+                    : 'أدخل الكمية المتوفرة — البيع يخصمها ويحجب عند النفاد'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          ) : null}
+          {untrackedStock ? null : (
           <View style={styles.priceRow}>
             <View style={{flex: 1.2}}>
-              {modeConfig.lotEntry === true && productId == null ? null : (
+              {modeConfig.lotEntry === true ? null : (
               <Field
                 ref={stockRef}
                 label={
@@ -2400,7 +3109,7 @@ export function ProductFormScreen() {
                     : `الكمية ${
                         stockUnitId != null
                           ? `بـ${unitNameById.get(stockUnitId) ?? ''}`
-                          : `(${BASE_UNIT_NAME})`
+                          : `(${baseUnitName ?? BASE_UNIT_NAME})`
                       }`
                 }
                 value={stock}
@@ -2413,6 +3122,7 @@ export function ProductFormScreen() {
               )}
             </View>
             <View style={{flex: 1}}>
+              {modeConfig.lotEntry === true ? null : (
               <Field
                 ref={thresholdRef}
                 label={saleMode === 'weight' ? 'حد التنبيه (كغ)' : 'حد التنبيه'}
@@ -2427,8 +3137,10 @@ export function ProductFormScreen() {
                 returnKeyType="done"
                 onSubmitEditing={() => Keyboard.dismiss()}
               />
+              )}
             </View>
           </View>
+          )}
           {saleMode === 'weight' ? (
             <Text style={styles.stockHintText}>
               منتج وزن — الأسعار لكل كيلو، والمخزون يُحفظ بالكيلوغرام بكسور
@@ -2639,7 +3351,12 @@ export function ProductFormScreen() {
           {/* ── Units editor — v32 (round-40 #4): قابل للطي ──────
               مطوي افتراضياً لتوفير مساحة الصفحة؛ الترويسة تعرض عدد
               الوحدات وسطر ملخّص، والضغط يفتح المحرّر الكامل (الحزم
-              الجاهزة + بطاقات الوحدات + زر الإضافة). */}
+              الجاهزة + بطاقات الوحدات + زر الإضافة).
+              v35 (الجولة 43): مطعم/كافيتريا/ملابس بلا وحدات —
+              الأحجام والربطة تحلّ محلها بلغة المجال. */}
+          {modeConfig.lotEntry === true ||
+          modeConfig.productCopy.untrackedStockDefault === true ? null : (
+          <>
           <TouchableOpacity
             style={styles.unitsFoldHeader}
             onPress={() => toggleUnits()}
@@ -2934,79 +3651,10 @@ export function ProductFormScreen() {
               onPress={addUnitAndOpen}
             />
           )}
-
-{modeConfig.vision ? (
-  <FoldSection
-    title="بصمة المنتج (التعرف البصري)"
-    hint={
-      capturedCount > 0
-        ? `${capturedCount}/3 بصمة محفوظة`
-        : 'اختياري — للبيع بالتعرف البصري'
-    }
-    icon="camera"
-    open={visionOpen}
-    onToggle={() => setVisionOpen(open => !open)}
-    badge={capturedCount > 0 ? `${capturedCount}/3` : null}>
-          {/* ── Vision enrollment ─────────────────────────────── */}
-          <View style={styles.anglesRow}>
-            {ANGLE_LABELS.map(angle => {
-              const state = angles[angle];
-              return (
-                <TouchableOpacity
-                  key={angle}
-                  style={[
-                    styles.angleCard,
-                    state.embedding != null ? {borderColor: c.success} : null,
-                  ]}
-                  onPress={() => void captureAngle(angle)}
-                  activeOpacity={0.8}>
-                  {state.thumbnailPath != null ? (
-                    <Image
-                      source={{uri: `file://${state.thumbnailPath}`}}
-                      style={styles.angleImage}
-                    />
-                  ) : (
-                    <View style={[styles.angleImage, styles.angleFallback]}>
-                      <Icon name="camera" size={22} color={c.textDim} />
-                    </View>
-                  )}
-                  <Text style={styles.angleLabel}>
-                    {ANGLE_LABELS_AR[angle]}
-                  </Text>
-                  {state.embedding != null ? (
-                    <Badge label="مسجّلة" tone="success" />
-                  ) : (
-                    <Badge label="فارغة" tone="neutral" />
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          {/* v8: one tap → the NATIVE photo engine opens full-screen
-              (torch + proper preview guaranteed) → the fingerprint
-              of the first empty angle is saved automatically. */}
-          <AppButton
-            title="تصوير بصمة المنتج بالكاميرا"
-            variant="secondary"
-            icon="camera"
-            small
-            onPress={() => {
-              const firstEmpty = ANGLE_LABELS.find(
-                angle => angles[angle]?.embedding == null,
-              );
-              if (firstEmpty == null) {
-                toast(
-                  'كل الزوايا مسجّلة — المس أي بطاقة زاوية لإعادة تصويرها',
-                  'info',
-                );
-                return;
-              }
-              void captureAngle(firstEmpty);
-            }}
-          />
-  </FoldSection>
-) : null}
+          </>
+          )}
+          {/* v35 (الجولة 43): قسم البصمة البصرية انتقل إلى أعلى
+              الصفحة (طلب التاجر) — لا يوجد هنا قسم بصمة سفلي. */}
           {productId != null ? (
             <View style={{marginTop: spacing.lg, gap: spacing.md}}>
               {/* v23 (round-29 #1): the archived state card + restore —
@@ -3553,6 +4201,192 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.body,
       minWidth: 44,
+    },
+    /** v35 (الجولة 43): عدد الربط + محرّر متغيرات التعديل + الأحجام
+     *  + بطاقة صورة المنتج بالأعلى. */
+    lotBundlesRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginTop: 8,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.sm,
+    },
+    lotBundlesStepper: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    lotBundlesInput: {
+      width: 64,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      height: 40,
+      paddingHorizontal: 8,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+      textAlign: 'center',
+    },
+    lotColorGroup: {
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.sm,
+      gap: 8,
+      marginTop: 8,
+    },
+    lotColorGroupHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+    },
+    lotColorName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    lotColorMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+    },
+    lotAddBundleBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      backgroundColor: c.accentSoft ?? c.surfaceAlt,
+      borderRadius: radius.sm,
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+    },
+    lotAddBundleText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    variantSizeChip: {
+      minWidth: 44,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      paddingVertical: 4,
+      paddingHorizontal: 8,
+    },
+    sizesToggleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingVertical: 4,
+    },
+    sizesToggleTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    sizesToggleHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 2,
+    },
+    sizePriceRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    sizePriceInput: {
+      flex: 1,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      height: 38,
+      paddingHorizontal: 8,
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'center',
+    },
+    photoCard: {
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
+      gap: spacing.sm,
+      marginBottom: spacing.md,
+    },
+    photoHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    photoTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    photoBody: {
+      alignItems: 'center',
+    },
+    photoPreviewBox: {
+      width: '100%',
+      borderRadius: radius.md,
+      overflow: 'hidden',
+    },
+    photoPreview: {
+      width: '100%',
+      height: 170,
+      resizeMode: 'contain',
+      backgroundColor: c.surfaceAlt,
+    },
+    photoRetakeChip: {
+      position: 'absolute',
+      bottom: 10,
+      left: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      backgroundColor: c.accent,
+      borderRadius: radius.pill,
+      paddingVertical: 5,
+      paddingHorizontal: 10,
+    },
+    photoRetakeText: {
+      color: c.onAccent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    photoEmptyBox: {
+      width: '100%',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      borderStyle: 'dashed',
+      borderRadius: radius.md,
+      paddingVertical: spacing.xl,
+    },
+    photoEmptyText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    photoEmptyHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+      paddingHorizontal: spacing.lg,
+      lineHeight: 17,
     },
     variantInfoCard: {
       flexDirection: 'row',

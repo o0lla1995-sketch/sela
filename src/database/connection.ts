@@ -47,6 +47,24 @@ const DDL_STATEMENTS: string[] = [
     FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE,
     UNIQUE(product_id, unit_id)
   )`,
+  // ── v35 (الجولة 43): متغيرات المنتج الواحد — نمط Shopify Variants.
+  //  ملابس: كل (لون × مقاس) صف بمخزونه (الربطة تملأ كل صف بعدد
+  //  الربط)؛ مطعم/كافيتريا: كل حجم بسعره الخاص. اللون الفارغ ''
+  //  للأحجام (ليست ملابس) كي يعمل UNIQUE دون قيود NULL.
+  `CREATE TABLE IF NOT EXISTS product_variants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'variant'
+      CHECK (kind IN ('variant','size')),
+    color TEXT NOT NULL DEFAULT '',
+    size TEXT NOT NULL DEFAULT '',
+    stock_quantity REAL NOT NULL DEFAULT 0,
+    retail_price REAL,
+    cost_price REAL,
+    created_at TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+    UNIQUE(product_id, kind, color, size)
+  )`,
   `CREATE TABLE IF NOT EXISTS stocktakes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -174,6 +192,7 @@ const DDL_STATEMENTS: string[] = [
   'CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)',
   'CREATE INDEX IF NOT EXISTS idx_product_units_product ON product_units(product_id)',
   'CREATE INDEX IF NOT EXISTS idx_product_units_barcode ON product_units(barcode)',
+  'CREATE INDEX IF NOT EXISTS idx_product_variants_product ON product_variants(product_id)',
   'CREATE INDEX IF NOT EXISTS idx_stocktakes_status ON stocktakes(status)',
   'CREATE INDEX IF NOT EXISTS idx_stocktake_items_session ON stocktake_items(stocktake_id)',
   'CREATE INDEX IF NOT EXISTS idx_embeddings_product ON product_embeddings(product_id)',
@@ -1277,6 +1296,143 @@ async function applyMigrations(database: DB): Promise<void> {
       'ترحيل v19: نطاق التصنيفات/الوحدات لكل نمط + ربطة الملابس (style_group)',
     );
     version = 19;
+  }
+
+  if (version < 20) {
+    // ── v35 (الجولة 43): الموديل الواحد منتج واحد بمتغيرات ──────
+    //  (أ) أعمدة المنتج الجديدة: has_variants (منتج بمتغيرات:
+    //      ملابس لون×مقاس / مطعم أحجام)، base_unit_name (وحدة الأساس
+    //      بلغة المجال: شريط/علبة/حصة/صحن/كوب)، stock_untracked
+    //      (مخزون بلا تتبع — مطعم/كافيتريا)، sizes_count (عدد
+    //      المقاسات بربطة الملابس — أساس بيع الجملة بالربطة).
+    //  (ب) أعمدة سطر البيع: variant_label (وصف المتغير للفاتورة)
+    //      و variant_id (استرجاع مخزون المتغير عند الإرجاع).
+    //  (ج) دمج ربطات v34 القديمة: النسخة السابقة كانت تولّد منتجاً
+    //      مستقلاً لكل مقاس بذات اسم الموديل («قام بتوزيعه على عدة
+    //      منتجات وهذا خطأ») — الدمج يجمع كل منتجات الاسم نفسه في
+    //      منتج واحد (أول صف) بمتغيرات (لون × مقاس) مخزون كل منها
+    //      من صفه الأصلي؛ الصفوف الأخرى تُحذف إن لم يكن لها تاريخ
+    //      بيع/جرد (وإلا تُؤرشف لتبقى للفواتير القديمة والإرجاع).
+    const v20Cols: [string, string, string][] = [
+      ['products', 'has_variants', 'INTEGER NOT NULL DEFAULT 0'],
+      ['products', 'base_unit_name', 'TEXT'],
+      ['products', 'stock_untracked', 'INTEGER NOT NULL DEFAULT 0'],
+      ['products', 'sizes_count', 'INTEGER'],
+      ['sale_items', 'variant_label', 'TEXT'],
+      ['sale_items', 'variant_id', 'INTEGER'],
+      ['sale_items', 'variant_color', 'TEXT'],
+    ];
+    for (const [table, column, ddl] of v20Cols) {
+      const check = await database.execute(
+        `SELECT COUNT(*) AS cnt FROM pragma_table_info('${table}') WHERE name = ?`,
+        [column],
+      );
+      const has = (check.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+      if (!has) {
+        await database.execute(
+          `ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`,
+        );
+      }
+    }
+
+    // (ج) دمج ربطات v34: كل منتجات الموديل الواحد (style_group
+    //     مضبوط) تُجمَّع باسمها الأساسي (قبل « — لون · مقاس»).
+    const legacyRows = await database.execute(
+      `SELECT id, name, stock_quantity, variant_size, variant_color, style_group
+         FROM products
+        WHERE style_group IS NOT NULL AND style_group != '' AND is_archived = 0
+        ORDER BY id ASC`,
+    );
+    type LegacyRow = {
+      id: number;
+      name: string;
+      stock_quantity: number;
+      variant_size: string | null;
+      variant_color: string | null;
+      style_group: string;
+    };
+    const legacy = (legacyRows.rows?._array ?? []) as unknown as LegacyRow[];
+    if (legacy.length > 0) {
+      // تجميع بالاسم الأساسي للموديل (قبل « — »).
+      const groups = new Map<string, LegacyRow[]>();
+      for (const row of legacy) {
+        const baseName = row.name.split(' — ')[0].trim() || row.name;
+        const arr = groups.get(baseName) ?? [];
+        arr.push(row);
+        groups.set(baseName, arr);
+      }
+      for (const [baseName, rows] of groups) {
+        // متغيرات الموديل: كل (لون × مقاس) مخزونه من صفوفه.
+        const variantMap = new Map<string, number>();
+        const sizes = new Set<string>();
+        for (const row of rows) {
+          const size = (row.variant_size ?? '').trim();
+          const color = (row.variant_color ?? '').trim();
+          sizes.add(size);
+          const key = `${color}\u0000${size}`;
+          variantMap.set(
+            key,
+            (variantMap.get(key) ?? 0) + Math.max(0, row.stock_quantity),
+          );
+        }
+        const total = [...variantMap.values()].reduce(
+          (sum, qty) => sum + qty,
+          0,
+        );
+        // المنتج الباقي = أول صف (الأقدم) — يحمل الاسم الأساسي
+        // والمتغيرات، وتُمسح منه سمات v34 كي لا يُعاد تجميعه.
+        const primary = rows[0];
+        await database.execute(
+          `UPDATE products SET
+             name = ?, has_variants = 1, sizes_count = ?,
+             stock_quantity = ?, style_group = NULL,
+             variant_size = NULL, variant_color = NULL
+           WHERE id = ?`,
+          [baseName, sizes.size, total, primary.id],
+        );
+        for (const [key, qty] of variantMap) {
+          const [color, size] = key.split('\u0000');
+          await database.execute(
+            `INSERT OR REPLACE INTO product_variants
+               (product_id, kind, color, size, stock_quantity, retail_price, cost_price, created_at)
+             VALUES (?, 'variant', ?, ?, ?, NULL, NULL, datetime('now'))`,
+            [primary.id, color, size, qty],
+          );
+        }
+        // بقية صفوف المجموعة: حذف إن بلا تاريخ، وإلا أرشفة
+        // (تبقى للفواتير القديمة والإرجاع — مخفية عن البيع).
+        for (const row of rows.slice(1)) {
+          const history = await database.execute(
+            `SELECT 1 WHERE EXISTS (SELECT 1 FROM sale_items WHERE product_id = ?)
+                    OR EXISTS (SELECT 1 FROM stocktake_items WHERE product_id = ?)
+               LIMIT 1`,
+            [row.id, row.id],
+          );
+          const hasHistory =
+            (history.rows?._array ?? []).length > 0;
+          if (hasHistory) {
+            await database.execute(
+              `UPDATE products SET is_archived = 1, stock_quantity = 0
+                WHERE id = ?`,
+              [row.id],
+            );
+          } else {
+            await database.execute('DELETE FROM products WHERE id = ?', [
+              row.id,
+            ]);
+          }
+        }
+      }
+      logDiag(
+        'db',
+        `ترحيل v20: دُمجت ربطات الملابس القديمة في موديلات بمتغيرات (${legacy.length} صف)`,
+      );
+    }
+    logDiag(
+      'db',
+      'ترحيل v20: متغيرات المنتج + وحدة الأساس + المخزون بلا تتبع',
+    );
+    version = 20;
   }
 
   if (version !== storedVersion) {

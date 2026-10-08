@@ -89,6 +89,13 @@ const RECONCILE_V19_FREEZE_FLAG = 'sila_reconcile_v19_freeze_v1';
  *  الأخرى، وفصلها هنا هو الذي يمنع تحصيلات متجر آخر من أن
  *  تُسجّل في كتب هذه النقطة (تداخل المتاجر). مرة واحدة فقط. */
 const RECONCILE_V34_DEVICE_FLAG = 'sila_reconcile_v34_device_v1';
+/** v35 (الجولة 43): التدقيق الشامل أحادي المرة — بعد أول تمريرة
+ *  زبائن ناجحة يمسح كل زبائن الكاش ويشذّب كل تحصيل لا يعرفه
+ *  الخادم لديون هذه النقطة (تلوث عصر POS: فاتورة 20₪ سُجّل منها
+ *  5 دين فقط والباقي تحصيل وهمي). يشترط أن يكون الخادم قد أرسل
+ *  أرقام الجهاز يوماً (علم v34) — وإلا فالكاش لا يفرّق بين «لا
+ *  تاريخ» و«مجهول» والتشذيب الأعمى خطر. مرة واحدة فقط. */
+const RECONCILE_V35_AUDIT_FLAG = 'sila_reconcile_v35_audit_v1';
 
 /** Result of one cycle — the UI toasts `message` on manual sync. */
 export interface SilaSyncOutcome {
@@ -271,15 +278,17 @@ async function syncCustomersCycle(): Promise<void> {
   const deviceResetFirstPass =
     feedHasDeviceNumbers && getString(RECONCILE_V34_DEVICE_FLAG, '') === '';
   const newCustomerOffsets = new Map<string, number>();
+  let reconcileOutcome: {recordedMinor: number; trimmedMinor: number} | null =
+    null;
   try {
-    const recordedMinor = await SilaRepo.reconcileAppCollections(
+    reconcileOutcome = await SilaRepo.reconcileAppCollections(
       rows.map(row => ({
         customerId: row.customer_id,
         name: row.customer_name,
         posPurchasesMinor: row.pos_purchases_minor ?? 0,
         posOutstandingMinor: row.pos_outstanding_minor ?? 0,
-        // v34: null حين لا يرسلها الخادم (قبل 0075) → الرجوع الآمن
-        // لأرقام POS الشاملة داخل المحرك نفسه.
+        // v35: أرقام الجهاز فقط — غيابها تخطٍّ كامل داخل المحرك
+        //  (لا رجوع لأرقام POS الشاملة بعد اليوم — فصل المتاجر).
         devicePurchasesMinor: row.device_purchases_minor ?? null,
         deviceOutstandingMinor: row.device_outstanding_minor ?? null,
       })),
@@ -301,15 +310,29 @@ async function syncCustomersCycle(): Promise<void> {
         'اكتمل تجميد أسس مطابقة تحصيلات صِلة (مرة واحدة) — السدادات القديمة لن تُسجّل كتحصيلات جديدة',
       );
     }
-    if (recordedMinor > 0) {
+    const recordedPart = reconcileOutcome?.recordedMinor ?? 0;
+    if (recordedPart > 0) {
       notificationsStore.push(
         'sila_collection',
         'تحصيل جديد عبر تطبيق صِلة',
         `سدّد زبون دينه من تطبيق صِلة — استلمت صِلة ${(
-          recordedMinor / 100
+          recordedPart / 100
         ).toFixed(
           2,
         )} ₪ نيابة عنك على ديون فواتير متجرك، وسُجّلت في الخزينة والتقارير`,
+        {system: true},
+      );
+    }
+    // v35 ③: التشذيب — شفاء فوري لكل زبون ظهر في التغذية ودفاتره
+    //  تدّعي فوق ما يعرفه الخادم لديون هذه النقطة.
+    const trimmedPart = reconcileOutcome?.trimmedMinor ?? 0;
+    if (trimmedPart > 0) {
+      notificationsStore.push(
+        'sila_collection',
+        'تصحيح تحصيلات مسجّلة خطأً',
+        `حُذف ${(trimmedPart / 100).toFixed(
+          2,
+        )} ₪ تحصيلات تطبيق لا يعرفها خادم صِلة لديون هذا المتجر — ديونك استعادت قيمتها الصحيحة`,
         {system: true},
       );
     }
@@ -350,6 +373,33 @@ async function syncCustomersCycle(): Promise<void> {
   );
   setString(CUSTOMERS_CURSOR_KEY, stamp);
   logDiag('sila', `تم تحديث أرصدة ${rows.length} زبون من صِلة`);
+  // v35 ③: التدقيق الشامل أحادي المرة — الزبائن الساكنون (لا
+  //  يظهرون في التغذية التدريجية أبداً) يُنظَّف تلوثهم التاريخي
+  //  هنا بعد أول تمريرة ناجحة حدّثت الكاش. يشترط أن يكون الخادم
+  //  أرسل أرقام الجهاز يوماً (علم v34 مضبوط) — وإلا فالكاش لا
+  //  يفرّق بين «لا تاريخ جهاز» و«مجهول قبل 0075» والتشذيب خطر.
+  if (
+    getString(RECONCILE_V35_AUDIT_FLAG, '') === '' &&
+    getString(RECONCILE_V34_DEVICE_FLAG, '') !== ''
+  ) {
+    setString(RECONCILE_V35_AUDIT_FLAG, '1');
+    try {
+      const auditTrimmed = await SilaRepo.auditAppCollections();
+      if (auditTrimmed > 0) {
+        notificationsStore.push(
+          'sila_collection',
+          'تصحيح شامل لديون متجرك',
+          `التدقيق الأول بعد التحديث حذف ${(auditTrimmed / 100).toFixed(
+            2,
+          )} ₪ تحصيلات وهمية كانت تأكل ديون فواتير متجرك — الأرصدة الآن مطابقة لما يعرفه خادم صِلة لديون هذه النقطة`,
+          {system: true},
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logDiag('sila', `التدقيق الشامل للتحصيلات تأجل: ${message}`, 'warn');
+    }
+  }
 }
 
 /**

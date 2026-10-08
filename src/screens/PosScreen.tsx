@@ -97,7 +97,12 @@ import {
 } from '../core/theme';
 import {formatMoney, formatQty, parseNumber} from '../core/format';
 import {baseUnitLabelOf, isWeightProduct, stockStateOf} from '../core/types';
-import type {CartLine, Product, ProductUnit} from '../core/types';
+import type {
+  CartLine,
+  Product,
+  ProductUnit,
+  ProductVariant,
+} from '../core/types';
 
 const GRID_COLUMNS = 3;
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -166,6 +171,9 @@ export function PosScreen({
   const discount = useCartStore(state => state.discount);
   const addProduct = useCartStore(state => state.addProduct);
   const addWeighted = useCartStore(state => state.addWeighted);
+  const addVariantLine = useCartStore(state => state.addVariantLine);
+  const addBundleLine = useCartStore(state => state.addBundleLine);
+  const addSizedLine = useCartStore(state => state.addSizedLine);
   const setLineUnit = useCartStore(state => state.setLineUnit);
   const increment = useCartStore(state => state.increment);
   const decrement = useCartStore(state => state.decrement);
@@ -214,15 +222,20 @@ export function PosScreen({
   // never be added as "one piece": tapping it (or scanning it) opens
   // this sheet so the merchant types/weighs the kg amount.
   const [weightProduct, setWeightProduct] = useState<Product | null>(null);
-  /** v34 (الجولة 42 #3): نافذة اختيار المقاس — تفتح عند لمس تجان
-   *  موديل ملابس مجمّع (style_group): مقاسات الموديل كلها بجانب
-   *  بعضها مع مخزون كل مقاس، لمسة واحدة تضيف المقاس للسلة. */
-  const [styleVariants, setStyleVariants] = useState<{
-    group: string;
-    baseName: string;
-    color: string | null;
-    variants: Product[];
+  /** v35 (الجولة 43): نافذة البيع الموحدة — لكل منتج نافذة بمحتوى
+   *  مودّه قبل السلة (طلب التاجر):
+   *  • clothing: موديل ملابس — لون + مقاس مفرقاً، أو ربطة بالجملة
+   *    (قطعة من كل مقاس باللون، عددها وسعرها يُحسبان تلقائياً).
+   *  • sizes: مطعم/كافيتريا بأحجام — حجم بسعره + كمية.
+   *  • unit: صيدلية — وحدة البيع (شريط/علبة) + كمية.
+   *  INLINE overlay — نفس درس روم الجهاز (لا Modal أبداً). */
+  const [saleSheet, setSaleSheet] = useState<{
+    kind: 'clothing' | 'sizes' | 'unit';
+    product: Product;
   } | null>(null);
+  /** موديلات انتظرت الماسح (باركود منتج بمتغيرات) — تفتح نوافذها
+   *  واحدة تلو الأخرى حين يُغلق الماسح. */
+  const [pendingSheets, setPendingSheets] = useState<Product[]>([]);
   const [weightUnitRows, setWeightUnitRows] = useState<ProductUnit[] | null>(
     null,
   );
@@ -468,6 +481,58 @@ export function PosScreen({
       }
     },
     [addProduct, pricingMode, beep, toast, openWeightPad],
+  );
+
+  /** v35 (الجولة 43): توجيه المنتج لنافذة البيع المناسبة لموده —
+   *  ملابس بمتغيرات (لون × مقاس) أو صنف بأحجام أو صيدلية بوحداتها،
+   *  وما عداهم يُضاف مباشرة (الأسرع للمجالات البسيطة). */
+  const openSaleSheet = useCallback(
+    (product: Product) => {
+      if (isWeightProduct(product)) {
+        openWeightPad(product);
+        return;
+      }
+      const variants = product.variants ?? [];
+      const hasClothing = variants.some(v => v.kind === 'variant');
+      const hasSizes = variants.some(v => v.kind === 'size');
+      if (hasClothing) {
+        setSaleSheet({kind: 'clothing', product});
+        return;
+      }
+      if (hasSizes) {
+        setSaleSheet({kind: 'sizes', product});
+        return;
+      }
+      if (settings.storeMode === 'pharmacy') {
+        setSaleSheet({kind: 'unit', product});
+        return;
+      }
+      tryAdd(product);
+    },
+    [openWeightPad, settings.storeMode, tryAdd],
+  );
+
+  // v35: نافذة الماسح المؤجلة — تفتح حين لا يكون هناك نافذة مفتوحة.
+  useEffect(() => {
+    if (saleSheet == null && pendingSheets.length > 0) {
+      const [next, ...rest] = pendingSheets;
+      setPendingSheets(rest);
+      openSaleSheet(next);
+    }
+  }, [saleSheet, pendingSheets, openSaleSheet]);
+
+  /** v35: أضف منتجاً ممسوحاً — المتغيرات تنتظر نافذتها بعد إغلاق
+   *  الماسح، والبقية تضاف مباشرة كما كانت. */
+  const addScanned = useCallback(
+    (product: Product) => {
+      const variants = product.variants ?? [];
+      if (variants.some(v => v.kind === 'variant')) {
+        setPendingSheets(prev => [...prev, product]);
+        return;
+      }
+      tryAdd(product);
+    },
+    [tryAdd],
   );
 
   // v8.3: queued weight pads — one scanner session can recognize
@@ -921,13 +986,18 @@ export function PosScreen({
   ]);
 
   /** v9: adds a candidate from the inline strip (weight products
-   *  open the pad instead). */
+   *  open the pad instead). v35: منتجات المتغيرات تفتح نافذتها. */
   const pickVisionMatch = useCallback(
     (product: Product) => {
       setVisionMatches(null);
       if (isWeightProduct(product)) {
         beep();
         openWeightPad(product);
+        return;
+      }
+      if ((product.variants ?? []).some(v => v.kind === 'variant')) {
+        beep();
+        setSaleSheet({kind: 'clothing', product});
         return;
       }
       const result = addProduct(
@@ -982,6 +1052,16 @@ export function PosScreen({
             return {status: 'queued', name: product.name};
           }
           const mode = useCartStore.getState().pricingMode;
+          // v35 (الجولة 43): منتج بمتغيرات (ملابس) — نافذة اللون
+          //  والمقاس تنتظر إغلاق الماسح ثم تفتح (المسار المباشر
+          //  يبيع كل مقاس كيف؟).
+          if ((product.variants ?? []).some(v => v.kind === 'variant')) {
+            setPendingSheets(prev =>
+              prev.some(p => p.id === product.id) ? prev : [...prev, product],
+            );
+            beep();
+            return {status: 'queued', name: product.name};
+          }
           const result = addProduct(product, mode, null);
           if (result.added) {
             beep();
@@ -1277,67 +1357,12 @@ export function PosScreen({
     );
   }, [search, products]);
 
-  /** v34 (الجولة 42 #3): عناصر الشبكة — منتجات الموديل الواحد
-   *  (style_group مشترك: موديل + لون × مقاسات) تُجمَّع في تجان واحد
-   *  يفتح نافذة اختيار المقاس؛ بقية المنتجات تجان لكل منها. مسح
-   *  باركود أي مقاس يضيفه مباشرة (الرمز هوية القطعة نفسها). */
+  /** v35 (الجولة 43): شبكة البيع — الموديل منتج واحد بمتغيراته
+   *  (ملابس لون×مقاس / أحجام)؛ التجان يفتح نافذة البيع بمحتوى
+   *  مودّه. تجميع style_group القديم حُذف — الترحيل v20 دمج
+   *  ربطات v34 في موديلات واحدة. */
   const displayItems = useMemo(() => {
-    type DisplayItem =
-      | {kind: 'product'; product: Product; sortKey: string}
-      | {
-          kind: 'style';
-          group: string;
-          baseName: string;
-          color: string | null;
-          variants: Product[];
-          totalStock: number;
-          sample: Product;
-          sortKey: string;
-        };
-    const items: DisplayItem[] = [];
-    const groups = new Map<string, Product[]>();
-    for (const product of filteredProducts) {
-      if (product.style_group != null && product.style_group.length > 0) {
-        const arr = groups.get(product.style_group) ?? [];
-        arr.push(product);
-        groups.set(product.style_group, arr);
-      }
-    }
-    for (const product of filteredProducts) {
-      const group = product.style_group;
-      if (group != null && group.length > 0 && groups.has(group)) {
-        // أول لقاء بالمجموعة → تجان مجمّع واحد؛ بعدها تُتخطى.
-        const variants = groups.get(group)!;
-        groups.delete(group);
-        const totalStock = variants.reduce(
-          (sum, entry) => sum + entry.stock_quantity,
-          0,
-        );
-        const sample = variants[0];
-        const baseName = sample.variant_color
-          ? product.name.split(` — ${sample.variant_color}`)[0].trim() ||
-            product.name
-          : product.name;
-        items.push({
-          kind: 'style',
-          group,
-          baseName,
-          color: sample.variant_color,
-          variants,
-          totalStock,
-          sample,
-          sortKey: baseName.toLowerCase(),
-        });
-      } else if (group == null || group.length === 0) {
-        items.push({
-          kind: 'product',
-          product,
-          sortKey: product.name.toLowerCase(),
-        });
-      }
-    }
-    items.sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'ar'));
-    return items;
+    return filteredProducts;
   }, [filteredProducts]);
 
   const priceOf = useCallback(
@@ -2100,73 +2125,28 @@ export function PosScreen({
                   />
                 </View>
               ) : (
-                displayItems.map(item => {
-                  if (item.kind === 'style') {
-                    /* v34: تجان الموديل المجمّع — الاسم الأساسي مع
-                     * اللون، ووسم «مقاسات» بعددها، والسعر موحد.
-                     * اللمسة تفتح نافذة اختيار المقاس. */
-                    const total = item.totalStock;
-                    return (
-                      <TouchableOpacity
-                        key={`style-${item.group}`}
-                        style={[styles.tile, styles.tileStyleGroup]}
-                        onPress={() => setStyleVariants(item)}
-                        activeOpacity={0.75}>
-                        {item.sample.image_uri ? (
-                          <Image
-                            source={{uri: `file://${item.sample.image_uri}`}}
-                            style={styles.tileImage}
-                          />
-                        ) : (
-                          <View
-                            style={[styles.tileImage, styles.tileImageFallback]}>
-                            <Icon name="tag" size={20} color={c.accent} />
-                          </View>
-                        )}
-                        <View style={styles.styleSizesBadge}>
-                          <Text style={styles.styleSizesBadgeText}>
-                            {item.variants.length} مقاس
-                          </Text>
-                        </View>
-                        <Text style={styles.tileName} numberOfLines={1}>
-                          {item.baseName}
-                          {item.color ? ` — ${item.color}` : ''}
-                        </Text>
-                        <Text style={styles.tilePrice}>
-                          {formatMoney(priceOf(item.sample))}
-                        </Text>
-                        <View style={styles.tileStockRow}>
-                          <View
-                            style={[
-                              styles.stockDot,
-                              {
-                                backgroundColor:
-                                  total <= 0
-                                    ? c.danger
-                                    : c.success,
-                              },
-                            ]}
-                          />
-                          <Text style={styles.tileStock}>
-                            {total <= 0
-                              ? 'نفد'
-                              : `${formatQty(total)} قطعة بالمقاسات`}
-                          </Text>
-                        </View>
-                      </TouchableOpacity>
-                    );
-                  }
-                  const product = item.product;
+                displayItems.map(product => {
+                  /* v35 (الجولة 43): كل منتج تجان واحد — اللمسة تفتح
+                   * نافذة البيع المناسبة لموده (ملابس/أحجام/وحدات)
+                   * أو تضيف مباشرة للمجالات البسيطة. */
                   const stockState = stockStateOf(
                     product,
                     settings.lowStockDefaultThreshold,
                   );
                   const weighted = isWeightProduct(product);
+                  const untracked = product.stock_untracked === 1;
+                  const clothingVariants = (product.variants ?? []).filter(
+                    v => v.kind === 'variant',
+                  );
+                  const sizeVariants = (product.variants ?? []).filter(
+                    v => v.kind === 'size',
+                  );
+                  const variantCount = clothingVariants.length;
                   return (
                     <TouchableOpacity
                       key={product.id}
                       style={styles.tile}
-                      onPress={() => tryAdd(product)}
+                      onPress={() => openSaleSheet(product)}
                       activeOpacity={0.75}>
                       {product.image_uri ? (
                         <Image
@@ -2184,34 +2164,70 @@ export function PosScreen({
                           <Icon name="scale" size={9} color={c.onAccent} />
                         </View>
                       ) : null}
+                      {variantCount > 0 ? (
+                        <View style={styles.styleSizesBadge}>
+                          <Text style={styles.styleSizesBadgeText}>
+                            {new Set(
+                              clothingVariants.map(v => v.color),
+                            ).size}{' '}
+                            لون ·{' '}
+                            {new Set(clothingVariants.map(v => v.size)).size} مقاس
+                          </Text>
+                        </View>
+                      ) : sizeVariants.length > 0 ? (
+                        <View style={styles.styleSizesBadge}>
+                          <Text style={styles.styleSizesBadgeText}>
+                            {sizeVariants.length} أحجام
+                          </Text>
+                        </View>
+                      ) : null}
                       <Text style={styles.tileName} numberOfLines={1}>
                         {product.name}
                       </Text>
                       <Text style={styles.tilePrice}>
-                        {formatMoney(priceOf(product))}
+                        {sizeVariants.length > 0
+                          ? `${formatMoney(
+                              Math.min(
+                                ...sizeVariants.map(
+                                  v => v.retail_price ?? product.retail_price,
+                                ),
+                              ),
+                            )}+`
+                          : formatMoney(priceOf(product))}
                         {weighted ? '/كغ' : ''}
                       </Text>
                       <View style={styles.tileStockRow}>
-                        <View
-                          style={[
-                            styles.stockDot,
-                            {
-                              backgroundColor:
-                                stockState === 'out'
-                                  ? c.danger
-                                  : stockState === 'low'
-                                  ? c.warning
-                                  : c.success,
-                            },
-                          ]}
-                        />
-                        <Text style={styles.tileStock}>
-                          {stockState === 'out'
-                            ? 'نفد'
-                            : `${formatQty(
-                                product.stock_quantity,
-                              )} ${baseUnitLabelOf(product, BASE_UNIT_NAME)}`}
-                        </Text>
+                        {untracked ? (
+                          <Text style={styles.tileStock}>يُباع دائماً</Text>
+                        ) : (
+                          <>
+                            <View
+                              style={[
+                                styles.stockDot,
+                                {
+                                  backgroundColor:
+                                    stockState === 'out'
+                                      ? c.danger
+                                      : stockState === 'low'
+                                      ? c.warning
+                                      : c.success,
+                                },
+                              ]}
+                            />
+                            <Text style={styles.tileStock}>
+                              {stockState === 'out'
+                                ? 'نفد'
+                                : `${formatQty(
+                                    product.stock_quantity,
+                                  )} ${
+                                    weighted
+                                      ? WEIGHT_UNIT_NAME
+                                      : product.base_unit_name ??
+                                        BASE_UNIT_NAME
+                                  }`}
+                            </Text>
+                          </>
+                        )}
                         {product.barcode ? (
                           <Icon name="barcode" size={11} color={c.textFaint} />
                         ) : null}
@@ -2331,32 +2347,45 @@ export function PosScreen({
                           </Text>
                           {/* Round-9: ONE meta row — price×qty and the unit
                             chip inline together, so each line is two
-                            rows tall max and nothing overflows. */}
+                            rows tall max and nothing overflows.
+                            v35 (الجولة 43): سطر المتغير يحمل وصفه
+                            (لون · مقاس / حجم / ربطة) بدل مبدّل الوحدة. */}
                           <View style={styles.cartLineMetaRow}>
                             <Text style={styles.cartLineMeta} numberOfLines={1}>
                               {formatMoney(line.unitPrice)} ×{' '}
                               {formatQty(line.quantity)} ={' '}
                               {formatMoney(line.unitPrice * line.quantity)}
                             </Text>
-                            <TouchableOpacity
-                              style={styles.unitChip}
-                              onPress={() => openUnitPicker(line)}
-                              activeOpacity={0.8}>
-                              <Icon name="scale" size={10} color={c.accent} />
-                              <Text
-                                style={styles.unitChipText}
-                                numberOfLines={1}>
-                                {line.unitName}
-                                {line.conversion !== 1
-                                  ? ` (${formatQty(line.conversion)})`
-                                  : ''}
-                              </Text>
-                              <Icon
-                                name="chevronDown"
-                                size={10}
-                                color={c.accent}
-                              />
-                            </TouchableOpacity>
+                            {line.variantLabel != null ? (
+                              <View style={styles.variantLabelChip}>
+                                <Icon name="tag" size={10} color={c.accent} />
+                                <Text
+                                  style={styles.variantLabelChipText}
+                                  numberOfLines={1}>
+                                  {line.variantLabel}
+                                </Text>
+                              </View>
+                            ) : (
+                              <TouchableOpacity
+                                style={styles.unitChip}
+                                onPress={() => openUnitPicker(line)}
+                                activeOpacity={0.8}>
+                                <Icon name="scale" size={10} color={c.accent} />
+                                <Text
+                                  style={styles.unitChipText}
+                                  numberOfLines={1}>
+                                  {line.unitName}
+                                  {line.conversion !== 1
+                                    ? ` (${formatQty(line.conversion)})`
+                                    : ''}
+                                </Text>
+                                <Icon
+                                  name="chevronDown"
+                                  size={10}
+                                  color={c.accent}
+                                />
+                              </TouchableOpacity>
+                            )}
                           </View>
                         </View>
                         <Stepper
@@ -2623,7 +2652,10 @@ export function PosScreen({
             ) : (
               <>
                 <UnitOption
-                  label={`${BASE_UNIT_NAME} (الأساس)`}
+                  label={`${
+                    products.find(p => p.id === unitPickerLine?.productId)
+                      ?.base_unit_name ?? BASE_UNIT_NAME
+                  } (الأساس)`}
                   meta={`سعر الوحدة: ${
                     unitPickerLine
                       ? formatMoney(
@@ -2659,6 +2691,11 @@ export function PosScreen({
                     />
                   );
                 })}
+                {unitPickerRows.length === 0 ? (
+                  <Text style={styles.unitModalMuted}>
+                    لا وحدات أخرى — هذا المنتج يُباع بوحدته الأساس فقط.
+                  </Text>
+                ) : null}
                 <Text style={styles.unitModalHint}>
                   الكميات تُخصم من المخزون بالقطعة تلقائياً — بيع كرتونة واحدة
                   يخصم عدد قطعها.
@@ -2688,102 +2725,52 @@ export function PosScreen({
         onConfirm={confirmWeight}
       />
 
-      {/* ── v34 (الجولة 42 #3): نافذة اختيار المقاس — موديل الملابس
-          المجمّع يفتح مقاساته كلها هنا مع مخزون كل مقاس وسعره؛
-          لمسة على المقاس تضيفه للسلة فوراً (اسم الصف في السلة يحمل
-          اللون والمقاس كاملين). INLINE absolute overlay — نفس درس
-          روم الجهاز (لا Modal أبداً). ── */}
-      {styleVariants != null ? (
-        <View style={styles.inlineOverlay}>
-          <TouchableOpacity
-            style={styles.inlineOverlayDim}
-            activeOpacity={1}
-            onPress={() => setStyleVariants(null)}
-          />
-          <BackHandlerCloser
-            active={styleVariants != null}
-            onClose={() => setStyleVariants(null)}
-          />
-          <View style={styles.variantSheet}>
-            <View style={styles.unitModalHandle} />
-            <View style={styles.variantSheetHeader}>
-              <View style={{flex: 1}}>
-                <Text style={styles.variantSheetTitle} numberOfLines={1}>
-                  {styleVariants.baseName}
-                  {styleVariants.color ? ` — ${styleVariants.color}` : ''}
-                </Text>
-                <Text style={styles.variantSheetMeta} numberOfLines={1}>
-                  اختر المقاس — {styleVariants.variants.length} مقاس · سعر
-                  القطعة {formatMoney(priceOf(styleVariants.variants[0]))} ·
-                  طريقة {pricingMode === 'WHOLESALE' ? 'الجملة' : 'المفرق'}
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={styles.variantCloseChip}
-                onPress={() => setStyleVariants(null)}
-                activeOpacity={0.75}>
-                <Icon name="x" size={16} color={c.textDim} />
-              </TouchableOpacity>
-            </View>
-            <ScrollView
-              style={{flex: 1}}
-              contentContainerStyle={styles.variantList}
-              showsVerticalScrollIndicator={false}>
-              {styleVariants.variants.map(variant => {
-                const out = variant.stock_quantity <= 0;
-                return (
-                  <TouchableOpacity
-                    key={variant.id}
-                    style={[
-                      styles.variantRow,
-                      out ? styles.variantRowOut : null,
-                    ]}
-                    disabled={out}
-                    onPress={() => {
-                      tryAdd(variant);
-                      setStyleVariants(null);
-                    }}
-                    activeOpacity={0.75}>
-                    <View style={styles.variantSizeChip}>
-                      <Text
-                        style={[
-                          styles.variantSizeText,
-                          out ? {color: c.textFaint} : null,
-                        ]}>
-                        {variant.variant_size ?? '—'}
-                      </Text>
-                    </View>
-                    <View style={{flex: 1}}>
-                      <Text
-                        style={[styles.variantRowName, out ? {color: c.textFaint} : null]}
-                        numberOfLines={1}>
-                        {variant.name}
-                      </Text>
-                      <Text style={styles.variantRowMeta}>
-                        {out
-                          ? 'نفد هذا المقاس'
-                          : `المتاح ${formatQty(variant.stock_quantity)} قطعة`}
-                      </Text>
-                    </View>
-                    <Text style={styles.variantRowPrice}>
-                      {formatMoney(priceOf(variant))}
-                    </Text>
-                    <Icon
-                      name={out ? 'alert' : 'plus'}
-                      size={16}
-                      color={out ? c.textFaint : c.accent}
-                    />
-                  </TouchableOpacity>
-                );
-              })}
-              <Text style={styles.variantFootnote}>
-                لمسة واحدة تضيف قطعة من المقاس — عدّل الكمية من السلة
-                بالعدّاد، وامسح باركود أي مقاس ليضاف مباشرة.
-              </Text>
-            </ScrollView>
-          </View>
-        </View>
-      ) : null}
+      {/* ── v35 (الجولة 43): نافذة البيع الموحدة — لكل منتج نافذة
+          بمحتوى مودّه قبل السلة (طلب التاجر): ملابس (لون + مقاس
+          مفرقاً / ربطة بالجملة)، مطعم (حجم بسعره)، صيدلية (شريط/
+          علبة + كمية). INLINE absolute overlay — نفس درس روم الجهاز
+          (لا Modal أبداً). ── */}
+      <SaleSheetView
+        sheet={saleSheet}
+        pricingMode={pricingMode}
+        onClose={() => setSaleSheet(null)}
+        onAddVariant={(product, variant, qty) => {
+          const result = addVariantLine(
+            product,
+            useCartStore.getState().pricingMode,
+            variant,
+            qty,
+          );
+          if (result.added) {
+            beep();
+            setSaleSheet(null);
+          } else if (result.reason) {
+            toast(result.reason, 'error');
+          }
+        }}
+        onAddBundle={(product, color, bundles) => {
+          const result = addBundleLine(product, color, bundles);
+          if (result.added) {
+            beep();
+            setSaleSheet(null);
+          } else if (result.reason) {
+            toast(result.reason, 'error');
+          }
+        }}
+        onAddSized={(product, sizeVariant, qty) => {
+          const result = addSizedLine(product, sizeVariant, qty);
+          if (result.added) {
+            beep();
+            setSaleSheet(null);
+          } else if (result.reason) {
+            toast(result.reason, 'error');
+          }
+        }}
+        onAddUnit={(product, unit) => {
+          tryAdd(product, unit);
+          setSaleSheet(null);
+        }}
+      />
 
       {/* ── v20: صرف قسيمة صلة — the shared redemption sheet. INLINE
           absolute overlay (the ROM Modal lesson). Cart-tied: the
@@ -3497,6 +3484,550 @@ function WeightSheet({
             style={{flex: 1.8}}
           />
         </View>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * SaleSheetView — v35 (الجولة 43): نافذة البيع الموحدة لكل مود.
+ * ─────────────────────────────────────────────────────────────────
+ * طلب التاجر: «في نقطة البيع يجب أن يباع كل منتج بشكل مناسب في
+ * إدخال خيارات البيع في نافذة البيع قبل الوضع بالسلة ويكون لكل
+ * منتج حسب المود والاحتياج نافذة مناسبة للبيع تسهل عملية البيع
+ * بالاختبارات المناسبة وبشكل احترافي».
+ *
+ * • clothing (ملابس — Shopify Variants):
+ *   مفرق: لون → مقاس (المتاح منه فقط) → كمية → إضافة.
+ *   جملة: لون → عدد الربط (الربطة = قطعة من كل مقاس، سعرها سعر
+ *   القطعة بالجملة × عدد المقاسات) — يظهر عند تفعيل وضع الجملة
+ *   في نافذة الموديل نفسها (حرف طلب التاجر).
+ * • sizes (مطعم/كافيتريا): شريحة لكل حجم بسعره → كمية → إضافة.
+ * • unit (صيدلية): الشريط افتراضياً والعلبة وحدات أكبر → كمية.
+ *
+ * INLINE absolute overlay — نفس درس روم الجهاز (لا Modal أبداً).
+ */
+function SaleSheetView({
+  sheet,
+  pricingMode,
+  onClose,
+  onAddVariant,
+  onAddBundle,
+  onAddSized,
+  onAddUnit,
+}: {
+  sheet: {kind: 'clothing' | 'sizes' | 'unit'; product: Product} | null;
+  pricingMode: 'RETAIL' | 'WHOLESALE';
+  onClose: () => void;
+  onAddVariant: (
+    product: Product,
+    variant: ProductVariant,
+    qty: number,
+  ) => void;
+  onAddBundle: (product: Product, color: string, bundles: number) => void;
+  onAddSized: (
+    product: Product,
+    sizeVariant: ProductVariant,
+    qty: number,
+  ) => void;
+  onAddUnit: (product: Product, unit: ProductUnit | null) => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  const product = sheet?.product ?? null;
+
+  // حالة الملابس: اللون ثم المقاس ثم الكمية، ووضع الجملة بالربطة.
+  const [color, setColor] = useState<string | null>(null);
+  const [size, setSize] = useState<string | null>(null);
+  const [qty, setQty] = useState(1);
+  const [wholesaleMode, setWholesaleMode] = useState(false);
+  const [bundles, setBundles] = useState(1);
+  // حالة الأحجام/الوحدات: الحجم/الوحدة المختارة.
+  const [pickedSizeId, setPickedSizeId] = useState<number | null>(null);
+  const [pickedUnitId, setPickedUnitId] = useState<number | null>(null);
+  const [unitRows, setUnitRows] = useState<ProductUnit[] | null>(null);
+
+  // صفحة جديدة — تصفير الاختيارات.
+  useEffect(() => {
+    setColor(null);
+    setSize(null);
+    setQty(1);
+    setWholesaleMode(false);
+    setBundles(1);
+    setPickedSizeId(null);
+    setPickedUnitId(null);
+    setUnitRows(null);
+  }, [product?.id, sheet?.kind]);
+
+  // وحدات الصيدلية تُحمّل عند فتح النافذة.
+  useEffect(() => {
+    if (sheet?.kind !== 'unit' || product == null) {
+      return;
+    }
+    let alive = true;
+    UnitRepo.listForProduct(product.id)
+      .then(rows => {
+        if (alive) {
+          setUnitRows(rows);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setUnitRows([]);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [sheet?.kind, product?.id, product]);
+
+  if (product == null || sheet == null) {
+    return null;
+  }
+
+  const clothingVariants = (product.variants ?? []).filter(
+    v => v.kind === 'variant',
+  );
+  const sizeVariants = (product.variants ?? []).filter(
+    v => v.kind === 'size',
+  );
+  const colors = [...new Set(clothingVariants.map(v => v.color))];
+  const activeColor = color ?? colors[0] ?? null;
+  const colorVariants = clothingVariants.filter(v => v.color === activeColor);
+  const sizesOfColor = colorVariants.map(v => v.size);
+  const activeVariant =
+    colorVariants.find(v => v.size === size) ??
+    colorVariants.find(v => v.stock_quantity > 0) ??
+    null;
+  const untracked = product.stock_untracked === 1;
+
+  // ── أسعار الملابس ──
+  const perPieceRetail = product.retail_price;
+  const perPieceWholesale =
+    product.wholesale_price > 0 ? product.wholesale_price : product.retail_price;
+  const sizesCount =
+    product.sizes_count ?? (new Set(colorVariants.map(v => v.size)).size || 1);
+  const bundlePrice = Math.round(perPieceWholesale * sizesCount * 100) / 100;
+  const minStockOfColor =
+    colorVariants.length > 0
+      ? Math.min(...colorVariants.map(v => v.stock_quantity))
+      : 0;
+
+  return (
+    <View style={styles.inlineOverlay}>
+      <TouchableOpacity
+        style={styles.inlineOverlayDim}
+        activeOpacity={1}
+        onPress={onClose}
+      />
+      <BackHandlerCloser active={sheet != null} onClose={onClose} />
+      <View style={styles.variantSheet}>
+        <View style={styles.unitModalHandle} />
+        <View style={styles.variantSheetHeader}>
+          <View style={{flex: 1}}>
+            <Text style={styles.variantSheetTitle} numberOfLines={1}>
+              {product.name}
+            </Text>
+            <Text style={styles.variantSheetMeta} numberOfLines={1}>
+              {sheet.kind === 'clothing'
+                ? `${colors.length} لون · ${sizesOfColor.length} مقاس · القطعة ${formatMoney(
+                    perPieceRetail,
+                  )} مفرق`
+                : sheet.kind === 'sizes'
+                ? `${sizeVariants.length} أحجام — اختر الحجم وسعره`
+                : `يُباع افتراضياً بال${
+                    product.base_unit_name ?? 'قطعة'
+                  } · ${formatMoney(
+                    pricingMode === 'WHOLESALE'
+                      ? product.wholesale_price
+                      : product.retail_price,
+                  )}`}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.variantCloseChip}
+            onPress={onClose}
+            activeOpacity={0.75}>
+            <Icon name="x" size={16} color={c.textDim} />
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView
+          style={{flex: 1}}
+          contentContainerStyle={styles.variantList}
+          showsVerticalScrollIndicator={false}>
+          {/* ════ ملابس ════ */}
+          {sheet.kind === 'clothing' ? (
+            <>
+              {/* مبدّل مفرق / جملة (بالربطة) — داخل نافذة الموديل
+               *  نفسها كما طلب التاجر حرفياً. */}
+              <View style={styles.sheetSegmentRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.sheetSegment,
+                    !wholesaleMode ? styles.sheetSegmentActive : null,
+                  ]}
+                  onPress={() => setWholesaleMode(false)}
+                  activeOpacity={0.8}>
+                  <Text
+                    style={[
+                      styles.sheetSegmentText,
+                      !wholesaleMode ? {color: c.onAccent} : null,
+                    ]}>
+                    مفرق — بالقطعة
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.sheetSegment,
+                    wholesaleMode ? styles.sheetSegmentActive : null,
+                  ]}
+                  onPress={() => setWholesaleMode(true)}
+                  activeOpacity={0.8}>
+                  <Text
+                    style={[
+                      styles.sheetSegmentText,
+                      wholesaleMode ? {color: c.onAccent} : null,
+                    ]}>
+                    جملة — بالربطة
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* الألوان */}
+              <Text style={styles.sheetPickLabel}>اللون</Text>
+              <View style={styles.sheetChipsRow}>
+                {colors.map(entry => (
+                  <TouchableOpacity
+                    key={`sc-${entry}`}
+                    style={[
+                      styles.sheetChip,
+                      activeColor === entry ? styles.sheetChipActive : null,
+                    ]}
+                    onPress={() => {
+                      setColor(entry);
+                      setSize(null);
+                    }}
+                    activeOpacity={0.75}>
+                    <Text
+                      style={[
+                        styles.sheetChipText,
+                        activeColor === entry ? {color: c.onAccent} : null,
+                      ]}>
+                      {entry}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {!wholesaleMode ? (
+                /* مفرق: مقاسات اللون بمخزون كل مقاس */
+                <>
+                  <Text style={styles.sheetPickLabel}>
+                    المقاس{activeColor ? ` — لون ${activeColor}` : ''}
+                  </Text>
+                  <View style={styles.sheetChipsRow}>
+                    {colorVariants.map(variant => {
+                      const out = variant.stock_quantity <= 0 && !untracked;
+                      return (
+                        <TouchableOpacity
+                          key={`sv-${variant.id}`}
+                          style={[
+                            styles.sheetChip,
+                            size === variant.size ? styles.sheetChipActive : null,
+                            out ? styles.sheetChipOut : null,
+                          ]}
+                          disabled={out}
+                          onPress={() => setSize(variant.size)}
+                          activeOpacity={0.75}>
+                          <Text
+                            style={[
+                              styles.sheetChipText,
+                              size === variant.size ? {color: c.onAccent} : null,
+                              out ? {color: c.textFaint} : null,
+                            ]}>
+                            {variant.size}
+                            {!untracked
+                              ? ` · ${formatQty(variant.stock_quantity)}`
+                              : ''}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  <View style={styles.sheetQtyRow}>
+                    <Text style={styles.sheetPickLabel}>الكمية</Text>
+                    <Stepper
+                      compact
+                      value={qty}
+                      onIncrement={() =>
+                        setQty(prev =>
+                          Math.min(
+                            999,
+                            prev + 1,
+                          ),
+                        )
+                      }
+                      onDecrement={() => setQty(prev => Math.max(1, prev - 1))}
+                    />
+                  </View>
+                  <Text style={styles.sheetTotalText}>
+                    {activeVariant != null
+                      ? `${qty} × ${formatMoney(perPieceRetail)} = ${formatMoney(
+                          qty * perPieceRetail,
+                        )}`
+                      : 'اختر المقاس'}
+                  </Text>
+                  <AppButton
+                    title={`إضافة للسلة${
+                      activeVariant != null
+                        ? ` · ${formatMoney(qty * perPieceRetail)}`
+                        : ''
+                    }`}
+                    icon="plus"
+                    disabled={activeVariant == null}
+                    onPress={() => {
+                      if (activeVariant != null) {
+                        onAddVariant(product, activeVariant, qty);
+                      }
+                    }}
+                  />
+                </>
+              ) : (
+                /* جملة: ربطة = قطعة من كل مقاس باللون المختار */
+                <>
+                  <View style={styles.bundleInfoCard}>
+                    <Icon name="box" size={16} color={c.accent} />
+                    <View style={{flex: 1}}>
+                      <Text style={styles.bundleInfoTitle}>
+                        ربطة واحدة = {sizesCount} مقاسات × قطعة
+                      </Text>
+                      <Text style={styles.bundleInfoMeta}>
+                        سعر الربطة {formatMoney(bundlePrice)} ({formatMoney(
+                          perPieceWholesale,
+                        )} × {sizesCount}) · المتاح{' '}
+                        {formatQty(minStockOfColor)} ربطة من هذا اللون
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.sheetQtyRow}>
+                    <Text style={styles.sheetPickLabel}>عدد الربط</Text>
+                    <Stepper
+                      compact
+                      value={bundles}
+                      onIncrement={() =>
+                        setBundles(prev =>
+                          Math.min(999, Math.min(minStockOfColor, prev + 1)),
+                        )
+                      }
+                      onDecrement={() =>
+                        setBundles(prev => Math.max(1, prev - 1))
+                      }
+                    />
+                  </View>
+                  <Text style={styles.sheetTotalText}>
+                    {bundles} ربطة × {formatMoney(bundlePrice)} ={' '}
+                    {formatMoney(bundles * bundlePrice)} ({bundles * sizesCount}{' '}
+                    قطعة)
+                  </Text>
+                  <AppButton
+                    title={`إضافة للسلة · ${formatMoney(
+                      bundles * bundlePrice,
+                    )}`}
+                    icon="plus"
+                    disabled={minStockOfColor <= 0}
+                    onPress={() => {
+                      if (activeColor != null) {
+                        onAddBundle(product, activeColor, bundles);
+                      }
+                    }}
+                  />
+                </>
+              )}
+            </>
+          ) : null}
+
+          {/* ════ أحجام مطعم/كافيتريا ════ */}
+          {sheet.kind === 'sizes' ? (
+            <>
+              <Text style={styles.sheetPickLabel}>اختر الحجم</Text>
+              <View style={styles.sheetChipsColumn}>
+                {sizeVariants.map(variant => {
+                  const price = variant.retail_price ?? product.retail_price;
+                  const active = pickedSizeId === variant.id;
+                  return (
+                    <TouchableOpacity
+                      key={`sz-${variant.id}`}
+                      style={[
+                        styles.sizeOptionRow,
+                        active ? styles.sizeOptionRowActive : null,
+                      ]}
+                      onPress={() => setPickedSizeId(variant.id)}
+                      activeOpacity={0.8}>
+                      <View style={styles.variantSizeChip}>
+                        <Text style={styles.sizeOptionName}>{variant.size}</Text>
+                      </View>
+                      <View style={{flex: 1}} />
+                      <Text style={styles.sizeOptionPrice}>
+                        {formatMoney(price)}
+                      </Text>
+                      <Icon
+                        name={active ? 'check' : 'chevronLeft'}
+                        size={16}
+                        color={active ? c.accent : c.textFaint}
+                      />
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <View style={styles.sheetQtyRow}>
+                <Text style={styles.sheetPickLabel}>الكمية</Text>
+                <Stepper
+                  compact
+                  value={qty}
+                  onIncrement={() => setQty(prev => Math.min(999, prev + 1))}
+                  onDecrement={() => setQty(prev => Math.max(1, prev - 1))}
+                />
+              </View>
+              {(() => {
+                const picked =
+                  sizeVariants.find(v => v.id === pickedSizeId) ?? null;
+                const price =
+                  picked?.retail_price ?? product.retail_price;
+                return (
+                  <>
+                    <Text style={styles.sheetTotalText}>
+                      {picked != null
+                        ? `${qty} × ${picked.size} × ${formatMoney(price)} = ${formatMoney(
+                            qty * price,
+                          )}`
+                        : 'اختر الحجم أولاً'}
+                    </Text>
+                    <AppButton
+                      title={`إضافة للسلة${
+                        picked != null ? ` · ${formatMoney(qty * price)}` : ''
+                      }`}
+                      icon="plus"
+                      disabled={picked == null}
+                      onPress={() => {
+                        if (picked != null) {
+                          onAddSized(product, picked, qty);
+                        }
+                      }}
+                    />
+                  </>
+                );
+              })()}
+            </>
+          ) : null}
+
+          {/* ════ صيدلية — وحدات البيع ════ */}
+          {sheet.kind === 'unit' ? (
+            <>
+              <Text style={styles.sheetPickLabel}>وحدة البيع</Text>
+              <View style={styles.sheetChipsColumn}>
+                <TouchableOpacity
+                  style={[
+                    styles.sizeOptionRow,
+                    pickedUnitId == null ? styles.sizeOptionRowActive : null,
+                  ]}
+                  onPress={() => setPickedUnitId(null)}
+                  activeOpacity={0.8}>
+                  <View style={styles.variantSizeChip}>
+                    <Text style={styles.sizeOptionName}>
+                      {product.base_unit_name ?? 'قطعة'}
+                    </Text>
+                  </View>
+                  <View style={{flex: 1}} />
+                  <Text style={styles.sizeOptionPrice}>
+                    {formatMoney(
+                      pricingMode === 'WHOLESALE'
+                        ? product.wholesale_price
+                        : product.retail_price,
+                    )}
+                  </Text>
+                  <Icon
+                    name={pickedUnitId == null ? 'check' : 'chevronLeft'}
+                    size={16}
+                    color={pickedUnitId == null ? c.accent : c.textFaint}
+                  />
+                </TouchableOpacity>
+                {(unitRows ?? []).map(row => {
+                  const active = pickedUnitId === row.unit_id;
+                  const price = unitPriceFor(product, row, pricingMode);
+                  return (
+                    <TouchableOpacity
+                      key={`su-${row.unit_id}`}
+                      style={[
+                        styles.sizeOptionRow,
+                        active ? styles.sizeOptionRowActive : null,
+                      ]}
+                      onPress={() => setPickedUnitId(row.unit_id)}
+                      activeOpacity={0.8}>
+                      <View style={styles.variantSizeChip}>
+                        <Text style={styles.sizeOptionName}>
+                          {row.unitName}
+                        </Text>
+                      </View>
+                      <View style={{flex: 1}}>
+                        <Text style={styles.sizeOptionMeta}>
+                          1 {row.unitName} = {formatQty(row.conversion)}{' '}
+                          {product.base_unit_name ?? 'قطعة'}
+                        </Text>
+                      </View>
+                      <Text style={styles.sizeOptionPrice}>
+                        {formatMoney(price)}
+                      </Text>
+                      <Icon
+                        name={active ? 'check' : 'chevronLeft'}
+                        size={16}
+                        color={active ? c.accent : c.textFaint}
+                      />
+                    </TouchableOpacity>
+                  );
+                })}
+                {unitRows == null ? (
+                  <Text style={styles.sheetTotalText}>جارٍ تحميل الوحدات…</Text>
+                ) : null}
+              </View>
+              <View style={styles.sheetQtyRow}>
+                <Text style={styles.sheetPickLabel}>الكمية</Text>
+                <Stepper
+                  compact
+                  value={qty}
+                  onIncrement={() => setQty(prev => Math.min(999, prev + 1))}
+                  onDecrement={() => setQty(prev => Math.max(1, prev - 1))}
+                />
+              </View>
+              {(() => {
+                const pickedUnit =
+                  (unitRows ?? []).find(row => row.unit_id === pickedUnitId) ??
+                  null;
+                const price = unitPriceFor(product, pickedUnit, pricingMode);
+                return (
+                  <>
+                    <Text style={styles.sheetTotalText}>
+                      {qty} × {formatMoney(price)} = {formatMoney(qty * price)}
+                    </Text>
+                    <AppButton
+                      title={`إضافة للسلة · ${formatMoney(qty * price)}`}
+                      icon="plus"
+                      onPress={() => onAddUnit(product, pickedUnit)}
+                    />
+                  </>
+                );
+              })()}
+            </>
+          ) : null}
+
+          <Text style={styles.variantFootnote}>
+            {sheet.kind === 'clothing'
+              ? 'بيع بالقطعة: اختر اللون والمقاس — وبالجملة: الربطة تخصم قطعة من كل مقاس باللون المختار.'
+              : sheet.kind === 'sizes'
+              ? 'كل حجم بسعره — يظهر في السلة والفاتورة باسمه.'
+              : 'الوحدة الأساس افتراضية — العلبة والوحدات الأكبر بأسعارها المشتقة.'}
+          </Text>
+        </ScrollView>
       </View>
     </View>
   );
@@ -4335,6 +4866,147 @@ const useStyles = makeStyles(c =>
     variantList: {
       gap: 8,
       paddingBottom: spacing.xl,
+    },
+    /** v35 (الجولة 43): نافذة البيع الموحدة — مقاطع مفرق/جملة
+     *  وشرائح اللون والمقاس والحجم والوحدة وبطاقة الربطة. */
+    sheetSegmentRow: {
+      flexDirection: 'row',
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.md,
+      padding: 3,
+      gap: 3,
+    },
+    sheetSegment: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 9,
+      borderRadius: radius.sm,
+    },
+    sheetSegmentActive: {
+      backgroundColor: c.accent,
+    },
+    sheetSegmentText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    sheetPickLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      marginTop: 4,
+    },
+    sheetChipsRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 7,
+    },
+    sheetChipsColumn: {
+      gap: 7,
+    },
+    sheetChip: {
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      backgroundColor: c.surface,
+      paddingVertical: 8,
+      paddingHorizontal: 13,
+      minWidth: 52,
+      alignItems: 'center',
+    },
+    sheetChipActive: {
+      backgroundColor: c.accent,
+      borderColor: c.accent,
+    },
+    sheetChipOut: {
+      opacity: 0.45,
+    },
+    sheetChipText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    sheetQtyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: 4,
+    },
+    sheetTotalText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+      textAlign: 'left',
+    },
+    bundleInfoCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
+      backgroundColor: c.surface,
+    },
+    bundleInfoTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    bundleInfoMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 2,
+      lineHeight: 17,
+    },
+    sizeOptionRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingVertical: 11,
+      paddingHorizontal: spacing.md,
+      backgroundColor: c.surface,
+    },
+    sizeOptionRowActive: {
+      borderColor: c.accent,
+      borderWidth: 1.5,
+    },
+    sizeOptionName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    sizeOptionMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+    },
+    sizeOptionPrice: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    variantLabelChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      borderWidth: 1,
+      borderColor: c.accent,
+      borderRadius: radius.sm,
+      backgroundColor: c.surface,
+      paddingVertical: 3,
+      paddingHorizontal: 7,
+      maxWidth: 130,
+    },
+    variantLabelChipText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
     },
     variantRow: {
       flexDirection: 'row',

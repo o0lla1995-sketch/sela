@@ -277,7 +277,10 @@ describe('app-collections reconciliation ledger', () => {
 
     const totals = await SilaRepo.appCollectionsTotals();
     expect(Number(totals.allMinor)).toBeGreaterThanOrEqual(0);
-    expect(recorded).toBeGreaterThanOrEqual(0);
+    // v35: النتيجة كائن {recordedMinor, trimmedMinor} — وغياب أرقام
+    // الجهاز في هذه التغذية يعني تخطياً كاملاً (لا رجوع لـ POS).
+    expect(recorded.recordedMinor).toBeGreaterThanOrEqual(0);
+    expect(recorded.trimmedMinor).toBeGreaterThanOrEqual(0);
 
     // The ledger row (if any) is queryable and countable.
     const count = await SilaRepo.appCollectionsCount();

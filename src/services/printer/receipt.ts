@@ -87,9 +87,15 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
   for (const item of data.items) {
     const name =
       data.productNameById.get(item.product_id) ?? `#${item.product_id}`;
+    // v35 (الجولة 43): وصف المتغير (لون · مقاس / حجم / ربطة) بعد
+    //  الاسم — الفاتورة تميز ما بيع تحديداً من كل موديل.
+    const variantSuffix =
+      (item as {variant_label?: string | null}).variant_label
+        ? ` (${(item as {variant_label?: string | null}).variant_label})`
+        : '';
     const unitSuffix =
       item.unit_name && item.unit_name !== 'قطعة' ? ` (${item.unit_name})` : '';
-    b.truncate(`${name}${unitSuffix}`, width);
+    b.truncate(`${name}${variantSuffix}${unitSuffix}`, width);
     b.qtyPriceLine(item.quantity, item.unit_price, item.total_line_price);
   }
 

@@ -39,6 +39,15 @@ function rowToProduct(row: Record<string, unknown>): Product {
       row.variant_color == null || String(row.variant_color).length === 0
         ? null
         : String(row.variant_color),
+    // v35 (الجولة 43): متغيرات المنتج الواحد + وحدة الأساس +
+    // المخزون بلا تتبع + مقاسات الربطة.
+    has_variants: Number(row.has_variants ?? 0) === 1 ? 1 : 0,
+    base_unit_name:
+      row.base_unit_name == null || String(row.base_unit_name).length === 0
+        ? null
+        : String(row.base_unit_name),
+    stock_untracked: Number(row.stock_untracked ?? 0) === 1 ? 1 : 0,
+    sizes_count: row.sizes_count == null ? null : Number(row.sizes_count),
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -61,6 +70,15 @@ export interface ProductInput {
   style_group?: string | null;
   variant_size?: string | null;
   variant_color?: string | null;
+  /** v35 (الجولة 43): منتج بمتغيرات داخلية (ملابس لون×مقاس /
+   *  مطعم أحجام) — البيع عبر نافذة المتغيرات. */
+  has_variants?: number;
+  /** v35: وحدة الأساس بلغة المجال (شريط/علبة/حصة/صحن/كوب). */
+  base_unit_name?: string | null;
+  /** v35: 1 = مخزون بلا تتبع — البيع لا يُحجب ولا يُخصم. */
+  stock_untracked?: number;
+  /** v35: عدد المقاسات بربطة الملابس (أساس بيع الجملة بالربطة). */
+  sizes_count?: number | null;
 }
 
 export const ProductRepo = {
@@ -132,8 +150,8 @@ export const ProductRepo = {
     }
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, style_group, variant_size, variant_color, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
@@ -149,6 +167,10 @@ export const ProductRepo = {
         input.style_group?.trim() ? input.style_group.trim() : null,
         input.variant_size?.trim() ? input.variant_size.trim() : null,
         input.variant_color?.trim() ? input.variant_color.trim() : null,
+        input.has_variants === 1 ? 1 : 0,
+        input.base_unit_name?.trim() ? input.base_unit_name.trim() : null,
+        input.stock_untracked === 1 ? 1 : 0,
+        input.sizes_count ?? null,
         localNow(),
       ],
     );
@@ -173,7 +195,8 @@ export const ProductRepo = {
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
         stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?,
         barcode = ?, sold_by_weight = ?, expiry_date = ?,
-        style_group = ?, variant_size = ?, variant_color = ?
+        style_group = ?, variant_size = ?, variant_color = ?,
+        has_variants = ?, base_unit_name = ?, stock_untracked = ?, sizes_count = ?
        WHERE id = ?`,
       [
         name,
@@ -190,6 +213,10 @@ export const ProductRepo = {
         input.style_group?.trim() ? input.style_group.trim() : null,
         input.variant_size?.trim() ? input.variant_size.trim() : null,
         input.variant_color?.trim() ? input.variant_color.trim() : null,
+        input.has_variants === 1 ? 1 : 0,
+        input.base_unit_name?.trim() ? input.base_unit_name.trim() : null,
+        input.stock_untracked === 1 ? 1 : 0,
+        input.sizes_count ?? null,
         id,
       ],
     );
@@ -247,13 +274,28 @@ export const ProductRepo = {
     ]);
   },
 
-  /** Atomically decrements stock; throws a friendly error on oversell. */
+  /** Atomically decrements stock; throws a friendly error on oversell.
+   *  v35: مخزون بلا تتبع (stock_untracked=1) لا يُخصم أبداً —
+   *  البيع لا يُحجب بنفاد (مطعم/كافيتريا). */
   async decrementStock(id: number, quantity: number): Promise<void> {
     const result = await getDb().execute(
-      'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+      `UPDATE products SET stock_quantity = stock_quantity - ?
+        WHERE id = ? AND stock_quantity >= ? AND stock_untracked = 0`,
       [quantity, id, quantity],
     );
     if (result.rowsAffected !== 1) {
+      // منتج بلا تتبع: الصف نفسه (وليس حرس الكمية) هو ما لم
+      // يطابق — لا خطأ هنا؛ غير ذلك فالمخزون فعلاً لا يكفي.
+      const row = await getDb().execute(
+        'SELECT stock_untracked FROM products WHERE id = ?',
+        [id],
+      );
+      const untracked =
+        (row.rows?._array?.[0] as {stock_untracked?: number})
+          ?.stock_untracked === 1;
+      if (untracked) {
+        return;
+      }
       throw new Error(
         `الكمية المتوفرة من المنتج غير كافية (المطلوب: ${quantity})`,
       );

@@ -88,6 +88,11 @@ export const StockAlertsService = {
       const newKeys: string[] = [];
 
       for (const product of products) {
+        // v35 (الجولة 43): المخزون بلا تتبع لا يُنذَر أبداً — لا
+        //  نفاد ولا انخفاض (مطعم/كافيتريا: الطبق خدمة لا مخزون).
+        if (product.stock_untracked === 1) {
+          continue;
+        }
         const state = stockStateOf(product, settings.lowStockDefaultThreshold);
         if (state !== 'ok') {
           const key = `${product.id}:${state}`;
@@ -173,6 +178,18 @@ export const StockAlertsService = {
     const products = useCatalogStore.getState().products;
     const result: StockAlert[] = [];
     for (const product of products) {
+      // v35 (الجولة 43): المخزون بلا تتبع لا يُنذَر (لا نفاد ولا
+      //  انخفاض) — لكن الصلاحية تبقى تنبيهاً إن وُجد تاريخها.
+      if (product.stock_untracked === 1) {
+        const expiry = expiryStateOf(
+          product.expiry_date,
+          settings.expiryAlertDays,
+        );
+        if (expiry === 'expired' || expiry === 'expiring') {
+          result.push({product, state: expiry});
+        }
+        continue;
+      }
       const state = stockStateOf(product, settings.lowStockDefaultThreshold);
       if (state !== 'ok') {
         result.push({product, state});

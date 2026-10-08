@@ -87,6 +87,16 @@ function rowToItem(row: Record<string, unknown>): SaleItemRecord {
     total_line_price: Number(row.total_line_price ?? 0),
     unit_name: row.unit_name == null ? null : String(row.unit_name),
     base_quantity: row.base_quantity == null ? null : Number(row.base_quantity),
+    variant_label:
+      row.variant_label == null || String(row.variant_label).length === 0
+        ? null
+        : String(row.variant_label),
+    variant_id:
+      row.variant_id == null ? null : Number(row.variant_id),
+    variant_color:
+      row.variant_color == null || String(row.variant_color).length === 0
+        ? null
+        : String(row.variant_color),
   };
 }
 
@@ -173,8 +183,8 @@ export const SaleRepo = {
         const baseQty = line.quantity * (line.conversion ?? 1);
         await tx.execute(
           `INSERT INTO sale_items
-            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity, variant_label, variant_id, variant_color)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             saleId,
             line.productId,
@@ -184,17 +194,81 @@ export const SaleRepo = {
             line.unitPrice * line.quantity,
             line.unitName ?? null,
             baseQty,
+            line.variantLabel ?? null,
+            line.variantId ?? null,
+            line.bundleColor ?? null,
           ],
         );
-        // Oversell guard inside the same transaction (base units).
-        const stockUpdate = await tx.execute(
-          'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
-          [baseQty, line.productId, baseQty],
+        // v35 (الجولة 43): مخزون بلا تتبع (مطعم/كافيتريا) لا يُخصم
+        //  ولا يُحجب أبداً — الخدمة لا تُعدّ مخزوناً.
+        const untracked = await tx.execute(
+          'SELECT stock_untracked FROM products WHERE id = ?',
+          [line.productId],
         );
-        if (stockUpdate.rowsAffected !== 1) {
-          throw new Error(
-            `الكمية المتوفرة من "${line.name}" غير كافية (${baseQty} قطعة مطلوبة)`,
+        const isUntracked =
+          (
+            untracked.rows?._array?.[0] as
+              | {stock_untracked?: number}
+              | undefined
+          )?.stock_untracked === 1;
+        if (!isUntracked) {
+          // Oversell guard inside the same transaction (base units).
+          const stockUpdate = await tx.execute(
+            'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+            [baseQty, line.productId, baseQty],
           );
+          if (stockUpdate.rowsAffected !== 1) {
+            throw new Error(
+              `الكمية المتوفرة من "${line.name}" غير كافية (${baseQty} قطعة مطلوبة)`,
+            );
+          }
+        }
+        // v35: خصم المتغير نفسه (لون × مقاس) — تحديد دقيق داخل
+        //  معاملة الفاتورة ذاتها؛ مجموع المنتج خُصم أعلاه. أحجام
+        //  المطعم (kind='size') بلا مخزون لكل حجم — تخطّى.
+        if (line.variantId != null) {
+          const kindRow = await tx.execute(
+            'SELECT kind FROM product_variants WHERE id = ?',
+            [line.variantId],
+          );
+          const variantKind = (
+            kindRow.rows?._array?.[0] as {kind?: string} | undefined
+          )?.kind;
+          if (variantKind === 'variant') {
+            const variantUpdate = await tx.execute(
+              'UPDATE product_variants SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+              [baseQty, line.variantId, baseQty],
+            );
+            if (variantUpdate.rowsAffected !== 1) {
+              throw new Error(
+                `نفدت كمية "${line.name}" من هذا المتغير (${baseQty} مطلوبة)`,
+              );
+            }
+          }
+        }
+        // v35: ربطة الجملة — قطعة من كل مقاس باللون المختار؛
+        //  كل مقاس يُخصم منه عدد الربط (line.quantity).
+        if (line.bundleColor != null) {
+          const colorRows = await tx.execute(
+            `SELECT id, stock_quantity FROM product_variants
+              WHERE product_id = ? AND kind = 'variant' AND color = ?`,
+            [line.productId, line.bundleColor],
+          );
+          const rows = (colorRows.rows?._array ?? []) as {
+            id: number;
+            stock_quantity: number;
+          }[];
+          for (const row of rows) {
+            const update = await tx.execute(
+              'UPDATE product_variants SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+              [line.quantity, row.id, line.quantity],
+            );
+            if (update.rowsAffected !== 1) {
+              throw new Error(
+                `مقاس من لون ${line.bundleColor} في "${line.name}" لا يكفي لـ ${line.quantity} ربطة`,
+              );
+            }
+          }
         }
       }
 
@@ -430,8 +504,8 @@ export const SaleRepo = {
       for (const line of lineValues) {
         await tx.execute(
           `INSERT INTO sale_items
-            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity, variant_label, variant_id, variant_color)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             retSaleId,
             line.productId,
@@ -441,16 +515,56 @@ export const SaleRepo = {
             -line.lineTotal,
             line.unitName,
             -line.baseQty,
+            line.variantLabel ?? null,
+            line.variantId ?? null,
+            line.variantColor ?? null,
           ],
         );
+        // v35 (الجولة 43): مخزون بلا تتبع لا يُسترجع (لم يُخصم
+        //  أصلاً)؛ والمتغير يُسترجع تحديداً بمعرّفه.
+        const untracked = await tx.execute(
+          'SELECT stock_untracked FROM products WHERE id = ?',
+          [line.productId],
+        );
+        const isUntracked =
+          (
+            untracked.rows?._array?.[0] as
+              | {stock_untracked?: number}
+              | undefined
+          )?.stock_untracked === 1;
         // Stock comes back (base units) — the product row ALWAYS
         // exists: history-bearing products are archived, never
         // deleted (v23 #1), and only history-bearing products can
         // be returned.
-        await tx.execute(
-          'UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?',
-          [line.baseQty, line.productId],
-        );
+        if (!isUntracked) {
+          await tx.execute(
+            'UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?',
+            [line.baseQty, line.productId],
+          );
+        }
+        // v35 (الجولة 43): استرجاع المتغير تحديداً — أو كل مقاسات
+        //  لون الربطة المرتجعة (قطعة لكل مقاس بعدد الربط).
+        if (line.variantId != null) {
+          const kindRow = await tx.execute(
+            'SELECT kind FROM product_variants WHERE id = ?',
+            [line.variantId],
+          );
+          const variantKind = (
+            kindRow.rows?._array?.[0] as {kind?: string} | undefined
+          )?.kind;
+          if (variantKind === 'variant') {
+            await tx.execute(
+              'UPDATE product_variants SET stock_quantity = stock_quantity + ? WHERE id = ?',
+              [line.baseQty, line.variantId],
+            );
+          }
+        } else if (line.variantColor != null) {
+          await tx.execute(
+            `UPDATE product_variants SET stock_quantity = stock_quantity + ?
+              WHERE product_id = ? AND kind = 'variant' AND color = ?`,
+            [line.quantity, line.productId, line.variantColor],
+          );
+        }
       }
 
       // 3) The return receipt + its line snapshots.

@@ -140,16 +140,24 @@ describe('v33 #9 — صفحة المنتج: طي وترتيب', () => {
     expect(src).toContain('modeConfig.defaultSaleMode');
   });
 
-  test('الملابس v34: ربطة كاملة (لون + مقاسات متعددة بكميات) بدل إلحاق المقاس بالاسم', () => {
+  test('الملابس v35: موديل واحد بمتغيرات من الربطة — لا توزيع على منتجات', () => {
     const src = read(PRODUCT_FORM);
-    // النظام القديم (appendVariant) حُذف.
+    // النظام القديم (appendVariant وربطة v34 بتوليد منتج لكل مقاس)
+    // حُذف — التاجر رفض التوزيع.
     expect(src).not.toContain('appendVariant');
-    // الربطة: لون مفرد + مقاسات متعددة + كمية لكل مقاس + منتج لكل
-    // مقاس بباركود داخلي ومجموعة style_group واحدة.
+    expect(src).not.toContain('style_group: styleGroup');
+    // الربطة: ألوان متعددة × مقاسات متعددة × عدد الربط — كل
+    // (لون × مقاس) متغير بمخزونه داخل المنتج الواحد.
     expect(src).toContain('saveLot');
-    expect(src).toContain('lotQtyBySize');
-    expect(src).toContain('style_group: styleGroup');
-    expect(src).toContain('generateInternalEan13');
+    expect(src).toContain('lotSizes');
+    expect(src).toContain('lotColors');
+    expect(src).toContain('lotBundles');
+    expect(src).toContain('has_variants: 1');
+    expect(src).toContain('VariantRepo.replaceForProduct');
+    // إجمالي القطع = ألوان × مقاسات × ربط.
+    expect(src).toContain(
+      'colors.length * lotSizes.length * bundles',
+    );
   });
 });
 

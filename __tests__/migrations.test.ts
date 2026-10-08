@@ -113,7 +113,7 @@ describe('database startup & migrations', () => {
       expect(columns(db, table).length).toBeGreaterThan(0);
     }
     // Migrations ran all the way.
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(19); // v34 (الجولة 42 #3): نطاق الأنماط + ربطة الملابس
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(20); // v35 (الجولة 43): الموديل الواحد منتج بمتغيرات (product_variants)
     // v32 (round-40 #3): the expiry column exists on a fresh install.
     expect(columns(db, 'products')).toContain('expiry_date');
     // Seed categories exist.
@@ -140,7 +140,7 @@ describe('database startup & migrations', () => {
     const cols = columns(db, 'campaign_debts');
     expect(cols).toContain('active_in_store'); // healed by migration v12
     expect(cols).toContain('store_state'); // added by migration v14
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(19); // v34 (الجولة 42 #3): نطاق الأنماط + ربطة الملابس
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(20); // v35 (الجولة 43): الموديل الواحد منتج بمتغيرات (product_variants)
 
     fs.rmSync(file, {force: true});
   });
@@ -231,7 +231,7 @@ describe('database startup & migrations', () => {
       .rows._array[0] as {total_amount: number; returned_minor: number};
     expect(Number(sale.total_amount)).toBeCloseTo(25.5, 5);
     expect(Number(sale.returned_minor)).toBe(0);
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(19); // v34 (الجولة 42 #3): نطاق الأنماط + ربطة الملابس
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(20); // v35 (الجولة 43): الموديل الواحد منتج بمتغيرات (product_variants)
     fs.rmSync(file, {force: true});
   });
 

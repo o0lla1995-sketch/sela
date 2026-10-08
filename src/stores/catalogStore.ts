@@ -12,6 +12,7 @@ import {ProductRepo} from '../database/repositories/ProductRepo';
 import {CategoryRepo} from '../database/repositories/CategoryRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {EmbeddingRepo} from '../database/repositories/EmbeddingRepo';
+import {VariantRepo} from '../database/repositories/VariantRepo';
 import {PlatformUtilsNative} from '../native/nativeBridge';
 import {logDiag} from '../core/diagnostics';
 import {EMBEDDING_MODEL_VERSION} from '../core/config';
@@ -192,18 +193,27 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
           );
         }
       }
-      const [products, categories, embeddings] = await Promise.all([
+      const [products, categories, embeddings, variants] = await Promise.all([
         ProductRepo.list(),
         // v34: تصنيفات نمط المتجر الحالي فقط — لا خليط المجالات.
         CategoryRepo.list(useSettingsStore.getState().settings.storeMode),
         EmbeddingRepo.listAll(),
+        // v35 (الجولة 43): متغيرات المنتجات — مع الكتالوج دائماً
+        //  كي تفتح نوافذ البيع (ملابس/أحجام) بلا انتظار.
+        VariantRepo.listAll(),
       ]);
       const index = EmbeddingRepo.buildIndex(embeddings);
       // v8.3: null out image paths whose files vanished (restore /
       // reinstall) BEFORE the products reach the screens.
       const cleaned = await cleanDeadImagePaths(products);
+      // v35: تثبيت المتغيرات على منتجاتها — الموديل الواحد يحمل
+      //  ألوانه ومقاساته وأسعار أحجامه أينما ظهر في التطبيق.
+      const withVariants = cleaned.map(product => ({
+        ...product,
+        variants: variants.get(product.id) ?? [],
+      }));
       set({
-        products: cleaned,
+        products: withVariants,
         categories,
         embeddingsIndex: index,
         embeddingsCount: embeddings.length,

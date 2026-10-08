@@ -133,7 +133,7 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
 
     // الخادم: التطبيق سدّد 60₪ (دين النقطة نزل 100→40) — وأرقام POS
     // الشاملة فيها تاريخ متجر آخر (12000 مشتريات منها 4000 قائمة).
-    const recorded = await SilaRepo.reconcileAppCollections(
+    const outcome = await SilaRepo.reconcileAppCollections(
       [
         {
           customerId: 'cus-a',
@@ -148,7 +148,8 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
     );
     // قبل v34 كانت المطابقة POS-الشاملة: 22000−14000−0 = 80₪ تُسجَّل
     // هنا خطأً (60 حقيقية + 20 من تاريخ المتجر الآخر). الآن: 60 فقط.
-    expect(recorded).toBe(6000);
+    expect(outcome.recordedMinor).toBe(6000);
+    expect(outcome.trimmedMinor).toBe(0);
 
     const own = await SilaRepo.storeOwnOutstandingByCustomer();
     expect(own.get('cus-a')).toBe(4000); // 10000 − 6000 تحصيل تطبيق
@@ -180,7 +181,7 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
     // إسناد FIFO ثنائي المرحلة أطفأه هناك) → دين هذه النقطة لم يمسّ.
     // أرقام POS الشاملة تنخفض (المطابقة القديمة كانت ستسجل 50 هنا!)
     // لكن أرقام الجهاز ثابتة.
-    const recorded = await SilaRepo.reconcileAppCollections(
+    const outcome = await SilaRepo.reconcileAppCollections(
       [
         {
           customerId: 'cus-b',
@@ -193,7 +194,8 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
       ],
       new Map<string, number>(),
     );
-    expect(recorded).toBe(0);
+    expect(outcome.recordedMinor).toBe(0);
+    expect(outcome.trimmedMinor).toBe(0);
 
     const own = await SilaRepo.storeOwnOutstandingByCustomer();
     expect(own.get('cus-b')).toBe(10000); // الدين القائم هنا كامل
@@ -205,7 +207,7 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
     expect(treasury.cashTotal).toBeCloseTo(0, 5);
   });
 
-  test('توافق رجعي: خادم بلا حقول 0075 → الرجوع لأرقام POS الشاملة كما كان', async () => {
+  test('v35: خادم بلا حقول 0075 → تخطّي كامل — لا تسجيل من أرقام POS الشاملة أبداً', async () => {
     const app = freshApp();
     await app.connection.initDatabase();
     const {SilaRepo} = load('src/services/sila/SilaRepo');
@@ -218,7 +220,10 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
       reconcileOffsetMinor: 0,
     });
 
-    const recorded = await SilaRepo.reconcileAppCollections(
+    // نفس خادم ما قبل 0075 الذي كان يسجّل 5000 (فارق POS الشامل
+    // المختلط بتاريخ متاجر التاجر الأخرى — شكوى «فاتورة 20₪ سُجّل
+    // منها 5 فقط»): الآن لا شيء يُسجّل بلا برهان أرقام هذه النقطة.
+    const outcome = await SilaRepo.reconcileAppCollections(
       [
         {
           customerId: 'cus-c',
@@ -231,7 +236,12 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
       ],
       new Map<string, number>(),
     );
-    expect(recorded).toBe(5000);
+    expect(outcome.recordedMinor).toBe(0);
+    expect(outcome.trimmedMinor).toBe(0);
+
+    // الدين القائم كامل — فارق POS لم يأكل منه شيئاً.
+    const own = await SilaRepo.storeOwnOutstandingByCustomer();
+    expect(own.get('cus-c')).toBe(8000);
   });
 
   test('إعادة التجميد الأحادية: أسس v19 الشاملة تنزل للمقياس الجهازي مرة واحدة', async () => {
@@ -268,7 +278,7 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
       false,
       true, // deviceBaselineReset
     );
-    expect(pass1).toBe(0); // إعادة التجميد لا تسجّل شيئاً بنفسها
+    expect(pass1.recordedMinor).toBe(0); // إعادة التجميد لا تسجّل شيئاً بنفسها
     const row = await getDb().execute(
       'SELECT reconcile_offset_minor AS o FROM sila_customers WHERE customer_id = ?',
       ['cus-d'],
@@ -289,7 +299,7 @@ describe('v34 — المطابقة الجهازية: تحصيل التطبيق �
       ],
       new Map<string, number>(),
     );
-    expect(pass2).toBe(3000);
+    expect(pass2.recordedMinor).toBe(3000);
   });
 });
 

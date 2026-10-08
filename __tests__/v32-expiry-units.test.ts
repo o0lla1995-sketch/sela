@@ -106,13 +106,16 @@ describe('v32 — صلاحية المنتجات: الطبقات', () => {
     expect(screen).toContain('expiryAlertDays');
   });
 
-  test('النسخة الاحتياطية تنقل expiry_date ذهاباً وإياباً', () => {
+  test('النسخة الاحتياطية تنقل expiry_date والمتغيرات ذهاباً وإياباً', () => {
     const src = read('src/services/BackupService.ts');
-    // v34: الاستعلام يشمل الآن أعمدة الربطة بين الصلاحية والإنشاء.
+    // v35: الاستعلام يشمل أعمدة المتغيرات بين الصلاحية والإنشاء.
     expect(src).toContain(
-      'expiry_date, style_group, variant_size, variant_color, created_at FROM products',
+      'expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at FROM products',
     );
     expect(src).toContain('product.expiry_date ?? null');
+    // جدول المتغيرات ينقل كاملاً (لون × مقاس لكل منتج).
+    expect(src).toContain('FROM product_variants');
+    expect(src).toContain('INSERT INTO product_variants');
   });
 });
 

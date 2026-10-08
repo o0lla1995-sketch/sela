@@ -76,14 +76,53 @@ export interface Product {
   /** v34 (الجولة 42 #3): ربطة الملابس — معرّف مجموعة الموديل
    *  المشتركة: كل منتجات الربطة الواحدة (موديل واحد، لون واحد،
    *  مقاسات متعددة) تحمل القيمة نفسها فتُجمّع في شبكة البيع
-   *  كتجان واحد يفتح نافذة اختيار المقاس. null = منتج عادي. */
+   *  كتجان واحد يفتح نافذة اختيار المقاس. null = منتج عادي.
+   *  v35: للموديلات الجديدة لم يعد يُستعمل (الموديل منتج واحد
+   *  بمتغيرات) — يبقى للترحيل والبيانات القديمة فقط. */
   style_group: string | null;
   /** v34: مقاس هذا الفرع داخل الربطة (مثال: '32' أو 'XL'). */
   variant_size: string | null;
   /** v34: لون الربطة المشترك (مثال: 'أسود'). */
   variant_color: string | null;
+  /** v35 (الجولة 43): 1 = منتج بمتغيرات داخلية (ملابس: لون ×
+   *  مقاس، مطعم/كافيتريا: أحجام) — البيع يتم عبر نافذة المتغيرات
+   *  والمخزون يُخصم من صف المتغير نفسه. */
+  has_variants: number;
+  /** v35: وحدة الأساس المعروضة للمجال (شريط/علبة للصيدلية،
+   *  حصة/صحن/كوب للمطعم) — null = قطعة (الافتراضي العام). */
+  base_unit_name: string | null;
+  /** v35: 1 = مخزون بلا تتبع (مطعم/كافيتريا افتراضياً) — البيع
+   *  لا يُحجب بنفاد ولا يُخصم مخزون؛ التتبع خيار يفعّله التاجر. */
+  stock_untracked: number;
+  /** v35: عدد المقاسات في ربطة الملابس (الربطة = قطعة من كل
+   *  مقاس) — أساس بيع الجملة بالربطة. null = ليس ملابس. */
+  sizes_count: number | null;
+  /** v35: متغيرات المنتج محمّلة مع الكتالوج (ملابس/أحجام). */
+  variants?: ProductVariant[];
   /** Unit rows loaded on demand (ProductForm / POS unit picker). */
   units?: ProductUnit[];
+}
+
+/** v35 (الجولة 43): متغير داخل منتج واحد — نمط Shopify Variants.
+ *  • ملابس (kind='variant'): كل (لون × مقاس) صف بمخزونه.
+ *  • مطعم/كافيتريا (kind='size'): كل حجم بسعره الخاص
+ *    (retail_price) وبتكلفته الاختيارية. */
+export interface ProductVariant {
+  id: number;
+  product_id: number;
+  /** 'variant' = ملابس (لون+مقاس) · 'size' = حجم بسعر. */
+  kind: 'variant' | 'size';
+  /** لون الملابس (فارغ لغير الملابس). */
+  color: string;
+  /** المقاس (ملابس) أو الحجم (مطعم/كافيتريا). */
+  size: string;
+  /** مخزون هذا المتغير بالقطع (الملابس). */
+  stock_quantity: number;
+  /** سعر الحجم — null = سعر المنتج الأساسي. */
+  retail_price: number | null;
+  /** تكلفة الحجم الاختيارية — null = تكلفة المنتج. */
+  cost_price: number | null;
+  created_at: string;
 }
 
 /** v8.3: is this product sold by weight (kilo-based)? */
@@ -165,7 +204,7 @@ export interface EmbeddingsIndex {
 }
 
 export interface CartLine {
-  /** Stable key: productId + unitId ('' for base unit). */
+  /** Stable key: productId + unitId ('' for base unit) + variantId. */
   key: string;
   productId: number;
   name: string;
@@ -188,6 +227,14 @@ export interface CartLine {
   conversion: number;
   /** v8.3: true for weight-sold products — quantity is fractional kg. */
   byWeight?: boolean;
+  /** v35 (الجولة 43): المتغير المختار (ملابس لون×مقاس / حجم)
+   *  — null = سطر بلا متغير. */
+  variantId?: number | null;
+  /** v35: وصف المتغير للعرض والفاتورة (مثال: «أسود · L»). */
+  variantLabel?: string | null;
+  /** v35: بيع ربطة الملابس بالجملة — اللون المختار؛ الربطة تخصم
+   *  قطعة من كل مقاس في هذا اللون (conversion = عدد المقاسات). */
+  bundleColor?: string | null;
 }
 
 export interface SaleRecord {
@@ -219,6 +266,13 @@ export interface SaleItemRecord {
   unit_name: string | null;
   /** Base pieces actually deducted from stock. */
   base_quantity: number | null;
+  /** v35 (الجولة 43): وصف المتغير (لون · مقاس / حجم) — للفاتورة
+   *  والعرض واسترجاع مخزون المتغير عند الإرجاع. */
+  variant_label?: string | null;
+  /** v35: معرّف صف المتغير الذي خُصم منه (إن وجد). */
+  variant_id?: number | null;
+  /** v35: لون ربطة الجملة (المرتجع يسترجع قطعة لكل مقاس فيه). */
+  variant_color?: string | null;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -272,6 +326,13 @@ export interface ReturnLineInput {
   basePerUnit: number;
   unitPrice: number;
   costPrice: number;
+  /** v35 (الجولة 43): المتغير الذي بيع منه (إن وجد) — لاسترجاع
+   *  مخزونه تحديداً عند الإرجاع. */
+  variantId?: number | null;
+  /** v35: لون ربطة الجملة المرتجعة — يسترجع قطعة لكل مقاس. */
+  variantColor?: string | null;
+  /** v35: وصف المتغير لسطر المرتجع السالب (للعرض والفواتير). */
+  variantLabel?: string | null;
 }
 
 export interface SaleWithItems {

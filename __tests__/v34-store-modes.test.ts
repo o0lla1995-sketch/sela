@@ -190,14 +190,19 @@ describe('v34 — إعدادات الأنماط لكل مجال (دراسة v34)
     expect(pharmacyBlock).not.toContain("kind: 'weight'");
   });
 
-  test('البقالة والفواكه فقط فيهما ميزان — البقية قطعة دائماً', () => {
+  test('البقالة فقط فيها مبدّل قطعة/وزن — v35: الفواكه وزن فقط بلا مبدّل', () => {
     const src = read(MODES);
-    expect((src.match(/saleModeSelector: true/g) ?? []).length).toBe(2);
+    // v35 (ملاحظة التاجر): «الفواكه بالوزن فقط بلا جملة ومفرق» —
+    // المبدّل للبقالة وحدها (1)، والفواكه وزن دائم بسعر كيلو واحد.
+    expect((src.match(/saleModeSelector: true/g) ?? []).length).toBe(1);
     const fruitsBlock = src.slice(
       src.indexOf("key: 'fruits'"),
       src.indexOf("key: 'restaurant'"),
     );
     expect(fruitsBlock).toContain("defaultSaleMode: 'weight'");
+    expect(fruitsBlock).toContain('saleModeSelector: false');
+    // سعر واحد للكيلو — لا جملة للفواكه بعد اليوم.
+    expect(fruitsBlock).toContain('wholesaleLabel: null');
     // الفواكه تستلم وزناً بالأكياس — لا صناديق معدودة.
     expect(fruitsBlock).toContain('receivingByContainer: false');
     expect(fruitsBlock).toContain('receivingByBag: true');
@@ -286,24 +291,40 @@ describe('v34 — صفحة المنتج: الترتيب المنطقي وسلس�
   });
 });
 
-describe('v34 — شبكة البيع: نافذة اختيار المقاس واللون', () => {
-  test('التجميع بstyle_group وتجان الموديل ونافذة المقاسات', () => {
+describe('v35 — شبكة البيع: نافذة البيع لكل منتج قبل السلة', () => {
+  test('الموديل بمتغيراته تجان واحد يفتح نافذة اللون والمقاس — لا توزيع على منتجات', () => {
     const src = read(POS);
-    expect(src).toContain('displayItems');
-    expect(src).toContain("product.style_group != null && product.style_group.length > 0");
-    expect(src).toContain('setStyleVariants(item)');
-    expect(src).toContain('styleVariants != null ? (');
-    // صف المقاس يعرض المخزون والسعر ويضيف بلمسة.
-    expect(src).toContain('tryAdd(variant)');
-    expect(src).toContain('variant.variant_size');
+    // v35: الموديل الواحد منتج واحد بمتغيرات — نافذة البيع
+    // (openSaleSheet) توجه كل منتج لنافذة موده.
+    expect(src).toContain('openSaleSheet');
+    expect(src).toContain("setSaleSheet({kind: 'clothing', product})");
+    expect(src).toContain("setSaleSheet({kind: 'sizes', product})");
+    expect(src).toContain("setSaleSheet({kind: 'unit', product})");
+    expect(src).toContain("variants.some(v => v.kind === 'variant')");
+    expect(src).toContain("variants.some(v => v.kind === 'size')");
+    // لا تجميع style_group بعد اليوم — المتغيرات داخل المنتج.
+    expect(src).not.toContain(
+      "product.style_group != null && product.style_group.length > 0",
+    );
   });
 
-  test('مسح باركود أي مقاس يضيفه مباشرة (المسار الأصلي سليم)', () => {
+  test('السلة تميز سطر المتغير (اللون والمقاس) وسطر الربطة', () => {
+    const src = read('src/stores/cartStore.ts');
+    // سطر المتغير: خط مستقل بمفتاح المنتج+المتغير.
+    expect(src).toContain('addVariantLine');
+    expect(src).toContain('variantLabel');
+    // ربطة الجملة: قطعة من كل مقاس باللون المختار.
+    expect(src).toContain('variantId: null');
+    expect(src).toContain('ربطة');
+  });
+
+  test('مسح باركود المنتج يضيفه أو يفتح نافذته (المسار الأصلي سليم)', () => {
     const src = read(POS);
     // findByBarcode ما زال مسار المسح المباشر.
     expect(read('src/database/repositories/ProductRepo.ts')).toContain(
       'findByBarcode',
     );
+    expect(src).toContain('addScanned');
     void src;
   });
 });
