@@ -214,10 +214,15 @@ export function StocktakeScreen() {
       if (value != null && (Number.isNaN(value) || value < 0)) {
         return;
       }
+      // v38 (الجولة 46 #9): المطابقة بالمفتاح المركب (منتج، متغير) —
+      //  موديل الملابس له صف لكل (لون × مقاس).
+      const sameLine = (row: StocktakeItem) =>
+        row.product_id === item.product_id &&
+        (row.variantId ?? null) === (item.variantId ?? null);
       // Optimistic UI update.
       setItems(prev =>
         prev.map(row =>
-          row.product_id === item.product_id
+          sameLine(row)
             ? {...row, counted_qty: value == null ? null : value}
             : row,
         ),
@@ -227,6 +232,7 @@ export function StocktakeScreen() {
           session.id,
           item.product_id,
           value == null ? null : value,
+          item.variantId ?? null,
         );
         const nextSummary = await StocktakeRepo.summary(session.id);
         setSummary(nextSummary);
@@ -558,11 +564,14 @@ export function StocktakeScreen() {
       }
       setSearch(code);
       const exact = items.filter(item => item.barcode === code);
-      if (exact.length === 1) {
+      // v38 (الجولة 46 #9): باركود موديل ملابس يطابق عدة صفوف (صف
+      //  لكل لون × مقاس) — أول صف يدخل بطاقة التركيز والبحث يعرض
+      //  البقية (كان يطوي أيّاً عند تعدد النتائج فلا شيء يحدث).
+      if (exact.length > 0) {
         // Found — focus its count input once the list re-renders,
         // ready for the merchant to type the counted quantity.
         setPendingFocusId(exact[0].product_id);
-      } else if (exact.length === 0) {
+      } else {
         toast(
           `لا يوجد منتج بهذا الباركود (${code}) في جلسة الجرد`,
           'info',
@@ -888,7 +897,9 @@ export function StocktakeScreen() {
             ref={listRef}
             style={{flex: 1}}
             data={filteredItems}
-            keyExtractor={item => String(item.product_id)}
+            keyExtractor={item =>
+              `${item.product_id}:${item.variantId ?? 0}`
+            }
             onScrollToIndexFailed={info => {
               // The row's frame is not measured yet (fresh filter) —
               // estimate from the average frame and retry shortly.
@@ -1053,11 +1064,18 @@ function CountRow({
         disabled={onPressRow == null}>
         <Text style={styles.rowName} numberOfLines={1}>
           {item.productName}
+          {/* v38 (الجولة 46 #9): صف متغير ملابس — اللون والمقاس
+              بجانب الاسم بتمييز بصري واضح. */}
+          {item.variantLabel ? (
+            <Text style={styles.rowVariant}> · {item.variantLabel}</Text>
+          ) : null}
         </Text>
         <View style={styles.rowMetaRow}>
           <Text style={styles.rowMeta}>
             النظام: {formatQty(item.system_qty)}
-            {item.soldByWeight === 1 ? ' كغ' : ''}
+            {item.soldByWeight === 1
+              ? ' كغ'
+              : ` ${item.baseUnitName ?? 'قطعة'}`}
           </Text>
           {item.unitHint ? (
             <Text style={styles.rowHint} numberOfLines={1}>
@@ -1170,6 +1188,10 @@ function FocusCountCard({
         </View>
         <Text style={styles.focusName} numberOfLines={1}>
           {item.productName}
+          {/* v38 (الجولة 46 #9): متغير الملابس في بطاقة التركيز. */}
+          {item.variantLabel ? (
+            <Text style={styles.focusVariant}> · {item.variantLabel}</Text>
+          ) : null}
         </Text>
         <TouchableOpacity
           style={styles.focusExitBtn}
@@ -1183,7 +1205,9 @@ function FocusCountCard({
       {/* كمية النظام + الوحدة — سطر صغير هادئ */}
       <Text style={styles.focusMeta} numberOfLines={1}>
         بالنظام: {formatQty(item.system_qty)}
-        {item.soldByWeight === 1 ? ' كغ' : ''}
+        {item.soldByWeight === 1
+          ? ' كغ'
+          : ` ${item.baseUnitName ?? 'قطعة'}`}
         {item.unitHint ? ` · (${item.unitHint})` : ''}
       </Text>
 
@@ -1279,9 +1303,17 @@ function ReportTable({items}: {items: StocktakeItem[]}) {
           {variances.map(item => {
             const variance = item.counted_qty! - item.system_qty;
             return (
-              <View key={item.product_id} style={styles.reportRow}>
+              <View
+                key={`${item.product_id}:${item.variantId ?? 0}`}
+                style={styles.reportRow}>
                 <Text style={styles.rowName} numberOfLines={1}>
                   {item.productName}
+                  {item.variantLabel ? (
+                    <Text style={styles.rowVariant}>
+                      {' '}
+                      · {item.variantLabel}
+                    </Text>
+                  ) : null}
                 </Text>
                 <Text style={styles.reportNumbers}>
                   {item.system_qty} → {item.counted_qty}
@@ -1317,9 +1349,17 @@ function ReportTable({items}: {items: StocktakeItem[]}) {
               ? null
               : item.counted_qty - item.system_qty;
           return (
-            <View key={item.product_id} style={styles.tableRow}>
+            <View
+              key={`${item.product_id}:${item.variantId ?? 0}`}
+              style={styles.tableRow}>
               <Text style={[styles.tableCell, {flex: 2}]} numberOfLines={1}>
                 {item.productName}
+                {item.variantLabel ? (
+                  <Text style={styles.rowVariant}>
+                    {' '}
+                    · {item.variantLabel}
+                  </Text>
+                ) : null}
               </Text>
               <Text style={styles.tableCell}>{item.system_qty}</Text>
               <Text style={styles.tableCell}>{item.counted_qty ?? '—'}</Text>
@@ -1547,6 +1587,17 @@ const useStyles = makeStyles(c =>
       color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.caption,
+    },
+    // v38 (الجولة 46 #9): تسمية المتغير (لون · مقاس) داخل الاسم.
+    rowVariant: {
+      color: c.accent,
+      fontFamily: fonts.medium,
+      fontSize: typography.small,
+    },
+    focusVariant: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
     rowMetaRow: {
       flexDirection: 'row',

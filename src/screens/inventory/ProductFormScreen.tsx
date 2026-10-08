@@ -61,7 +61,7 @@ import {
 import {buildLabelJob} from '../../services/printer/label';
 import {ThermalPrinterService} from '../../services/printer/ThermalPrinterService';
 import {Stepper} from '../../components/ui';
-import {formatMoney, parseNumber} from '../../core/format';
+import {formatMoney, formatQty, parseNumber} from '../../core/format';
 import {
   fonts,
   makeStyles,
@@ -174,6 +174,9 @@ export function ProductFormScreen() {
    *  جذر شكوى «تصفير المخزون عند التعديل»)، ومرجعاً للتحقق
    *  القارئ بعد الحفظ (read-back) ضد القيمة المقصودة. */
   const loadedStockRef = useRef(0);
+  // v38 (الجولة 46 #3): تكلفة المخزون الموجود كما حُفظت — أساس
+  //  المتوسط المرجّح عند الإضافة فوق مخزون قائم.
+  const loadedCostRef = useRef(0);
   const loadedUntrackedRef = useRef(0);
   /** v34: سلسلة حقول استلام البضاعة — التالي ينتقل داخل القسم ثم
    *  يقفز لسعر التكلفة المُملأ تلقائياً فالأسعار فالكمية. */
@@ -265,6 +268,12 @@ export function ProductFormScreen() {
   const [receiveMode, setReceiveMode] = useState<'none' | 'carton' | 'bag'>(
     'none',
   );
+  // v38 (الجولة 46 #3): نظام الإدخال/التعبئة — عند تعديل منتج قائم،
+  //  الاستلام يُضاف إلى المخزون الحالي افتراضياً (كان يستبدله بصمت
+  //  فتُنسى القيم السابقة — شكوى التاجر حرفياً: «يعتبره إدخالاً
+  //  جديداً فينسى القيم السابقة»). التبديل إلى «تعيين» متاح صراحة
+  //  لمن أراد كتابة الإجمالي الكامل بيده.
+  const [intakeAdd, setIntakeAdd] = useState(true);
   const [cartonsCount, setCartonsCount] = useState('');
   const [piecesPerCarton, setPiecesPerCarton] = useState('');
   const [cartonCost, setCartonCost] = useState('');
@@ -319,6 +328,7 @@ export function ProductFormScreen() {
             //  القاعدة — مرجع الحفظ الأمين للمنتجات بلا تتبع ومرجع
             //  التحقق القارئ بعد الحفظ.
             loadedStockRef.current = Number(product.stock_quantity ?? 0);
+            loadedCostRef.current = Number(product.cost_price ?? 0);
             loadedUntrackedRef.current = product.stock_untracked === 1 ? 1 : 0;
             setThreshold(
               product.low_stock_threshold != null
@@ -766,11 +776,18 @@ export function ProductFormScreen() {
     // row itself didn't, inviting mismatched conversions.
     const kindMatch = (unit: {kind: string}) =>
       saleMode === 'weight' ? unit.kind === 'weight' : unit.kind === 'piece';
-    const free =
-      units.find(unit => !used.has(unit.id) && kindMatch(unit)) ??
-      units.find(unit => !used.has(unit.id));
+    // v38 (الجولة 46 #2): صرامة كاملة — لا احتياطي عبر النوع إطلاقاً:
+    //  كانت آخر وحدة حرة تُضاف مهما كان نوعها (وحدة وزن على منتج
+    //  قطعي!) فتلوث رياضيات وحدة الإدخال بمعاملات كسرية قد تُنهار
+    //  الكمية بالتقريب. لا يوجد من النوع الصحيح؟ رسالة واضحة.
+    const free = units.find(unit => !used.has(unit.id) && kindMatch(unit));
     if (free == null) {
-      toast('كل الوحدات مستخدمة — أضف وحدات جديدة من شاشة الوحدات', 'info');
+      toast(
+        saleMode === 'weight'
+          ? 'كل وحدات الوزن مستخدمة — أضف وحدات جديدة من شاشة الوحدات'
+          : 'كل وحدات القطع مستخدمة — أضف وحدات جديدة من شاشة الوحدات',
+        'info',
+      );
       return;
     }
     setUnitRows(prev => [
@@ -1064,24 +1081,49 @@ export function ProductFormScreen() {
   /** v16 (round-22 #3): receiving → live auto-fill of stock + cost.
    *  The merchant still sets (or adopts the suggested) sale prices —
    *  exactly the requested split: "يتم تعبئة الكمية وسعر التكلفة وهو
-   *  يضيف سعر البيع والجملة". */
+   *  يضيف سعر البيع والجملة".
+   *  v38 (الجولة 46 #3): مع منتج قائم ووضع «إضافة» — الحقل يُملأ
+   *  بالموجود + المستلم (لا استبدال بعد اليوم). */
   useEffect(() => {
     if (cartonMath != null) {
-      setStock(String(cartonMath.totalPieces));
+      const base =
+        productId != null && intakeAdd ? loadedStockRef.current : 0;
+      setStock(String(base + cartonMath.totalPieces));
       if (cartonMath.perPiece != null) {
-        setCostPrice(String(Math.round(cartonMath.perPiece * 1000) / 1000));
+        // المتوسط المرجّح للتكلفة — الموجود بسعره القديم والمستلم
+        //  بسعره الجديد، فتظل تكلفة المخزون صادقة محاسبياً.
+        const oldQty = base;
+        const oldCost =
+          productId != null && intakeAdd ? loadedCostRef.current : 0;
+        const blended =
+          oldQty + cartonMath.totalPieces > 0
+            ? (oldCost * oldQty +
+                (cartonMath.perPiece ?? 0) * cartonMath.totalPieces) /
+              (oldQty + cartonMath.totalPieces)
+            : cartonMath.perPiece ?? 0;
+        setCostPrice(String(Math.round(blended * 1000) / 1000));
       }
     }
-  }, [cartonMath]);
+  }, [cartonMath, intakeAdd, productId]);
 
   useEffect(() => {
     if (bagMath != null) {
-      setStock(String(bagMath.totalKg));
+      const base =
+        productId != null && intakeAdd ? loadedStockRef.current : 0;
+      setStock(String(Math.round((base + bagMath.totalKg) * 1000) / 1000));
       if (bagMath.perKg != null) {
-        setCostPrice(String(Math.round(bagMath.perKg * 1000) / 1000));
+        const oldQty = base;
+        const oldCost =
+          productId != null && intakeAdd ? loadedCostRef.current : 0;
+        const blended =
+          oldQty + bagMath.totalKg > 0
+            ? (oldCost * oldQty + (bagMath.perKg ?? 0) * bagMath.totalKg) /
+              (oldQty + bagMath.totalKg)
+            : bagMath.perKg ?? 0;
+        setCostPrice(String(Math.round(blended * 1000) / 1000));
       }
     }
-  }, [bagMath]);
+  }, [bagMath, intakeAdd, productId]);
 
   /** v16 (round-22 #3): switching the receiving mode also switches
    *  the sale mode (carton = pieces, bag = weight) and resets the
@@ -1227,34 +1269,65 @@ export function ProductFormScreen() {
     [unitRows, validConversion],
   );
 
-  /** Switch the stock-entry unit and re-express the typed quantity
-   *  in the new unit (120 قطعة ⇄ 5 كرتونة) so nothing is lost. */
-  const switchStockUnit = useCallback(
-    (unitId: number | null) => {
-      if (unitId === stockUnitId) {
-        return;
-      }
-      const oldConv = validConversion(stockUnitId) ?? 1;
-      const newConv = validConversion(unitId) ?? 1;
-      setStockUnitId(unitId);
-      if (oldConv !== newConv && stock.trim()) {
+  // v38 (الجولة 46 #2): مرجع آخر معامل تحويل صالح للوحدة المختارة —
+  // العمود الفقري لإعادة التعبير الحية. المشكلة الجذرية كانت: قيمة
+  // حقل الكمية تُكتب بمعنى وحدة، ثم يتغير معامل الوحدة (تعديلاً أو
+  // مسحاً أو حذفاً) والقيمة تبقى كما هي فيتغير معناها بصمت —
+  // «١٥٠» كانت ١٥٠ حبة ثم صارت ١٥٠ علبة (×٣٠) أو انهارت إلى ٥
+  // عند العودة للأساس، وفي حواف التقريب كانت تصل إلى صفر حرفياً
+  // مع رسالة نجاح (المخزون الوهمي). الآن الكمية بمعناها الأساس
+  // (القطع) محفوظة دائماً في هذا المرجع وأي تغيير بالوحدة يعيد
+  // التعبير فوراً فلا يتغير المجموع الأساس أبداً بصمت.
+  const lastStockConvRef = useRef(1);
+
+  // v38 (الجولة 46 #2): المؤثر الموحد لإعادة التعبير — المصدر
+  // الوحيد لكل تحويلات حقل الكمية بين الوحدات:
+  //  • تبديل رقاقة وحدة الإدخال (يستدعي switchStockUnit أدناه
+  //    التي صارت مجرد تغيير الاختيار — التعبير هنا).
+  //  • تعديل معامل تحويل الوحدة المختارة من قسم الوحدات (كانت
+  //    القيمة تحتفظ بمعناها القديم فيتضاعف المخزون أو ينهار).
+  //  • فقدان المعامل (مسحه نصياً) أو حذف صف الوحدة — يعاد التعبير
+  //    إلى وحدة الأساس فوراً ثم يُصفّر الاختيار (كان الاختيار
+  //    يُصفّر والقيمة تبقى بوحدتها القديمة!).
+  useEffect(() => {
+    const conv =
+      stockUnitId != null ? validConversion(stockUnitId) : null;
+    const effective = stockUnitId == null ? 1 : conv;
+    if (effective == null) {
+      // الوحدة المختارة بلا معامل صالح الآن — القيمة تعود لوحدة
+      // الأساس (المجموع الأساس محفوظ فلا يضيع) ثم يُصفّر الاختيار.
+      const previous = lastStockConvRef.current;
+      if (previous > 0 && stock.trim()) {
         const current = parseNumber(stock);
         if (!Number.isNaN(current)) {
-          const basePieces = current * oldConv;
-          const next = basePieces / newConv;
-          setStock(String(Math.round(next * 1000) / 1000));
+          const basePieces = current * previous;
+          setStock(String(Math.round(basePieces * 1000) / 1000));
         }
       }
-    },
-    [stock, stockUnitId, validConversion],
-  );
-
-  // Keep the stock unit valid when unit rows are removed/edited.
-  useEffect(() => {
-    if (stockUnitId != null && validConversion(stockUnitId) == null) {
+      lastStockConvRef.current = 1;
       setStockUnitId(null);
+      return;
     }
-  }, [stockUnitId, validConversion]);
+    if (effective !== lastStockConvRef.current) {
+      const previous = lastStockConvRef.current;
+      if (stock.trim()) {
+        const current = parseNumber(stock);
+        if (!Number.isNaN(current)) {
+          const basePieces = current * previous;
+          setStock(String(Math.round((basePieces / effective) * 1000) / 1000));
+        }
+      }
+      lastStockConvRef.current = effective;
+    }
+  }, [stockUnitId, validConversion, stock]);
+
+  /** v38 (الجولة 46 #2): تبديل وحدة الإدخال — تغيير الاختيار فقط؛
+   *  إعادة التعبير الحية (بلا فقدان) في المؤثر الموحد أعلاه. كان
+   *  التحويل هنا يعتمد معاملات لحظية فقد معناها عند الوحدات غير
+   *  المكتملة. */
+  const switchStockUnit = useCallback((unitId: number | null) => {
+    setStockUnitId(unitId);
+  }, []);
 
   /** Live conversion hint under the stock field. */
   const stockHint = useMemo(() => {
@@ -1482,6 +1555,24 @@ export function ProductFormScreen() {
       : weighted
       ? Math.round(stockRaw * 1000) / 1000
       : Math.round(stockRaw);
+    // v38 (الجولة 46 #2): حارس الانهيار إلى الصفر — كمية مكتوبة
+    //  موجبة لا يجوز أن تُحفظ صفراً أبداً بعد أي تحويل وحدات أو
+    //  تقريب (حافة Math.round مع كسور أصغر من نصف وحدة الأساس).
+    //  الرسالة تخبر التاجر بالحل فوراً بدل نجاح وهمي فوق صفر.
+    if (
+      !untrackedStock &&
+      !isClothingModel &&
+      stockTyped &&
+      stockParsed > 0 &&
+      (!Number.isFinite(stockValue) || stockValue <= 0)
+    ) {
+      toast(
+        'الكمية المدخلة أصغر من وحدة الأساس فتُقرب إلى صفر — اكتب كمية أكبر أو أعد وحدة الإدخال إلى وحدة الأساس، ثم أعد الحفظ',
+        'error',
+        6000,
+      );
+      return;
+    }
     const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
 
     if (!trimmedName) {
@@ -2134,35 +2225,46 @@ export function ProductFormScreen() {
       </Text>
     </View>
 
-    {/* المقاسات التي تأتي بها الربطة — متعددة الاختيار */}
+    {/* المقاسات التي تأتي بها الربطة — متعددة الاختيار.
+        v38 (الجولة 46 #8): الرقائق تعرض الافتراضية + المخصصة معاً —
+        كان المقاس/اللون المضاف يدخل الحفظ لكنه لا يظهر بين الخيارات
+        فلا يمكن رؤيته ولا إلغاؤه (شكوى التاجر نصاً). */}
     <Text style={styles.lotSubLabel}>المقاسات بالربطة (اختر كل ما فيها)</Text>
     <View style={styles.variantChipsRow}>
-      {(modeConfig.variantSizes ?? []).map(size => (
-        <TouchableOpacity
-          key={`size-${size}`}
-          style={[
-            styles.catChip,
-            lotSizes.includes(size)
-              ? {backgroundColor: c.accent, borderColor: c.accent}
-              : null,
-          ]}
-          onPress={() =>
-            setLotSizes(prev =>
-              prev.includes(size)
-                ? prev.filter(entry => entry !== size)
-                : [...prev, size],
-            )
-          }
-          activeOpacity={0.75}>
-          <Text
-            style={[
-              styles.catChipText,
-              {color: lotSizes.includes(size) ? c.onAccent : c.textDim},
-            ]}>
-            {size}
-          </Text>
-        </TouchableOpacity>
-      ))}
+      {[...new Set([...(modeConfig.variantSizes ?? []), ...lotSizes])].map(
+        size => {
+          const custom = !(modeConfig.variantSizes ?? []).includes(size);
+          const selected = lotSizes.includes(size);
+          return (
+            <TouchableOpacity
+              key={`size-${size}`}
+              style={[
+                styles.catChip,
+                selected
+                  ? {backgroundColor: c.accent, borderColor: c.accent}
+                  : null,
+                custom ? {borderStyle: 'dashed' as const} : null,
+              ]}
+              onPress={() =>
+                setLotSizes(prev =>
+                  prev.includes(size)
+                    ? prev.filter(entry => entry !== size)
+                    : [...prev, size],
+                )
+              }
+              activeOpacity={0.75}>
+              <Text
+                style={[
+                  styles.catChipText,
+                  {color: selected ? c.onAccent : c.textDim},
+                ]}>
+                {size}
+                {custom ? ' ✎' : ''}
+              </Text>
+            </TouchableOpacity>
+          );
+        },
+      )}
     </View>
     <View style={styles.lotCustomRow}>
       <TextInput
@@ -2194,35 +2296,44 @@ export function ProductFormScreen() {
       </TouchableOpacity>
     </View>
 
-    {/* الألوان — متعددة الاختيار: كل لون يدخل بعدد الربط نفسه */}
+    {/* الألوان — متعددة الاختيار: كل لون يدخل بعدد الربط نفسه.
+        v38 (الجولة 46 #8): نفس اتحاد الافتراضي + المخصص. */}
     <Text style={styles.lotSubLabel}>الألوان (اختر كل ما وصلك)</Text>
     <View style={styles.variantChipsRow}>
-      {(modeConfig.variantColors ?? []).map(color => (
-        <TouchableOpacity
-          key={`color-${color}`}
-          style={[
-            styles.catChip,
-            lotColors.includes(color)
-              ? {backgroundColor: c.accent, borderColor: c.accent}
-              : null,
-          ]}
-          onPress={() =>
-            setLotColors(prev =>
-              prev.includes(color)
-                ? prev.filter(entry => entry !== color)
-                : [...prev, color],
-            )
-          }
-          activeOpacity={0.75}>
-          <Text
-            style={[
-              styles.catChipText,
-              {color: lotColors.includes(color) ? c.onAccent : c.textDim},
-            ]}>
-            {color}
-          </Text>
-        </TouchableOpacity>
-      ))}
+      {[...new Set([...(modeConfig.variantColors ?? []), ...lotColors])].map(
+        color => {
+          const custom = !(modeConfig.variantColors ?? []).includes(color);
+          const selected = lotColors.includes(color);
+          return (
+            <TouchableOpacity
+              key={`color-${color}`}
+              style={[
+                styles.catChip,
+                selected
+                  ? {backgroundColor: c.accent, borderColor: c.accent}
+                  : null,
+                custom ? {borderStyle: 'dashed' as const} : null,
+              ]}
+              onPress={() =>
+                setLotColors(prev =>
+                  prev.includes(color)
+                    ? prev.filter(entry => entry !== color)
+                    : [...prev, color],
+                )
+              }
+              activeOpacity={0.75}>
+              <Text
+                style={[
+                  styles.catChipText,
+                  {color: selected ? c.onAccent : c.textDim},
+                ]}>
+                {color}
+                {custom ? ' ✎' : ''}
+              </Text>
+            </TouchableOpacity>
+          );
+        },
+      )}
     </View>
     <View style={styles.lotCustomRow}>
       <TextInput
@@ -2877,6 +2988,58 @@ export function ProductFormScreen() {
           ) : null}
           </View>
 
+          {/* v38 (الجولة 46 #3): وضع الاستلام لمنتج قائم — إضافة أم
+              تعيين. الإضافة افتراضية (المستلم يُجمع مع الموجود
+              والتكلفة تُمتوسط مرجّحاً)؛ التعيين لمن أراد كتابة
+              الإجمالي الكامل بنفسه. المنتج الجديد بلا موجود أصلاً
+              فلا يظهر المبدّل. */}
+          {productId != null &&
+          receiveMode !== 'none' &&
+          !untrackedStock ? (
+            <View style={styles.intakeRow}>
+              <TouchableOpacity
+                style={[
+                  styles.intakeChip,
+                  intakeAdd ? styles.intakeChipActive : null,
+                ]}
+                onPress={() => setIntakeAdd(true)}
+                activeOpacity={0.8}>
+                <Icon
+                  name="plus"
+                  size={15}
+                  color={intakeAdd ? c.onAccent : c.textDim}
+                />
+                <Text
+                  style={[
+                    styles.intakeChipText,
+                    {color: intakeAdd ? c.onAccent : c.textDim},
+                  ]}>
+                  إضافة للمخزون الحالي ({formatQty(loadedStockRef.current)})
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.intakeChip,
+                  !intakeAdd ? styles.intakeChipActive : null,
+                ]}
+                onPress={() => setIntakeAdd(false)}
+                activeOpacity={0.8}>
+                <Icon
+                  name="edit"
+                  size={15}
+                  color={!intakeAdd ? c.onAccent : c.textDim}
+                />
+                <Text
+                  style={[
+                    styles.intakeChipText,
+                    {color: !intakeAdd ? c.onAccent : c.textDim},
+                  ]}>
+                  تعيين الكمية الإجمالية
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+
           {receiveMode === 'carton' ? (
             <Card style={styles.receiveCard}>
               <View style={styles.unitFieldsRow}>
@@ -2920,7 +3083,17 @@ export function ProductFormScreen() {
               {cartonMath != null ? (
                 <View style={styles.receiveSummary}>
                   <Text style={styles.receiveSummaryText}>
-                    {cartonMath.totalPieces}{' '}{BASE_UNIT_NAME} إجمالاً
+                    {/* v38 (الجولة 46 #3): المعادلة كاملة أمام العين —
+                        الموجود + المستلم = الجديد (وضع الإضافة). */}
+                    {productId != null && intakeAdd
+                      ? `الموجود ${formatQty(
+                          loadedStockRef.current,
+                        )} + المستلم ${formatQty(
+                          cartonMath.totalPieces,
+                        )} = ${formatQty(
+                          loadedStockRef.current + cartonMath.totalPieces,
+                        )} ${BASE_UNIT_NAME} — يُملأ حقل الكمية بالجديد`
+                      : `${cartonMath.totalPieces} ${BASE_UNIT_NAME} إجمالاً`}
                     {cartonMath.perPiece != null
                       ? ` · تكلفة القطعة ${cartonMath.perPiece.toFixed(
                           3,
@@ -3004,7 +3177,17 @@ export function ProductFormScreen() {
               {bagMath != null ? (
                 <View style={styles.receiveSummary}>
                   <Text style={styles.receiveSummaryText}>
-                    {bagMath.totalKg} {WEIGHT_UNIT_NAME} إجمالاً
+                    {/* v38 (الجولة 46 #3): معادلة الإضافة كاملة —
+                        الموجود + المستلم = الجديد. */}
+                    {productId != null && intakeAdd
+                      ? `الموجود ${formatQty(loadedStockRef.current)} + المستلم ${formatQty(
+                          bagMath.totalKg,
+                        )} = ${formatQty(
+                          Math.round(
+                            (loadedStockRef.current + bagMath.totalKg) * 1000,
+                          ) / 1000,
+                        )} ${WEIGHT_UNIT_NAME} — يُملأ حقل الكمية بالجديد`
+                      : `${bagMath.totalKg} ${WEIGHT_UNIT_NAME} إجمالاً`}
                     {bagMath.perKg != null
                       ? ` · تكلفة ${WEIGHT_UNIT_NAME} ${bagMath.perKg.toFixed(
                           3,
@@ -3469,6 +3652,18 @@ export function ProductFormScreen() {
           </TouchableOpacity>
           {unitsOpen ? (
             <>
+          {/* v38 (الجولة 46 #3): شرح نظام التعبئة — طلب التاجر فهمه:
+              فتح علبة/كرتونة لا يحتاج أي عملية إدخال؛ المخزون صحن
+              واحد بوحدة الأساس، والوحدات مجرد طرق بيع منه (بيع
+              العلبة يخصم محتواها تلقائياً). التعبئة الفعلية للبضاعة
+              تكون من قسم «إدخال البضاعة» أعلاه (إضافة للموجود). */}
+          {saleMode === 'piece' ? (
+            <Text style={styles.repackHintText}>
+              التعبئة (فتح علبة/كرتونة) لا تحتاج أي عملية — المخزون واحد
+              بوحدة الأساس، وبيع أي عبوة يخصم محتواها تلقائياً. والبضاعة
+              الجديدة تُستلم من «إدخال البضاعة» فوق فتُضاف للموجود.
+            </Text>
+          ) : null}
           {/* v9.1 (round-14 #4): one-tap weight packages — the
               regional staples pre-wired with their kg amounts, so a
               weight product's units are ALWAYS suitable (the actual
@@ -4537,6 +4732,44 @@ const useStyles = makeStyles(c =>
     receiveCard: {
       gap: spacing.sm,
       paddingVertical: spacing.md,
+    },
+    // v38 (الجولة 46 #3): مبدّل وضع الاستلام — إضافة للموجود أم
+    //  تعيين الإجمالي (لمنتج قائم فقط).
+    intakeRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      marginTop: spacing.sm,
+      marginBottom: spacing.xs,
+    },
+    intakeChip: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingVertical: 8,
+      paddingHorizontal: 8,
+      backgroundColor: c.surfaceAlt,
+    },
+    intakeChipActive: {
+      backgroundColor: c.accent,
+      borderColor: c.accent,
+    },
+    intakeChipText: {
+      fontFamily: fonts.bold,
+      fontSize: 11.5,
+      textAlign: 'center',
+    },
+    // v38 (الجولة 46 #3): شرح التعبئة داخل قسم الوحدات.
+    repackHintText: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      lineHeight: 18,
+      marginBottom: spacing.sm,
     },
     receiveSummary: {
       gap: 6,

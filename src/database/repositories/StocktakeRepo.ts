@@ -5,6 +5,14 @@
  * start; the merchant then enters counted quantities physically.
  * Completing a session (optionally) reconciles stock to the counted
  * values inside one transaction and stamps the full audit report.
+ *
+ * v38 (الجولة 46 #9): جرد حسب نوع المنتج — منتجات المتغيرات
+ * (الملابس: لون × مقاس) تُجرد متغيراً متغيراً: صف مستقل لكل ربطة
+ * بمخزونها النظامي، وتسوية الإتمام تكتب عدّ كل متغير في صفه ثم
+ * تعيد توليد إجمالي الموديل (products.stock_quantity) من مجموع
+ * متغيراته فلا يتفكك الاتساق أبداً. باقي الأنماط (بقالة/صيدلية/
+ * فواكه/مطعم/كافيتريا) تبقى صفوفها على مستوى المنتج كما كانت،
+ * مع تلميح وحدة القياس المناسب لكل مجال (علبة/كرتونة/كغ…).
  */
 import {getDb} from '../connection';
 import {localNow} from '../../core/format';
@@ -29,6 +37,12 @@ function rowToItem(row: Record<string, unknown>): StocktakeItem {
     id: Number(row.id),
     stocktake_id: Number(row.stocktake_id),
     product_id: Number(row.product_id),
+    variantId: row.variant_id == null ? null : Number(row.variant_id),
+    variantLabel: row.variant_label == null ? null : String(row.variant_label),
+    baseUnitName:
+      row.base_unit_name == null || String(row.base_unit_name).length === 0
+        ? null
+        : String(row.base_unit_name),
     productName: String(row.product_name ?? ''),
     barcode: row.barcode == null ? null : String(row.barcode),
     categoryId: row.category_id == null ? null : Number(row.category_id),
@@ -82,7 +96,11 @@ export const StocktakeRepo = {
    *  الجلسة — المخزون القائم يُلتقط كمرجع، والتاجر يعدّ ما يشاء
    *  منه، والتسوية عند الإتمام تكتب العدّ فور اختيار «تطبيق
    *  التعديلات». بلا تتبع تبقى الكمية مرجعاً (لا تُخصم بالبيع)
-   *  لكنها صادقة بعد كل جرد. */
+   *  لكنها صادقة بعد كل جرد.
+   * v38 (الجولة 46 #9): الملابس ومنتجات المتغيرات — صف مستقل لكل
+   *  (لون × مقاس) بمخزونه النظامي بدل صف واحد للموديل كله (كان
+   *  يجرد الموديل رقماً واحداً فيعمي الفروقات بين الربط). أحجام
+   *  المطعم (kind='size') بلا مخزون لكل حجم — تبقى على صف المنتج. */
   async start(): Promise<Stocktake> {
     const db = getDb();
     const open = await this.getOpen();
@@ -94,10 +112,26 @@ export const StocktakeRepo = {
       [localNow()],
     );
     const id = created.insertId ?? -1;
+    // صفوف المنتجات بلا متغيرات ملابس (البقية كلها).
     await db.execute(
       `INSERT INTO stocktake_items (stocktake_id, product_id, system_qty)
        SELECT ?, p.id, p.stock_quantity FROM products p
-        WHERE p.is_archived = 0`,
+        WHERE p.is_archived = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM product_variants v
+             WHERE v.product_id = p.id AND v.kind = 'variant'
+          )`,
+      [id],
+    );
+    // صفوف متغيرات الملابس — ربطة ربطة بلونها ومقاسها.
+    await db.execute(
+      `INSERT INTO stocktake_items (stocktake_id, product_id, variant_id, variant_label, system_qty)
+       SELECT ?, v.product_id, v.id,
+              TRIM(COALESCE(NULLIF(v.color, '') || ' · ', '') || v.size),
+              v.stock_quantity
+         FROM product_variants v
+         JOIN products p ON p.id = v.product_id
+        WHERE v.kind = 'variant' AND p.is_archived = 0`,
       [id],
     );
     const result = await db.execute('SELECT * FROM stocktakes WHERE id = ?', [
@@ -130,8 +164,10 @@ export const StocktakeRepo = {
     const params: (string | number)[] = [stocktakeId];
     const search = options?.search?.trim();
     if (search) {
-      conditions.push('p.name LIKE ?');
-      params.push(`%${search}%`);
+      conditions.push(
+        `(p.name LIKE ? OR si.variant_label LIKE ?)`,
+      );
+      params.push(`%${search}%`, `%${search}%`);
     }
     if (options?.categoryId != null && options?.categoryId !== 'all') {
       conditions.push('p.category_id = ?');
@@ -141,24 +177,30 @@ export const StocktakeRepo = {
       conditions.push('si.counted_qty IS NULL');
     }
     const result = await getDb().execute(
-      `SELECT si.*, p.name AS product_name, p.barcode, p.category_id, p.sold_by_weight, ${UNIT_HINT_SQL}
+      `SELECT si.*, p.name AS product_name, p.barcode, p.category_id,
+              p.sold_by_weight, p.base_unit_name, ${UNIT_HINT_SQL}
        FROM stocktake_items si
        JOIN products p ON p.id = si.product_id
        WHERE ${conditions.join(' AND ')}
-       ORDER BY p.name ASC`,
+       ORDER BY p.name ASC, si.variant_label ASC`,
       params,
     );
     return (result.rows?._array ?? []).map(rowToItem);
   },
 
+  /** v38: العدّ يكتب على صف (المنتج، المتغير) — المتغير NULL للصف
+   *  العادي، ومعرّف متغير الملابس لصفه. */
   async setCounted(
     stocktakeId: number,
     productId: number,
     counted: number | null,
+    variantId: number | null = null,
   ): Promise<void> {
     await getDb().execute(
-      'UPDATE stocktake_items SET counted_qty = ? WHERE stocktake_id = ? AND product_id = ?',
-      [counted, stocktakeId, productId],
+      `UPDATE stocktake_items SET counted_qty = ?
+        WHERE stocktake_id = ? AND product_id = ?
+          AND IFNULL(variant_id, 0) = IFNULL(?, 0)`,
+      [counted, stocktakeId, productId, variantId],
     );
   },
 
@@ -189,8 +231,12 @@ export const StocktakeRepo = {
 
   /**
    * Completes the session. When `applyAdjustments` is true, every counted
-   * value is written back to products.stock_quantity atomically; items
-   * left uncounted keep their system quantity untouched.
+   * value is written back atomically: product-level rows update
+   * products.stock_quantity; VARIANT rows (v38: clothing لون × مقاس)
+   * update product_variants.stock_quantity and then REGENERATE the
+   * parent product's total from the sum of its variants — the same
+   * invariant the sale/return flows maintain. Items left uncounted
+   * keep their system quantity untouched.
    */
   async complete(
     stocktakeId: number,
@@ -200,20 +246,57 @@ export const StocktakeRepo = {
     let adjusted = 0;
     await db.transaction(async tx => {
       if (applyAdjustments) {
+        // 1) صفوف المنتجات العادية.
         const result = await tx.execute(
           `UPDATE products
            SET stock_quantity = (
              SELECT si.counted_qty FROM stocktake_items si
              WHERE si.stocktake_id = ? AND si.product_id = products.id
-               AND si.counted_qty IS NOT NULL
+               AND si.variant_id IS NULL AND si.counted_qty IS NOT NULL
            )
            WHERE id IN (
              SELECT si.product_id FROM stocktake_items si
-             WHERE si.stocktake_id = ? AND si.counted_qty IS NOT NULL
+             WHERE si.stocktake_id = ? AND si.variant_id IS NULL
+               AND si.counted_qty IS NOT NULL
            )`,
           [stocktakeId, stocktakeId],
         );
         adjusted = result.rowsAffected ?? 0;
+        // 2) صفوف متغيرات الملابس — العدّ على صف المتغير نفسه.
+        const variantResult = await tx.execute(
+          `UPDATE product_variants
+           SET stock_quantity = (
+             SELECT si.counted_qty FROM stocktake_items si
+             WHERE si.stocktake_id = ? AND si.variant_id = product_variants.id
+               AND si.counted_qty IS NOT NULL
+           )
+           WHERE id IN (
+             SELECT si.variant_id FROM stocktake_items si
+             WHERE si.stocktake_id = ? AND si.variant_id IS NOT NULL
+               AND si.counted_qty IS NOT NULL
+           )`,
+          [stocktakeId, stocktakeId],
+        );
+        adjusted += variantResult.rowsAffected ?? 0;
+        // 3) إعادة توليد إجمالي كل موديل جُردت متغيراته — من مجموع
+        //    متغيراته (نفس عقد البيع/الإرجاع) فلا ينفك الاتساق.
+        const resync = await tx.execute(
+          `UPDATE products
+           SET stock_quantity = (
+             SELECT COALESCE(SUM(v.stock_quantity), 0)
+               FROM product_variants v
+              WHERE v.product_id = products.id AND v.kind = 'variant'
+           )
+           WHERE id IN (
+             SELECT DISTINCT si.product_id FROM stocktake_items si
+             WHERE si.stocktake_id = ? AND si.variant_id IS NOT NULL
+               AND si.counted_qty IS NOT NULL
+           )`,
+          [stocktakeId],
+        );
+        // الصفوف المعاد توليدها ليست «منتجات معدّلة» إضافية — هي
+        // نفس متغيرات الخطوة 2 مجتمعة؛ لا نضيفها إلى العدّ.
+        void resync;
       }
       await tx.execute(
         "UPDATE stocktakes SET status = 'completed', completed_at = ? WHERE id = ?",

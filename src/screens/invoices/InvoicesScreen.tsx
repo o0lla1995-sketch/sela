@@ -1703,25 +1703,28 @@ function ReturnSheet({
                     <View style={retStyles(c).stepper}>
                       <TouchableOpacity
                         style={retStyles(c).stepBtn}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
                         onPress={() =>
                           setQty(line.item.id, qty - step, line.remaining)
                         }
                         disabled={busy || qty <= 0}>
-                        <Icon name="minus" size={14} color={c.text} />
+                        <Icon name="minus" size={13} color={c.text} />
                       </TouchableOpacity>
                       <Text style={retStyles(c).stepValue}>
                         {formatQty(qty)}
                       </Text>
                       <TouchableOpacity
                         style={retStyles(c).stepBtn}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
                         onPress={() =>
                           setQty(line.item.id, qty + step, line.remaining)
                         }
                         disabled={busy || qty >= line.remaining}>
-                        <Icon name="plus" size={14} color={c.text} />
+                        <Icon name="plus" size={13} color={c.text} />
                       </TouchableOpacity>
                       <TouchableOpacity
                         style={retStyles(c).allBtn}
+                        hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}
                         onPress={() =>
                           setQty(line.item.id, line.remaining, line.remaining)
                         }
@@ -1791,14 +1794,28 @@ function ReturnSheet({
                 البديلة انتقلت للتمرير أعلاه فلا يمكن لشيء أن يدفع
                 زر التأكيد خارج الشاشة. ── */}
             <View style={retStyles(c).summaryBox}>
-              {/* v36: الاستبدال بقيمة المرجع — زر فتح نافذة الاختيار. */}
-              {refundTotal > 0 ? (
+              {/* v36: الاستبدال بقيمة المرجع — زر فتح نافذة الاختيار.
+                  v38 (الجولة 46 #6): يظهر دائماً ما دامت في الفاتورة
+                  أصناف قابلة للإرجاع — كان يظهر فقط بعد اختيار كميات
+                  (refundTotal > 0) فيظن التاجر أن الفاتورة النقدية بلا
+                  زبون لا تدعم الاستبدال. الضغط بلا كميات يرشد
+                  برسالة واضحة بدل لا شيء. */}
+              {lines.length > 0 ? (
                 <TouchableOpacity
                   style={[
                     retStyles(c).exchangeBtn,
                     exchangeModeOn ? {borderColor: c.accent} : null,
                   ]}
-                  onPress={() => setExchangeOpen(true)}
+                  onPress={() => {
+                    if (pickedCount === 0) {
+                      toast(
+                        'اختر كميات المرتجع أولاً — الاستبدال يقابل قيمة ما تُرجعه',
+                        'info',
+                        5000,
+                      );
+                    }
+                    setExchangeOpen(true);
+                  }}
                   disabled={busy}>
                   <Icon name="swap" size={16} color={c.accent} />
                   <View style={{flex: 1}}>
@@ -1846,7 +1863,11 @@ function ReturnSheet({
                         retStyles(c).methodText,
                         refundMethod === 'none' ? {color: c.onAccent} : null,
                       ]}>
-                      استبدال بضاعة (بلا استرداد)
+                      {/* v38 (الجولة 46 #6): التسمية الدقيقة — هذا ليس
+                          نافذة الاستبدال (فوق) بل إرجاع بلا استرداد
+                          نقدي؛ الاسم القديم «استبدال بضاعة» أوهم التاجر
+                          بأن الفواتير النقدية لا تدعم الاستبدال. */}
+                      إرجاع بلا استرداد نقدي
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -2635,60 +2656,60 @@ function excStyles(c: ReturnType<typeof useThemeColors>) {
       backgroundColor: c.accent,
     },
     optionBox: {
-      marginHorizontal: 12,
-      marginBottom: 8,
+      marginHorizontal: 10,
+      marginBottom: 6,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.lg,
-      padding: 12,
+      borderRadius: radius.md,
+      padding: 9,
       backgroundColor: c.surfaceAlt,
-      gap: 8,
+      gap: 6,
     },
-    optionHead: {flexDirection: 'row', alignItems: 'center', gap: 8},
+    optionHead: {flexDirection: 'row', alignItems: 'center', gap: 6},
     optionName: {
       fontFamily: fonts.bold,
-      fontSize: 14,
+      fontSize: 13,
       color: c.text,
     },
     optionMeta: {
       fontFamily: fonts.regular,
-      fontSize: 11.5,
+      fontSize: 10.5,
       color: c.textDim,
-      marginTop: 2,
+      marginTop: 1,
     },
-    chipRow: {flexDirection: 'row', gap: 6, paddingVertical: 2},
+    chipRow: {flexDirection: 'row', gap: 5, paddingVertical: 1},
     chip: {
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: 999,
-      paddingHorizontal: 10,
-      paddingVertical: 6,
+      paddingHorizontal: 9,
+      paddingVertical: 4,
       backgroundColor: c.surfaceHi,
     },
     chipText: {
       fontFamily: fonts.medium,
-      fontSize: 11.5,
+      fontSize: 11,
       color: c.text,
     },
     qtyRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
+      gap: 6,
     },
     qtyLabel: {
       fontFamily: fonts.medium,
-      fontSize: 12.5,
+      fontSize: 12,
       color: c.textDim,
     },
     qtyInput: {
-      width: 90,
+      width: 74,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.md,
-      paddingHorizontal: 10,
-      paddingVertical: 8,
+      borderRadius: radius.sm,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
       fontFamily: fonts.bold,
-      fontSize: 14,
+      fontSize: 13,
       color: c.text,
       backgroundColor: c.surfaceHi,
       textAlign: 'center',
@@ -2696,89 +2717,91 @@ function excStyles(c: ReturnType<typeof useThemeColors>) {
     qtyTotal: {
       flex: 1,
       fontFamily: fonts.medium,
-      fontSize: 12,
+      fontSize: 11.5,
       color: c.text,
       textAlign: 'left',
     },
-    list: {paddingHorizontal: 12, paddingVertical: 4},
+    list: {paddingHorizontal: 10, paddingVertical: 3},
     centerBox: {alignItems: 'center', justifyContent: 'center', padding: 24},
     emptyText: {
       fontFamily: fonts.regular,
-      fontSize: 12.5,
+      fontSize: 12,
       color: c.textDim,
       textAlign: 'center',
     },
+    // v38 (الجولة 46 #7): صف نتيجة البحث المضغوط — طلب التاجر حرفياً
+    //  (كان كبيراً جداً يأخذ مساحة كبيرة عند الاستبدال).
     productRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
+      gap: 6,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.md,
-      padding: 10,
-      marginBottom: 6,
+      borderRadius: radius.sm,
+      padding: 7,
+      marginBottom: 4,
       backgroundColor: c.surfaceAlt,
     },
     productName: {
       fontFamily: fonts.medium,
-      fontSize: 13,
+      fontSize: 12.5,
       color: c.text,
     },
     productMeta: {
       fontFamily: fonts.regular,
-      fontSize: 11.5,
+      fontSize: 10.5,
       color: c.textDim,
-      marginTop: 2,
+      marginTop: 1,
     },
     cartBox: {
-      margin: 12,
+      margin: 10,
       marginTop: 4,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.lg,
-      padding: 10,
+      borderRadius: radius.md,
+      padding: 8,
       backgroundColor: c.surfaceAlt,
     },
     cartHead: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      marginBottom: 6,
+      marginBottom: 4,
     },
     cartTitle: {
       fontFamily: fonts.bold,
-      fontSize: 13,
+      fontSize: 12.5,
       color: c.text,
     },
-    cartClear: {fontFamily: fonts.medium, fontSize: 12, color: c.danger},
-    cartRow: {flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4},
+    cartClear: {fontFamily: fonts.medium, fontSize: 11.5, color: c.danger},
+    cartRow: {flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3},
     cartRowName: {
       fontFamily: fonts.medium,
-      fontSize: 12.5,
+      fontSize: 12,
       color: c.text,
     },
     cartRowMeta: {
       fontFamily: fonts.regular,
-      fontSize: 11,
+      fontSize: 10.5,
       color: c.textDim,
       marginTop: 1,
     },
     exchangeRemove: {
-      width: 28,
-      height: 28,
-      borderRadius: 14,
+      width: 26,
+      height: 26,
+      borderRadius: 13,
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: c.surfaceHi,
     },
-    balanceRow: {marginTop: 8, alignItems: 'center'},
+    balanceRow: {marginTop: 6, alignItems: 'center'},
     balanceText: {
       fontFamily: fonts.regular,
-      fontSize: 12,
+      fontSize: 11.5,
       color: c.textDim,
       textAlign: 'center',
     },
-    actions: {padding: 12, paddingTop: 4},
+    actions: {padding: 10, paddingTop: 4},
   });
 }
 
@@ -2786,27 +2809,30 @@ function excStyles(c: ReturnType<typeof useThemeColors>) {
 function retStyles(c: ReturnType<typeof useThemeColors>) {
   return StyleSheet.create({
     // v36: زر الاستبدال وقائمة الأصناف البديلة داخل نافذة الإرجاع.
+    // v38 (الجولة 46 #7): حجوم مضغوطة — طلب التاجر نصاً «حجمها كبير
+    //  جداً ويأخذ مساحة كبيرة»؛ البطاقات والخطوط والفراغات صُغّرت
+    //  مع إبقاء أهداف اللمس مريحة (28+ مع hitSlop).
     exchangeBtn: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 10,
+      gap: 8,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.lg,
-      padding: 12,
+      borderRadius: radius.md,
+      padding: 8,
       backgroundColor: c.surfaceAlt,
-      marginBottom: 10,
+      marginBottom: 8,
     },
     exchangeBtnTitle: {
       fontFamily: fonts.bold,
-      fontSize: 14,
+      fontSize: 13,
       color: c.text,
     },
     exchangeBtnSub: {
       fontFamily: fonts.regular,
-      fontSize: 11.5,
+      fontSize: 11,
       color: c.textDim,
-      marginTop: 2,
+      marginTop: 1,
     },
     exchangeList: {
       backgroundColor: c.surfaceAlt,
@@ -2896,15 +2922,15 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
     head: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      paddingBottom: spacing.md,
+      gap: spacing.sm,
+      paddingBottom: spacing.sm,
       borderBottomWidth: 1,
       borderBottomColor: c.borderSoft,
     },
     headIcon: {
-      width: 42,
-      height: 42,
-      borderRadius: 13,
+      width: 34,
+      height: 34,
+      borderRadius: 11,
       backgroundColor: c.warningSoft,
       alignItems: 'center',
       justifyContent: 'center',
@@ -2912,18 +2938,18 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
     headTitle: {
       color: c.text,
       fontFamily: fonts.bold,
-      fontSize: typography.heading,
+      fontSize: 15.5,
     },
     headSub: {
       color: c.textFaint,
       fontFamily: fonts.regular,
-      fontSize: typography.small,
-      marginTop: 2,
+      fontSize: 11,
+      marginTop: 1,
     },
     closeBtn: {
-      width: 34,
-      height: 34,
-      borderRadius: 10,
+      width: 30,
+      height: 30,
+      borderRadius: 9,
       backgroundColor: c.surfaceHi,
       alignItems: 'center',
       justifyContent: 'center',
@@ -2942,39 +2968,40 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
       lineHeight: 20,
     },
     linesList: {
-      gap: spacing.sm,
-      paddingVertical: spacing.md,
+      gap: 5,
+      paddingVertical: spacing.sm,
     },
+    // v38 (الجولة 46 #7): صف المرتجع المضغوط — طلب التاجر حرفياً.
     lineCard: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
+      gap: 6,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.borderSoft,
       borderRadius: radius.md,
-      padding: spacing.md,
+      padding: 8,
     },
     lineName: {
       color: c.text,
       fontFamily: fonts.bold,
-      fontSize: typography.caption,
+      fontSize: 12.5,
     },
     lineMeta: {
       color: c.textFaint,
       fontFamily: fonts.regular,
-      fontSize: typography.small,
-      marginTop: 2,
+      fontSize: 11,
+      marginTop: 1,
     },
     stepper: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
+      gap: 4,
     },
     stepBtn: {
-      width: 32,
-      height: 32,
-      borderRadius: 10,
+      width: 28,
+      height: 28,
+      borderRadius: 9,
       backgroundColor: c.surfaceHi,
       borderWidth: 1,
       borderColor: c.borderSoft,
@@ -2984,21 +3011,21 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
     stepValue: {
       color: c.text,
       fontFamily: fonts.bold,
-      fontSize: typography.caption,
-      minWidth: 40,
+      fontSize: 12.5,
+      minWidth: 30,
       textAlign: 'center',
       fontVariant: ['tabular-nums'],
     },
     allBtn: {
-      paddingHorizontal: 8,
-      paddingVertical: 6,
-      borderRadius: 8,
+      paddingHorizontal: 7,
+      paddingVertical: 5,
+      borderRadius: 7,
       backgroundColor: c.accentSofter,
     },
     allBtnText: {
       color: c.accent,
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: 11,
     },
     summaryBox: {
       borderTopWidth: 1,

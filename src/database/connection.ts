@@ -76,12 +76,18 @@ const DDL_STATEMENTS: string[] = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     stocktake_id INTEGER NOT NULL,
     product_id INTEGER NOT NULL,
+    -- v38 (الجولة 46 #9): صف لكل متغير (لون × مقاس) لمنتجات المتغيرات —
+    -- NULL لصف المنتج العادي. الفردية عبر فهرس تعبيري أدناه.
+    variant_id INTEGER,
+    variant_label TEXT,
     system_qty REAL NOT NULL DEFAULT 0,
     counted_qty REAL,
     FOREIGN KEY(stocktake_id) REFERENCES stocktakes(id) ON DELETE CASCADE,
     FOREIGN KEY(product_id) REFERENCES products(id),
-    UNIQUE(stocktake_id, product_id)
+    FOREIGN KEY(variant_id) REFERENCES product_variants(id) ON DELETE CASCADE
   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_stocktake_items_line
+     ON stocktake_items(stocktake_id, product_id, IFNULL(variant_id, 0))`,
   `CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -1498,6 +1504,54 @@ async function applyMigrations(database: DB): Promise<void> {
     );
     logDiag('db', 'ترحيل v21: أعمدة الاستبدال وجدول صوره (الاستبدال بقيمة المرجع)');
     version = 21;
+  }
+
+  if (version < 22) {
+    // ── v38 (الجولة 46 #9): جرد متغيرات الملابس ────────────────────
+    // stocktake_items صار يحمل صفوفاً لكل متغير (لون × مقاس) للمنتجات
+    // ذات المتغيرات — الملابس تُجرد ربطة ربطة لا كموديل واحداً.
+    // القيد الفريد القديم (stocktake_id, product_id) يُستبدل بفهرس
+    // تعبيري يفصل صفوف المنتج (variant_id NULL) عن صفوف متغيراته.
+    // الجلسات المفتوحة القديمة تُرحّل كما هي (variant_id NULL) فلا
+    // يُفقد أي عدّ قائم.
+    const hasVariantCol = await database.execute(
+      `SELECT COUNT(*) AS cnt FROM pragma_table_info('stocktake_items') WHERE name = 'variant_id'`,
+    );
+    const variantColExists =
+      (hasVariantCol.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!variantColExists) {
+      await database.execute(`CREATE TABLE stocktake_items_v22 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stocktake_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        variant_id INTEGER,
+        variant_label TEXT,
+        system_qty REAL NOT NULL DEFAULT 0,
+        counted_qty REAL,
+        FOREIGN KEY(stocktake_id) REFERENCES stocktakes(id) ON DELETE CASCADE,
+        FOREIGN KEY(product_id) REFERENCES products(id),
+        FOREIGN KEY(variant_id) REFERENCES product_variants(id) ON DELETE CASCADE
+      )`);
+      await database.execute(
+        `INSERT INTO stocktake_items_v22
+           (stocktake_id, product_id, system_qty, counted_qty)
+         SELECT stocktake_id, product_id, system_qty, counted_qty
+           FROM stocktake_items`,
+      );
+      await database.execute('DROP TABLE stocktake_items');
+      await database.execute(
+        'ALTER TABLE stocktake_items_v22 RENAME TO stocktake_items',
+      );
+    }
+    await database.execute(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_stocktake_items_line
+         ON stocktake_items(stocktake_id, product_id, IFNULL(variant_id, 0))`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stocktake_items_session ON stocktake_items(stocktake_id)',
+    );
+    logDiag('db', 'ترحيل v22: جرد متغيرات الملابس (صف لكل لون × مقاس)');
+    version = 22;
   }
 
   if (version !== storedVersion) {

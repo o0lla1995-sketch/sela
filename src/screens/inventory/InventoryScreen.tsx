@@ -114,7 +114,9 @@ export function InventoryScreen() {
     () =>
       products.filter(
         product =>
-          stockStateOf(product, settings.lowStockDefaultThreshold) !== 'ok',
+          // v38 (الجولة 46 #4): بلا تتبع ليس حالة تنبيه — الكمية مرجعية.
+          stockStateOf(product, settings.lowStockDefaultThreshold) === 'low' ||
+          stockStateOf(product, settings.lowStockDefaultThreshold) === 'out',
       ).length,
     [products, settings.lowStockDefaultThreshold],
   );
@@ -677,6 +679,8 @@ function InventoryLayout({
                               ? c.dangerSoft
                               : state === 'low'
                               ? c.warningSoft
+                              : state === 'untracked'
+                              ? c.surfaceHi
                               : c.successSoft,
                         },
                       ]}>
@@ -689,11 +693,17 @@ function InventoryLayout({
                                 ? c.danger
                                 : state === 'low'
                                 ? c.warning
+                                : state === 'untracked'
+                                ? c.textDim
                                 : c.success,
                           },
                         ]}>
                         {state === 'out'
                           ? 'نفد'
+                          : // v38 (الجولة 46 #4): بلا تتبع ليست «نفداً» —
+                            // الكمية مرجعية لا تُخصم بالبيع أبداً.
+                            state === 'untracked'
+                          ? 'بلا تتبع'
                           : `${formatQty(
                               product.stock_quantity,
                             )} ${baseUnitLabelOf(product, BASE_UNIT_NAME)}`}

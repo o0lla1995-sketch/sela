@@ -142,7 +142,7 @@ export function baseUnitLabelOf(
 }
 
 /** Stock state derived from quantity vs threshold. */
-export type StockState = 'out' | 'low' | 'ok';
+export type StockState = 'out' | 'low' | 'ok' | 'untracked';
 
 /** v32 (round-40 #3): حالة الصلاحية — منتهي / قرب الانتهاء / سليم. */
 export type ExpiryState = 'expired' | 'expiring' | 'ok';
@@ -397,6 +397,12 @@ export interface StocktakeItem {
   stocktake_id: number;
   product_id: number;
   productName: string;
+  /** v38 (الجولة 46 #9): جرد متغيرات الملابس — صف لكل (لون ×
+   *  مقاس) بدل صف واحد للموديل كله؛ NULL = صف منتج عادي. */
+  variantId: number | null;
+  variantLabel: string | null;
+  /** v38: وحدة الأساس بلغة المجال لعرضها بجانب العدّ. */
+  baseUnitName: string | null;
   /** v30 (round-38 #2): the product's barcode — scan-to-search in
    *  the counting screen matches it exactly (same contract as the
    *  inventory search). */
@@ -846,11 +852,21 @@ export interface CampaignSettlementRow {
   created_at: string;
 }
 
-/** Derives the stock state for a product given the global default threshold. */
+/** Derives the stock state for a product given the global default threshold.
+ *  v38 (الجولة 46 #4): المنتجات «بلا تتبع مخزون» (مطعم/كافيتريا)
+ *  ليست نافدة أبداً — كميتها مرجعية لا تُخصم بالبيع، فإظهار شارة
+ *  «نفد» عليها (لمجرد أن المرجع 0) كان خطأ عرضياً صريحاً. الآن
+ *  لها حالة خاصة 'untracked' تعرض بلغة كل شاشة كما يليق بها. */
 export function stockStateOf(
-  product: Pick<Product, 'stock_quantity' | 'low_stock_threshold'>,
+  product: Pick<
+    Product,
+    'stock_quantity' | 'low_stock_threshold' | 'stock_untracked'
+  >,
   defaultThreshold: number,
 ): StockState {
+  if (product.stock_untracked === 1) {
+    return 'untracked';
+  }
   if (product.stock_quantity <= 0) {
     return 'out';
   }

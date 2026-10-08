@@ -94,7 +94,9 @@ export const StockAlertsService = {
           continue;
         }
         const state = stockStateOf(product, settings.lowStockDefaultThreshold);
-        if (state !== 'ok') {
+        // v38 (الجولة 46 #4): حالة موسعة — 'untracked' مستحيلة هنا
+        //  (استُبعدت أعلاه) لكن التضييق يجعل النية صريحة.
+        if (state === 'out' || state === 'low') {
           const key = `${product.id}:${state}`;
           if (!ledgerKeys.has(key)) {
             if (state === 'out') {
@@ -191,7 +193,9 @@ export const StockAlertsService = {
         continue;
       }
       const state = stockStateOf(product, settings.lowStockDefaultThreshold);
-      if (state !== 'ok') {
+      // v38 (الجولة 46 #4): التضييق الصريح — بلا تتبع استُبعدت أعلاه
+      //  أصلاً، والنوع الموسع يمرر TS فقط.
+      if (state === 'out' || state === 'low') {
         result.push({product, state});
       }
       const expiry = expiryStateOf(

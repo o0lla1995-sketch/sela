@@ -465,7 +465,7 @@ export function PosScreen({
   }, []);
 
   const tryAdd = useCallback(
-    (product: Product, unit?: ProductUnit | null) => {
+    (product: Product, unit?: ProductUnit | null, quantity?: number) => {
       // v8.3 (round-12 #4): weight-sold products NEVER add as whole
       // pieces — the weight pad opens instead (type kg or tap وقية /
       // نصف كغ quick chips; price = kg × kilo price).
@@ -473,7 +473,14 @@ export function PosScreen({
         openWeightPad(product);
         return;
       }
-      const result = addProduct(product, pricingMode, unit ?? null);
+      // v38 (الجولة 46 #5): الكمية المختارة في نافذة البيع تمر الآن
+      //  فعلاً إلى السلة — كانت تُعرض فوق الزر ثم تُتجاهل.
+      const result = addProduct(
+        product,
+        pricingMode,
+        unit ?? null,
+        quantity ?? 1,
+      );
       if (result.added) {
         beep();
       } else if (result.reason) {
@@ -2766,8 +2773,10 @@ export function PosScreen({
             toast(result.reason, 'error');
           }
         }}
-        onAddUnit={(product, unit) => {
-          tryAdd(product, unit);
+        onAddUnit={(product, unit, qty) => {
+          // v38 (الجولة 46 #5): الكمية من عدّاد نافذة البيع — كانت
+          //  تضيف قطعة واحدة فقط مهما ضُبط العدّاد.
+          tryAdd(product, unit, qty);
           setSaleSheet(null);
         }}
       />
@@ -3530,7 +3539,12 @@ function SaleSheetView({
     sizeVariant: ProductVariant,
     qty: number,
   ) => void;
-  onAddUnit: (product: Product, unit: ProductUnit | null) => void;
+  onAddUnit: (
+    product: Product,
+    unit: ProductUnit | null,
+    /** v38 (الجولة 46 #5): الكمية المختارة من عدّاد النافذة. */
+    qty: number,
+  ) => void;
 }) {
   const c = useThemeColors();
   const styles = useStyles();
@@ -4041,7 +4055,7 @@ function SaleSheetView({
               <AppButton
                 title={`إضافة للسلة · ${formatMoney(qty * pickedUnitPrice)}`}
                 icon="plus"
-                onPress={() => onAddUnit(product, pickedUnitRow)}
+                onPress={() => onAddUnit(product, pickedUnitRow, qty)}
               />
             </>
           ) : null}

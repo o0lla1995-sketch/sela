@@ -230,6 +230,10 @@ export interface BackupFile {
   stocktake_items: {
     stocktake_id: number;
     product_id: number;
+    /** v38 (الجولة 46 #9): صف متغير ملابس — معرّف المتغير وتسميته
+     *  (لون · مقاس)؛ NULL لصف المنتج العادي. */
+    variant_id?: number | null;
+    variant_label?: string | null;
     system_qty: number;
     counted_qty: number | null;
   }[];
@@ -506,7 +510,7 @@ export const BackupService = {
         'SELECT id, started_at, completed_at, status, note FROM stocktakes',
       ),
       db.execute(
-        'SELECT stocktake_id, product_id, system_qty, counted_qty FROM stocktake_items',
+        'SELECT stocktake_id, product_id, variant_id, variant_label, system_qty, counted_qty FROM stocktake_items',
       ),
       db.execute(
         `SELECT idempotency_key, customer_id, customer_name, customer_phone_last4,
@@ -791,6 +795,9 @@ export const BackupService = {
       stocktake_items: rowsOf(stocktakeItems).map(row => ({
         stocktake_id: Number(row.stocktake_id),
         product_id: Number(row.product_id),
+        variant_id: row.variant_id == null ? null : Number(row.variant_id),
+        variant_label:
+          row.variant_label == null ? null : String(row.variant_label),
         system_qty: Number(row.system_qty ?? 0),
         counted_qty: row.counted_qty == null ? null : Number(row.counted_qty),
       })),
@@ -1532,13 +1539,30 @@ export const BackupService = {
         if (newStocktakeId == null || newProductId == null) {
           continue;
         }
+        // v38 (الجولة 46 #9): صفوف متغيرات الملابس — المعرّف المحلي
+        //  القديم يُعاد ربطه بخريطة المتغيرات المُنشأة حديثاً عبر
+        //  (المنتج، التسمية) — أرقام المتغيرات تتغير مع الاستعادة.
+        let newVariantId: number | null = null;
+        if (item.variant_id != null) {
+          const variantRow = await tx.execute(
+            `SELECT id FROM product_variants
+              WHERE product_id = ? AND kind = 'variant'
+                AND TRIM(COALESCE(NULLIF(color, '') || ' · ', '') || size) = ?
+              LIMIT 1`,
+            [newProductId, item.variant_label ?? ''],
+          );
+          const hit = variantRow.rows?._array?.[0] as {id?: number} | undefined;
+          newVariantId = hit?.id ?? null;
+        }
         await tx.execute(
           `INSERT INTO stocktake_items
-            (stocktake_id, product_id, system_qty, counted_qty)
-           VALUES (?, ?, ?, ?)`,
+            (stocktake_id, product_id, variant_id, variant_label, system_qty, counted_qty)
+           VALUES (?, ?, ?, ?, ?, ?)`,
           [
             newStocktakeId,
             newProductId,
+            newVariantId,
+            item.variant_label ?? null,
             Number(item.system_qty ?? 0),
             item.counted_qty ?? null,
           ],

@@ -78,6 +78,7 @@ function toLine(
   product: Product,
   mode: PricingMode,
   unit: ProductUnit | null,
+  quantity = 1,
 ): CartLine {
   const weighted = product.sold_by_weight === 1;
   const untracked = product.stock_untracked === 1;
@@ -93,7 +94,7 @@ function toLine(
     wholesalePrice: unit
       ? unit.wholesale_price ?? product.wholesale_price * unit.conversion
       : product.wholesale_price,
-    quantity: 1,
+    quantity,
     availableStock: untracked ? UNTRACKED_STOCK : product.stock_quantity,
     unitId: unit?.unit_id ?? null,
     unitName:
@@ -232,6 +233,11 @@ interface CartState {
     product: Product,
     mode: PricingMode,
     unit?: ProductUnit | null,
+    /** v38 (الجولة 46 #5): كمية الإضافة — نافذة البيع الصيدلانية
+     *  كانت تعرض عدّاد كمية لكن زرها أضاف قطعة واحدة فقط مهما
+     *  ضُبط (الكمية لم تكن تمر أصلاً). الافتراضي 1 يحفظ سلوك
+     *  كل المسارات الأخرى. */
+    quantity?: number,
   ) => {added: boolean; reason?: string};
   /** v8.3 (round-12 #4): add a WEIGHT-sold product with a fractional
    *  quantity (kg or a sub-unit like وقية via `unit`). */
@@ -367,8 +373,17 @@ function bundleUsed(
 export const useCartStore = create<CartState>((set, get) => ({
   ...loadDraft(),
 
-  addProduct: (product, mode, unit = null) => {
+  addProduct: (product, mode, unit = null, quantity = 1) => {
     const state = get();
+    // v38 (الجولة 46 #5): الكمية الصحيحة — عدد صحيح ≥ 1 للقطع
+    //  (وحدات الصيدلية/البقالة)، وأي قيمة غير صالحة تعود إلى 1
+    //  كي لا ينكسر أي مسار قديم.
+    const safeQty =
+      Number.isFinite(quantity) && quantity >= 1
+        ? product.sold_by_weight === 1
+          ? quantity
+          : Math.round(quantity)
+        : 1;
     const key = lineKey(product.id, unit?.unit_id ?? null);
     const conversion = unit?.conversion ?? 1;
     const existing = state.lines.find(line => line.key === key);
@@ -379,7 +394,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     // v35 (الجولة 43): المخزون بلا تتبع لا يُحجب أبداً.
     if (
       !untracked &&
-      alreadyInCart + conversion > product.stock_quantity
+      alreadyInCart + conversion * safeQty > product.stock_quantity
     ) {
       return {
         added: false,
@@ -389,7 +404,9 @@ export const useCartStore = create<CartState>((set, get) => ({
           unit != null ? `${product.name} (${unit.unitName})` : product.name
         } هو ${formatQtyForMessage(
           product.stock_quantity - alreadyInCart,
-        )} قطعة فقط${alreadyInCart > 0 ? ` (في السلة ${formatQtyForMessage(alreadyInCart)} قطعة)` : ''}`,
+        )} ${
+          product.sold_by_weight === 1 ? 'كغ' : 'قطعة'
+        } فقط${alreadyInCart > 0 ? ` (في السلة ${formatQtyForMessage(alreadyInCart)} قطعة)` : ''}`,
       };
     }
 
@@ -398,7 +415,7 @@ export const useCartStore = create<CartState>((set, get) => ({
         line.key === key
           ? {
               ...line,
-              quantity: line.quantity + 1,
+              quantity: line.quantity + safeQty,
               availableStock: untracked
                 ? UNTRACKED_STOCK
                 : product.stock_quantity,
@@ -409,7 +426,7 @@ export const useCartStore = create<CartState>((set, get) => ({
       saveDraft(lines, state.pricingMode, state.discount);
       return {added: true};
     }
-    const lines = [...state.lines, toLine(product, mode, unit)];
+    const lines = [...state.lines, toLine(product, mode, unit, safeQty)];
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
     return {added: true};
