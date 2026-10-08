@@ -25,11 +25,13 @@ import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {uuidV4} from './sila/qr';
 import type {
   CartLine,
+  ExchangeLineInput,
   PricingMode,
   ReturnBook,
   ReturnLineInput,
   SaleItemRecord,
   SaleRecord,
+  SaleReturnExchange,
   SaleReturnItem,
   SaleReturnRecord,
   SaleWithItems,
@@ -1001,6 +1003,10 @@ export const InvoiceService = {
     print: boolean;
     receiptSettings: ReceiptSettings;
     onPrintError?: (message: string) => void;
+    /** v36: الاستبدال بقيمة المرجع — إن وُجدت أصناف فالعملية
+     *  استبدال بضاعة بلا أثر مالي: لا استرداد ولا خصم دين ولا
+     *  عكس رفع لصلة؛ فقط المخزون (المرتجع يعود والبديل يخرج). */
+    exchange?: ExchangeLineInput[];
   }): Promise<SaleReturnRecord> {
     const prep = await this.prepareReturn(input.saleId);
 
@@ -1033,7 +1039,11 @@ export const InvoiceService = {
       posReceiptRef: string;
       idempotencyKey: string;
     } | null = null;
-    if (prep.book === 'sila' && prep.debtState.kind === 'sila-synced') {
+    if (
+      prep.book === 'sila' &&
+      prep.debtState.kind === 'sila-synced' &&
+      (input.exchange?.length ?? 0) === 0
+    ) {
       const debt = await SilaRepo.byInvoiceRef(prep.sale.invoice_number);
       if (debt != null) {
         const refundMinor = Math.round(
@@ -1070,6 +1080,7 @@ export const InvoiceService = {
           lines: input.lines,
           silaReversal,
           note: input.note,
+          exchange: input.exchange,
         });
       } catch (error) {
         lastError = error;
@@ -1090,14 +1101,25 @@ export const InvoiceService = {
         : new Error('تعذر حجز رقم مرتجع — حاول مرة أخرى');
     }
 
-    logDiag(
-      'sale',
-      `تم إرجاع ${input.lines.length} صنف من ${
-        prep.sale.invoice_number
-      } بإيصال ${result.return_number} بقيمة ${(
-        result.refund_minor / 100
-      ).toFixed(2)} ₪`,
-    );
+    if ((input.exchange?.length ?? 0) > 0) {
+      logDiag(
+        'sale',
+        `استبدال بقيمة المرجع: ${input.lines.length} صنف مرتجع و${
+          (input.exchange ?? []).length
+        } بديل من ${prep.sale.invoice_number} بإيصال ${
+          result.return_number
+        } — لا أثر مالي؛ فقط المخزون`,
+      );
+    } else {
+      logDiag(
+        'sale',
+        `تم إرجاع ${input.lines.length} صنف من ${
+          prep.sale.invoice_number
+        } بإيصال ${result.return_number} بقيمة ${(
+          result.refund_minor / 100
+        ).toFixed(2)} ₪`,
+      );
+    }
 
     // v26 (round-34 #3): a synced-debt return left a reversal payment
     // in the queue — push it to the صِلة server RIGHT AWAY (fire and
@@ -1121,8 +1143,11 @@ export const InvoiceService = {
     if (input.print) {
       try {
         const items: SaleReturnItem[] = await SaleRepo.returnItems(result.id);
+        const exchanges: SaleReturnExchange[] = await SaleRepo.returnExchanges(
+          result.id,
+        );
         const job = buildReturnReceiptJob(
-          {ret: result, items},
+          {ret: result, items, exchanges},
           input.receiptSettings,
         );
         await ThermalPrinterService.printJob(job);

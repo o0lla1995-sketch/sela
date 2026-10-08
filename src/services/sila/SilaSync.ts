@@ -96,6 +96,18 @@ const RECONCILE_V34_DEVICE_FLAG = 'sila_reconcile_v34_device_v1';
  *  أرقام الجهاز يوماً (علم v34) — وإلا فالكاش لا يفرّق بين «لا
  *  تاريخ» و«مجهول» والتشذيب الأعمى خطر. مرة واحدة فقط. */
 const RECONCILE_V35_AUDIT_FLAG = 'sila_reconcile_v35_audit_v1';
+/** v36 (0078 — عزل المتاجر الجذري): إعادة تأسيس أحادية بعد تنفيذ
+ *  هجرة 0078 على الخادم. أسس المطابقة جُمّدت سابقاً على أرقام
+ *  store_split v2 التي كانت تخلط تحصيلات متاجر التاجر الأخرى
+ *  (فائض الكاشير ينزل للحمّ العامة ويطفئ أقدم الديون عالمياً)،
+ *  والتدقيق الشامل v35 قارن على نفس الأرقام الملوثة. الآن بعد
+ *  0078: أرقام الجهاز نقية (يتحرك دين النقطة بفواتيرها وسدادّاتها
+ *  هي وسدادّات التطبيق فقط) — فتُعاد كل الأسس مرة واحدة على
+ *  الأرقام النقية، ويُعاد التدقيق الشامل على نفس النقاء فتخرج
+ *  كل تحصيلات التسرب التاريخية من الدفاتر وتستقيم الأرصدة.
+ *  يشترط أن تكون التمريرة حاملة لأرقام الجهاز (خادم ما قبل 0075
+ *  لا يرسلها — تُترك الأسس كما هي حتى يرسلها). مرة واحدة فقط. */
+const RECONCILE_V36_REBASE_FLAG = 'sila_reconcile_v36_rebase_v1';
 
 /** Result of one cycle — the UI toasts `message` on manual sync. */
 export interface SilaSyncOutcome {
@@ -277,6 +289,10 @@ async function syncCustomersCycle(): Promise<void> {
   );
   const deviceResetFirstPass =
     feedHasDeviceNumbers && getString(RECONCILE_V34_DEVICE_FLAG, '') === '';
+  // v36 (0078): إعادة التأسيس الأحادية على أرقام الجهاز النقية بعد
+  // تنفيذ 0078 — مرة واحدة، ولا تُستهلك إلا بتمريرة تحمل الأرقام.
+  const v36RebasePass =
+    feedHasDeviceNumbers && getString(RECONCILE_V36_REBASE_FLAG, '') === '';
   const newCustomerOffsets = new Map<string, number>();
   let reconcileOutcome: {recordedMinor: number; trimmedMinor: number} | null =
     null;
@@ -294,13 +310,20 @@ async function syncCustomersCycle(): Promise<void> {
       })),
       newCustomerOffsets,
       freezeFirstPass,
-      deviceResetFirstPass,
+      deviceResetFirstPass || v36RebasePass,
     );
     if (deviceResetFirstPass) {
       setString(RECONCILE_V34_DEVICE_FLAG, '1');
       logDiag(
         'sila',
         'أُعيد تجميد أسس مطابقة تحصيلات صلة على أرقام هذه النقطة (مرة واحدة) — فصل كامل لديون المتاجر',
+      );
+    }
+    if (v36RebasePass) {
+      setString(RECONCILE_V36_REBASE_FLAG, '1');
+      logDiag(
+        'sila',
+        'v36/0078: أُعيد تجميد كل أسس المطابقة على أرقام الجهاز النقية (مرة واحدة) — انتهى تسرب فائض كاشير المتاجر الأخرى إلى ديون هذه النقطة',
       );
     }
     if (freezeFirstPass) {
@@ -398,6 +421,31 @@ async function syncCustomersCycle(): Promise<void> {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logDiag('sila', `التدقيق الشامل للتحصيلات تأجل: ${message}`, 'warn');
+    }
+  }
+  // v36 (0078): إعادة التدقيق الشامل على الأرقام النقية — التدقيق v35
+  // أعلاه قارن على أرقام store_split v2 الملوثة بتسرب فائض كاشير
+  // المتاجر الأخرى إلى الحمّ العامة، فالتلوث الذي دخل قبلها قد يبقى
+  // جاثماً على دفاتر من لا يتحرك حسابهم (لا يظهرون في التغذية
+  // التدريجية أبداً). بعد 0078 الأرقام نقية فيُمسح كل زبائن الكاش
+  // مرة أخرى ويُشذّب ما لا يعرفه الخادم لديون هذه النقطة تحت أي
+  // تاريخ — فتستقيم الأرصدة والخزينة والتقارير معاً.
+  if (v36RebasePass) {
+    try {
+      const rebasedTrimmed = await SilaRepo.auditAppCollections();
+      if (rebasedTrimmed > 0) {
+        notificationsStore.push(
+          'sila_collection',
+          'تصحيح عزل المتاجر الجذري (0078)',
+          `حُذف ${(rebasedTrimmed / 100).toFixed(
+            2,
+          )} ₪ تحصيلات كانت نتيجة تسرب من كاشير متاجر التاجر الأخرى إلى ديون متجرك — ديونك الآن تتحرك بفواتير متجرك وسدادّاته هو وسدادّات التطبيق فقط، كما طلبت`,
+          {system: true},
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logDiag('sila', `تدقيق v36/0078 تأجل: ${message}`, 'warn');
     }
   }
 }
@@ -1032,6 +1080,31 @@ async function runCycle(manual: boolean): Promise<SilaSyncOutcome> {
                 renumberedReceipts += 1;
               } else {
                 await SilaRepo.markPaymentRetry(row.local_id);
+              }
+              continue;
+            }
+            // v36 (0078 §3.5): الحارس الخادمي الجديد — المبلغ فوق دين
+            // هذه النقطة نفسها. غالباً تكون فواتير دين المتجر ما تزال
+            // في الطابور (pending/syncing) فلا يعرفها الخادم بعد: دفعة
+            // كهذه تعود للطابور (transient) حتى تصل الفواتير فيُقبل
+            // الإيصال من تلقاء نفسه. بعد 12 محاولة (دورات + كل «زامن
+            // الآن») يُعلن فاشلاً بنصيحة واضحة للكاشير.
+            if (code === 'AMOUNT_EXCEEDS_DEVICE_DEBT') {
+              if (row.retry_count >= 12) {
+                await SilaRepo.markPaymentFailed(
+                  row.local_id,
+                  code,
+                  silaErrorAdvice(code),
+                );
+                notificationsStore.push(
+                  'sila_payment',
+                  `سداد ينتظر فواتير متجرك: ${row.pos_receipt_ref}`,
+                  `${row.customer_name ?? 'زبون'} — ${silaErrorAdvice(code)}`,
+                  {system: true},
+                );
+              } else {
+                await SilaRepo.markPaymentRetry(row.local_id);
+                transientFailure = true;
               }
               continue;
             }

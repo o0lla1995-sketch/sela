@@ -24,6 +24,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -67,12 +68,18 @@ import {
   scanBarcode,
 } from '../../services/vision/scanFlow';
 import type {
+  ExchangeLineInput,
+  Product,
+  ProductUnit,
+  ProductVariant,
   ReturnLineInput,
   SaleItemRecord,
   SaleRecord,
   SaleReturnRecord,
   SilaDebtRow,
 } from '../../core/types';
+import {VariantRepo} from '../../database/repositories/VariantRepo';
+import {UnitRepo} from '../../database/repositories/UnitRepo';
 
 const PAGE_SIZE = 30;
 
@@ -1382,6 +1389,11 @@ function ReturnSheet({
   // Cash invoices choose how to refund; debt invoices always
   // reduce the debt (the goods come back, the customer owes less).
   const [refundMethod, setRefundMethod] = useState<'cash' | 'none'>('cash');
+  // v36: الاستبدال بقيمة المرجع — أصناف بديلة تخرج من المخزون بدل
+  // الإرجاع المالي. بلا أي أثر مالي: المرتجع يعود للمخزون والبديل
+  // يخرج منه؛ لا استرداد نقدي ولا خصم دين ولا عكس رفع لصلة.
+  const [exchangePicks, setExchangePicks] = useState<ExchangePick[]>([]);
+  const [exchangeOpen, setExchangeOpen] = useState(false);
 
   // Load the context every time the sheet opens.
   useEffect(() => {
@@ -1392,6 +1404,8 @@ function ReturnSheet({
     setError(null);
     setQuantities({});
     setRefundMethod('cash');
+    setExchangePicks([]);
+    setExchangeOpen(false);
     InvoiceService.prepareReturn(saleId)
       .then(prep => {
         setLines(prep.lines);
@@ -1430,8 +1444,22 @@ function ReturnSheet({
     line => (quantities[line.item.id] ?? 0) > 0,
   ).length;
 
+  // v36: الاستبدال — القيمة الحية للبضاعة البديلة.
+  const exchangeTotal = exchangePicks.reduce(
+    (sum, pick) => sum + pick.unitPrice * pick.quantity,
+    0,
+  );
+  const exchangeModeOn = exchangePicks.length > 0;
+
   // The debt action label — the merchant confirms the EXACT effect.
   const debtAction: string = (() => {
+    if (exchangeModeOn) {
+      return `استبدال بضاعة بلا أثر مالي — المرتجع يعود للمخزون والبديل (${
+        exchangePicks.length
+      } صنف بقيمة ${formatMoney(
+        exchangeTotal,
+      )}) يخرج منه. لا استرداد نقدي ولا خصم دين ولا عكس رفع لصلة`;
+    }
     if (book === 'sila') {
       if (debtState.kind === 'sila-synced') {
         return `يُخصم ${formatMoney(refundTotal)} من دين ${
@@ -1468,6 +1496,24 @@ function ReturnSheet({
     if (busy || refundTotal <= 0) {
       return;
     }
+    // v36: في وضع الاستبدال — قيمة البدائل لا تتجاوز قيمة المرتجع
+    // («الاستبدال بقيمتها»): الزيادة تُرفض برسالة واضحة.
+    if (exchangePicks.length > 0) {
+      if (exchangeTotal <= 0) {
+        toast('قيمة الاستبدال غير صالحة — راجع الأصناف البديلة', 'error');
+        return;
+      }
+      if (exchangeTotal > refundTotal + 0.0001) {
+        toast(
+          `قيمة الاستبدال (${formatMoney(exchangeTotal)}) أعلى من قيمة المرتجع (${formatMoney(
+            refundTotal,
+          )}) — راجع الأصناف البديلة أو كمياتها`,
+          'error',
+          6000,
+        );
+        return;
+      }
+    }
     setBusy(true);
     try {
       const payload: ReturnLineInput[] = lines
@@ -1491,6 +1537,23 @@ function ReturnSheet({
           variantColor: line.item.variant_color ?? null,
           variantLabel: line.item.variant_label ?? null,
         }));
+      // v36: أصناف الاستبدال (إن اختيرت) — تخرج من المخزون بدل
+      // الإرجاع المالي، بلا أثر مالي إطلاقاً.
+      const exchangePayload: ExchangeLineInput[] | undefined =
+        exchangePicks.length > 0
+          ? exchangePicks.map(pick => ({
+              productId: pick.productId,
+              productName: pick.name,
+              quantity: pick.quantity,
+              unitName: pick.unitName,
+              basePerUnit: pick.basePerUnit,
+              unitPrice: pick.unitPrice,
+              costPrice: pick.costPrice,
+              variantId: pick.variantId ?? null,
+              variantColor: pick.variantColor ?? null,
+              variantLabel: pick.variantLabel ?? null,
+            }))
+          : undefined;
       await InvoiceService.createReturn({
         saleId,
         lines: payload,
@@ -1509,8 +1572,14 @@ function ReturnSheet({
         onPrintError: message => {
           toast(`سُجّل المرتجع لكن الطباعة فشلت: ${message}`, 'error');
         },
+        exchange: exchangePayload,
       });
-      toast('سُجّل المرتجع وأُعيدت الكميات للمخزون', 'success');
+      toast(
+        exchangePayload != null
+          ? 'سُجّل الاستبدال — المرتجع عاد للمخزون والبديل خرج منه، بلا أثر مالي'
+          : 'سُجّل المرتجع وأُعيدت الكميات للمخزون',
+        'success',
+      );
       onDone();
     } catch (err) {
       toast(err instanceof Error ? err.message : 'فشل تسجيل المرتجع', 'error');
@@ -1520,6 +1589,8 @@ function ReturnSheet({
   }, [
     busy,
     refundTotal,
+    exchangePicks,
+    exchangeTotal,
     lines,
     quantities,
     book,
@@ -1665,7 +1736,68 @@ function ReturnSheet({
 
             {/* ── The live summary + the debt action ── */}
             <View style={retStyles(c).summaryBox}>
-              {book === 'cash' ? (
+              {/* v36: الاستبدال بقيمة المرجع — زر فتح نافذة الاختيار. */}
+              {refundTotal > 0 ? (
+                <TouchableOpacity
+                  style={[
+                    retStyles(c).exchangeBtn,
+                    exchangeModeOn ? {borderColor: c.accent} : null,
+                  ]}
+                  onPress={() => setExchangeOpen(true)}
+                  disabled={busy}>
+                  <Icon name="swap" size={16} color={c.accent} />
+                  <View style={{flex: 1}}>
+                    <Text style={retStyles(c).exchangeBtnTitle}>
+                      الاستبدال بقيمة المرجع
+                    </Text>
+                    <Text style={retStyles(c).exchangeBtnSub}>
+                      {exchangeModeOn
+                        ? `${exchangePicks.length} صنف بقيمة ${formatMoney(exchangeTotal)} — انقر للتعديل`
+                        : 'أخذ بضاعة أخرى بدل المرتجع — يفتح نافذة بحث ومسح باركود. لا أثر مالي؛ فقط المخزون'}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              ) : null}
+              {exchangeModeOn ? (
+                <View style={retStyles(c).exchangeList}>
+                  {exchangePicks.map(pick => (
+                    <View key={pick.key} style={retStyles(c).exchangeRow}>
+                      <View style={{flex: 1}}>
+                        <Text style={retStyles(c).exchangeRowName} numberOfLines={1}>
+                          {pick.name}
+                          {pick.variantLabel ? ` (${pick.variantLabel})` : ''}
+                          {pick.unitName && pick.unitName !== 'قطعة'
+                            ? ` · ${pick.unitName}`
+                            : ''}
+                        </Text>
+                        <Text style={retStyles(c).exchangeRowMeta}>
+                          {formatQty(pick.quantity)} × {formatMoney(pick.unitPrice)} ={' '}
+                          {formatMoney(pick.unitPrice * pick.quantity)}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={retStyles(c).exchangeRemove}
+                        onPress={() =>
+                          setExchangePicks(prev =>
+                            prev.filter(x => x.key !== pick.key),
+                          )
+                        }
+                        disabled={busy}>
+                        <Icon name="x" size={13} color={c.danger} />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                  <TouchableOpacity
+                    style={retStyles(c).exchangeClear}
+                    onPress={() => setExchangePicks([])}
+                    disabled={busy}>
+                    <Text style={retStyles(c).exchangeClearText}>
+                      إلغاء الاستبدال — العودة للإرجاع المالي
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+              {book === 'cash' && !exchangeModeOn ? (
                 <View style={retStyles(c).methodRow}>
                   <TouchableOpacity
                     style={[
@@ -1715,15 +1847,42 @@ function ReturnSheet({
               ) : null}
               <View style={retStyles(c).totalRow}>
                 <Text style={retStyles(c).totalLabel}>
-                  إجمالي قيمة المرتجع ({pickedCount} صنف)
+                  {exchangeModeOn
+                    ? `قيمة المرتجع (${pickedCount} صنف)`
+                    : `إجمالي قيمة المرتجع (${pickedCount} صنف)`}
                 </Text>
                 <Text style={retStyles(c).totalValue}>
                   {formatMoney(refundTotal)}
                 </Text>
               </View>
+              {exchangeModeOn ? (
+                <>
+                  <View style={retStyles(c).totalRow}>
+                    <Text
+                      style={[
+                        retStyles(c).totalLabel,
+                        {color: c.accent},
+                      ]}>
+                      قيمة الاستبدال ({exchangePicks.length} صنف)
+                    </Text>
+                    <Text
+                      style={[
+                        retStyles(c).totalValue,
+                        {color: c.accent},
+                      ]}>
+                      {formatMoney(exchangeTotal)}
+                    </Text>
+                  </View>
+                  <Text style={retStyles(c).exchangeBalanced}>
+                    {exchangeTotal > refundTotal + 0.0001
+                      ? 'قيمة الاستبدال أعلى من قيمة المرتجع — قلّل الكميات أو الأصناف قبل التأكيد'
+                      : 'الفرق لصالح المتجر — لا يُسترد ولا يُخصم شيء: استبدال بضاعة فقط'}
+                  </Text>
+                </>
+              ) : null}
               <AppButton
-                title="تأكيد الإرجاع"
-                icon="undo"
+                title={exchangeModeOn ? 'تأكيد الاستبدال' : 'تأكيد الإرجاع'}
+                icon={exchangeModeOn ? 'swap' : 'undo'}
                 onPress={() => void confirm()}
                 loading={busy}
                 disabled={refundTotal <= 0 || pickedCount === 0}
@@ -1738,13 +1897,876 @@ function ReturnSheet({
         )}
         </Pressable>
       </View>
+      {/* v36: نافذة الاستبدال — طبقة فوق نافذة الإرجاع (نفس درس
+          الروم: بلا Modal أبداً — inline overlay). */}
+      {exchangeOpen ? (
+        <ExchangeSheet
+          refundTotal={refundTotal}
+          picks={exchangePicks}
+          onAdd={pick =>
+            setExchangePicks(prev => {
+              const existing = prev.find(x => x.key === pick.key);
+              if (existing != null) {
+                return prev.map(x =>
+                  x.key === pick.key ? {...x, ...pick} : x,
+                );
+              }
+              return [...prev, pick];
+            })
+          }
+          onRemove={key =>
+            setExchangePicks(prev => prev.filter(x => x.key !== key))
+          }
+          onClear={() => setExchangePicks([])}
+          onClose={() => setExchangeOpen(false)}
+        />
+      ) : null}
     </View>
   );
+}
+
+/** v36: صنف استبدال مختار في النافذة (قبل التنفيذ). */
+interface ExchangePick {
+  /** مفتاح فريد: منتج:وحدة:متغير. */
+  key: string;
+  productId: number;
+  name: string;
+  quantity: number;
+  unitName: string | null;
+  basePerUnit: number;
+  unitPrice: number;
+  costPrice: number;
+  variantId?: number | null;
+  variantColor?: string | null;
+  variantLabel?: string | null;
+}
+
+
+/**
+ * v36: ExchangeSheet — نافذة «الاستبدال بقيمة المرجع».
+ * ─────────────────────────────────────────────────────────────────
+ * بحث بالاسم + قارئ باركود → اختيار منتج → خياراته (الكمية،
+ * الوحدة، المتغير لون×مقاس/حجم) → «أضف إلى الاستبدال» — يُوضع في
+ * سلة الاستبدال بدل المنتجات المرتجعة. العملية كلها بلا أثر مالي:
+ * فقط المخزون (المرتجع يعود عند التنفيذ والبديل يخرج).
+ * Inline overlay — NEVER a RN Modal (نفس درس هذا الروم).
+ */
+function ExchangeSheet({
+  refundTotal,
+  picks,
+  onAdd,
+  onRemove,
+  onClear,
+  onClose,
+}: {
+  refundTotal: number;
+  picks: ExchangePick[];
+  onAdd: (pick: ExchangePick) => void;
+  onRemove: (key: string) => void;
+  onClear: () => void;
+  onClose: () => void;
+}) {
+  const c = useThemeColors();
+  const toast = useToastStore(state => state.show);
+  const [search, setSearch] = useState('');
+  const [results, setResults] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  // الخيارات الحية للمنتج المفتوح (productId → الاختيار).
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [openUnits, setOpenUnits] = useState<ProductUnit[]>([]);
+  const [openVariants, setOpenVariants] = useState<ProductVariant[]>([]);
+  const [chosenUnitId, setChosenUnitId] = useState<number | null>(null);
+  const [chosenVariantId, setChosenVariantId] = useState<number | null>(null);
+  const [qtyText, setQtyText] = useState('1');
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedAt = useRef(Date.now());
+
+  const load = useCallback(async (q: string) => {
+    setLoading(true);
+    try {
+      const rows = await ProductRepo.list({
+        search: q.trim().length > 0 ? q.trim() : undefined,
+        archival: 'active',
+      });
+      setResults(rows.slice(0, 80));
+    } catch {
+      setResults([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load('');
+  }, [load]);
+
+  useEffect(() => {
+    if (searchTimer.current != null) {
+      clearTimeout(searchTimer.current);
+    }
+    searchTimer.current = setTimeout(() => void load(search), 250);
+    return () => {
+      if (searchTimer.current != null) {
+        clearTimeout(searchTimer.current);
+      }
+    };
+  }, [search, load]);
+
+  const doScan = useCallback(async () => {
+    if (scanning) {
+      return;
+    }
+    setScanning(true);
+    try {
+      const permission = await ensureCameraPermission();
+      if (permission !== 'granted') {
+        toast(cameraPermissionMessage(permission), 'error');
+        return;
+      }
+      const code = await scanBarcode();
+      if (code == null) {
+        return;
+      }
+      const hit =
+        (await ProductRepo.findByBarcode(code.trim())) ?? null;
+      if (hit == null) {
+        // جرّب باركودات الوحدات (كرتونة/علبة…).
+        const byUnit = await UnitRepo.findByBarcode(code.trim());
+        if (byUnit != null) {
+          const unitProduct = await ProductRepo.getById(byUnit.productId);
+          if (unitProduct != null) {
+            setSearch(unitProduct.name);
+            void openProduct(byUnit.productId, byUnit.productUnit?.id ?? null);
+          }
+          return;
+        }
+        toast('لا منتج بهذا الباركود — ابحث بالاسم', 'error');
+        return;
+      }
+      setSearch(hit.name);
+      void openProduct(hit.id, null);
+    } finally {
+      setScanning(false);
+    }
+  }, [scanning, toast]);
+
+  /** فتح منتج بخياراته — تحميل وحداته ومتغيراته ثم اختيار افتراضي. */
+  const openProduct = useCallback(
+    async (productId: number, preferUnitId: number | null) => {
+      const product = results.find(x => x.id === productId)
+        ?? (await ProductRepo.getById(productId));
+      if (product == null) {
+        toast('المنتج غير موجود', 'error');
+        return;
+      }
+      const units = await UnitRepo.listForProduct(productId);
+      const variants = await VariantRepo.listByProduct(productId);
+      setOpenId(productId);
+      setOpenUnits(units);
+      setOpenVariants(variants);
+      setChosenUnitId(
+        preferUnitId ??
+          (units.length > 0 ? units[0].id : null),
+      );
+      setChosenVariantId(
+        variants.length > 0 ? variants[0].id : null,
+      );
+      setQtyText(
+        Number(product.sold_by_weight) === 1 ? '1' : '1',
+      );
+    },
+    [results, toast],
+  );
+
+  const closeProduct = useCallback(() => {
+    setOpenId(null);
+    setChosenUnitId(null);
+    setChosenVariantId(null);
+    setQtyText('1');
+  }, []);
+
+  const openProductRow = results.find(x => x.id === openId) ?? null;
+  const openUnit =
+    openUnits.find(u => u.id === chosenUnitId) ?? null;
+  const openVariant =
+    openVariants.find(v => v.id === chosenVariantId) ?? null;
+
+  // السعر الحي: متغير الحجم (مطعم) له سعره؛ وإلا سعر الوحدة
+  // (بما يعادلها من سعر الأساس) أو سعر الأساس نفسه.
+  const liveUnitPrice: number = (() => {
+    if (openProductRow == null) {
+      return 0;
+    }
+    if (openVariant != null && openVariant.retail_price != null) {
+      return openVariant.retail_price;
+    }
+    if (openUnit != null) {
+      const override = openUnit.retail_price;
+      if (override != null && override > 0) {
+        return override;
+      }
+      return openProductRow.retail_price * openUnit.conversion;
+    }
+    return openProductRow.retail_price;
+  })();
+  const liveBasePerUnit = openUnit != null ? openUnit.conversion : 1;
+  const liveCost: number = (() => {
+    if (openProductRow == null) {
+      return 0;
+    }
+    if (openVariant != null && openVariant.cost_price != null) {
+      return openVariant.cost_price;
+    }
+    if (openUnit != null) {
+      return openProductRow.cost_price * openUnit.conversion;
+    }
+    return openProductRow.cost_price;
+  })();
+
+  const qtyNum = Number(qtyText.replace(',', '.'));
+  const qtyValid =
+    Number.isFinite(qtyNum) && qtyNum > 0;
+
+  const variantStock = openVariant != null
+    ? openVariant.stock_quantity
+    : null;
+  const productStock =
+    openProductRow != null &&
+    Number(openProductRow.stock_untracked) !== 1
+      ? openProductRow.stock_quantity
+      : null;
+
+  const addCurrent = useCallback(() => {
+    if (openProductRow == null || !qtyValid) {
+      return;
+    }
+    const label = openVariant != null
+      ? `${openVariant.color ? openVariant.color + ' · ' : ''}${openVariant.size}`
+      : null;
+    const unitName = openUnit != null ? openUnit.unitName : null;
+    const pick: ExchangePick = {
+      key: `${openProductRow.id}:${chosenUnitId ?? 0}:${chosenVariantId ?? 0}`,
+      productId: openProductRow.id,
+      name: openProductRow.name,
+      quantity: qtyNum,
+      unitName,
+      basePerUnit: liveBasePerUnit,
+      unitPrice: liveUnitPrice,
+      costPrice: liveCost,
+      variantId: chosenVariantId,
+      variantColor: openVariant?.color ?? null,
+      variantLabel: label,
+    };
+    onAdd(pick);
+    toast(
+      `أُضيف للاستبدال: ${pick.name}${
+        label ? ` (${label})` : ''
+      } — ${formatQty(qtyNum)} × ${formatMoney(liveUnitPrice)}`,
+      'success',
+    );
+    closeProduct();
+  }, [
+    openProductRow,
+    openVariant,
+    openUnit,
+    chosenUnitId,
+    chosenVariantId,
+    qtyValid,
+    qtyNum,
+    liveUnitPrice,
+    liveBasePerUnit,
+    liveCost,
+    onAdd,
+    toast,
+    closeProduct,
+  ]);
+
+  // hardware back closes (guarded like ReturnSheet).
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (Date.now() - mountedAt.current >= 400) {
+        if (openId != null) {
+          closeProduct();
+        } else {
+          onClose();
+        }
+      }
+      return true;
+    });
+    return () => sub.remove();
+  }, [openId, closeProduct, onClose]);
+
+  const picksTotal = picks.reduce(
+    (sum, pick) => sum + pick.unitPrice * pick.quantity,
+    0,
+  );
+
+  const sheetHeight = Math.round(Dimensions.get('window').height * 0.88);
+
+  return (
+    <View style={excStyles(c).backdrop}>
+      <Pressable
+        style={{flex: 1}}
+        onPress={() => {
+          if (Date.now() - mountedAt.current >= 400) {
+            onClose();
+          }
+        }}
+      />
+      <View style={[excStyles(c).sheet, {height: sheetHeight}]}>
+        <View style={excStyles(c).head}>
+          <View style={excStyles(c).headIcon}>
+            <Icon name="swap" size={20} color={c.accent} />
+          </View>
+          <View style={{flex: 1}}>
+            <Text style={excStyles(c).headTitle}>
+              الاستبدال بقيمة المرجع
+            </Text>
+            <Text style={excStyles(c).headSub}>
+              اختر البضاعة البديلة — تخرج من المخزن بدل المرتجع، بلا أثر مالي
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={onClose}
+            style={excStyles(c).closeBtn}>
+            <Icon name="x" size={16} color={c.textDim} />
+          </TouchableOpacity>
+        </View>
+
+        {/* البحث + المسح */}
+        <View style={excStyles(c).searchRow}>
+          <TextInput
+            style={excStyles(c).searchInput}
+            value={search}
+            onChangeText={setSearch}
+            placeholder="ابحث بالاسم أو امسح الباركود…"
+            placeholderTextColor={c.textFaint}
+            autoCorrect={false}
+          />
+          <TouchableOpacity
+            style={excStyles(c).scanBtn}
+            onPress={() => void doScan()}
+            disabled={scanning || loading}>
+            {scanning ? (
+              <ActivityIndicator size="small" color={c.onAccent} />
+            ) : (
+              <Icon name="scan" size={18} color={c.onAccent} />
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {/* المنتج المفتوح بخياراته */}
+        {openProductRow != null ? (
+          <View style={excStyles(c).optionBox}>
+            <View style={excStyles(c).optionHead}>
+              <View style={{flex: 1}}>
+                <Text style={excStyles(c).optionName} numberOfLines={1}>
+                  {openProductRow.name}
+                </Text>
+                <Text style={excStyles(c).optionMeta}>
+                  {productStock != null
+                    ? `المتوفر: ${formatQty(productStock)}`
+                    : 'مخزون بلا تتبع'}
+                  {variantStock != null
+                    ? ` · مخزون المتغير: ${formatQty(variantStock)}`
+                    : ''}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={closeProduct} style={excStyles(c).closeBtn}>
+                <Icon name="x" size={14} color={c.textDim} />
+              </TouchableOpacity>
+            </View>
+            {openVariants.length > 0 ? (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={excStyles(c).chipRow}>
+                {openVariants.map(v => {
+                  const active = v.id === chosenVariantId;
+                  return (
+                    <TouchableOpacity
+                      key={v.id}
+                      style={[
+                        excStyles(c).chip,
+                        active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+                      ]}
+                      onPress={() => setChosenVariantId(v.id)}>
+                      <Text
+                        style={[
+                          excStyles(c).chipText,
+                          active ? {color: c.onAccent} : null,
+                        ]}>
+                        {v.color ? `${v.color} · ` : ''}
+                        {v.size} ({formatQty(v.stock_quantity)})
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            ) : null}
+            {openUnits.length > 0 ? (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={excStyles(c).chipRow}>
+                {openUnits.map(u => {
+                  const active = u.id === chosenUnitId;
+                  const price =
+                    u.retail_price != null && u.retail_price > 0
+                      ? u.retail_price
+                      : openProductRow.retail_price * u.conversion;
+                  return (
+                    <TouchableOpacity
+                      key={u.id}
+                      style={[
+                        excStyles(c).chip,
+                        active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+                      ]}
+                      onPress={() => setChosenUnitId(u.id)}>
+                      <Text
+                        style={[
+                          excStyles(c).chipText,
+                          active ? {color: c.onAccent} : null,
+                        ]}>
+                        {u.unitName} — {formatMoney(price)}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            ) : null}
+            <View style={excStyles(c).qtyRow}>
+              <Text style={excStyles(c).qtyLabel}>الكمية</Text>
+              <TextInput
+                style={excStyles(c).qtyInput}
+                value={qtyText}
+                onChangeText={t =>
+                  setQtyText(t.replace(',', '.').replace(/[^\d.]/g, ''))
+                }
+                keyboardType="decimal-pad"
+                autoCorrect={false}
+              />
+              <Text style={excStyles(c).qtyTotal}>
+                {qtyValid
+                  ? `${formatQty(qtyNum)} × ${formatMoney(liveUnitPrice)} = ${formatMoney(
+                      liveUnitPrice * qtyNum,
+                    )}`
+                  : '—'}
+              </Text>
+            </View>
+            <AppButton
+              title="أضف إلى الاستبدال"
+              icon="plus"
+              variant="success"
+              onPress={addCurrent}
+              disabled={!qtyValid || liveUnitPrice <= 0}
+            />
+          </View>
+        ) : null}
+
+        {/* نتائج البحث */}
+        <ScrollView
+          style={{flex: 1}}
+          contentContainerStyle={excStyles(c).list}
+          showsVerticalScrollIndicator={false}>
+          {loading ? (
+            <View style={excStyles(c).centerBox}>
+              <ActivityIndicator size="large" color={c.accent} />
+            </View>
+          ) : results.length === 0 ? (
+            <View style={excStyles(c).centerBox}>
+              <Text style={excStyles(c).emptyText}>
+                لا نتائج — جرّب بحثاً آخر أو امسح الباركود
+              </Text>
+            </View>
+          ) : (
+            results.map(product => {
+              const price = product.retail_price;
+              return (
+                <TouchableOpacity
+                  key={product.id}
+                  style={excStyles(c).productRow}
+                  onPress={() => void openProduct(product.id, null)}>
+                  <View style={{flex: 1}}>
+                    <Text style={excStyles(c).productName} numberOfLines={1}>
+                      {product.name}
+                    </Text>
+                    <Text style={excStyles(c).productMeta}>
+                      {formatMoney(price)}
+                      {Number(product.stock_untracked) === 1
+                        ? ' · بلا تتبع مخزون'
+                        : ` · متوفر ${formatQty(product.stock_quantity)}`}
+                    </Text>
+                  </View>
+                  <Icon name="chevronLeft" size={16} color={c.textFaint} />
+                </TouchableOpacity>
+              );
+            })
+          )}
+        </ScrollView>
+
+        {/* سلة الاستبدال + الخلاصة */}
+        {picks.length > 0 ? (
+          <View style={excStyles(c).cartBox}>
+            <View style={excStyles(c).cartHead}>
+              <Text style={excStyles(c).cartTitle}>
+                سلة الاستبدال ({picks.length})
+              </Text>
+              <TouchableOpacity onPress={onClear}>
+                <Text style={excStyles(c).cartClear}>تفريغ</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              style={{maxHeight: 110}}
+              showsVerticalScrollIndicator={false}>
+              {picks.map(pick => (
+                <View key={pick.key} style={excStyles(c).cartRow}>
+                  <View style={{flex: 1}}>
+                    <Text style={excStyles(c).cartRowName} numberOfLines={1}>
+                      {pick.name}
+                      {pick.variantLabel ? ` (${pick.variantLabel})` : ''}
+                      {pick.unitName && pick.unitName !== 'قطعة'
+                        ? ` · ${pick.unitName}`
+                        : ''}
+                    </Text>
+                    <Text style={excStyles(c).cartRowMeta}>
+                      {formatQty(pick.quantity)} × {formatMoney(pick.unitPrice)} ={' '}
+                      {formatMoney(pick.unitPrice * pick.quantity)}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={excStyles(c).exchangeRemove}
+                    onPress={() => onRemove(pick.key)}>
+                    <Icon name="x" size={13} color={c.danger} />
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+            <View style={excStyles(c).balanceRow}>
+              <Text style={excStyles(c).balanceText}>
+                قيمة المرتجع: {formatMoney(refundTotal)} · قيمة الاستبدال:{' '}
+                <Text
+                  style={[
+                    excStyles(c).balanceText,
+                    picksTotal > refundTotal + 0.0001
+                      ? {color: c.danger, fontWeight: '700'}
+                      : {color: c.success, fontWeight: '700'},
+                  ]}>
+                  {formatMoney(picksTotal)}
+                </Text>
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        <View style={excStyles(c).actions}>
+          <AppButton
+            title="تم — عودة للمرتجع"
+            variant="primary"
+            icon="check"
+            onPress={onClose}
+          />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/** The ExchangeSheet's own styles (v36). */
+function excStyles(c: ReturnType<typeof useThemeColors>) {
+  return StyleSheet.create({
+    backdrop: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+    },
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: 24,
+      borderTopRightRadius: 24,
+      overflow: 'hidden',
+    },
+    head: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      padding: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border,
+    },
+    headIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.surfaceAlt,
+    },
+    headTitle: {
+      fontFamily: fonts.bold,
+      fontSize: 15,
+      color: c.text,
+    },
+    headSub: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      marginTop: 2,
+    },
+    closeBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.surfaceAlt,
+    },
+    searchRow: {
+      flexDirection: 'row',
+      gap: 8,
+      padding: 12,
+    },
+    searchInput: {
+      flex: 1,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      fontFamily: fonts.regular,
+      fontSize: 13,
+      color: c.text,
+      backgroundColor: c.surfaceAlt,
+    },
+    scanBtn: {
+      width: 44,
+      borderRadius: radius.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.accent,
+    },
+    optionBox: {
+      marginHorizontal: 12,
+      marginBottom: 8,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      padding: 12,
+      backgroundColor: c.surfaceAlt,
+      gap: 8,
+    },
+    optionHead: {flexDirection: 'row', alignItems: 'center', gap: 8},
+    optionName: {
+      fontFamily: fonts.bold,
+      fontSize: 14,
+      color: c.text,
+    },
+    optionMeta: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      marginTop: 2,
+    },
+    chipRow: {flexDirection: 'row', gap: 6, paddingVertical: 2},
+    chip: {
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      backgroundColor: c.surfaceHi,
+    },
+    chipText: {
+      fontFamily: fonts.medium,
+      fontSize: 11.5,
+      color: c.text,
+    },
+    qtyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    qtyLabel: {
+      fontFamily: fonts.medium,
+      fontSize: 12.5,
+      color: c.textDim,
+    },
+    qtyInput: {
+      width: 90,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      fontFamily: fonts.bold,
+      fontSize: 14,
+      color: c.text,
+      backgroundColor: c.surfaceHi,
+      textAlign: 'center',
+    },
+    qtyTotal: {
+      flex: 1,
+      fontFamily: fonts.medium,
+      fontSize: 12,
+      color: c.text,
+      textAlign: 'left',
+    },
+    list: {paddingHorizontal: 12, paddingVertical: 4},
+    centerBox: {alignItems: 'center', justifyContent: 'center', padding: 24},
+    emptyText: {
+      fontFamily: fonts.regular,
+      fontSize: 12.5,
+      color: c.textDim,
+      textAlign: 'center',
+    },
+    productRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      padding: 10,
+      marginBottom: 6,
+      backgroundColor: c.surfaceAlt,
+    },
+    productName: {
+      fontFamily: fonts.medium,
+      fontSize: 13,
+      color: c.text,
+    },
+    productMeta: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      marginTop: 2,
+    },
+    cartBox: {
+      margin: 12,
+      marginTop: 4,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      padding: 10,
+      backgroundColor: c.surfaceAlt,
+    },
+    cartHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 6,
+    },
+    cartTitle: {
+      fontFamily: fonts.bold,
+      fontSize: 13,
+      color: c.text,
+    },
+    cartClear: {fontFamily: fonts.medium, fontSize: 12, color: c.danger},
+    cartRow: {flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4},
+    cartRowName: {
+      fontFamily: fonts.medium,
+      fontSize: 12.5,
+      color: c.text,
+    },
+    cartRowMeta: {
+      fontFamily: fonts.regular,
+      fontSize: 11,
+      color: c.textDim,
+      marginTop: 1,
+    },
+    exchangeRemove: {
+      width: 28,
+      height: 28,
+      borderRadius: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.surfaceHi,
+    },
+    balanceRow: {marginTop: 8, alignItems: 'center'},
+    balanceText: {
+      fontFamily: fonts.regular,
+      fontSize: 12,
+      color: c.textDim,
+      textAlign: 'center',
+    },
+    actions: {padding: 12, paddingTop: 4},
+  });
 }
 
 /** The ReturnSheet's own styles (kept separate from the screen's). */
 function retStyles(c: ReturnType<typeof useThemeColors>) {
   return StyleSheet.create({
+    // v36: زر الاستبدال وقائمة الأصناف البديلة داخل نافذة الإرجاع.
+    exchangeBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      padding: 12,
+      backgroundColor: c.surfaceAlt,
+      marginBottom: 10,
+    },
+    exchangeBtnTitle: {
+      fontFamily: fonts.bold,
+      fontSize: 14,
+      color: c.text,
+    },
+    exchangeBtnSub: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      marginTop: 2,
+    },
+    exchangeList: {
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.lg,
+      padding: 10,
+      marginBottom: 10,
+      gap: 6,
+    },
+    exchangeRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    exchangeRowName: {
+      fontFamily: fonts.medium,
+      fontSize: 13,
+      color: c.text,
+    },
+    exchangeRowMeta: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      marginTop: 1,
+    },
+    exchangeRemove: {
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.surfaceHi,
+    },
+    exchangeClear: {alignItems: 'center', paddingVertical: 6},
+    exchangeClearText: {
+      fontFamily: fonts.medium,
+      fontSize: 12,
+      color: c.danger,
+    },
+    exchangeBalanced: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      textAlign: 'center',
+      marginBottom: 6,
+    },
     backdrop: {
       position: 'absolute',
       top: 0,

@@ -169,6 +169,9 @@ export function silaErrorAdvice(code: string): string {
     case 'AMOUNT_INVALID':
     case 'AMOUNT_EXCEEDS_LIMIT':
       return 'المبلغ غير مقبول — راجع الفاتورة';
+    case 'AMOUNT_EXCEEDS_DEVICE_DEBT':
+      return 'المبلغ أكبر من دين هذا الزبون لدى متجرك أنت (فواتير متجرك) — '
+        + 'كاشير متجرك يحصّل ديون متجرك فقط؛ إن كانت لديك فواتير دين لم تُرفع بعد فانتظر المزامنة ثم أعد المحاولة';
     case 'DUPLICATE_INVOICE_REF':
       return 'هذه الفاتورة مسجلة ديناً مسبقاً — لا يمكن تكرارها';
     case 'DUPLICATE_RECEIPT_REF':

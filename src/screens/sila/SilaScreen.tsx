@@ -561,7 +561,7 @@ export function SilaScreen() {
     [payBusy, paySheet, reload, toast],
   );
 
-  const confirmPayment = useCallback(() => {
+  const confirmPayment = useCallback(async () => {
     const customer = paySheet;
     if (customer == null) {
       return;
@@ -588,7 +588,18 @@ export function SilaScreen() {
       customer.device_outstanding_minor > 0
         ? customer.device_outstanding_minor
         : Math.max(0, customer.pos_outstanding_minor);
-    const storeDebtMinor = Math.min(ownMinor, serverCapMinor);
+    // v36 (0078): فواتير دين هذا المتجر التي لم تصل الخادم بعد
+    // (pending/syncing) تُضاف إلى سقف الخادم — الخادم لا يعرفها
+    // فيرصد إيصالها مؤقتاً (AMOUNT_EXCEEDS_DEVICE_DEBT يعود للطابور
+    // ويُقبل من تلقاء نفسه فور وصولها)؛ بدونها كان السقف يمنع
+    // الكاشير من تحصيل دين تعرفه دفاتره فقط لأن الرفع تأخر.
+    const pendingUnsyncedMinor = await SilaRepo.pendingUnsyncedOwnDebtMinor(
+      customer.customer_id,
+    );
+    const storeDebtMinor = Math.min(
+      ownMinor,
+      serverCapMinor + pendingUnsyncedMinor,
+    );
     if (amountMinor > storeDebtMinor) {
       toast(
         `المبلغ أكبر من دين متجرك (${formatMoney(
@@ -599,7 +610,7 @@ export function SilaScreen() {
       );
       return;
     }
-    void doConfirmPayment(amount);
+    await doConfirmPayment(amount);
   }, [
     doConfirmPayment,
     parsePayAmount,

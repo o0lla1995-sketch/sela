@@ -10,11 +10,13 @@ import {getDb, toMessage} from '../connection';
 import {localNow} from '../../core/format';
 import type {
   CartLine,
+  ExchangeLineInput,
   PricingMode,
   ReturnBook,
   ReturnLineInput,
   SaleItemRecord,
   SaleRecord,
+  SaleReturnExchange,
   SaleReturnItem,
   SaleReturnRecord,
   SaleWithItems,
@@ -111,6 +113,8 @@ function rowToReturn(row: Record<string, unknown>): SaleReturnRecord {
     refund_method: String(row.refund_method ?? 'none') as 'none' | 'cash',
     refund_minor: Number(row.refund_minor ?? 0),
     debt_adjusted_minor: Number(row.debt_adjusted_minor ?? 0),
+    is_exchange: Number(row.is_exchange ?? 0) === 1 ? 1 : 0,
+    exchange_minor: Number(row.exchange_minor ?? 0),
     note: row.note == null ? null : String(row.note),
     created_at: String(row.created_at ?? ''),
   };
@@ -130,6 +134,28 @@ function rowToReturnItem(row: Record<string, unknown>): SaleReturnItem {
     unit_price: Number(row.unit_price ?? 0),
     line_total: Number(row.line_total ?? 0),
     cost_price: Number(row.cost_price ?? 0),
+  };
+}
+
+/** v36: صورة صنف استبدال محفوظ — بضاعة خرجت من المخزون مقابل
+ *  مرتجع، بلا أثر مالي. */
+function rowToExchange(row: Record<string, unknown>): SaleReturnExchange {
+  return {
+    id: Number(row.id),
+    return_id: Number(row.return_id),
+    product_id: Number(row.product_id),
+    product_name: String(row.product_name ?? ''),
+    quantity: Number(row.quantity ?? 0),
+    unit_name: row.unit_name == null ? null : String(row.unit_name),
+    base_quantity: Number(row.base_quantity ?? 0),
+    unit_price: Number(row.unit_price ?? 0),
+    line_total: Number(row.line_total ?? 0),
+    cost_price: Number(row.cost_price ?? 0),
+    variant_id: row.variant_id == null ? null : Number(row.variant_id),
+    variant_color:
+      row.variant_color == null ? null : String(row.variant_color),
+    variant_label:
+      row.variant_label == null ? null : String(row.variant_label),
   };
 }
 
@@ -408,6 +434,17 @@ export const SaleRepo = {
     }
   },
 
+  /** v36: صور أصناف الاستبدال لإشعار مرتجع معين (للطباعة والعروض). */
+  async returnExchanges(returnId: number): Promise<SaleReturnExchange[]> {
+    const result = await getDb().execute(
+      'SELECT * FROM sale_return_exchanges WHERE return_id = ? ORDER BY id ASC',
+      [returnId],
+    );
+    return (result.rows?._array ?? []).map(row =>
+      rowToExchange(row as Record<string, unknown>),
+    );
+  },
+
   /** v23 (round-29 #2): creates a RETURN — one atomic transaction:
    *   1. a NEGATIVE RET-… invoice row (nets revenue/cogs/profit in
    *      every report automatically) + negative sale_items lines,
@@ -440,6 +477,11 @@ export const SaleRepo = {
     /** Pro-rata discount ratio of the original invoice (0..1]. */
     discountRatio: number;
     lines: ReturnLineInput[];
+    /** v36: الاستبدال بقيمة المرجع — بضاعة تخرج من المخزون بدل
+     *  الإرجاع المالي. موجودة وغير فارغة = وضع الاستبدال: لا أثر
+     *  مالي إطلاقاً (لا استرداد نقدي ولا خصم دين ولا عكس رفع لصلة)
+     *  — فقط المخزون: المرتجع يعود والبديل يخرج. */
+    exchange?: ExchangeLineInput[];
     /** sila reversal payload when the queue row is already synced. */
     silaReversal?: {
       customerId: string | null;
@@ -475,6 +517,25 @@ export const SaleRepo = {
     const totalCost = lineValues.reduce((sum, l) => sum + l.lineCost, 0);
     const createdAt = localNow();
 
+    // ── v36: حساب الاستبدال (إن وجد) ─────────────────────────
+    // قيمة البضاعة البديلة بأسعارها الحالية — للمقارنة بقيمة
+    // المرتجع وللسجل، لا تدخل أي تجميعة مالية (صف المرتجع نفسه
+    // يُقيَّد بأصفار مالية في وضع الاستبدال).
+    const exchangeMode = (input.exchange?.length ?? 0) > 0;
+    const exchangeValues = (input.exchange ?? []).map(line => ({
+      ...line,
+      lineTotal: line.unitPrice * line.quantity,
+      baseQty: line.quantity * line.basePerUnit,
+    }));
+    const exchangeValue = exchangeValues.reduce(
+      (sum, l) => sum + l.lineTotal,
+      0,
+    );
+    const exchangeMinor = Math.round(exchangeValue * 100);
+    if (exchangeMode && exchangeMinor <= 0) {
+      throw new Error('قيمة الاستبدال غير صالحة');
+    }
+
     let returnId = -1;
 
     await db.transaction(async tx => {
@@ -488,9 +549,11 @@ export const SaleRepo = {
          VALUES (?, ?, ?, ?, 0, 'RETAIL', ?, ?)`,
         [
           input.returnNumber,
-          -refundValue,
-          -totalCost,
-          -(refundValue - totalCost),
+          // v36: وضع الاستبدال = أصفار مالية كاملة — لا يتحرك
+          // إيراد ولا تكلفة ولا ربح ولا خزينة إطلاقاً؛ فقط المخزون.
+          exchangeMode ? 0 : -refundValue,
+          exchangeMode ? 0 : -totalCost,
+          exchangeMode ? 0 : -(refundValue - totalCost),
           createdAt,
           input.book,
         ],
@@ -568,17 +631,21 @@ export const SaleRepo = {
       }
 
       // 3) The return receipt + its line snapshots.
+      //    v36: وضع الاستبدال → refund_method 'none' قسراً (لا نقد)
+      //    + is_exchange=1 + exchange_minor؛ الدين لا يُمس إطلاقاً.
       const insertReturn = await tx.execute(
         `INSERT INTO sale_returns
-          (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, is_exchange, exchange_minor, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
         [
           input.returnNumber,
           input.saleId,
           input.invoiceRef,
           input.book,
-          input.refundMethod,
+          exchangeMode ? 'none' : input.refundMethod,
           refundMinor,
+          exchangeMode ? 1 : 0,
+          exchangeMode ? exchangeMinor : 0,
           input.note?.trim() || null,
           createdAt,
         ],
@@ -607,6 +674,94 @@ export const SaleRepo = {
         );
       }
 
+      // v36: صور أصناف الاستبدال + خصم مخزونها + سطرها الموجب في
+      // فاتورة المرتجع (الكميات فقط تعمل في الإحصاءات؛ القيم المالية
+      // للصف كله أصفار في وضع الاستبدال فلا يتحرك أي رقم مالي).
+      for (const line of exchangeValues) {
+        await tx.execute(
+          `INSERT INTO sale_return_exchanges
+            (return_id, product_id, product_name, quantity, unit_name, base_quantity, unit_price, line_total, cost_price, variant_id, variant_color, variant_label, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            returnId,
+            line.productId,
+            line.productName,
+            line.quantity,
+            line.unitName,
+            line.baseQty,
+            line.unitPrice,
+            line.lineTotal,
+            line.costPrice,
+            line.variantId ?? null,
+            line.variantColor ?? null,
+            (line.variantLabel ?? null),
+            createdAt,
+          ],
+        );
+        // سطر موجب في فاتورة المرتجع — «ما خرج بدلاً من المرتجع».
+        await tx.execute(
+          `INSERT INTO sale_items
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity, variant_label, variant_id, variant_color)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            retSaleId,
+            line.productId,
+            line.quantity,
+            line.unitPrice,
+            line.costPrice,
+            line.lineTotal,
+            line.unitName,
+            line.baseQty,
+            (line.variantLabel ?? null),
+            line.variantId ?? null,
+            line.variantColor ?? null,
+          ],
+        );
+        // خصم المخزون (وحدات الأساس) مع تحقق توفر واضح.
+        const prodRow = await tx.execute(
+          'SELECT stock_quantity, stock_untracked, has_variants FROM products WHERE id = ?',
+          [line.productId],
+        );
+        const prod = prodRow.rows?._array?.[0] as
+          | {stock_quantity?: number; stock_untracked?: number; has_variants?: number}
+          | undefined;
+        if (prod == null) {
+          throw new Error(`منتج الاستبدال «${line.productName}» غير موجود`);
+        }
+        const untrackedExchange = Number(prod.stock_untracked ?? 0) === 1;
+        if (!untrackedExchange) {
+          const available = Number(prod.stock_quantity ?? 0);
+          if (line.baseQty > available + 0.0001) {
+            throw new Error(
+              `مخزون «${line.productName}» لا يكفي للاستبدال — المتوفر ${available} والمطلوب ${line.baseQty}`,
+            );
+          }
+          await tx.execute(
+            'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?',
+            [line.baseQty, line.productId],
+          );
+        }
+        if (line.variantId != null) {
+          const vRow = await tx.execute(
+            'SELECT stock_quantity FROM product_variants WHERE id = ?',
+            [line.variantId],
+          );
+          const vStock = vRow.rows?._array?.[0] as
+            | {stock_quantity?: number}
+            | undefined;
+          const vAvail = Number(vStock?.stock_quantity ?? 0);
+          if (!untrackedExchange && line.baseQty > vAvail + 0.0001) {
+            throw new Error(
+              `مخزون متغير «${line.productName}» لا يكفي للاستبدال — المتوفر ${vAvail}`,
+            );
+          }
+          await tx.execute(
+            'UPDATE product_variants SET stock_quantity = stock_quantity - ? WHERE id = ?',
+            [line.baseQty, line.variantId],
+          );
+        }
+      }
+
       // 4) The original invoice's accumulator — «تعديل الفاتورة
       //    التي تم الإرجاع منها مع تمييزها».
       await tx.execute(
@@ -615,8 +770,11 @@ export const SaleRepo = {
       );
 
       // 5) The DEBT reversal — same transaction, no half states.
+      //    v36: في وضع الاستبدال لا يُمس أي دين إطلاقاً — لا خصم
+      //    من دفتر المتجر ولا تقليص طابور صلة ولا عكس رفع: البضاعة
+      //    بدّلت بضاعة، والعملية المالية كما هي.
       let debtAdjustedMinor = 0;
-      if (input.book === 'local') {
+      if (!exchangeMode && input.book === 'local') {
         // v26 (round-34 #2): local_debts.amount_minor carries
         // CHECK (amount_minor > 0) — the old blind
         // `SET amount_minor = MAX(0, amount_minor - ?)` CRASHED with
@@ -653,7 +811,7 @@ export const SaleRepo = {
             debtAdjustedMinor = refundMinor;
           }
         }
-      } else if (input.book === 'sila') {
+      } else if (!exchangeMode && input.book === 'sila') {
         if (input.silaReversal != null) {
           // Synced debt — the reverse operation: a payment upload
           // (kind 'return_reversal') reduces the customer's debt on

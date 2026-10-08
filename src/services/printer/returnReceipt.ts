@@ -11,7 +11,11 @@
 import {ReceiptBuilder} from './escpos';
 import {formatDateTime} from '../../core/format';
 import {APP_NAME, RECEIPT_WIDTH_58, RECEIPT_WIDTH_80} from '../../core/config';
-import type {SaleReturnItem, SaleReturnRecord} from '../../core/types';
+import type {
+  SaleReturnExchange,
+  SaleReturnItem,
+  SaleReturnRecord,
+} from '../../core/types';
 import type {ReceiptSettings} from './receipt';
 
 const LABELS = {
@@ -25,6 +29,11 @@ const LABELS = {
   localAdjusted: 'Store-book debt reduced',
   cashRefund: 'Cash refunded to customer',
   noRefund: 'Goods exchange - no refund',
+  // v36: الاستبدال بقيمة المرجع
+  exchangeTitle: 'EXCHANGED ITEMS (out of stock)',
+  exchangeTotal: 'Exchange Value',
+  exchangeNote:
+    'Goods exchange - no financial effect: returned back to stock, exchanged out. No cash, no debt change.',
   qty: 'Qty x Price = Amount',
   thanks: 'Thank You!',
 } as const;
@@ -32,6 +41,8 @@ const LABELS = {
 export interface ReturnReceiptData {
   ret: SaleReturnRecord;
   items: SaleReturnItem[];
+  /** v36: أصناف الاستبدال (إن كان إشعار استبدال). */
+  exchanges?: SaleReturnExchange[];
 }
 
 export function buildReturnReceiptJob(
@@ -84,19 +95,46 @@ export function buildReturnReceiptJob(
     b.qtyPriceLine(item.quantity, item.unit_price, item.line_total);
   }
 
+  // ── v36: أصناف الاستبدال — بضاعة خرجت بدل المرتجع ──
+  const exchanges = data.exchanges ?? [];
+  if (exchanges.length > 0) {
+    b.separator(width)
+      .bold(true)
+      .align(1)
+      .textLine(LABELS.exchangeTitle)
+      .bold(false)
+      .align(2);
+    for (const item of exchanges) {
+      const unitSuffix =
+        item.unit_name && item.unit_name !== 'قطعة'
+          ? ` (${item.unit_name})`
+          : '';
+      const label = item.variant_label
+        ? `${item.product_name} (${item.variant_label})${unitSuffix}`
+        : `${item.product_name}${unitSuffix}`;
+      b.truncate(label, width);
+      b.qtyPriceLine(item.quantity, item.unit_price, item.line_total);
+    }
+  }
+
   // ── Refund total + the debt adjustment ──
   b.separator(width)
     .bold(true)
     .size(1, 1)
     .twoColumns(
-      LABELS.refundTotal,
-      data.ret.refund_minor / 100,
+      exchanges.length > 0 ? LABELS.exchangeTotal : LABELS.refundTotal,
+      exchanges.length > 0
+        ? data.ret.exchange_minor / 100
+        : data.ret.refund_minor / 100,
       Math.max(width - 4, 16),
     )
     .size(0, 0)
     .bold(false);
 
-  if (data.ret.debt_adjusted_minor > 0) {
+  if (exchanges.length > 0) {
+    // v36: استبدال بضاعة — لا أثر مالي إطلاقاً.
+    b.align(2).textLine(LABELS.exchangeNote);
+  } else if (data.ret.debt_adjusted_minor > 0) {
     b.bold(true)
       .twoColumns(
         LABELS.debtAdjusted,

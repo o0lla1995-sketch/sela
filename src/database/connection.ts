@@ -177,10 +177,29 @@ const DDL_STATEMENTS: string[] = [
     line_total REAL NOT NULL,
     cost_price REAL NOT NULL DEFAULT 0
   )`,
+  // v36: الاستبدال بقيمة المرجع — بضاعة تخرج من المخزون مقابل
+  // المرتجع، بلا أي أثر مالي (لا نقد ولا دين) — فقط حركة مخزون.
+  `CREATE TABLE IF NOT EXISTS sale_return_exchanges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    return_id INTEGER NOT NULL REFERENCES sale_returns(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL,
+    product_name TEXT NOT NULL,
+    quantity REAL NOT NULL CHECK (quantity > 0),
+    unit_name TEXT,
+    base_quantity REAL NOT NULL CHECK (base_quantity > 0),
+    unit_price REAL NOT NULL,
+    line_total REAL NOT NULL,
+    cost_price REAL NOT NULL DEFAULT 0,
+    variant_id INTEGER,
+    variant_color TEXT,
+    variant_label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
   'CREATE INDEX IF NOT EXISTS idx_sale_returns_sale ON sale_returns(sale_id)',
   'CREATE INDEX IF NOT EXISTS idx_sale_returns_created ON sale_returns(created_at)',
   'CREATE INDEX IF NOT EXISTS idx_sri_return ON sale_return_items(return_id)',
   'CREATE INDEX IF NOT EXISTS idx_sri_sale_item ON sale_return_items(sale_item_id)',
+  'CREATE INDEX IF NOT EXISTS idx_srex_return ON sale_return_exchanges(return_id)',
   // v23.0.1 FIX: idx_sales_return_kind was created HERE — before
   // migrations — so upgrading any pre-v23 database (whose sales
   // table lacks return_kind until migration v15 ALTERs it in)
@@ -1435,6 +1454,52 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 20;
   }
 
+  if (version < 21) {
+    // ── v36: الاستبدال بقيمة المرجع في الإرجاع ─────────────────
+    // أعمدة إشعار المرتجع (is_exchange/exchange_minor) + جدول
+    // صور أصناف الاستبدال. بلا أي تغيير على السلوك القائم —
+    // القيم القديمة تعني «إرجاع مالي عادي».
+    const srCols: [string, string][] = [
+      ['is_exchange', 'INTEGER NOT NULL DEFAULT 0'],
+      ['exchange_minor', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+    for (const [column, ddl] of srCols) {
+      const check = await database.execute(
+        `SELECT COUNT(*) AS cnt FROM pragma_table_info('sale_returns') WHERE name = ?`,
+        [column],
+      );
+      const has = (check.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+      if (!has) {
+        await database.execute(
+          `ALTER TABLE sale_returns ADD COLUMN ${column} ${ddl}`,
+        );
+      }
+    }
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS sale_return_exchanges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        return_id INTEGER NOT NULL REFERENCES sale_returns(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL,
+        product_name TEXT NOT NULL,
+        quantity REAL NOT NULL CHECK (quantity > 0),
+        unit_name TEXT,
+        base_quantity REAL NOT NULL CHECK (base_quantity > 0),
+        unit_price REAL NOT NULL,
+        line_total REAL NOT NULL,
+        cost_price REAL NOT NULL DEFAULT 0,
+        variant_id INTEGER,
+        variant_color TEXT,
+        variant_label TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_srex_return ON sale_return_exchanges(return_id)',
+    );
+    logDiag('db', 'ترحيل v21: أعمدة الاستبدال وجدول صوره (الاستبدال بقيمة المرجع)');
+    version = 21;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -1511,6 +1576,7 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM stocktake_items');
   await database.execute('DELETE FROM stocktakes');
   await database.execute('DELETE FROM sale_return_items');
+  await database.execute('DELETE FROM sale_return_exchanges');
   await database.execute('DELETE FROM sale_returns');
   await database.execute('DELETE FROM sale_items');
   await database.execute('DELETE FROM sales');
@@ -1531,7 +1597,7 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM voucher_redemptions');
   await database.execute('DELETE FROM cash_movements');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements','cash_movements')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sale_return_exchanges','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements','cash_movements')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

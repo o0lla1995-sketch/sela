@@ -103,10 +103,14 @@ describe('v32 — ديون صِلة: تمييز هذا المتجر عن كل ا
     expect(src).toContain('من فواتير متاجرك الأخرى');
   });
 
-  test('زر السداد وسقفه من دفاتر المتجر مع حد أمان الخادم', () => {
+  test('زر السداد وسقفه من دفاتر المتجر مع حد أمان الخادم + ديون المتجر غير المرفوعة (v36/0078)', () => {
     const src = read(SILA);
     expect(src).toContain('{ownMinor > 0 ? (');
-    expect(src).toContain('Math.min(ownMinor, serverCapMinor)');
+    // v36 (0078): السقف = min(دفاتر المتجر, حد الخادم + فواتير دين
+    // المتجر التي لم تصل الخادم بعد) — الخادم سيرفض ما فواته حتى
+    // تصل فيعود الإيصال للطابور ويُقبل من تلقاء نفسه.
+    expect(src).toContain('serverCapMinor + pendingUnsyncedMinor');
+    expect(src).toContain('pendingUnsyncedOwnDebtMinor');
   });
 
   test('نظرة عامة: مؤشر الدين والمدينون من الدفاتر المحلية + بطاقة المتاجر الأخرى', () => {

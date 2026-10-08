@@ -838,6 +838,33 @@ export const SilaRepo = {
     }
   },
 
+  /** v36 (0078): ديون هذا المتجر التي لم تصل الخادم بعد — فواتير دين
+   *  للزبون ما تزال في الطابور (pending/syncing). سقف سداد الكاشير
+   *  في التطبيق يضيفها إلى حد الخادم (device_outstanding) لأن الخادم
+   *  لا يعرفها بعد، ولولا هذا الخادم لرفض الإيصال (0078 §3.5) رغم
+   *  أن الدفاتر المحلية تعرف الدين — فتنتظر المزامنة ويُقبل لاحقاً
+   *  من تلقاء نفسه. */
+  async pendingUnsyncedOwnDebtMinor(
+    customerId: string,
+  ): Promise<number> {
+    if (!customerId || customerId.length === 0) {
+      return 0;
+    }
+    try {
+      const result = await getDb().execute(
+        `SELECT COALESCE(SUM(amount_minor - COALESCE(credit_covered_minor, 0)), 0) AS minor
+           FROM sila_debt_queue
+          WHERE customer_id = ?
+            AND state IN ('pending','syncing')`,
+        [customerId],
+      );
+      const row = (result.rows?._array?.[0] ?? {}) as {minor?: number | null};
+      return Math.max(0, Number(row.minor ?? 0));
+    } catch {
+      return 0;
+    }
+  },
+
   // ── v15 (round-21 #3): repayments queue (§3.1 sila_payment_uploads) ──
 
   /** Creates a payment row at collection time — ONE idempotency key

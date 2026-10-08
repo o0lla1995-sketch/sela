@@ -294,6 +294,11 @@ export interface SaleReturnRecord {
   refund_minor: number;
   /** The part that reduced a DEBT book (sila queue / local row). */
   debt_adjusted_minor: number;
+  /** v36: 1 = استبدال بضاعة بدل الإرجاع المالي — لا أثر مالي
+   *  إطلاقاً؛ فقط المخزون: المرتجع يعود والبديل يخرج. */
+  is_exchange: 0 | 1;
+  /** v36: قيمة البضاعة المستبدلة الخارجة من المخزن (قرشاً). */
+  exchange_minor: number;
   note: string | null;
   created_at: string;
 }
@@ -333,6 +338,41 @@ export interface ReturnLineInput {
   variantColor?: string | null;
   /** v35: وصف المتغير لسطر المرتجع السالب (للعرض والفواتير). */
   variantLabel?: string | null;
+}
+
+/** v36: صنف استبدال — بضاعة تخرج من المخزون مقابل المرتجع
+ *  (استبدال بقيمة المرجع بلا أثر مالي). */
+export interface ExchangeLineInput {
+  productId: number;
+  productName: string;
+  /** الكمية بوحدة البيع المختارة. */
+  quantity: number;
+  unitName: string | null;
+  /** وحدات الأساس لكل وحدة بيع مختارة. */
+  basePerUnit: number;
+  /** سعر الوحدة المختارة (للمقارنة بقيمة المرتجع وللسجل). */
+  unitPrice: number;
+  costPrice: number;
+  variantId?: number | null;
+  variantColor?: string | null;
+  variantLabel?: string | null;
+}
+
+/** v36: سجل صنف استبدال محفوظ (صورة ذاتية كصور مرتجع الأصناف). */
+export interface SaleReturnExchange {
+  id: number;
+  return_id: number;
+  product_id: number;
+  product_name: string;
+  quantity: number;
+  unit_name: string | null;
+  base_quantity: number;
+  unit_price: number;
+  line_total: number;
+  cost_price: number;
+  variant_id: number | null;
+  variant_color: string | null;
+  variant_label: string | null;
 }
 
 export interface SaleWithItems {
