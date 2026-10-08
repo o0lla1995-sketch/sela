@@ -4,6 +4,10 @@
  * v9.2 (round-15 #3): every unit carries a TYPE (kind — piece /
  * weight / volume / length) so weight products offer weight units
  * and piece products offer packaging units.
+ * v34 (الجولة 42 #3): نطاق لكل نمط — كل وحدة موسومة بنمط المتجر
+ * الذي أُنشئت فيه (store_mode)؛ القوائم والمنتقيات ترشَّح بالنمط
+ * الحالي فلا تتداخل وحدات المجالات فوق بعضها، وتبديل النمط لا
+ * يزرع فوق القديم (لا تراكم) ولا يحذف شيئاً.
  */
 import {getDb, toMessage} from '../connection';
 import type {ProductUnit, Unit, UnitKind} from '../../core/types';
@@ -23,6 +27,10 @@ function rowToUnit(row: Record<string, unknown>): Unit {
     short_name: String(row.short_name ?? ''),
     sort_order: Number(row.sort_order ?? 0),
     kind: kindOf(row),
+    store_mode:
+      row.store_mode == null || String(row.store_mode).length === 0
+        ? null
+        : String(row.store_mode),
   };
 }
 
@@ -43,28 +51,40 @@ function rowToProductUnit(row: Record<string, unknown>): ProductUnit {
 
 export const UnitRepo = {
   /** v9.2: grouped by TYPE first (piece → weight → volume → length)
-   *  so the management screen and pickers read naturally. */
-  async list(): Promise<Unit[]> {
+   *  so the management screen and pickers read naturally.
+   *  v34: @param mode عند تمريره → وحدات هذا النمط فقط (واجهات
+   *  المتجر والمنتقيات)؛ بلا وسيط → الكل (نسخ احتياطي/ترحيل). */
+  async list(mode?: string | null): Promise<Unit[]> {
+    const scoped = mode != null && mode.length > 0;
     const result = await getDb().execute(
       `SELECT * FROM units
+       ${scoped ? 'WHERE store_mode = ?' : ''}
        ORDER BY CASE kind
          WHEN 'piece' THEN 0
          WHEN 'weight' THEN 1
          WHEN 'volume' THEN 2
          ELSE 3
        END, sort_order ASC, id ASC`,
+      scoped ? [mode as string] : [],
     );
     return (result.rows?._array ?? []).map(rowToUnit);
   },
 
-  async create(name: string, short: string, kind: UnitKind = 'piece'): Promise<number> {
+  /** v34: إنشاء وحدة داخل نطاق نمط (وسم store_mode). */
+  async create(
+    name: string,
+    short: string,
+    kind: UnitKind = 'piece',
+    mode?: string | null,
+  ): Promise<number> {
     const trimmed = name.trim();
     if (!trimmed) {
       throw new Error('اسم الوحدة مطلوب');
     }
+    const scopeMode = mode != null && mode.length > 0 ? mode : null;
     const existing = await getDb().execute(
-      'SELECT id FROM units WHERE name = ? COLLATE NOCASE',
-      [trimmed],
+      'SELECT id FROM units WHERE name = ? COLLATE NOCASE AND (store_mode IS ? OR (store_mode IS NULL AND ? IS NULL))',
+      [trimmed, scopeMode, scopeMode],
     );
     const hit = existing.rows?._array?.[0] as {id?: number} | undefined;
     if (hit?.id != null) {
@@ -77,8 +97,8 @@ export const UnitRepo = {
       (orderResult.rows?._array?.[0] as {next?: number})?.next ?? 1,
     );
     const result = await getDb().execute(
-      'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
-      [trimmed, short.trim() || trimmed, next, kind],
+      'INSERT INTO units (name, short_name, sort_order, kind, store_mode) VALUES (?, ?, ?, ?, ?)',
+      [trimmed, short.trim() || trimmed, next, kind, scopeMode],
     );
     return result.insertId ?? -1;
   },
@@ -89,19 +109,23 @@ export const UnitRepo = {
    * merchant never has to leave the product form to add a package
    * unit that doesn't exist yet.
    * v9.2 (round-15 #3): carries the unit TYPE through.
+   * v34: carries the MODE scope through (استلام البضاعة ينشئ وحدة
+   *  الكرتونة/الكيس/العلبة داخل نطاق النمط الحالي).
    */
   async getOrCreate(
     name: string,
     short?: string,
     kind: UnitKind = 'piece',
+    mode?: string | null,
   ): Promise<number> {
     const trimmed = name.trim();
     if (!trimmed) {
       throw new Error('اسم الوحدة مطلوب');
     }
+    const scopeMode = mode != null && mode.length > 0 ? mode : null;
     const existing = await getDb().execute(
-      'SELECT id FROM units WHERE name = ? COLLATE NOCASE',
-      [trimmed],
+      'SELECT id FROM units WHERE name = ? COLLATE NOCASE AND (store_mode IS ? OR (store_mode IS NULL AND ? IS NULL))',
+      [trimmed, scopeMode, scopeMode],
     );
     const hit = existing.rows?._array?.[0] as {id?: number} | undefined;
     if (hit?.id != null) {
@@ -114,8 +138,8 @@ export const UnitRepo = {
       (orderResult.rows?._array?.[0] as {next?: number})?.next ?? 1,
     );
     const result = await getDb().execute(
-      'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
-      [trimmed, (short ?? trimmed).trim() || trimmed, next, kind],
+      'INSERT INTO units (name, short_name, sort_order, kind, store_mode) VALUES (?, ?, ?, ?, ?)',
+      [trimmed, (short ?? trimmed).trim() || trimmed, next, kind, scopeMode],
     );
     return result.insertId ?? -1;
   },
@@ -155,6 +179,16 @@ export const UnitRepo = {
       );
     }
     await getDb().execute('DELETE FROM units WHERE id = ?', [id]);
+  },
+
+  /** v34: وسم كل الوحدات غير الموسومة بنمط معين (وسم البيانات
+   *  القديمة مرة واحدة عند أول إقلاع بعد الترقية). */
+  async tagUntagged(mode: string): Promise<number> {
+    const result = await getDb().execute(
+      'UPDATE units SET store_mode = ? WHERE store_mode IS NULL',
+      [mode],
+    );
+    return Number(result.rowsAffected ?? 0);
   },
 
   // ── Per-product unit rows ─────────────────────────────────────

@@ -25,6 +25,7 @@ import {
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
+import {useSettingsStore} from '../../stores/settingsStore';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useToastStore} from '../../stores/toastStore';
 import {
@@ -52,7 +53,10 @@ export function ManageCategoriesScreen() {
 
   const load = useCallback(async () => {
     try {
-      const list = await CategoryRepo.listWithCounts();
+      // v34: إدارة تصنيفات نمط المتجر الحالي فقط — بلا خليط المجالات.
+      const list = await CategoryRepo.listWithCounts(
+        useSettingsStore.getState().settings.storeMode,
+      );
       setCategories(list);
     } catch (error) {
       toast(
@@ -80,7 +84,11 @@ export function ManageCategoriesScreen() {
     }
     setBusy(true);
     try {
-      await CategoryRepo.create(name);
+      // v34: التصنيف الجديد يُوسم بنمط المتجر الحالي.
+      await CategoryRepo.create(
+        name,
+        useSettingsStore.getState().settings.storeMode,
+      );
       setNewName('');
       await load();
       await refreshCatalog();

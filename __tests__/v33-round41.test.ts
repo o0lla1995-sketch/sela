@@ -99,10 +99,24 @@ describe('v33 #4 — أنماط المتجر', () => {
 });
 
 describe('v33 #9 — صفحة المنتج: طي وترتيب', () => {
-  test('FoldSection موجود ومستخدم في ثلاثة أقسام', () => {
+  test('FoldSection موجود — v34: قسمان قابلان للطي فقط (الصلاحية والبصمة)، والاستلام صار قسماً ظاهراً دائماً قبل الأسعار', () => {
     const src = read(PRODUCT_FORM);
     expect(src).toContain('function FoldSection');
-    expect((src.match(/<FoldSection/g) ?? []).length).toBe(3);
+    // v34 (الجولة 42 #3): الاستلام غير مطوي — «إدخال البضائع لا بد
+    // أن يكون قبل إدخال أسعار التكلفة» — فبقي طيّان فقط.
+    expect((src.match(/<FoldSection/g) ?? []).length).toBe(2);
+    // الترتيب المنطقي: بيانات ← تصنيف ← طريقة بيع ← إدخال البضاعة ←
+    // سعر التكلفة.
+    const details = src.indexOf('title="بيانات المنتج"');
+    const category = src.indexOf('Category picker');
+    const saleMode = src.indexOf('title="طريقة البيع"');
+    const receiving = src.indexOf('title="إدخال البضاعة"');
+    const cost = src.indexOf('ref={costRef}');
+    expect(details).toBeGreaterThan(-1);
+    expect(category).toBeGreaterThan(details);
+    expect(saleMode).toBeGreaterThan(category);
+    expect(receiving).toBeGreaterThan(saleMode);
+    expect(cost).toBeGreaterThan(receiving);
   });
 
   test('الهوية أولاً ثم التصنيف ثم طريقة البيع ثم الأسعار', () => {
@@ -126,20 +140,28 @@ describe('v33 #9 — صفحة المنتج: طي وترتيب', () => {
     expect(src).toContain('modeConfig.defaultSaleMode');
   });
 
-  test('الملابس: مقاسات وألوان تُلحق بالاسم', () => {
+  test('الملابس v34: ربطة كاملة (لون + مقاسات متعددة بكميات) بدل إلحاق المقاس بالاسم', () => {
     const src = read(PRODUCT_FORM);
-    expect(src).toContain('appendVariant');
-    expect(src).toContain('modeConfig.variantSizes != null');
+    // النظام القديم (appendVariant) حُذف.
+    expect(src).not.toContain('appendVariant');
+    // الربطة: لون مفرد + مقاسات متعددة + كمية لكل مقاس + منتج لكل
+    // مقاس بباركود داخلي ومجموعة style_group واحدة.
+    expect(src).toContain('saveLot');
+    expect(src).toContain('lotQtyBySize');
+    expect(src).toContain('style_group: styleGroup');
+    expect(src).toContain('generateInternalEan13');
   });
 });
 
 describe('v33 #10 — الرئيسية: الخزينة والديون أولاً', () => {
-  test('قسم الخزينة والديون يسبق قسم اليوم', () => {
+  test('v34: بطاقتا اليوم مدموجتان داخل بطاقة الخزينة والديون — لا قسم مستقل لليوم', () => {
     const src = read(HOME);
     const money = src.indexOf('title="الخزينة والديون"');
-    const today = src.indexOf('title="اليوم"');
     expect(money).toBeGreaterThan(-1);
-    expect(money).toBeLessThan(today);
+    // قسم «اليوم» المستقل حُذف — قيمه داخل البطاقة الموحدة.
+    expect(src).not.toContain('title="اليوم"');
+    expect(src).toContain('مبيعات اليوم');
+    expect(src).toContain('صافي ربح اليوم');
   });
 
   test('عرض الكل في تنبيهات المخزون يفتح صفحة التنبيهات المخصصة', () => {

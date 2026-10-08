@@ -32,6 +32,7 @@ import {
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {UnitRepo} from '../../database/repositories/UnitRepo';
+import {useSettingsStore} from '../../stores/settingsStore';
 import {useToastStore} from '../../stores/toastStore';
 import {UNIT_KIND_LABELS} from '../../core/config';
 import {
@@ -75,7 +76,10 @@ export function ManageUnitsScreen() {
 
   const load = useCallback(async () => {
     try {
-      setUnits(await UnitRepo.list());
+      // v34: إدارة وحدات نمط المتجر الحالي فقط.
+      setUnits(
+        await UnitRepo.list(useSettingsStore.getState().settings.storeMode),
+      );
     } catch (error) {
       toast(
         error instanceof Error ? error.message : 'فشل تحميل الوحدات',
@@ -102,7 +106,13 @@ export function ManageUnitsScreen() {
     }
     setBusy(true);
     try {
-      await UnitRepo.create(name, newShort, newKind);
+      // v34: الوحدة الجديدة تُوسم بنمط المتجر الحالي.
+      await UnitRepo.create(
+        name,
+        newShort,
+        newKind,
+        useSettingsStore.getState().settings.storeMode,
+      );
       setNewName('');
       setNewShort('');
       await load();

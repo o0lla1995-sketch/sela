@@ -27,7 +27,6 @@ import {
   Card,
   EmptyState,
   SectionTitle,
-  StatCard,
 } from '../components/ui';
 import {Icon, type IconName} from '../components/Icon';
 import {
@@ -263,7 +262,7 @@ export function HomeScreen() {
             «دفتر الديون» there. */}
         <SectionTitle
           title="الخزينة والديون"
-          hint="النقد الفعلي لديك + الديون المستحقة لك"
+          hint="رصيدك وديونك الآن + مبيعات اليوم وربحه"
         />
         <Card style={styles.moneyCard}>
           <View style={styles.moneyRow}>
@@ -297,6 +296,40 @@ export function HomeScreen() {
                     }`
                   : 'لا ديون قائمة'}
               </Text>
+            </View>
+          </View>
+
+          {/* v34 (الجولة 42 #1): صف اليوم داخل البطاقة نفسها —
+              مبيعات اليوم وصافي الربح؛ الإرجاعات تُخصم من يوم
+              الفاتورة الأصلية (v30) فلا يظهر الربح سالباً بسبب
+              مرتجعات قديمة. */}
+          <View style={styles.todayWrap}>
+            <View style={styles.todayRule} />
+            <View style={styles.moneyRow}>
+              <View style={styles.moneyCell}>
+                <Text style={styles.moneyLabel}>مبيعات اليوم</Text>
+                <Text style={[styles.moneyValueToday, {color: c.accent}]}>
+                  {formatMoney(bundle?.summary.revenue ?? 0)}
+                </Text>
+                <Text style={styles.moneyMeta}>فواتير اليوم شاملة الديون</Text>
+              </View>
+              <View style={styles.moneyDivider} />
+              <View style={styles.moneyCell}>
+                <Text style={styles.moneyLabel}>صافي ربح اليوم</Text>
+                <Text
+                  style={[
+                    styles.moneyValueToday,
+                    {
+                      color:
+                        (bundle?.summary.netProfit ?? 0) >= 0
+                          ? c.success
+                          : c.danger,
+                    },
+                  ]}>
+                  {formatMoney(bundle?.summary.netProfit ?? 0)}
+                </Text>
+                <Text style={styles.moneyMeta}>بعد تكلفة البضاعة والخصومات</Text>
+              </View>
             </View>
           </View>
 
@@ -464,30 +497,6 @@ export function HomeScreen() {
             </TouchableOpacity>
           )}
         </Card>
-
-        {/* ── ملخص اليوم — v33 (round-41 #10): انتقل أسفل قسم
-            الخزينة والديون بطلب التاجر. v32: بطاقتا «عدد الفواتير»
-            و«متوسط الفاتورة» محذوفتان («غير مهمين») — المبيعات وصافي
-            الربح فقط في صف واحد نظيف. ── */}
-        <SectionTitle title="اليوم" hint="يتحدّث تلقائياً بعد كل فاتورة" />
-        <View style={styles.statsGrid}>
-          <View style={styles.statsRow}>
-            <StatCard
-              label="مبيعات اليوم"
-              value={formatMoney(bundle?.summary.revenue ?? 0)}
-              tone="accent"
-              icon="wallet"
-            />
-            <StatCard
-              label="صافي الربح"
-              value={formatMoney(bundle?.summary.netProfit ?? 0)}
-              tone={
-                (bundle?.summary.netProfit ?? 0) >= 0 ? 'success' : 'danger'
-              }
-              icon="chart"
-            />
-          </View>
-        </View>
 
         {/* ── Quick actions ──────────────────────────────────── */}
         <SectionTitle title="إجراءات سريعة" />
@@ -755,13 +764,8 @@ const useStyles = makeStyles(c =>
     },
     // (v27 round-35 #4: the dashboard ledger links moved out — the
     // quick actions row is their only home now.)
-    statsGrid: {
-      gap: spacing.md,
-    },
-    statsRow: {
-      flexDirection: 'row',
-      gap: spacing.md,
-    },
+    // v34 (الجولة 42 #1): بطاقتا اليوم دُمجتا داخل بطاقة الخزينة
+    // والديون — لا حاجة لشبكة إحصاءات مستقلة بعد الآن.
     // ── v18 (round-24 #2): the الخزينة والديون card ─────────────
     moneyCard: {gap: spacing.md},
     moneyRow: {flexDirection: 'row', alignItems: 'stretch'},
@@ -779,6 +783,19 @@ const useStyles = makeStyles(c =>
     moneyValue: {
       fontFamily: fonts.black,
       fontSize: typography.title + 2,
+      fontVariant: ['tabular-nums'],
+    },
+    /** v34 (الجولة 42 #1): صف اليوم المدموج داخل بطاقة الخزينة
+     *  والديون — نفس لغة صف الرصيد لكن بقيمة أصغر حجماً حتى يبقى
+     *  الرصيد/الدين هما البطلين الأولين للبطاقة. */
+    todayWrap: {gap: spacing.md},
+    todayRule: {
+      height: 1,
+      backgroundColor: c.borderSoft,
+    },
+    moneyValueToday: {
+      fontFamily: fonts.black,
+      fontSize: typography.title - 2,
       fontVariant: ['tabular-nums'],
     },
     moneyMeta: {

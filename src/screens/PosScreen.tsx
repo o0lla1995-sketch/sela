@@ -214,6 +214,15 @@ export function PosScreen({
   // never be added as "one piece": tapping it (or scanning it) opens
   // this sheet so the merchant types/weighs the kg amount.
   const [weightProduct, setWeightProduct] = useState<Product | null>(null);
+  /** v34 (الجولة 42 #3): نافذة اختيار المقاس — تفتح عند لمس تجان
+   *  موديل ملابس مجمّع (style_group): مقاسات الموديل كلها بجانب
+   *  بعضها مع مخزون كل مقاس، لمسة واحدة تضيف المقاس للسلة. */
+  const [styleVariants, setStyleVariants] = useState<{
+    group: string;
+    baseName: string;
+    color: string | null;
+    variants: Product[];
+  } | null>(null);
   const [weightUnitRows, setWeightUnitRows] = useState<ProductUnit[] | null>(
     null,
   );
@@ -1268,6 +1277,69 @@ export function PosScreen({
     );
   }, [search, products]);
 
+  /** v34 (الجولة 42 #3): عناصر الشبكة — منتجات الموديل الواحد
+   *  (style_group مشترك: موديل + لون × مقاسات) تُجمَّع في تجان واحد
+   *  يفتح نافذة اختيار المقاس؛ بقية المنتجات تجان لكل منها. مسح
+   *  باركود أي مقاس يضيفه مباشرة (الرمز هوية القطعة نفسها). */
+  const displayItems = useMemo(() => {
+    type DisplayItem =
+      | {kind: 'product'; product: Product; sortKey: string}
+      | {
+          kind: 'style';
+          group: string;
+          baseName: string;
+          color: string | null;
+          variants: Product[];
+          totalStock: number;
+          sample: Product;
+          sortKey: string;
+        };
+    const items: DisplayItem[] = [];
+    const groups = new Map<string, Product[]>();
+    for (const product of filteredProducts) {
+      if (product.style_group != null && product.style_group.length > 0) {
+        const arr = groups.get(product.style_group) ?? [];
+        arr.push(product);
+        groups.set(product.style_group, arr);
+      }
+    }
+    for (const product of filteredProducts) {
+      const group = product.style_group;
+      if (group != null && group.length > 0 && groups.has(group)) {
+        // أول لقاء بالمجموعة → تجان مجمّع واحد؛ بعدها تُتخطى.
+        const variants = groups.get(group)!;
+        groups.delete(group);
+        const totalStock = variants.reduce(
+          (sum, entry) => sum + entry.stock_quantity,
+          0,
+        );
+        const sample = variants[0];
+        const baseName = sample.variant_color
+          ? product.name.split(` — ${sample.variant_color}`)[0].trim() ||
+            product.name
+          : product.name;
+        items.push({
+          kind: 'style',
+          group,
+          baseName,
+          color: sample.variant_color,
+          variants,
+          totalStock,
+          sample,
+          sortKey: baseName.toLowerCase(),
+        });
+      } else if (group == null || group.length === 0) {
+        items.push({
+          kind: 'product',
+          product,
+          sortKey: product.name.toLowerCase(),
+        });
+      }
+    }
+    items.sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'ar'));
+    return items;
+  }, [filteredProducts]);
+
   const priceOf = useCallback(
     (product: Product) =>
       pricingMode === 'WHOLESALE'
@@ -2019,7 +2091,7 @@ export function PosScreen({
               contentContainerStyle={styles.grid}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled">
-              {filteredProducts.length === 0 ? (
+              {displayItems.length === 0 ? (
                 <View style={{paddingTop: spacing.xl}}>
                   <EmptyState
                     icon="search"
@@ -2028,7 +2100,63 @@ export function PosScreen({
                   />
                 </View>
               ) : (
-                filteredProducts.map(product => {
+                displayItems.map(item => {
+                  if (item.kind === 'style') {
+                    /* v34: تجان الموديل المجمّع — الاسم الأساسي مع
+                     * اللون، ووسم «مقاسات» بعددها، والسعر موحد.
+                     * اللمسة تفتح نافذة اختيار المقاس. */
+                    const total = item.totalStock;
+                    return (
+                      <TouchableOpacity
+                        key={`style-${item.group}`}
+                        style={[styles.tile, styles.tileStyleGroup]}
+                        onPress={() => setStyleVariants(item)}
+                        activeOpacity={0.75}>
+                        {item.sample.image_uri ? (
+                          <Image
+                            source={{uri: `file://${item.sample.image_uri}`}}
+                            style={styles.tileImage}
+                          />
+                        ) : (
+                          <View
+                            style={[styles.tileImage, styles.tileImageFallback]}>
+                            <Icon name="tag" size={20} color={c.accent} />
+                          </View>
+                        )}
+                        <View style={styles.styleSizesBadge}>
+                          <Text style={styles.styleSizesBadgeText}>
+                            {item.variants.length} مقاس
+                          </Text>
+                        </View>
+                        <Text style={styles.tileName} numberOfLines={1}>
+                          {item.baseName}
+                          {item.color ? ` — ${item.color}` : ''}
+                        </Text>
+                        <Text style={styles.tilePrice}>
+                          {formatMoney(priceOf(item.sample))}
+                        </Text>
+                        <View style={styles.tileStockRow}>
+                          <View
+                            style={[
+                              styles.stockDot,
+                              {
+                                backgroundColor:
+                                  total <= 0
+                                    ? c.danger
+                                    : c.success,
+                              },
+                            ]}
+                          />
+                          <Text style={styles.tileStock}>
+                            {total <= 0
+                              ? 'نفد'
+                              : `${formatQty(total)} قطعة بالمقاسات`}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  }
+                  const product = item.product;
                   const stockState = stockStateOf(
                     product,
                     settings.lowStockDefaultThreshold,
@@ -2559,6 +2687,103 @@ export function PosScreen({
         onClose={closeWeightSheet}
         onConfirm={confirmWeight}
       />
+
+      {/* ── v34 (الجولة 42 #3): نافذة اختيار المقاس — موديل الملابس
+          المجمّع يفتح مقاساته كلها هنا مع مخزون كل مقاس وسعره؛
+          لمسة على المقاس تضيفه للسلة فوراً (اسم الصف في السلة يحمل
+          اللون والمقاس كاملين). INLINE absolute overlay — نفس درس
+          روم الجهاز (لا Modal أبداً). ── */}
+      {styleVariants != null ? (
+        <View style={styles.inlineOverlay}>
+          <TouchableOpacity
+            style={styles.inlineOverlayDim}
+            activeOpacity={1}
+            onPress={() => setStyleVariants(null)}
+          />
+          <BackHandlerCloser
+            active={styleVariants != null}
+            onClose={() => setStyleVariants(null)}
+          />
+          <View style={styles.variantSheet}>
+            <View style={styles.unitModalHandle} />
+            <View style={styles.variantSheetHeader}>
+              <View style={{flex: 1}}>
+                <Text style={styles.variantSheetTitle} numberOfLines={1}>
+                  {styleVariants.baseName}
+                  {styleVariants.color ? ` — ${styleVariants.color}` : ''}
+                </Text>
+                <Text style={styles.variantSheetMeta} numberOfLines={1}>
+                  اختر المقاس — {styleVariants.variants.length} مقاس · سعر
+                  القطعة {formatMoney(priceOf(styleVariants.variants[0]))} ·
+                  طريقة {pricingMode === 'WHOLESALE' ? 'الجملة' : 'المفرق'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.variantCloseChip}
+                onPress={() => setStyleVariants(null)}
+                activeOpacity={0.75}>
+                <Icon name="x" size={16} color={c.textDim} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              style={{flex: 1}}
+              contentContainerStyle={styles.variantList}
+              showsVerticalScrollIndicator={false}>
+              {styleVariants.variants.map(variant => {
+                const out = variant.stock_quantity <= 0;
+                return (
+                  <TouchableOpacity
+                    key={variant.id}
+                    style={[
+                      styles.variantRow,
+                      out ? styles.variantRowOut : null,
+                    ]}
+                    disabled={out}
+                    onPress={() => {
+                      tryAdd(variant);
+                      setStyleVariants(null);
+                    }}
+                    activeOpacity={0.75}>
+                    <View style={styles.variantSizeChip}>
+                      <Text
+                        style={[
+                          styles.variantSizeText,
+                          out ? {color: c.textFaint} : null,
+                        ]}>
+                        {variant.variant_size ?? '—'}
+                      </Text>
+                    </View>
+                    <View style={{flex: 1}}>
+                      <Text
+                        style={[styles.variantRowName, out ? {color: c.textFaint} : null]}
+                        numberOfLines={1}>
+                        {variant.name}
+                      </Text>
+                      <Text style={styles.variantRowMeta}>
+                        {out
+                          ? 'نفد هذا المقاس'
+                          : `المتاح ${formatQty(variant.stock_quantity)} قطعة`}
+                      </Text>
+                    </View>
+                    <Text style={styles.variantRowPrice}>
+                      {formatMoney(priceOf(variant))}
+                    </Text>
+                    <Icon
+                      name={out ? 'alert' : 'plus'}
+                      size={16}
+                      color={out ? c.textFaint : c.accent}
+                    />
+                  </TouchableOpacity>
+                );
+              })}
+              <Text style={styles.variantFootnote}>
+                لمسة واحدة تضيف قطعة من المقاس — عدّل الكمية من السلة
+                بالعدّاد، وامسح باركود أي مقاس ليضاف مباشرة.
+              </Text>
+            </ScrollView>
+          </View>
+        </View>
+      ) : null}
 
       {/* ── v20: صرف قسيمة صلة — the shared redemption sheet. INLINE
           absolute overlay (the ROM Modal lesson). Cart-tied: the
@@ -4050,6 +4275,120 @@ const useStyles = makeStyles(c =>
       textAlign: 'center',
       lineHeight: 18,
       marginTop: spacing.sm,
+    },
+
+    // ── v34 (الجولة 42 #3): تجان الموديل المجمّع + نافذة المقاس ──
+    tileStyleGroup: {
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+    },
+    styleSizesBadge: {
+      position: 'absolute',
+      top: spacing.xs + 2,
+      left: spacing.xs + 2,
+      backgroundColor: c.accent,
+      borderRadius: 9,
+      paddingHorizontal: 7,
+      height: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    styleSizesBadgeText: {
+      color: c.onAccent,
+      fontFamily: fonts.bold,
+      fontSize: 10,
+    },
+    variantSheet: {
+      backgroundColor: c.bg,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      gap: spacing.sm,
+      maxHeight: '72%',
+    },
+    variantSheetHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    variantSheetTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+    },
+    variantSheetMeta: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      marginTop: 2,
+    },
+    variantCloseChip: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    variantList: {
+      gap: 8,
+      paddingBottom: spacing.xl,
+    },
+    variantRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      padding: spacing.sm + 2,
+    },
+    variantRowOut: {
+      opacity: 0.55,
+    },
+    variantSizeChip: {
+      minWidth: 48,
+      height: 34,
+      borderRadius: radius.sm,
+      backgroundColor: c.accentSofter,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 8,
+    },
+    variantSizeText: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    variantRowName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    variantRowMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 1,
+    },
+    variantRowPrice: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      fontVariant: ['tabular-nums'],
+    },
+    variantFootnote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+      lineHeight: 16,
+      marginTop: spacing.xs,
     },
 
     // ── v9.2 (round-15 #1): weight pad — BUILT-IN keypad ────────

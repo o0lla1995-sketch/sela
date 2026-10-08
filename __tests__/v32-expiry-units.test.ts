@@ -108,7 +108,10 @@ describe('v32 — صلاحية المنتجات: الطبقات', () => {
 
   test('النسخة الاحتياطية تنقل expiry_date ذهاباً وإياباً', () => {
     const src = read('src/services/BackupService.ts');
-    expect(src).toContain('expiry_date, created_at FROM products');
+    // v34: الاستعلام يشمل الآن أعمدة الربطة بين الصلاحية والإنشاء.
+    expect(src).toContain(
+      'expiry_date, style_group, variant_size, variant_color, created_at FROM products',
+    );
     expect(src).toContain('product.expiry_date ?? null');
   });
 });

@@ -659,11 +659,18 @@ export const SilaRepo = {
    *  غطّاه الرصيد المسبق، وسدادّات الكاشير هنا، والعمليات العكسية
    *  لمرتجعات ديون صِلة، وتحصيلات تطبيق صِلة على ديون المتجر.
    *  هذا هو «دين المتجر نفسه» الذي طلبه التاجر مميّزاً عن أرصدة
-   *  الخادم التي قد تجمع فواتير كل المتاجر المرتبطة بنفس التاجر. */
+   *  الخادم التي قد تجمع فواتير كل المتاجر المرتبطة بنفس التاجر.
+   *
+   *  v34 (الجولة 42 #2): حدّ أدنى صفر لكل زبون — أي فائض سدادّ/
+   *  تحصيل فوق دين المتجر (كتحصيل تطبيق على ديون متجر آخر كان
+   *  يُسجّل قبل فصل المطابقة الجهازية) لا ينقلب ديناً سالباً يخصم
+   *  بصمت من إجمالي الدين القائم للغير؛ الفائض يبقى في محفظة
+   *  الزبون لدى تطبيق صِلة نفسه (رصيد تطبيق صلة لا يمس دفاتر
+   *  المتجر) ولا يدخل كتب المتجر مطلقاً. */
   async storeOwnOutstandingByCustomer(): Promise<Map<string, number>> {
     try {
       const result = await getDb().execute(
-        `SELECT customer_id, SUM(delta) AS own_minor FROM (
+        `SELECT customer_id, MAX(0, SUM(delta)) AS own_minor FROM (
            SELECT customer_id,
                   SUM(amount_minor - COALESCE(credit_covered_minor, 0)) AS delta
              FROM sila_debt_queue
@@ -702,14 +709,16 @@ export const SilaRepo = {
   /** v32 (round-40 #6): إجمالي دين هذا المتجر + عدد المدينين له —
    *  من الدفاتر المحلية (نفس معادلة storeOwnOutstandingByCustomer).
    *  هذا هو الرقم الذي تقوده إحصائيات الرئيسية والتقارير ونظرة
-   *  عامة، بدل أرصدة الخادم المختلطة بمتاجر التاجر الأخرى. */
+   *  عامة، بدل أرصدة الخادم المختلطة بمتاجر التاجر الأخرى.
+   *  v34 (الجولة 42 #2): حدّ أدنى صفر لكل زبون قبل الجمع — لا
+   *  يُخصم سالب أحد الزبائن من ديون بقية الزبائن أبداً. */
   async storeOwnOutstandingTotal(): Promise<{
     ownMinor: number;
     debtorsCount: number;
   }> {
     try {
       const result = await getDb().execute(
-        `SELECT COALESCE(SUM(own), 0) AS total_minor,
+        `SELECT COALESCE(SUM(MAX(own, 0)), 0) AS total_minor,
                 COALESCE(SUM(CASE WHEN own > 0 THEN 1 ELSE 0 END), 0) AS debtors
          FROM (
            SELECT customer_id, SUM(delta) AS own FROM (
@@ -1370,10 +1379,19 @@ export const SilaRepo = {
   /**
    * THE reconciliation engine (طريقة المخزون مع خطّ أساس).
    * ─────────────────────────────────────────────────────────────────
-   * When a customer repays their STORE debt through the Sila app
-   * (not at the cashier), the server's pos_outstanding_minor drops
-   * and the store's books must see the money (the round-24 complaint
-   * «فإن الدين يختفي ولا يسجل سدادات مستلمة من صلة»).
+   * v34 (الجولة 42 #2): المطابقة صارت على مستوى هذه النقطة
+   * تحديداً (0075 device fields) — لا على أرقام POS الشاملة التي
+   * تجمع فواتير كل متاجر التاجر المرتبطة بنفس الحساب. حين كان
+   * الزبون يسدّد عبر تطبيق صلة ديناً وُلد في متجر آخر للتاجر، كان
+   * الفارق POS-الشامل ينمو فيُسجّل هنا تحصيلاً وهمياً: الخزينة
+   * تتضخم و«دين المتجر نفسه» لذلك الزبون ينقلب سالباً فيخصم
+   * بصمت من إجمالي الدين القائم — وصف التاجر بالضبط: «الديون على
+   * زبائن صلة لا تحسب في الدين القائم». الآن:
+   *   collectedOnDeviceDebts = device_purchases_minor − device_outstanding_minor
+   * (كل ما طُفئ من ديون هذه النقطة — بإسناد الخادم ثنائي المرحلة)،
+   * والفارق عن الحصة المحلية هو ما جمعه تطبيق صلة على ديون هذه
+   * النقطة بالتحديد. الخوادم قبل 0075 لا ترسل الحقول → الرجوع
+   * الآمن لأرقام POS الشاملة كما كان.
    *
    * The server knows the full stock per customer:
    *   collectedOnStoreDebts = pos_purchases_minor − pos_outstanding_minor
@@ -1430,12 +1448,23 @@ export const SilaRepo = {
       name: string;
       posPurchasesMinor: number;
       posOutstandingMinor: number;
+      /** v34 (الجولة 42 #2): أرقام هذه النقطة تحديداً (خادم 0075 —
+       *  إسناد ثنائي المرحلة). متوفرة → تُستخدم بدل أرقام POS
+       *  الشاملة؛ غائبة (null) على الخوادم الأقدم → الرجوع الآمن. */
+      devicePurchasesMinor?: number | null;
+      deviceOutstandingMinor?: number | null;
     }[],
     newCustomerOffsets: Map<string, number>,
     /** v19 (round-25 #1): first-pass flag — freeze the CURRENT gap
      * of every EXISTING cache row as its baseline so historical
      * collections never dump as fresh money. */
     freezeBaseline = false,
+    /** v34 (الجولة 42 #2): إعادة تجميد أحادية لأُسس المطابقة على
+     *  الأرقام الجهازية عند أول تمريرة تتضمنها (مرة واحدة فقط) —
+     *  أسس v19 جُمّدت على أرقام POS الشاملة (تاريخ متاجر أخرى
+     *  داخلها)؛ إبقاؤها كما هي كان سيبتلع تحصيلات حقيقية على
+     *  ديون هذه النقطة لأن الأسس أعلى من الفارق الجهازي الصحيح. */
+    deviceBaselineReset = false,
   ): Promise<number> {
     if (rows.length === 0) {
       return 0;
@@ -1445,8 +1474,18 @@ export const SilaRepo = {
     let recordedCount = 0;
     for (const row of rows) {
       try {
-        const collectedOnStoreDebts =
-          row.posPurchasesMinor - row.posOutstandingMinor;
+        // v34: أولوية أرقام هذه النقطة (0075) — وفقط عند غيابها
+        // الرجوع لأرقام POS الشاملة (توافق رجعي مع الخوادم الأقدم).
+        const hasDeviceNumbers =
+          row.devicePurchasesMinor != null &&
+          row.deviceOutstandingMinor != null;
+        const purchasesBase = hasDeviceNumbers
+          ? Number(row.devicePurchasesMinor)
+          : row.posPurchasesMinor;
+        const outstandingBase = hasDeviceNumbers
+          ? Number(row.deviceOutstandingMinor)
+          : row.posOutstandingMinor;
+        const collectedOnStoreDebts = purchasesBase - outstandingBase;
         // The store's own share of that stock (see header).
         const aggResult = await db.execute(
           `SELECT
@@ -1487,6 +1526,28 @@ export const SilaRepo = {
           continue; // nothing to record on the very first sight
         }
         const offset = Number(cached.reconcile_offset_minor ?? 0);
+        // v34 (الجولة 42 #2): إعادة التجميد الأحادية على الأرقام
+        // الجهازية — تُستبدل (لأعلى أو لأسفل) مرة واحدة، لأن أسس
+        // v19 كانت بأرقام POS الشاملة (تاريخ متاجر أخرى داخلها)
+        // والفارق الجهازي الصحيح أصغر منها عادة. بعدها يستأنف
+        // الانضباط المعتاد: الأساس لا ينخفض أبداً.
+        if (
+          deviceBaselineReset &&
+          hasDeviceNumbers &&
+          currentGap !== offset
+        ) {
+          await db.execute(
+            `UPDATE sila_customers SET reconcile_offset_minor = ?
+             WHERE customer_id = ?`,
+            [currentGap, row.customerId],
+          );
+          logDiag(
+            'sila',
+            `أُعيد تجميد أساس مطابقة تحصيلات ${row.name} على أرقام هذه
+             النقطة عند ${(currentGap / 100).toFixed(2)}₪ (فصل المتاجر)`,
+          );
+          continue;
+        }
         // v19: the one-time baseline freeze for rows created before
         // this update (anchored 0 by the v18 upgrade path) — their
         // current gap is HISTORY, not fresh money. Never lowers an
@@ -1518,8 +1579,8 @@ export const SilaRepo = {
             row.customerId,
             row.name,
             Math.round(unrecorded),
-            Math.round(row.posPurchasesMinor),
-            Math.round(row.posOutstandingMinor),
+            Math.round(purchasesBase),
+            Math.round(outstandingBase),
           ],
         );
         recordedTotal += Math.round(unrecorded);

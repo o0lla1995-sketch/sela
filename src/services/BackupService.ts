@@ -91,7 +91,9 @@ export interface BackupFile {
    *  SKIPPED on restore (vectors from another model live in a
    *  different space and would poison matching). */
   embeddingModelVersion?: number;
-  categories: {id: number; name: string}[];
+  /** v34: مع عمود نطاق النمط (store_mode) — الاستعادة تحافظ على
+   *  فصل تصنيفات كل مجال. */
+  categories: {id: number; name: string; store_mode?: string | null}[];
   units: {
     id: number;
     name: string;
@@ -99,6 +101,8 @@ export interface BackupFile {
     sort_order: number;
     /** v9.2 (round-15 #3): the unit type (old backups: undefined). */
     kind?: string;
+    /** v34: نطاق النمط الذي تخدمه الوحدة. */
+    store_mode?: string | null;
   }[];
   products: {
     id: number;
@@ -116,6 +120,10 @@ export interface BackupFile {
     is_archived?: number;
     /** v32 (round-40 #3): expiry 'YYYY-MM-DD' (old backups: none). */
     expiry_date?: string | null;
+    /** v34: ربطة الملابس. */
+    style_group?: string | null;
+    variant_size?: string | null;
+    variant_color?: string | null;
     created_at: string;
   }[];
   product_units: {
@@ -431,10 +439,10 @@ export const BackupService = {
       campaignDebts,
       campaignSettlements,
     ] = await Promise.all([
-      db.execute('SELECT id, name FROM categories'),
-      db.execute('SELECT id, name, short_name, sort_order, kind FROM units'),
+      db.execute('SELECT id, name, store_mode FROM categories'),
+      db.execute('SELECT id, name, short_name, sort_order, kind, store_mode FROM units'),
       db.execute(
-        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, created_at FROM products',
+        'SELECT id, name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, style_group, variant_size, variant_color, created_at FROM products',
       ),
       db.execute(
         'SELECT product_id, unit_id, conversion, barcode, retail_price, wholesale_price FROM product_units',
@@ -593,6 +601,8 @@ export const BackupService = {
       categories: rowsOf(categories).map(row => ({
         id: Number(row.id),
         name: String(row.name ?? ''),
+        // v34: نطاق النمط — يُنقل مع النسخة كي تبقى المجالات مفصولة.
+        store_mode: row.store_mode == null ? null : String(row.store_mode),
       })),
       units: rowsOf(units).map(row => ({
         id: Number(row.id),
@@ -600,6 +610,7 @@ export const BackupService = {
         short_name: String(row.short_name ?? ''),
         sort_order: Number(row.sort_order ?? 0),
         kind: String(row.kind ?? 'piece'),
+        store_mode: row.store_mode == null ? null : String(row.store_mode),
       })),
       products: rowsOf(products).map(row => ({
         id: Number(row.id),
@@ -621,6 +632,11 @@ export const BackupService = {
           row.expiry_date == null || String(row.expiry_date).length < 10
             ? null
             : String(row.expiry_date).slice(0, 10),
+        // v34: ربطة الملابس — المجموعة والمقاس واللون.
+        style_group: row.style_group == null ? null : String(row.style_group),
+        variant_size: row.variant_size == null ? null : String(row.variant_size),
+        variant_color:
+          row.variant_color == null ? null : String(row.variant_color),
         created_at: String(row.created_at ?? ''),
       })),
       product_units: rowsOf(productUnits).map(row => ({
@@ -1137,8 +1153,9 @@ export const BackupService = {
           continue;
         }
         const inserted = await tx.execute(
-          'INSERT INTO categories (name) VALUES (?)',
-          [category.name],
+          // v34: النطاق يُستعاد كما كان — فصل المجالات محفوظ.
+          'INSERT INTO categories (name, store_mode) VALUES (?, ?)',
+          [category.name, category.store_mode ?? null],
         );
         categoryMap.set(Number(category.id), Number(inserted.insertId));
       }
@@ -1149,7 +1166,7 @@ export const BackupService = {
           continue;
         }
         const inserted = await tx.execute(
-          'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
+          'INSERT INTO units (name, short_name, sort_order, kind, store_mode) VALUES (?, ?, ?, ?, ?)',
           [
             unit.name,
             unit.short_name || unit.name,
@@ -1161,6 +1178,8 @@ export const BackupService = {
             unit.kind === 'length'
               ? unit.kind
               : 'piece',
+            // v34: نطاق النمط.
+            unit.store_mode ?? null,
           ],
         );
         unitMap.set(Number(unit.id), Number(inserted.insertId));
@@ -1178,8 +1197,8 @@ export const BackupService = {
             : null;
         const inserted = await tx.execute(
           `INSERT INTO products
-            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, is_archived, expiry_date, style_group, variant_size, variant_color, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             product.name,
             Number(product.cost_price ?? 0),
@@ -1195,6 +1214,11 @@ export const BackupService = {
             product.sold_by_weight === 1 ? 1 : 0,
             product.is_archived === 1 ? 1 : 0,
             product.expiry_date ?? null,
+            // v34: ربطة الملابس — تُستعاد كما كانت فتبقى الموديلات
+            // مجمّعة في شبكة البيع.
+            product.style_group ?? null,
+            product.variant_size ?? null,
+            product.variant_color ?? null,
             product.created_at || nowLocal(),
           ],
         );

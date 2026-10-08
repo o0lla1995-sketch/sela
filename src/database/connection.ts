@@ -21,14 +21,19 @@ export function getDb(): DB {
 const DDL_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL
+    name TEXT NOT NULL,
+    -- v34 (الجولة 42 #3): نمط المتجر الذي ينتمي إليه التصنيف —
+    -- NULL يُوسم مرة واحدة بنمط المتجر الحالي عند أول إقلاع.
+    store_mode TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS units (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     short_name TEXT NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0,
-    kind TEXT NOT NULL DEFAULT 'piece'
+    kind TEXT NOT NULL DEFAULT 'piece',
+    -- v34 (الجولة 42 #3): نطاق الوحدة — نمط المتجر الذي تخدمه.
+    store_mode TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS product_units (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -587,8 +592,10 @@ async function applyMigrations(database: DB): Promise<void> {
       const hit = existing.rows?._array?.[0] as {id?: number} | undefined;
       if (hit?.id == null) {
         await database.execute(
-          'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM units), ?)',
-          [unit.name, unit.short, unit.kind],
+          // v34: وحدات كتالوج v5 توسم بالنمط الافتراضي (بقالة) —
+          // ترقية جهاز قديم تبقى وحداته ضمن نطاق بقالته.
+          'INSERT INTO units (name, short_name, sort_order, kind, store_mode) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM units), ?, ?)',
+          [unit.name, unit.short, unit.kind, 'grocery'],
         );
       }
     }
@@ -1232,6 +1239,46 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 18;
   }
 
+  if (version < 19) {
+    // ── v34 (الجولة 42 #3): نظام أنماط احترافي ────────────────────
+    //  (أ) نطاق التصنيفات والوحدات لكل نمط: العمود store_mode يحمل
+    //      نمط المتجر الذي ينتمي إليه التصنيف/الوحدة — تبديل النمط
+    //      لا يزرع فوق القديم بعد اليوم؛ كل نمط يرى أصنافه ووحداته
+    //      فقط (دون حذف أي شيء — إعادة النمط تعيد الظهور فوراً).
+    //      NULL = صف قديم قبل الترقية → يُوسم بنمط المتجر الحالي
+    //      مرة واحدة عند أول إقلاع (وسم البيانات القديمة يتم في
+    //      طبقة الكتالوج كي يُقرأ إعداد النمط الحي، لا هنا).
+    //  (ب) ربطة الملابس: style_group يجمع منتجات الموديل الواحد
+    //      (بنطال جينز — أسود بمقاسات 30..36)، وvariant_size و
+    //      variant_color يعرضان في شبكة البيع نافذة اختيار المقاس
+    //      واللون — النمط العالمي (Shopify/Lightspeed) دون كسر أي
+    //      مسار قائم: كل مقاس يبقى منتجاً كاملاً بمخزونه وباركوده.
+    const modeCols: [string, string, string][] = [
+      ['categories', 'store_mode', 'TEXT'],
+      ['units', 'store_mode', 'TEXT'],
+      ['products', 'style_group', 'TEXT'],
+      ['products', 'variant_size', 'TEXT'],
+      ['products', 'variant_color', 'TEXT'],
+    ];
+    for (const [table, column, ddl] of modeCols) {
+      const check = await database.execute(
+        `SELECT COUNT(*) AS cnt FROM pragma_table_info('${table}') WHERE name = ?`,
+        [column],
+      );
+      const has = (check.rows?._array?.[0] as {cnt?: number})?.cnt ?? 0;
+      if (!has) {
+        await database.execute(
+          `ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`,
+        );
+      }
+    }
+    logDiag(
+      'db',
+      'ترحيل v19: نطاق التصنيفات/الوحدات لكل نمط + ربطة الملابس (style_group)',
+    );
+    version = 19;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -1268,7 +1315,11 @@ export async function initDatabase(): Promise<void> {
         | undefined;
       if ((countRow?.cnt ?? 0) === 0) {
         for (const name of DEFAULT_CATEGORIES) {
-          await db.execute('INSERT INTO categories (name) VALUES (?)', [name]);
+          // v34: البذور الافتراضية موسومة بالنمط الافتراضي (بقالة).
+          await db.execute(
+            'INSERT INTO categories (name, store_mode) VALUES (?, ?)',
+            [name, 'grocery'],
+          );
         }
         logDiag('db', `تمت إضافة ${DEFAULT_CATEGORIES.length} فئات افتراضية`);
       }
@@ -1280,9 +1331,10 @@ export async function initDatabase(): Promise<void> {
       if ((unitsRow?.cnt ?? 0) === 0) {
         let order = 0;
         for (const unit of DEFAULT_UNITS) {
+          // v34: البذور الافتراضية موسومة بالنمط الافتراضي (بقالة).
           await db.execute(
-            'INSERT INTO units (name, short_name, sort_order, kind) VALUES (?, ?, ?, ?)',
-            [unit.name, unit.short, order++, unit.kind],
+            'INSERT INTO units (name, short_name, sort_order, kind, store_mode) VALUES (?, ?, ?, ?, ?)',
+            [unit.name, unit.short, order++, unit.kind, 'grocery'],
           );
         }
         logDiag('db', `تمت إضافة ${DEFAULT_UNITS.length} وحدات افتراضية`);

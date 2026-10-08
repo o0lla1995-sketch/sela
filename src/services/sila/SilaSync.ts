@@ -83,6 +83,12 @@ const FULL_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
  *  this update can never dump as one huge «تحصيل» dated today (the
  *  67.10₪ complaint). Consumed on the first successful pass. */
 const RECONCILE_V19_FREEZE_FLAG = 'sila_reconcile_v19_freeze_v1';
+/** v34 (الجولة 42 #2): إعادة تجميد أحادية لأُسس المطابقة على
+ *  الأرقام الجهازية (0075) عند أول تمريرة تتضمنها — أسس v19
+ *  جُمّدت على أرقام POS الشاملة التي تختلط بفواتير متاجر التاجر
+ *  الأخرى، وفصلها هنا هو الذي يمنع تحصيلات متجر آخر من أن
+ *  تُسجّل في كتب هذه النقطة (تداخل المتاجر). مرة واحدة فقط. */
+const RECONCILE_V34_DEVICE_FLAG = 'sila_reconcile_v34_device_v1';
 
 /** Result of one cycle — the UI toasts `message` on manual sync. */
 export interface SilaSyncOutcome {
@@ -253,6 +259,17 @@ async function syncCustomersCycle(): Promise<void> {
   // «تحصيل دين 67.10» complaint). Only payments made AFTER this
   // freeze are recorded, dated and sized correctly.
   const freezeFirstPass = getString(RECONCILE_V19_FREEZE_FLAG, '') === '';
+  // v34 (الجولة 42 #2): هل خادم 0075 يرسل أرقام هذه النقطة؟ أول
+  // تمريرة تحملها تعيد تجميد الأسس على المقياس الجهازي الصحيح
+  // (مرة واحدة) — بعدها كل مطابقة تحصيلات التطبيق تخص ديون هذه
+  // النقطة فقط، لا فواتير متاجر التاجر الأخرى.
+  const feedHasDeviceNumbers = rows.some(
+    row =>
+      row.device_purchases_minor != null ||
+      row.device_outstanding_minor != null,
+  );
+  const deviceResetFirstPass =
+    feedHasDeviceNumbers && getString(RECONCILE_V34_DEVICE_FLAG, '') === '';
   const newCustomerOffsets = new Map<string, number>();
   try {
     const recordedMinor = await SilaRepo.reconcileAppCollections(
@@ -261,10 +278,22 @@ async function syncCustomersCycle(): Promise<void> {
         name: row.customer_name,
         posPurchasesMinor: row.pos_purchases_minor ?? 0,
         posOutstandingMinor: row.pos_outstanding_minor ?? 0,
+        // v34: null حين لا يرسلها الخادم (قبل 0075) → الرجوع الآمن
+        // لأرقام POS الشاملة داخل المحرك نفسه.
+        devicePurchasesMinor: row.device_purchases_minor ?? null,
+        deviceOutstandingMinor: row.device_outstanding_minor ?? null,
       })),
       newCustomerOffsets,
       freezeFirstPass,
+      deviceResetFirstPass,
     );
+    if (deviceResetFirstPass) {
+      setString(RECONCILE_V34_DEVICE_FLAG, '1');
+      logDiag(
+        'sila',
+        'أُعيد تجميد أسس مطابقة تحصيلات صلة على أرقام هذه النقطة (مرة واحدة) — فصل كامل لديون المتاجر',
+      );
+    }
     if (freezeFirstPass) {
       setString(RECONCILE_V19_FREEZE_FLAG, '1');
       logDiag(

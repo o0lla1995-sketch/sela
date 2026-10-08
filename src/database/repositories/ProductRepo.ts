@@ -25,6 +25,20 @@ function rowToProduct(row: Record<string, unknown>): Product {
       row.expiry_date == null || String(row.expiry_date).length < 10
         ? null
         : String(row.expiry_date).slice(0, 10),
+    // v34 (الجولة 42 #3): ربطة الملابس — مجموعة الموديل المشتركة
+    // (لون واحد × مقاسات) وسمة كل منتج فرعي.
+    style_group:
+      row.style_group == null || String(row.style_group).length === 0
+        ? null
+        : String(row.style_group),
+    variant_size:
+      row.variant_size == null || String(row.variant_size).length === 0
+        ? null
+        : String(row.variant_size),
+    variant_color:
+      row.variant_color == null || String(row.variant_color).length === 0
+        ? null
+        : String(row.variant_color),
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -43,6 +57,10 @@ export interface ProductInput {
   sold_by_weight?: number;
   /** v32 (round-40 #3): تاريخ انتهاء الصلاحية 'YYYY-MM-DD' أو null. */
   expiry_date?: string | null;
+  /** v34 (الجولة 42 #3): ربطة الملابس — مجموعة الموديل والمقاس واللون. */
+  style_group?: string | null;
+  variant_size?: string | null;
+  variant_color?: string | null;
 }
 
 export const ProductRepo = {
@@ -114,8 +132,8 @@ export const ProductRepo = {
     }
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, style_group, variant_size, variant_color, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
@@ -128,6 +146,9 @@ export const ProductRepo = {
         input.barcode?.trim() ? input.barcode.trim() : null,
         input.sold_by_weight === 1 ? 1 : 0,
         input.expiry_date ?? null,
+        input.style_group?.trim() ? input.style_group.trim() : null,
+        input.variant_size?.trim() ? input.variant_size.trim() : null,
+        input.variant_color?.trim() ? input.variant_color.trim() : null,
         localNow(),
       ],
     );
@@ -151,7 +172,8 @@ export const ProductRepo = {
       `UPDATE products SET
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
         stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?,
-        barcode = ?, sold_by_weight = ?, expiry_date = ?
+        barcode = ?, sold_by_weight = ?, expiry_date = ?,
+        style_group = ?, variant_size = ?, variant_color = ?
        WHERE id = ?`,
       [
         name,
@@ -165,6 +187,9 @@ export const ProductRepo = {
         input.barcode?.trim() ? input.barcode.trim() : null,
         input.sold_by_weight === 1 ? 1 : 0,
         input.expiry_date ?? null,
+        input.style_group?.trim() ? input.style_group.trim() : null,
+        input.variant_size?.trim() ? input.variant_size.trim() : null,
+        input.variant_color?.trim() ? input.variant_color.trim() : null,
         id,
       ],
     );

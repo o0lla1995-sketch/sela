@@ -37,6 +37,7 @@ import {
 import {Icon} from '../../components/Icon';
 import {StocktakeRepo} from '../../database/repositories/StocktakeRepo';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
+import {useSettingsStore} from '../../stores/settingsStore';
 import {ExportService} from '../../services/ExportService';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useNotificationsStore} from '../../stores/notificationsStore';
@@ -104,7 +105,8 @@ export function StocktakeScreen() {
       const [open, past, cats] = await Promise.all([
         StocktakeRepo.getOpen(),
         StocktakeRepo.list(),
-        CategoryRepo.list(),
+        // v34: تصنيفات نمط المتجر الحالي فقط.
+        CategoryRepo.list(useSettingsStore.getState().settings.storeMode),
       ]);
       setSession(open);
       setHistory(past.filter(entry => entry.id !== open?.id));

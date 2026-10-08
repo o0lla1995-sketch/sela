@@ -7,6 +7,9 @@ export type PricingMode = 'RETAIL' | 'WHOLESALE';
 export interface Category {
   id: number;
   name: string;
+  /** v34 (الجولة 42 #3): نمط المتجر الذي ينتمي إليه التصنيف —
+   *  نطاق الرؤية: كل نمط يرى تصنيفاته فقط. */
+  store_mode?: string | null;
   /** Product count (only populated in management listings). */
   productCount?: number;
 }
@@ -25,6 +28,8 @@ export interface Unit {
   sort_order: number;
   /** v9.2: the unit type — defaults to 'piece' on old rows. */
   kind: UnitKind;
+  /** v34: نمط المتجر الذي تخدمه الوحدة (null = قديمة قبل الترقية). */
+  store_mode?: string | null;
 }
 
 /** A unit attached to a product with its conversion + price overrides. */
@@ -68,6 +73,15 @@ export interface Product {
    *  — يُغذّي تحذيرات «قرب الانتهاء/منتهي» في تنبيهات المخزون
    *  والإشعارات. */
   expiry_date: string | null;
+  /** v34 (الجولة 42 #3): ربطة الملابس — معرّف مجموعة الموديل
+   *  المشتركة: كل منتجات الربطة الواحدة (موديل واحد، لون واحد،
+   *  مقاسات متعددة) تحمل القيمة نفسها فتُجمّع في شبكة البيع
+   *  كتجان واحد يفتح نافذة اختيار المقاس. null = منتج عادي. */
+  style_group: string | null;
+  /** v34: مقاس هذا الفرع داخل الربطة (مثال: '32' أو 'XL'). */
+  variant_size: string | null;
+  /** v34: لون الربطة المشترك (مثال: 'أسود'). */
+  variant_color: string | null;
   /** Unit rows loaded on demand (ProductForm / POS unit picker). */
   units?: ProductUnit[];
 }

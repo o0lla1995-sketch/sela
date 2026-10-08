@@ -90,9 +90,12 @@ export function SettingsScreen() {
   const [modePickerOpen, setModePickerOpen] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
 
-  /** v33 (round-41 #4): تبديل نمط المتجر — يزرع الأصناف والوحدات
-   *  المقترحة للنمط الجديد (بلا حذف أي بيانات قائمة أبداً) ثم يحدّث
-   *  إعدادات النمط ويقفل الكتالوج — والصفحة/الكتالوج يتكيّفان فوراً. */
+  /** v34 (الجولة 42 #3): تبديل نمط المتجر — نطاق كامل: يزرع
+   *  تصنيفات ووحدات النمط الجديد موسومة به فقط إن لم تكن موجودة
+   *  له (فلا تراكم فوق بيانات الأنماط الأخرى أبداً)، ثم يحدّث
+   *  إعدادات النمط ويقفل الكتالوج — والصفحة/الكتالوج يتكيّفان
+   *  فوراً: كل نمط يرى تصنيفاته ووحداته فقط (بلا حذف — إعادة
+   *  النمط تعيد الظهور فوراً). */
   const applyStoreMode = useCallback(
     async (mode: StoreMode) => {
       if (modeBusy || mode === settings.storeMode) {
@@ -102,7 +105,7 @@ export function SettingsScreen() {
       const config = storeModeConfig(mode);
       Alert.alert(
         `تحويل المتجر إلى: ${config.label}`,
-        `ستُزرع التصنيفات والوحدات المقترحة لهذا المجال إن لم تكن موجودة (لا يُحذف أي منتج أو تصنيف أو وحدة قائمة)، وستتكيف صفحة المنتج مع مجالك تلقائياً.\n\nهل تريد المتابعة؟`,
+        `ستُزرع تصنيفات ووحدات هذا المجال داخل نطاقه فقط — كل نمط يرى تصنيفاته ووحداته دون خليط أو تراكم (لا يُحذف أي منتج أو تصنيف أو وحدة قائمة)، وستتكيف صفحة المنتج وطريقة الإدخال مع مجالك تلقائياً.\n\nهل تريد المتابعة؟`,
         [
           {text: 'تراجع', style: 'cancel'},
           {
@@ -112,23 +115,30 @@ export function SettingsScreen() {
               try {
                 let addedCategories = 0;
                 let addedUnits = 0;
-                const existingCategories = await CategoryRepo.list();
+                // v34: النطاق بالنمط — نزرع داخل نطاق النمط الجديد
+                // فقط، والتفرد داخل النطاق نفسه (لا عبر المجالات).
+                const existingCategories = await CategoryRepo.list(mode);
                 const existingNames = new Set(
                   existingCategories.map(cat => cat.name.trim()),
                 );
                 for (const name of config.categorySeeds) {
                   if (!existingNames.has(name)) {
-                    await CategoryRepo.create(name);
+                    await CategoryRepo.create(name, mode);
                     addedCategories += 1;
                   }
                 }
-                const existingUnits = await UnitRepo.list();
+                const existingUnits = await UnitRepo.list(mode);
                 const existingUnitNames = new Set(
                   existingUnits.map(u => u.name.trim()),
                 );
                 for (const seed of config.unitSeeds) {
                   if (!existingUnitNames.has(seed.name)) {
-                    await UnitRepo.create(seed.name, seed.short, seed.kind);
+                    await UnitRepo.create(
+                      seed.name,
+                      seed.short,
+                      seed.kind,
+                      mode,
+                    );
                     addedUnits += 1;
                   }
                 }
@@ -138,7 +148,7 @@ export function SettingsScreen() {
                 toast(
                   `أصبح متجرك «${config.label}»` +
                     (addedCategories > 0 || addedUnits > 0
-                      ? ` — أُضيف ${addedCategories} تصنيف و${addedUnits} وحدة مقترحة`
+                      ? ` — أُضيف ${addedCategories} تصنيف و${addedUnits} وحدة لهذا المجال`
                       : ''),
                   'success',
                   5000,

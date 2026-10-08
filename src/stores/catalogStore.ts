@@ -1,15 +1,22 @@
 /**
  * Catalog store — products, categories and the in-memory embeddings
  * index handed to the camera frame processor worklet.
+ * v34 (الجولة 42 #3): النطاق بنمط المتجر — التصنيفات تُحمّل
+ * لنمط المتجر الحالي فقط، ومرة واحدة بعد الترقية تُوسم كل
+ * التصنيفات/الوحدات غير الموسومة بنمط المتجر الحالي (بيانات
+ * ما قبل الأنماط كانت خليط المجالات المتراكمة — الوسم يجعلها
+ * ملكاً للنمط الذي كان يعمل وقتها فلا تتداخل فوق بعضها).
  */
 import {create} from 'zustand';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {CategoryRepo} from '../database/repositories/CategoryRepo';
+import {UnitRepo} from '../database/repositories/UnitRepo';
 import {EmbeddingRepo} from '../database/repositories/EmbeddingRepo';
 import {PlatformUtilsNative} from '../native/nativeBridge';
 import {logDiag} from '../core/diagnostics';
 import {EMBEDDING_MODEL_VERSION} from '../core/config';
-import {getNumber, setNumber, KEYS} from '../storage/storage';
+import {getNumber, setNumber, getString, setString, KEYS} from '../storage/storage';
+import {useSettingsStore} from './settingsStore';
 import {useToastStore} from './toastStore';
 import {notificationsStore} from './notificationsStore';
 import type {Category, EmbeddingsIndex, Product} from '../core/types';
@@ -40,6 +47,45 @@ interface CatalogState {
  * something to repeat on every screen refresh).
  */
 let deadPathSweepDone = false;
+
+/** v34 (الجولة 42 #3): وسم أحادي للبيانات القديمة — كل تصنيف/وحدة
+ *  بلا store_mode يُوسم بنمط المتجر الحالي مرة واحدة فقط بعد
+ *  الترقية، فيصبح ملكاً لمجال المتجر الذي كان يعمل وقت الترقية
+ *  ولا يظهر فوق تصنيفات الأنماط الأخرى بعد التبديل. */
+const LEGACY_MODE_TAG_FLAG = 'catalog_legacy_mode_tagged_v34';
+let legacyModeTagDone = false;
+
+async function tagLegacyRowsOnce(): Promise<void> {
+  if (legacyModeTagDone) {
+    return;
+  }
+  legacyModeTagDone = true;
+  try {
+    if (getString(LEGACY_MODE_TAG_FLAG, '') !== '') {
+      return;
+    }
+    const mode = useSettingsStore.getState().settings.storeMode;
+    const cats = await CategoryRepo.tagUntagged(mode);
+    const units = await UnitRepo.tagUntagged(mode);
+    setString(LEGACY_MODE_TAG_FLAG, '1');
+    if (cats > 0 || units > 0) {
+      logDiag(
+        'catalog',
+        `وُسمت بيانات ما قبل الأنماط بنمط المتجر الحالي: ${cats} تصنيف و${units} وحدة`,
+      );
+    }
+  } catch (error) {
+    // الفشل ليس فادحاً — المحاولة تتكرر بعد إعادة التشغيل حتى تنجح.
+    legacyModeTagDone = false;
+    logDiag(
+      'catalog',
+      `تعذر وسم البيانات القديمة بنمط المتجر: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      'warn',
+    );
+  }
+}
 
 async function cleanDeadImagePaths(products: Product[]): Promise<Product[]> {
   if (deadPathSweepDone) {
@@ -100,6 +146,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
   refresh: async () => {
     set({loading: true, error: null});
     try {
+      // v34: وسم بيانات ما قبل الأنماط بنمط المتجر الحالي (مرة واحدة).
+      await tagLegacyRowsOnce();
       // v10 (round-16 #4): one-time migration — when the bundled
       // embedding model changes generation, every stored fingerprint
       // belongs to the OLD feature space and would match garbage.
@@ -146,7 +194,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       }
       const [products, categories, embeddings] = await Promise.all([
         ProductRepo.list(),
-        CategoryRepo.list(),
+        // v34: تصنيفات نمط المتجر الحالي فقط — لا خليط المجالات.
+        CategoryRepo.list(useSettingsStore.getState().settings.storeMode),
         EmbeddingRepo.listAll(),
       ]);
       const index = EmbeddingRepo.buildIndex(embeddings);

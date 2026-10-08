@@ -1,6 +1,16 @@
 /**
- * ProductFormScreen — إضافة/تعديل منتج (v3).
+ * ProductFormScreen — إضافة/تعديل منتج (v34 — إعادة هيكلة الأنماط).
  * ─────────────────────────────────────────────────────────────────
+ * v34 (الجولة 42 #3): صفحة المنتج بترتيب المنطق التجاري لكل مجال:
+ *   بيانات المنتج ← التصنيف (نطاق النمط) ← طريقة البيع ← إدخال
+ *   البضاعة (يملأ الكمية والتكلفة تلقائياً — قبل الأسعار لأنه
+ *   مصدرها) ← الأسعار (مقترحة من التكلفة) ← حد التنبيه ← الأقسام
+ *   الاختيارية (صلاحية/وحدات/بصمة) بحسب المجال.
+ * • الملابس: نظام الربطة — إدخال الموديل مرة واحدة (لون + مقاسات
+ *   متعددة بكمية لكل مقاس) يولّد منتجاً مستقلاً لكل مقاس بباركود
+ *   داخلي، مرتبطة بمجموعة style_group واحدة تُباع من نافذة المقاس.
+ * • الأقسام غير المناسبة للمجال مخفية كلياً (لا ميزان للصيدلية،
+ *   لا باركود للمطعم، لا استلام للكافيتريا) وتعود بلا فقدان.
  * Three-angle vision enrollment + pricing + stock + alert threshold
  * + BARCODE (with scan-to-fill) + UNITS editor (كرتونة × 24 …) with
  * per-unit price overrides that make wholesale-by-carton trivial.
@@ -157,6 +167,11 @@ export function ProductFormScreen() {
   const wholesaleRef = useRef<FieldHandle>(null);
   const stockRef = useRef<FieldHandle>(null);
   const thresholdRef = useRef<FieldHandle>(null);
+  /** v34: سلسلة حقول استلام البضاعة — التالي ينتقل داخل القسم ثم
+   *  يقفز لسعر التكلفة المُملأ تلقائياً فالأسعار فالكمية. */
+  const receiveCountRef = useRef<FieldHandle>(null);
+  const receivePerRef = useRef<FieldHandle>(null);
+  const receiveCostRef = useRef<FieldHandle>(null);
   /** Unit-card fields, keyed `unitId:field` — chained inside each card. */
   const unitFieldRefs = useRef<Record<string, FieldHandle | null>>({});
   const focusUnitField = useCallback((key: string) => {
@@ -182,6 +197,21 @@ export function ProductFormScreen() {
     modeConfig.defaultSaleMode,
   );
   const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
+  // ── v34 (الجولة 42 #3): ربطة الملابس — إدخال الموديل دفعة واحدة:
+  //    لون واحد + مقاسات متعددة بكمية لكل مقاس → منتج مستقل لكل
+  //    مقاس بباركود داخلي، مرتبطة بمجموعة style_group واحدة.
+  const [lotColor, setLotColor] = useState('');
+  const [lotSizes, setLotSizes] = useState<string[]>([]);
+  const [lotQtyBySize, setLotQtyBySize] = useState<Record<string, number>>({});
+  const [lotCustomColor, setLotCustomColor] = useState('');
+  const [lotCustomSize, setLotCustomSize] = useState('');
+  /** بيانات الربطة للمنتج المحمّل للتعديل (ملابس) — تُحفظ كما هي
+   *  حتى لا ينفصل المنتج عن مجموعته عند تعديل السعر أو الاسم. */
+  const [variantInfo, setVariantInfo] = useState<{
+    color: string | null;
+    size: string | null;
+    group: string | null;
+  } | null>(null);
   // ── v32 (round-40 #3): تاريخ انتهاء الصلاحية — اختياري، بإحدى
   //    طريقتين: تاريخ محدد (يوم/شهر/سنة) أو مدة من اليوم (أيام أو
   //    أشهر) تُحسب إلى تاريخ فعلي وتُخزن 'YYYY-MM-DD'.
@@ -203,7 +233,6 @@ export function ProductFormScreen() {
   //    البداية (ترويستهما تعرضان الحالة)، وقسم الصلاحية يُفتح
   //    تلقائياً عند تحرير منتج له صلاحية محفوظة.
   const [expiryOpen, setExpiryOpen] = useState(modeConfig.expiry === 'prominent');
-  const [receiveOpen, setReceiveOpen] = useState(false);
   const [visionOpen, setVisionOpen] = useState(false);
   // ── v16 (round-22 #3): استلام البضاعة — quick receiving with
   // AUTO-FILL. The merchant picks how the goods arrived (by carton
@@ -237,9 +266,10 @@ export function ProductFormScreen() {
     let mounted = true;
     const load = async () => {
       try {
+        // v34: نطاق النمط الحالي — تصنيفات ووحدات هذا المجال فقط.
         const [cats, unitList] = await Promise.all([
-          CategoryRepo.list(),
-          UnitRepo.list(),
+          CategoryRepo.list(settings.storeMode),
+          UnitRepo.list(settings.storeMode),
         ]);
         if (!mounted) {
           return;
@@ -271,6 +301,20 @@ export function ProductFormScreen() {
             setCategoryId(product.category_id ?? 'none');
             setSaleMode(product.sold_by_weight === 1 ? 'weight' : 'piece');
             setUnitRows(productUnits.map(unitRowToDraft));
+            // v34: بيانات الربطة تُحمَّل وتُحفظ كما هي — تعديل السعر
+            // أو الاسم لا ينفصل المنتج عن مجموعته ومقاسه.
+            if (
+              product.style_group != null ||
+              product.variant_size != null ||
+              product.variant_color != null
+            ) {
+              setVariantInfo({
+                color: product.variant_color,
+                size: product.variant_size,
+                group: product.style_group,
+              });
+              setLotColor(product.variant_color ?? '');
+            }
             // v32: تاريخ الانتهاء المحفوظ يُحمَّل في وضع «تاريخ محدد».
             if (
               product.expiry_date != null &&
@@ -579,27 +623,6 @@ export function ProductFormScreen() {
     }
   }, [toast]);
 
-  /** v33 (round-41 #4): إلحاق مقاس/لون بالاسم — نمط الملابس. كل
-   *  رقاقة تُلحق « — القيمة» بالاسم إن لم تكن موجودة (أو تزيلها إن
-   *  ضُغطت وهي مضافة)، فيصبح كل مقاس/لون منتجاً مستقلاً بمخزونه
-   *  وباركوده الداخلي، والاسم يقرأ بوضوح («قميص قطن — أسود — L»). */
-  const appendVariant = useCallback(
-    (variant: string) => {
-      setName(prev => {
-        const base = prev.trim();
-        if (base.length === 0) {
-          toast('اكتب اسم المنتج أولاً ثم اختر المقاس/اللون', 'info');
-          return prev;
-        }
-        if (base.includes(` — ${variant}`)) {
-          return base.replace(` — ${variant}`, '');
-        }
-        return `${base} — ${variant}`;
-      });
-    },
-    [toast],
-  );
-
   /** v9.1 (round-14 #6): prints N product labels on the thermal
    *  printer — name + price + a scannable barcode (EAN-13 or
    *  CODE128). Works straight from the form (even before save):
@@ -800,14 +823,16 @@ export function ProductFormScreen() {
           return;
         }
         // v9.2 (round-15 #3): weight packages are WEIGHT-kind units.
+        // v34: وحدات الوزن الجاهزة داخل نطاق النمط الحالي.
         const unitId = await UnitRepo.getOrCreate(
           preset.name,
           preset.name,
           'weight',
+          settings.storeMode,
         );
         presetUnitId = unitId;
         // The units list may not contain it yet — refresh first.
-        const unitList = await UnitRepo.list();
+        const unitList = await UnitRepo.list(settings.storeMode);
         setUnits(unitList);
         // Post-await dedupe: a row for this unit may have landed
         // while the await was in flight.
@@ -1015,7 +1040,12 @@ export function ProductFormScreen() {
   const ensureReceivingUnit = useCallback(
     async (kind: 'carton' | 'bag') => {
       try {
-        const name = kind === 'carton' ? 'كرتونة' : 'كيس';
+        // v34: ملصق العبوة بلغة المجال — كرتونة (بقالة) / علبة
+        //  (صيدلية) / كيس (وزن) — والوحدة داخل نطاق النمط الحالي.
+        const name =
+          kind === 'carton'
+            ? modeConfig.receivingLabels?.container ?? 'كرتونة'
+            : 'كيس';
         const unitKind = kind === 'carton' ? 'piece' : 'weight';
         const conversion =
           kind === 'carton'
@@ -1042,8 +1072,13 @@ export function ProductFormScreen() {
           );
           return;
         }
-        const unitId = await UnitRepo.getOrCreate(name, name, unitKind);
-        const unitList = await UnitRepo.list();
+        const unitId = await UnitRepo.getOrCreate(
+          name,
+          name,
+          unitKind,
+          settings.storeMode,
+        );
+        const unitList = await UnitRepo.list(settings.storeMode);
         setUnits(unitList);
         setUnitRows(prev => [
           ...prev,
@@ -1059,7 +1094,7 @@ export function ProductFormScreen() {
         // A unit row is a convenience — never block receiving on it.
       }
     },
-    [unitRows, unitNameById, piecesPerCarton, kgPerBag],
+    [unitRows, unitNameById, piecesPerCarton, kgPerBag, modeConfig, settings.storeMode],
   );
 
   /** v16 (round-22 #3): apply receiving prices (incl. the unit
@@ -1069,7 +1104,11 @@ export function ProductFormScreen() {
     (retail: number | null, wholesale: number | null) => {
       applySuggestion(retail, wholesale);
       const kind = receiveMode === 'bag' ? 'bag' : 'carton';
-      const name = kind === 'carton' ? 'كرتونة' : 'كيس';
+      // v34: ملصق العبوة بلغة المجال (كرتونة/علبة/كيس).
+      const name =
+        kind === 'carton'
+          ? modeConfig.receivingLabels?.container ?? 'كرتونة'
+          : 'كيس';
       const conversion =
         kind === 'carton'
           ? parseNumber(piecesPerCarton)
@@ -1096,7 +1135,7 @@ export function ProductFormScreen() {
         );
       }
     },
-    [receiveMode, applySuggestion, unitNameById, piecesPerCarton, kgPerBag],
+    [receiveMode, applySuggestion, unitNameById, piecesPerCarton, kgPerBag, modeConfig],
   );
 
   /** Unit rows usable as a stock-entry unit (valid conversion). */
@@ -1177,7 +1216,131 @@ export function ProductFormScreen() {
     ensureReceivingUnit,
   ]);
 
+  /** v34 (الجولة 42 #3): حفظ ربطة الملابس — الموديل مرة واحدة:
+   *  لون + مقاسات متعددة بكمية لكل مقاس → منتج مستقل لكل مقاس
+   *  بباركود داخلي فريد، وكلها تحمل style_group واحداً
+   *  (`الموديل|اللون`) فتُباع من نافذة اختيار المقاس في الشبكة.
+   *  الربطة اللاحقة للموديل نفسه بلون آخر تنشئ مجموعة أخرى؛
+   *  والموديل نفسه باللون نفسه تنضم للمجموعة ذاتها (مقاسات
+   *  إضافية لاحقاً بلا تكرار). */
+  const saveLot = useCallback(async () => {
+    const modelName = name.trim();
+    const color = (lotColor || lotCustomColor).trim();
+    const cost = parseNumber(costPrice);
+    const retail = parseNumber(retailPrice);
+    const wholesale = wholesalePrice.trim()
+      ? parseNumber(wholesalePrice)
+      : retail;
+    const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
+
+    if (!modelName) {
+      toast('اسم الموديل مطلوب (مثال: بنطال جينز)', 'error');
+      return;
+    }
+    if (!color) {
+      toast('اختر لون الربطة أو اكتبه', 'error');
+      return;
+    }
+    if (lotSizes.length === 0) {
+      toast('اختر مقاساً واحداً على الأقل للربطة', 'error');
+      return;
+    }
+    const sizes = lotSizes
+      .map(size => ({size, qty: Math.max(1, Math.round(lotQtyBySize[size] ?? 1))}))
+      .filter(entry => entry.qty > 0);
+    if (sizes.length === 0) {
+      toast('أدخل كمية صالحة لمقاس واحد على الأقل', 'error');
+      return;
+    }
+    if (Number.isNaN(cost) || cost < 0) {
+      toast('أدخل سعر تكلفة صالحاً للقطعة', 'error');
+      return;
+    }
+    if (Number.isNaN(retail) || retail <= 0) {
+      toast('أدخل سعر مبيع صالحاً للقطعة', 'error');
+      return;
+    }
+    if (Number.isNaN(wholesale) || wholesale < 0) {
+      toast('سعر الجملة غير صالح', 'error');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const styleGroup = `${modelName}|${color}`;
+      let created = 0;
+      for (const entry of sizes) {
+        // باركود داخلي فريد لكل مقاس — الرمز هو هوية القطعة على الرف.
+        const barcode = await generateInternalEan13(async candidate => {
+          const productHit = await ProductRepo.findByBarcode(candidate);
+          if (productHit != null) {
+            return true;
+          }
+          return (await UnitRepo.findByBarcode(candidate)) != null;
+        });
+        await ProductRepo.create({
+          name: `${modelName} — ${color} · ${entry.size}`,
+          cost_price: cost,
+          retail_price: retail,
+          wholesale_price: wholesale,
+          stock_quantity: entry.qty,
+          category_id: categoryId === 'none' ? null : categoryId,
+          image_uri: imageUri,
+          low_stock_threshold:
+            thresholdValue != null && !Number.isNaN(thresholdValue)
+              ? Math.trunc(thresholdValue)
+              : null,
+          barcode,
+          sold_by_weight: 0,
+          expiry_date: null,
+          style_group: styleGroup,
+          variant_size: entry.size,
+          variant_color: color,
+        });
+        created += 1;
+      }
+      await refreshCatalog();
+      toast(
+        `تمت إضافة ربطة ${modelName} — ${color}: ${created} منتج` +
+          ` (${sizes.map(e => `${e.size}×${e.qty}`).join('، ')})` +
+          ' بباركود داخلي لكل مقاس',
+        'success',
+        6000,
+      );
+      navigation.goBack();
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل حفظ الربطة',
+        'error',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    name,
+    lotColor,
+    lotCustomColor,
+    lotSizes,
+    lotQtyBySize,
+    costPrice,
+    retailPrice,
+    wholesalePrice,
+    threshold,
+    categoryId,
+    imageUri,
+    refreshCatalog,
+    toast,
+    navigation,
+  ]);
+
   const save = useCallback(async () => {
+    // v34 (الجولة 42 #3): الملابس عند الإنشاء = ربطة (دفعة مقاسات
+    //  بمنتج لكل مقاس) — مسار حفظ خاص بها. عند التعديل يمر المسار
+    //  الطبيعي مع الحفاظ على بيانات الربطة كما حُمّلت.
+    if (modeConfig.lotEntry === true && productId == null) {
+      await saveLot();
+      return;
+    }
     const trimmedName = name.trim();
     const cost = parseNumber(costPrice);
     const retail = parseNumber(retailPrice);
@@ -1287,6 +1450,11 @@ export function ProductFormScreen() {
         sold_by_weight: weighted ? 1 : 0,
         // v32 (round-40 #3): التاريخ المحسوب (تاريخ محدد أو مدة).
         expiry_date: expiryDate ?? null,
+        // v34 (الجولة 42 #3): بيانات الربطة تُحفظ كما حُمّلت — تعديل
+        //  السعر أو الاسم لا ينفصل المنتج عن مجموعته ومقاسه.
+        style_group: variantInfo?.group ?? null,
+        variant_size: variantInfo?.size ?? null,
+        variant_color: variantInfo?.color ?? null,
       };
 
       let targetId = productId;
@@ -1362,6 +1530,9 @@ export function ProductFormScreen() {
     productId,
     expiryDate,
     expiryMode,
+    variantInfo,
+    modeConfig,
+    saveLot,
     refreshCatalog,
     toast,
     navigation,
@@ -1516,19 +1687,45 @@ export function ProductFormScreen() {
             onChangeText={setName}
             placeholder="مثال: شوكولاتة دوف 100غ"
             returnKeyType="next"
-            onSubmitEditing={() => barcodeRef.current?.focus()}
+            onSubmitEditing={() => {
+              // v34: سلسلة التالي المنطقية — الباركود إن كان أساس
+              //  المجال، وإلا حقول استلام البضاعة، وإلا سعر التكلفة.
+              if (modeConfig.barcode) {
+                barcodeRef.current?.focus();
+              } else if (
+                modeConfig.receiving &&
+                receiveMode !== 'none'
+              ) {
+                receiveCountRef.current?.focus();
+              } else {
+                costRef.current?.focus();
+              }
+            }}
           />
+          {/* v34: الباركود أساس بعض المجالات فقط (بقالة/صيدلية/
+              ملابس) — مطعم وكافيتريا وفواكه إدخال أسرع بلا باركود. */}
+          {modeConfig.barcode ? (
           <View style={styles.barcodeRow}>
             <View style={{flex: 1}}>
               <Field
                 ref={barcodeRef}
-                label="الباركود (اختياري)"
+                label={
+                  modeConfig.lotEntry
+                    ? 'الباركود (اختياري — لكل مقاس رمز مولّد تلقائياً)'
+                    : 'الباركود (اختياري)'
+                }
                 value={barcode}
                 onChangeText={setBarcode}
                 keyboardType="numeric"
                 placeholder="امسحه أو اكتبه"
                 returnKeyType="next"
-                onSubmitEditing={() => costRef.current?.focus()}
+                onSubmitEditing={() => {
+                  if (modeConfig.receiving && receiveMode !== 'none') {
+                    receiveCountRef.current?.focus();
+                  } else {
+                    costRef.current?.focus();
+                  }
+                }}
               />
             </View>
             <TouchableOpacity
@@ -1548,6 +1745,7 @@ export function ProductFormScreen() {
               <Icon name="sparkles" size={20} color={c.accent} />
             </TouchableOpacity>
           </View>
+          ) : null}
           {/* v9.1 (round-14 #6): barcode preview + label printing —
               the merchant sees exactly what will print (EAN-13 for
               valid 13-digit codes, CODE128 otherwise) and can print
@@ -1588,66 +1786,188 @@ export function ProductFormScreen() {
             </Card>
           ) : null}
 
-{/* ── v33 (round-41 #4): المقاس واللون — ملابس فقط: رقائق
-              سريعة تُلحق بالاسم، وكل مقاس يُحفظ منتجاً مستقلاً
-              بباركود داخلي (زر التوليد بجانب الباركود أعلاه). ── */}
-{modeConfig.variantSizes != null ? (
+{/* ── v34 (الجولة 42 #3): ربطة الملابس — إدخال الموديل دفعة
+              واحدة: لون واحد + مقاسات متعددة بكمية لكل مقاس،
+              والاسم يبقى اسم الموديل فقط (بلا مقاس/لون). عند الحفظ
+              يُنشأ منتج مستقل لكل مقاس بباركود داخلي، مرتبطة
+              بمجموعة واحدة تُباع من نافذة المقاس في الشبكة. ── */}
+{modeConfig.lotEntry === true ? (
+  productId == null ? (
   <View style={styles.variantBox}>
     <View style={styles.categoryHeader}>
-      <Text style={styles.fieldLabelOuter}>المقاس واللون</Text>
-      <Text style={styles.variantHint}>يُلحق بالاسم — كل مقاس منتج مستقل</Text>
+      <Text style={styles.fieldLabelOuter}>ربطة الملابس (المقاسات واللون)</Text>
+      <Text style={styles.variantHint}>
+        {lotSizes.length > 0
+          ? `${lotSizes.length} مقاس — ${lotSizes.reduce(
+              (sum, size) => sum + Math.max(1, Math.round(lotQtyBySize[size] ?? 1)),
+              0,
+            )} قطعة إجمالاً`
+          : 'الاسم أعلاه اسم الموديل — بلا مقاس أو لون'}
+      </Text>
     </View>
-    <View style={styles.variantChipsRow}>
-      {modeConfig.variantSizes.map(size => (
-        <TouchableOpacity
-          key={`size-${size}`}
-          style={[
-            styles.catChip,
-            name.includes(` — ${size}`)
-              ? {backgroundColor: c.accent, borderColor: c.accent}
-              : null,
-          ]}
-          onPress={() => appendVariant(size)}
-          activeOpacity={0.75}>
-          <Text
-            style={[
-              styles.catChipText,
-              {color: name.includes(` — ${size}`) ? c.onAccent : c.textDim},
-            ]}>
-            {size}
-          </Text>
-        </TouchableOpacity>
-      ))}
-    </View>
+
+    {/* اللون: رقائق مفردة الاختيار + مخصص */}
+    <Text style={styles.lotSubLabel}>اللون (اختر واحداً)</Text>
     <View style={styles.variantChipsRow}>
       {(modeConfig.variantColors ?? []).map(color => (
         <TouchableOpacity
           key={`color-${color}`}
           style={[
             styles.catChip,
-            name.includes(` — ${color}`)
+            lotColor === color
               ? {backgroundColor: c.accent, borderColor: c.accent}
               : null,
           ]}
-          onPress={() => appendVariant(color)}
+          onPress={() => {
+            setLotColor(color);
+            setLotCustomColor('');
+          }}
           activeOpacity={0.75}>
           <Text
             style={[
               styles.catChipText,
-              {
-                color: name.includes(` — ${color}`) ? c.onAccent : c.textDim,
-              },
+              {color: lotColor === color ? c.onAccent : c.textDim},
             ]}>
             {color}
           </Text>
         </TouchableOpacity>
       ))}
     </View>
-    <Text style={styles.variantFootnote}>
-      بعد حفظ هذا المقاس أضف المقاس التالي من «إضافة منتج» — الاسم نفسه مع
-      مقاس/لون مختلف وباركود داخلي لكل واحد.
-    </Text>
+    <View style={styles.lotCustomRow}>
+      <TextInput
+        style={styles.lotCustomInput}
+        value={lotCustomColor}
+        onChangeText={text => {
+          setLotCustomColor(text);
+          if (text.trim().length > 0) {
+            setLotColor('');
+          }
+        }}
+        placeholder="لون آخر…"
+        placeholderTextColor={c.textFaint}
+        returnKeyType="done"
+      />
+      {lotCustomColor.trim().length > 0 ? (
+        <Icon name="check" size={15} color={c.success} />
+      ) : null}
+    </View>
+
+    {/* المقاسات: رقائق متعددة الاختيار + مخصص */}
+    <Text style={styles.lotSubLabel}>المقاسات (اختر كل ما بالربطة)</Text>
+    <View style={styles.variantChipsRow}>
+      {(modeConfig.variantSizes ?? []).map(size => (
+        <TouchableOpacity
+          key={`size-${size}`}
+          style={[
+            styles.catChip,
+            lotSizes.includes(size)
+              ? {backgroundColor: c.accent, borderColor: c.accent}
+              : null,
+          ]}
+          onPress={() =>
+            setLotSizes(prev =>
+              prev.includes(size)
+                ? prev.filter(entry => entry !== size)
+                : [...prev, size],
+            )
+          }
+          activeOpacity={0.75}>
+          <Text
+            style={[
+              styles.catChipText,
+              {color: lotSizes.includes(size) ? c.onAccent : c.textDim},
+            ]}>
+            {size}
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+    <View style={styles.lotCustomRow}>
+      <TextInput
+        style={styles.lotCustomInput}
+        value={lotCustomSize}
+        onChangeText={setLotCustomSize}
+        placeholder="مقاس آخر واضغط إضافة…"
+        placeholderTextColor={c.textFaint}
+        returnKeyType="done"
+        onSubmitEditing={() => {
+          const custom = lotCustomSize.trim();
+          if (custom.length > 0 && !lotSizes.includes(custom)) {
+            setLotSizes(prev => [...prev, custom]);
+          }
+          setLotCustomSize('');
+        }}
+      />
+      <TouchableOpacity
+        style={styles.lotAddBtn}
+        onPress={() => {
+          const custom = lotCustomSize.trim();
+          if (custom.length > 0 && !lotSizes.includes(custom)) {
+            setLotSizes(prev => [...prev, custom]);
+          }
+          setLotCustomSize('');
+        }}
+        activeOpacity={0.8}>
+        <Icon name="plus" size={16} color={c.onAccent} />
+      </TouchableOpacity>
+    </View>
+
+    {/* كمية كل مقاس — سطر لكل مقاس مختار بعدّاد */}
+    {lotSizes.length > 0 ? (
+      <View style={styles.lotQtyList}>
+        {lotSizes.map(size => (
+          <View key={`qty-${size}`} style={styles.lotQtyRow}>
+            <Text style={styles.lotQtySize}>{size}</Text>
+            <View style={{flex: 1}} />
+            <Stepper
+              compact
+              value={Math.max(1, Math.round(lotQtyBySize[size] ?? 1))}
+              onIncrement={() =>
+                setLotQtyBySize(prev => ({
+                  ...prev,
+                  [size]: Math.min(999, Math.max(1, Math.round(prev[size] ?? 1)) + 1),
+                }))
+              }
+              onDecrement={() =>
+                setLotQtyBySize(prev => ({
+                  ...prev,
+                  [size]: Math.max(1, Math.max(1, Math.round(prev[size] ?? 1)) - 1),
+                }))
+              }
+            />
+            <TouchableOpacity
+              onPress={() =>
+                setLotSizes(prev => prev.filter(entry => entry !== size))
+              }
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              <Icon name="trash" size={15} color={c.danger} />
+            </TouchableOpacity>
+          </View>
+        ))}
+        <Text style={styles.variantFootnote}>
+          سيُنشأ منتج مستقل لكل مقاس بباركوده الداخلي ومخزونه — وفي شبكة
+          البيع يظهر الموديل تجاناً واحداً يفتح نافذة اختيار المقاس.
+        </Text>
+      </View>
+    ) : null}
   </View>
+  ) : (
+    /* تعديل منتج من ربطة — بيانات الربطة كما هي (لا تنفصل المجموعة). */
+    <View style={styles.variantInfoCard}>
+      <Icon name="tag" size={16} color={c.accent} />
+      <View style={{flex: 1}}>
+        <Text style={styles.variantInfoTitle}>
+          {variantInfo?.color != null ? `لون الربطة: ${variantInfo.color}` : 'منتج ملابس'}
+          {variantInfo?.size != null ? ` · المقاس: ${variantInfo.size}` : ''}
+        </Text>
+        <Text style={styles.variantInfoMeta}>
+          هذا المنتج فرع من ربطة — عدّل سعره أو مخزونه بحرية، وهويته
+          (اللون والمقاس والمجموعة) تبقى كما هي كي لا تنفصل عن باقي
+          مقاسات الموديل في شبكة البيع.
+        </Text>
+      </View>
+    </View>
+  )
 ) : null}
           {/* ── Category picker ──────────────────────────────── */}
           <View style={styles.categoryHeader}>
@@ -1761,7 +2081,262 @@ export function ProductFormScreen() {
           </View>
   </>
 ) : null}
-          <Field
+{modeConfig.receiving ? (
+  <View style={styles.receiveSection}>
+  {/* ── v34 (الجولة 42 #3): إدخال البضاعة قبل الأسعار — الترتيب
+      المنطقي الذي طلبه التاجر: التاجر يستلم أولاً (كراتين/أكياس/
+      علب) فتُحسب الكمية والتكلفة تلقائياً، ثم يعتمد الأسعار
+      المقترحة أو يعدّلها. ملصقات العبوة بلغة المجال (كرتونة/
+      علبة) والأزرار حسب ما يحتاجه المجال فعلاً. */}
+  <SectionTitle
+    title="إدخال البضاعة"
+    hint={
+      receiveMode === 'none'
+        ? 'يدوي — أو اختر كيف وصلت البضاعة لتُملأ الكمية والتكلفة تلقائياً'
+        : 'الكمية والتكلفة تُملآن تلقائياً في الحقول أدناه — اعتمد الأسعار المقترحة أو عدّلها'
+    }
+  />
+          {/* ── v16 (round-22 #3): استلام البضاعة — smart receiving
+              with AUTO-FILL. The merchant picks how the goods arrived
+              (cartons or weight bags), types counts + package price,
+              and quantity/cost/suggested prices (and the matching
+              كرتونة/كيس sale unit) fill themselves. ─────────────── */}
+          <View style={styles.saleModeRow}>
+            <TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                receiveMode === 'none' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => switchReceiveMode('none')}
+              activeOpacity={0.8}>
+              <Icon
+                name="edit"
+                size={18}
+                color={receiveMode === 'none' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  receiveMode === 'none'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
+                ]}>
+                يدوي
+              </Text>
+            </TouchableOpacity>
+            {modeConfig.receivingByContainer ? (
+<TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                receiveMode === 'carton' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => switchReceiveMode('carton')}
+              activeOpacity={0.8}>
+              <Icon
+                name="box"
+                size={18}
+                color={receiveMode === 'carton' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  receiveMode === 'carton'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
+                ]}>
+                بالكرتونة
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+            {modeConfig.receivingByBag ? (
+<TouchableOpacity
+              style={[
+                styles.saleModeChip,
+                receiveMode === 'bag' ? styles.saleModeChipActive : null,
+              ]}
+              onPress={() => switchReceiveMode('bag')}
+              activeOpacity={0.8}>
+              <Icon
+                name="scale"
+                size={18}
+                color={receiveMode === 'bag' ? c.onAccent : c.textDim}
+              />
+              <Text
+                style={[
+                  styles.saleModeText,
+                  receiveMode === 'bag'
+                    ? {color: c.onAccent}
+                    : {color: c.textDim},
+                ]}>
+                بالوزن (كيس)
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+          </View>
+
+          {receiveMode === 'carton' ? (
+            <Card style={styles.receiveCard}>
+              <View style={styles.unitFieldsRow}>
+                <View style={{flex: 1}}>
+                  <Field
+                    ref={receiveCountRef}
+                    label={`عدد ${modeConfig.receivingLabels?.container ?? 'الكراتين'}`}
+                    value={cartonsCount}
+                    onChangeText={setCartonsCount}
+                    keyboardType="numeric"
+                    placeholder="3"
+                    returnKeyType="next"
+                    onSubmitEditing={() => receivePerRef.current?.focus()}
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    ref={receivePerRef}
+                    label={modeConfig.receivingLabels?.perContainer ?? `قطع بالكرتونة (${BASE_UNIT_NAME})`}
+                    value={piecesPerCarton}
+                    onChangeText={setPiecesPerCarton}
+                    keyboardType="numeric"
+                    placeholder="24"
+                    returnKeyType="next"
+                    onSubmitEditing={() => receiveCostRef.current?.focus()}
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    ref={receiveCostRef}
+                    label={`سعر ${modeConfig.receivingLabels?.container ?? 'الكرتونة'} (₪)`}
+                    value={cartonCost}
+                    onChangeText={setCartonCost}
+                    keyboardType="numeric"
+                    placeholder="48.00"
+                    returnKeyType="next"
+                    onSubmitEditing={() => costRef.current?.focus()}
+                  />
+                </View>
+              </View>
+              {cartonMath != null ? (
+                <View style={styles.receiveSummary}>
+                  <Text style={styles.receiveSummaryText}>
+                    {cartonMath.totalPieces}{' '}{BASE_UNIT_NAME} إجمالاً
+                    {cartonMath.perPiece != null
+                      ? ` · تكلفة القطعة ${cartonMath.perPiece.toFixed(
+                          3,
+                        )}`
+                      : ''}
+                    {cartonMath.cartonRetail != null
+                      ? ` · سعر الكرتونة المقترح ${cartonMath.cartonRetail.toFixed(
+                          2,
+                        )}`
+                      : ''}
+                  </Text>
+                  {cartonMath.retail != null && cartonMath.wholesale != null ? (
+                    <TouchableOpacity
+                      style={styles.receiveSuggestBtn}
+                      onPress={() =>
+                        applyReceivingPrices(
+                          cartonMath.retail,
+                          cartonMath.wholesale,
+                        )
+                      }
+                      activeOpacity={0.85}>
+                      <Icon name="sparkles" size={15} color={c.onAccent} />
+                      <Text style={styles.receiveSuggestText}>
+                        اعتماد الأسعار المقترحة — مفرق{' '}
+                        {cartonMath.retail.toFixed(2)} وجملة{' '}
+                        {cartonMath.wholesale.toFixed(2)} للقطعة (+ وحدة
+                        الكرتونة تلقائياً)
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              ) : (
+                <Text style={styles.receiveHintText}>
+                  أدخل عدد الكراتين وعدد القطع بالكرتونة — الكمية وتكلفة القطعة
+                  تُملأ تلقائياً في الحقول أدناه
+                </Text>
+              )}
+            </Card>
+          ) : null}
+
+          {receiveMode === 'bag' ? (
+            <Card style={styles.receiveCard}>
+              <View style={styles.unitFieldsRow}>
+                <View style={{flex: 1}}>
+                  <Field
+                    ref={receiveCountRef}
+                    label="عدد الأكياس"
+                    value={bagsCount}
+                    onChangeText={setBagsCount}
+                    keyboardType="numeric"
+                    placeholder="10"
+                    returnKeyType="next"
+                    onSubmitEditing={() => receivePerRef.current?.focus()}
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    ref={receivePerRef}
+                    label={`وزن الكيس (${WEIGHT_UNIT_NAME})`}
+                    value={kgPerBag}
+                    onChangeText={setKgPerBag}
+                    keyboardType="decimal-pad"
+                    placeholder="25"
+                    returnKeyType="next"
+                    onSubmitEditing={() => receiveCostRef.current?.focus()}
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <Field
+                    ref={receiveCostRef}
+                    label="سعر الكيس (₪)"
+                    value={bagCost}
+                    onChangeText={setBagCost}
+                    keyboardType="numeric"
+                    placeholder="90.00"
+                    returnKeyType="next"
+                    onSubmitEditing={() => costRef.current?.focus()}
+                  />
+                </View>
+              </View>
+              {bagMath != null ? (
+                <View style={styles.receiveSummary}>
+                  <Text style={styles.receiveSummaryText}>
+                    {bagMath.totalKg} {WEIGHT_UNIT_NAME} إجمالاً
+                    {bagMath.perKg != null
+                      ? ` · تكلفة ${WEIGHT_UNIT_NAME} ${bagMath.perKg.toFixed(
+                          3,
+                        )}`
+                      : ''}
+                  </Text>
+                  {bagMath.retail != null && bagMath.wholesale != null ? (
+                    <TouchableOpacity
+                      style={styles.receiveSuggestBtn}
+                      onPress={() =>
+                        applyReceivingPrices(bagMath.retail, bagMath.wholesale)
+                      }
+                      activeOpacity={0.85}>
+                      <Icon name="sparkles" size={15} color={c.onAccent} />
+                      <Text style={styles.receiveSuggestText}>
+                        اعتماد الأسعار المقترحة — مفرق{' '}
+                        {bagMath.retail.toFixed(2)} وجملة{' '}
+                        {bagMath.wholesale.toFixed(2)} للكيلو (+ وحدة الكيس
+                        تلقائياً)
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              ) : (
+                <Text style={styles.receiveHintText}>
+                  أدخل عدد الأكياس ووزن الكيس — الكمية بالكيلو وتكلفة الكيلو
+                  تُملأ تلقائياً في الحقول أدناه
+                </Text>
+              )}
+            </Card>
+          ) : null}
+  </View>
+) : null}
+
+                    <Field
             ref={costRef}
             label={
               saleMode === 'weight'
@@ -1810,9 +2385,13 @@ export function ProductFormScreen() {
             </View>
           </View>
           {/* ── Stock entry: weight = fractional kg directly; piece
-              = type in any unit, stored in pieces ── */}
+              = type in any unit, stored in pieces.
+              v34 (الجولة 42 #3): في وضع الربطة (إنشاء ملابس) الكمية
+              تأتي من قائمة المقاسات أعلاه — حقل الكمية مخفي ويبقى
+              حد التنبيه فقط (يُطبق على كل مقاسات الربطة). ── */}
           <View style={styles.priceRow}>
             <View style={{flex: 1.2}}>
+              {modeConfig.lotEntry === true && productId == null ? null : (
               <Field
                 ref={stockRef}
                 label={
@@ -1831,6 +2410,7 @@ export function ProductFormScreen() {
                 returnKeyType="next"
                 onSubmitEditing={() => thresholdRef.current?.focus()}
               />
+              )}
             </View>
             <View style={{flex: 1}}>
               <Field
@@ -2053,237 +2633,6 @@ export function ProductFormScreen() {
                 ? 'أكمل اليوم والشهر والسنة بصيغة صحيحة'
                 : 'أدخل مدة صالحة أكبر من صفر'}
             </Text>
-          ) : null}
-  </FoldSection>
-) : null}
-{modeConfig.receiving ? (
-  <FoldSection
-    title="استلام البضاعة (تعبئة تلقائية)"
-    hint="كراتين أو أكياس — الكمية والتكلفة والأسعار المقترحة تُملأ تلقائياً"
-    icon="box"
-    open={receiveOpen}
-    onToggle={() => setReceiveOpen(open => !open)}
-    badge={receiveMode === 'none' ? null : 'مفعّل'}>
-          {/* ── v16 (round-22 #3): استلام البضاعة — smart receiving
-              with AUTO-FILL. The merchant picks how the goods arrived
-              (cartons or weight bags), types counts + package price,
-              and quantity/cost/suggested prices (and the matching
-              كرتونة/كيس sale unit) fill themselves. ─────────────── */}
-          <View style={styles.saleModeRow}>
-            <TouchableOpacity
-              style={[
-                styles.saleModeChip,
-                receiveMode === 'none' ? styles.saleModeChipActive : null,
-              ]}
-              onPress={() => switchReceiveMode('none')}
-              activeOpacity={0.8}>
-              <Icon
-                name="edit"
-                size={18}
-                color={receiveMode === 'none' ? c.onAccent : c.textDim}
-              />
-              <Text
-                style={[
-                  styles.saleModeText,
-                  receiveMode === 'none'
-                    ? {color: c.onAccent}
-                    : {color: c.textDim},
-                ]}>
-                يدوي
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.saleModeChip,
-                receiveMode === 'carton' ? styles.saleModeChipActive : null,
-              ]}
-              onPress={() => switchReceiveMode('carton')}
-              activeOpacity={0.8}>
-              <Icon
-                name="box"
-                size={18}
-                color={receiveMode === 'carton' ? c.onAccent : c.textDim}
-              />
-              <Text
-                style={[
-                  styles.saleModeText,
-                  receiveMode === 'carton'
-                    ? {color: c.onAccent}
-                    : {color: c.textDim},
-                ]}>
-                بالكرتونة
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.saleModeChip,
-                receiveMode === 'bag' ? styles.saleModeChipActive : null,
-              ]}
-              onPress={() => switchReceiveMode('bag')}
-              activeOpacity={0.8}>
-              <Icon
-                name="scale"
-                size={18}
-                color={receiveMode === 'bag' ? c.onAccent : c.textDim}
-              />
-              <Text
-                style={[
-                  styles.saleModeText,
-                  receiveMode === 'bag'
-                    ? {color: c.onAccent}
-                    : {color: c.textDim},
-                ]}>
-                بالوزن (كيس)
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {receiveMode === 'carton' ? (
-            <Card style={styles.receiveCard}>
-              <View style={styles.unitFieldsRow}>
-                <View style={{flex: 1}}>
-                  <Field
-                    label="عدد الكراتين"
-                    value={cartonsCount}
-                    onChangeText={setCartonsCount}
-                    keyboardType="numeric"
-                    placeholder="3"
-                    returnKeyType="next"
-                  />
-                </View>
-                <View style={{flex: 1}}>
-                  <Field
-                    label={`قطع بالكرتونة (${BASE_UNIT_NAME})`}
-                    value={piecesPerCarton}
-                    onChangeText={setPiecesPerCarton}
-                    keyboardType="numeric"
-                    placeholder="24"
-                    returnKeyType="next"
-                  />
-                </View>
-                <View style={{flex: 1}}>
-                  <Field
-                    label="سعر الكرتونة (₪)"
-                    value={cartonCost}
-                    onChangeText={setCartonCost}
-                    keyboardType="numeric"
-                    placeholder="48.00"
-                    returnKeyType="done"
-                  />
-                </View>
-              </View>
-              {cartonMath != null ? (
-                <View style={styles.receiveSummary}>
-                  <Text style={styles.receiveSummaryText}>
-                    {cartonMath.totalPieces} {BASE_UNIT_NAME} إجمالاً
-                    {cartonMath.perPiece != null
-                      ? ` · تكلفة ${BASE_UNIT_NAME} ${cartonMath.perPiece.toFixed(
-                          3,
-                        )}`
-                      : ''}
-                    {cartonMath.cartonRetail != null
-                      ? ` · سعر الكرتونة المقترح ${cartonMath.cartonRetail.toFixed(
-                          2,
-                        )}`
-                      : ''}
-                  </Text>
-                  {cartonMath.retail != null && cartonMath.wholesale != null ? (
-                    <TouchableOpacity
-                      style={styles.receiveSuggestBtn}
-                      onPress={() =>
-                        applyReceivingPrices(
-                          cartonMath.retail,
-                          cartonMath.wholesale,
-                        )
-                      }
-                      activeOpacity={0.85}>
-                      <Icon name="sparkles" size={15} color={c.onAccent} />
-                      <Text style={styles.receiveSuggestText}>
-                        اعتماد الأسعار المقترحة — مفرق{' '}
-                        {cartonMath.retail.toFixed(2)} وجملة{' '}
-                        {cartonMath.wholesale.toFixed(2)} للقطعة (+ وحدة
-                        الكرتونة تلقائياً)
-                      </Text>
-                    </TouchableOpacity>
-                  ) : null}
-                </View>
-              ) : (
-                <Text style={styles.receiveHintText}>
-                  أدخل عدد الكراتين وعدد القطع بالكرتونة — الكمية وتكلفة القطعة
-                  تُملأ تلقائياً في الحقول أدناه
-                </Text>
-              )}
-            </Card>
-          ) : null}
-
-          {receiveMode === 'bag' ? (
-            <Card style={styles.receiveCard}>
-              <View style={styles.unitFieldsRow}>
-                <View style={{flex: 1}}>
-                  <Field
-                    label="عدد الأكياس"
-                    value={bagsCount}
-                    onChangeText={setBagsCount}
-                    keyboardType="numeric"
-                    placeholder="10"
-                    returnKeyType="next"
-                  />
-                </View>
-                <View style={{flex: 1}}>
-                  <Field
-                    label={`وزن الكيس (${WEIGHT_UNIT_NAME})`}
-                    value={kgPerBag}
-                    onChangeText={setKgPerBag}
-                    keyboardType="decimal-pad"
-                    placeholder="25"
-                    returnKeyType="next"
-                  />
-                </View>
-                <View style={{flex: 1}}>
-                  <Field
-                    label="سعر الكيس (₪)"
-                    value={bagCost}
-                    onChangeText={setBagCost}
-                    keyboardType="numeric"
-                    placeholder="90.00"
-                    returnKeyType="done"
-                  />
-                </View>
-              </View>
-              {bagMath != null ? (
-                <View style={styles.receiveSummary}>
-                  <Text style={styles.receiveSummaryText}>
-                    {bagMath.totalKg} {WEIGHT_UNIT_NAME} إجمالاً
-                    {bagMath.perKg != null
-                      ? ` · تكلفة ${WEIGHT_UNIT_NAME} ${bagMath.perKg.toFixed(
-                          3,
-                        )}`
-                      : ''}
-                  </Text>
-                  {bagMath.retail != null && bagMath.wholesale != null ? (
-                    <TouchableOpacity
-                      style={styles.receiveSuggestBtn}
-                      onPress={() =>
-                        applyReceivingPrices(bagMath.retail, bagMath.wholesale)
-                      }
-                      activeOpacity={0.85}>
-                      <Icon name="sparkles" size={15} color={c.onAccent} />
-                      <Text style={styles.receiveSuggestText}>
-                        اعتماد الأسعار المقترحة — مفرق{' '}
-                        {bagMath.retail.toFixed(2)} وجملة{' '}
-                        {bagMath.wholesale.toFixed(2)} للكيلو (+ وحدة الكيس
-                        تلقائياً)
-                      </Text>
-                    </TouchableOpacity>
-                  ) : null}
-                </View>
-              ) : (
-                <Text style={styles.receiveHintText}>
-                  أدخل عدد الأكياس ووزن الكيس — الكمية بالكيلو وتكلفة الكيلو
-                  تُملأ تلقائياً في الحقول أدناه
-                </Text>
-              )}
-            </Card>
           ) : null}
   </FoldSection>
 ) : null}
@@ -3150,7 +3499,82 @@ const useStyles = makeStyles(c =>
       color: c.textFaint,
       fontFamily: fonts.regular,
       fontSize: typography.micro + 1,
+      lineHeight: 17,
+    },
+    /** v34 (الجولة 42 #3): نظام ربطة الملابس — إدخال الدفعة. */
+    receiveSection: {gap: spacing.sm},
+    lotSubLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      marginTop: spacing.xs,
+    },
+    lotCustomRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginTop: 6,
+    },
+    lotCustomInput: {
+      flex: 1,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      paddingHorizontal: 12,
+      height: 40,
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.body,
+      textAlign: 'right',
+    },
+    lotAddBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: radius.sm,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    lotQtyList: {
+      gap: 8,
+      marginTop: 8,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.sm,
+    },
+    lotQtyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    lotQtySize: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+      minWidth: 44,
+    },
+    variantInfoCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.sm,
+      backgroundColor: c.surface,
+    },
+    variantInfoTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    variantInfoMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
       lineHeight: 16,
+      marginTop: 2,
     },
     unitsFoldHeader: {
       flexDirection: 'row',
