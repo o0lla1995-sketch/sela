@@ -1674,7 +1674,7 @@ export const SilaRepo = {
             );
           }
           // بعد التشذيب أعد قراءة الحصة المحلية (انخفضت بالمشذَّب)
-          //  حتى لا يتضخع الفارق غير المسجل في هذه التمريرة نفسها.
+          //  حتى لا يتضخم الفارق غير المسجل في هذه التمريرة نفسها.
           const reagg = await db.execute(
             `SELECT
                (SELECT COALESCE(SUM(amount_minor), 0) FROM sila_payment_queue
