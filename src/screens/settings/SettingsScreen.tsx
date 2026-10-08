@@ -520,7 +520,11 @@ export function SettingsScreen() {
           />
           <Segmented
             value={settings.scannerMode}
-            onChange={(value: ScannerMode) => update({scannerMode: value})}
+            onChange={(value: ScannerMode) =>
+              // v37 (الجولة 45 #2ب): لمس التاجر للإعداد بنفسه —
+              //  يُختم حتى لا يُرحَّل اختياره الصريح لاحقاً.
+              update({scannerMode: value, scannerModeTouched: true})
+            }
             options={[
               {value: 'barcode', label: 'باركود'},
               {value: 'visual', label: 'بصري'},

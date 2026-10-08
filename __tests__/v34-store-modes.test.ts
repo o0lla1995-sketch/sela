@@ -190,11 +190,19 @@ describe('v34 — إعدادات الأنماط لكل مجال (دراسة v34)
     expect(pharmacyBlock).not.toContain("kind: 'weight'");
   });
 
-  test('البقالة فقط فيها مبدّل قطعة/وزن — v35: الفواكه وزن فقط بلا مبدّل', () => {
+  test('v37 (الجولة 45 #1د): لا مبدّل قطعة/وزن في أي مود — البقالة نُزع آخراً', () => {
     const src = read(MODES);
-    // v35 (ملاحظة التاجر): «الفواكه بالوزن فقط بلا جملة ومفرق» —
-    // المبدّل للبقالة وحدها (1)، والفواكه وزن دائم بسعر كيلو واحد.
-    expect((src.match(/saleModeSelector: true/g) ?? []).length).toBe(1);
+    // v37 (طلب التاجر نصاً): «إزالة قسم اختيار طريقة البيع في صفحة
+    // المنتج بهذا المود (بقالة) لأنه يتم تحديدها مسبقاً عند إدخال
+    // البضاعة» — البقالة كانت آخر مود فيه المبدّل؛ الآن لا مود
+    // يستعمله إطلاقاً (الفواكه وزن دائم بسعر كيلو واحد، والبقية
+    // قطعة دائمة)، والصفحة تعرض الحالة فقط.
+    expect((src.match(/saleModeSelector: true/g) ?? []).length).toBe(0);
+    const groceryBlock = src.slice(
+      src.indexOf("key: 'grocery'"),
+      src.indexOf("key: 'cafe'"),
+    );
+    expect(groceryBlock).toContain('saleModeSelector: false');
     const fruitsBlock = src.slice(
       src.indexOf("key: 'fruits'"),
       src.indexOf("key: 'restaurant'"),

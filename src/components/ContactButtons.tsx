@@ -1,9 +1,12 @@
 /**
  * ContactButtons — management contact channels (سيلا).
  * ─────────────────────────────────────────────────────────────────
- * Any channel the owner configures in the admin panel (or baked as a
- * fallback) appears as a labelled, branded icon; tapping it deep-links
- * into the matching app:
+ * v37 (الجولة 45 #3ب): تحويل أزرار التواصل الخاصة بتفعيل أو تجديد
+ * الاشتراك إلى أيقونات فقط (Icons Only) بتصميم عصري وأنيق — كان
+ * زراً حبةً بلافتة نصية؛ الآن أقراص دائرية 48px بلون القناة
+ * الأساسي، أيقونة بيضاء متمركزة، حلقة خفيفة وحافة لمس واسعة.
+ * النص اللاتفي انتقل إلى accessibilityLabel (قارئ الشاشة
+ * يقرؤه) — الواجهة نظيفة بالأيقونات وحدها.
  *
  *   phone → tel:      whatsapp → wa.me
  *   telegram → t.me   email → mailto:
@@ -12,9 +15,9 @@
  * the management published.
  */
 import React from 'react';
-import {Linking, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import {Linking, StyleSheet, TouchableOpacity, View} from 'react-native';
 import Svg, {Path} from 'react-native-svg';
-import {fonts, spacing, useThemeColors} from '../core/theme';
+import {spacing} from '../core/theme';
 import type {LicenseContact} from '../services/license/LicenseService';
 
 /* ── brand-colored channel icons ─────────────────────────────── */
@@ -111,8 +114,6 @@ export function ContactButtons({
 }: {
   contact: LicenseContact;
 }): React.JSX.Element | null {
-  const c = useThemeColors();
-
   const available = CHANNELS.filter(ch => {
     const value = contact[ch.key];
     return typeof value === 'string' && value.trim().length > 0;
@@ -133,9 +134,10 @@ export function ContactButtons({
           key={ch.key}
           style={[styles.btn, {backgroundColor: ch.color}]}
           onPress={() => open(ch.buildUrl(String(contact[ch.key])))}
-          accessibilityLabel={ch.label}>
+          accessibilityLabel={ch.label}
+          accessibilityRole="link"
+          hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
           {ch.icon}
-          <Text style={[styles.label, {color: c.onAccent}]}>{ch.label}</Text>
         </TouchableOpacity>
       ))}
     </View>
@@ -147,21 +149,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row-reverse',
     flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: spacing.sm,
+    gap: spacing.md,
     marginTop: spacing.sm,
   },
+  /** v37 (الجولة 45 #3ب): قرص أيقونة دائري 48px — أيقونة فقط
+   *  بلا نص؛ حلقة بيضاء شفافة خفيفة حولها ولمعان بسيط عند
+   *  الضغط. مساحة اللمس مريحة للإصبع. */
   btn: {
-    flexDirection: 'row',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 7,
-    paddingHorizontal: 16,
-    paddingVertical: 11,
-    borderRadius: 13,
-    minWidth: 104,
-  },
-  label: {
-    fontFamily: fonts.bold,
-    fontSize: 13.5,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.22)',
   },
 });

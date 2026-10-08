@@ -267,8 +267,13 @@ class ScannerActivity : Activity() {
     private lateinit var torchButton: TextView
     private lateinit var flashOverlay: View
     private lateinit var statusChip: TextView
-    /** v9.1: in-window feedback banner — "✓ أُضيف: ...". */
-    private var resultBanner: TextView? = null
+    /** v9.1: in-window feedback banner — "✓ أُضيف: ...".
+     *  v37 (الجولة 45 #2هـ): أعيد تصميمه بالكامل — كان TextView
+     *  مسطحاً؛ الآن LinearLayout من جزأين (قرص أيقونة + نص)
+     *  ليكون أكبر وأوضح وأكثر ترتيباً بصرياً. */
+    private var resultBanner: LinearLayout? = null
+    private var resultIconView: TextView? = null
+    private var resultMessageView: TextView? = null
     private val bannerHide = Runnable {
         resultBanner?.visibility = View.GONE
     }
@@ -548,18 +553,52 @@ class ScannerActivity : Activity() {
         topBar.addView(torchButton)
         root.addView(topBar)
 
-        // 3.5) v9.1: in-window RESULT banner — JS confirms every
-        //     streamed read ("✓ اسم المنتج" / "غير مسجل") so the
-        //     merchant sees the outcome WITHOUT leaving the camera.
-        resultBanner = TextView(this).apply {
-            visibility = View.GONE
-            textSize = 14f
-            setPadding(dp(16), dp(9), dp(16), dp(9))
+        // 3.5) v37 (الجولة 45 #2هـ): شريط النتيجة داخل الكاميرا أعيد
+        //     تصميمه بالكامل (طلب التاجر: «تحسين وتنسيق التنبيهات
+        //     داخل شاشة المسح لتكون أكبر حكماً وأوضح وأكثر ترتيباً
+        //     بصرياً»). كان TextView مسطحاً 14sp؛ الآن بطاقة من
+        //     جزأين: قرص أيقونة ملون (✓ أخضر / ! أحمر) + نص عريض
+        //     16sp على خلفية أدكن بحدّ يتبع لون الحالة، بظلّ
+        //     ارتفاع وعرض محدود كي لا يتجاوز حافة المعاينة.
+        val iconView = TextView(this).apply {
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            textSize = 15f
+            setTextColor(Color.parseColor("#0B0F14"))
+            gravity = Gravity.CENTER
             background = GradientDrawable().apply {
-                cornerRadius = dp(14).toFloat()
-                setColor(Color.parseColor("#E6121216"))
-                setStroke(dp(1), Color.parseColor("#33FFFFFF"))
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#34D399"))
             }
+            layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
+                marginEnd = dp(10)
+                gravity = Gravity.CENTER_VERTICAL
+            }
+        }
+        val messageView = TextView(this).apply {
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            textSize = 16f
+            setTextColor(Color.parseColor("#E8EDF2"))
+            maxLines = 3
+            gravity = Gravity.CENTER_VERTICAL
+            // v37: حدّ أقصى لعرض النص — الرسالة الطويلة تلفّ أسطراً
+            //  بدل أن تتجاوز حافة المعاينة.
+            maxWidth = (resources.displayMetrics.widthPixels * 0.70f).toInt()
+        }
+        resultIconView = iconView
+        resultMessageView = messageView
+        resultBanner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(12), dp(20), dp(12))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                setColor(Color.parseColor("#F212161C"))
+                setStroke(dp(1) + 1, Color.parseColor("#6634D399"))
+            }
+            elevation = dp(6).toFloat()
+            addView(iconView)
+            addView(messageView)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1151,20 +1190,32 @@ class ScannerActivity : Activity() {
      *  engine name + confirmed count). */
     private fun showScanResult(ok: Boolean, message: String) {
         val banner = resultBanner ?: return
+        val icon = resultIconView ?: return
+        val text = resultMessageView ?: return
         if (ok) {
             confirmedCount.incrementAndGet()
         }
         updateStatusChip()
-        banner.text = if (ok) "✓ $message" else message
-        banner.setTextColor(
-            if (ok) Color.parseColor("#4ADE80") else Color.parseColor("#F87171")
+        // v37 (الجولة 45 #2هـ): الحالة تحدد لون القرص والحدّ معاً —
+        //  الأخضر للنجاح (✓) والأحمر للمعلومة (!). النص بلا بادئة
+        //  رمزية مكررة: القرص يحملها وحده فالترتيب البصري أنظف.
+        val tone = if (ok) {
+            Color.parseColor("#34D399")
+        } else {
+            Color.parseColor("#F87171")
+        }
+        icon.text = if (ok) "✓" else "!"
+        (icon.background as? GradientDrawable)?.setColor(tone)
+        text.text = message
+        (banner.background as? GradientDrawable)?.setStroke(
+            dp(1) + 1,
+            if (ok) Color.parseColor("#6634D399") else Color.parseColor("#66F87171"),
         )
         banner.visibility = View.VISIBLE
         banner.removeCallbacks(bannerHide)
-        // v10 (round-16 #3): stock-out / failure notices linger
-        // longer — the merchant must actually READ them before the
-        // banner fades.
-        banner.postDelayed(bannerHide, if (ok) 1900L else 3000L)
+        // v37: مهل أطول — النجاح 2200ms والمعلومة 3600ms (كانت
+        //  1900/3000): التاجر يقرأها فعلاً قبل الاختفاء.
+        banner.postDelayed(bannerHide, if (ok) 2200L else 3600L)
     }
 
     // ── Torch ─────────────────────────────────────────────────

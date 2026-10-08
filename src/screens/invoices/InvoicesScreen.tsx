@@ -61,7 +61,7 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {formatDateTime, formatMoney, formatQty} from '../../core/format';
+import {formatDateTime, formatMoney, formatQty, parseNumber} from '../../core/format';
 import {
   cameraPermissionMessage,
   ensureCameraPermission,
@@ -1628,7 +1628,7 @@ function ReturnSheet({
     return null;
   }
 
-  const sheetHeight = Math.round(Dimensions.get('window').height * 0.72);
+  const sheetHeight = Math.round(Dimensions.get('window').height * 0.82);
 
   return (
     <View style={retStyles(c).backdrop}>
@@ -1732,9 +1732,64 @@ function ReturnSheet({
                   </View>
                 );
               })}
+
+            {/* ═══ v37 (الجولة 45 #2ج+2د): قائمة أصناف الاستبدال
+                البديلة — انتقلت من التذييل إلى داخل التمرير: كانت
+                تنمو بلا حد مع كل صنف مضاف فتدفع مجموع القيمة وزر
+                التأكيد أسفل حدود الشاشة (شكوى التاجر نصاً:
+                «مختفٍ زر التأكيد أسفل الشاشة أثناء عمليات
+                الاستبدال أو الإرجاع»). الآن مهما بلغ عدد الأصناف
+                والعمليات المعقدة: التمرير يمررها كافة والتذييل
+                محدود الارتفاع يعرض زر التأكيد دائماً. ═══ */}
+            {exchangeModeOn ? (
+              <View style={retStyles(c).exchangeListScrollSection}>
+                <Text style={retStyles(c).exchangeSectionTitle}>
+                  أصناف الاستبدال البديلة ({exchangePicks.length}) — بقيمة{' '}
+                  {formatMoney(exchangeTotal)}
+                </Text>
+                {exchangePicks.map(pick => (
+                  <View key={pick.key} style={retStyles(c).exchangeRow}>
+                    <View style={{flex: 1}}>
+                      <Text style={retStyles(c).exchangeRowName} numberOfLines={1}>
+                        {pick.name}
+                        {pick.variantLabel ? ` (${pick.variantLabel})` : ''}
+                        {pick.unitName && pick.unitName !== 'قطعة'
+                          ? ` · ${pick.unitName}`
+                          : ''}
+                      </Text>
+                      <Text style={retStyles(c).exchangeRowMeta}>
+                        {formatQty(pick.quantity)} × {formatMoney(pick.unitPrice)} ={' '}
+                        {formatMoney(pick.unitPrice * pick.quantity)}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={retStyles(c).exchangeRemove}
+                      onPress={() =>
+                        setExchangePicks(prev =>
+                          prev.filter(x => x.key !== pick.key),
+                        )
+                      }
+                      disabled={busy}>
+                      <Icon name="x" size={13} color={c.danger} />
+                    </TouchableOpacity>
+                  </View>
+                ))}
+                <TouchableOpacity
+                  style={retStyles(c).exchangeClear}
+                  onPress={() => setExchangePicks([])}
+                  disabled={busy}>
+                  <Text style={retStyles(c).exchangeClearText}>
+                    إلغاء الاستبدال — العودة للإرجاع المالي
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
             </ScrollView>
 
-            {/* ── The live summary + the debt action ── */}
+            {/* ── v37: التذييل المحدود الارتفاع — كل عناصره صفوف
+                مقيدة الطول (أزرار + نصوص + مجاميع)؛ قائمة الأصناف
+                البديلة انتقلت للتمرير أعلاه فلا يمكن لشيء أن يدفع
+                زر التأكيد خارج الشاشة. ── */}
             <View style={retStyles(c).summaryBox}>
               {/* v36: الاستبدال بقيمة المرجع — زر فتح نافذة الاختيار. */}
               {refundTotal > 0 ? (
@@ -1757,45 +1812,6 @@ function ReturnSheet({
                     </Text>
                   </View>
                 </TouchableOpacity>
-              ) : null}
-              {exchangeModeOn ? (
-                <View style={retStyles(c).exchangeList}>
-                  {exchangePicks.map(pick => (
-                    <View key={pick.key} style={retStyles(c).exchangeRow}>
-                      <View style={{flex: 1}}>
-                        <Text style={retStyles(c).exchangeRowName} numberOfLines={1}>
-                          {pick.name}
-                          {pick.variantLabel ? ` (${pick.variantLabel})` : ''}
-                          {pick.unitName && pick.unitName !== 'قطعة'
-                            ? ` · ${pick.unitName}`
-                            : ''}
-                        </Text>
-                        <Text style={retStyles(c).exchangeRowMeta}>
-                          {formatQty(pick.quantity)} × {formatMoney(pick.unitPrice)} ={' '}
-                          {formatMoney(pick.unitPrice * pick.quantity)}
-                        </Text>
-                      </View>
-                      <TouchableOpacity
-                        style={retStyles(c).exchangeRemove}
-                        onPress={() =>
-                          setExchangePicks(prev =>
-                            prev.filter(x => x.key !== pick.key),
-                          )
-                        }
-                        disabled={busy}>
-                        <Icon name="x" size={13} color={c.danger} />
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                  <TouchableOpacity
-                    style={retStyles(c).exchangeClear}
-                    onPress={() => setExchangePicks([])}
-                    disabled={busy}>
-                    <Text style={retStyles(c).exchangeClearText}>
-                      إلغاء الاستبدال — العودة للإرجاع المالي
-                    </Text>
-                  </TouchableOpacity>
-                </View>
               ) : null}
               {book === 'cash' && !exchangeModeOn ? (
                 <View style={retStyles(c).methodRow}>
@@ -2065,16 +2081,22 @@ function ExchangeSheet({
       setOpenId(productId);
       setOpenUnits(units);
       setOpenVariants(variants);
-      setChosenUnitId(
-        preferUnitId ??
-          (units.length > 0 ? units[0].id : null),
-      );
+      // v37 (الجولة 45 #2د): الافتراض = وحدة البيع الأساس نفسها
+      //  (شريط/قطعة/حصة) — لا أول وحدة مخصصة (كرتونة/علبة):
+      //  طلب التاجر نصاً «إظهار المنتجات بوحدة البيع الافتراضية
+      //  في السلة (وليس الوحدة المدخلة يدوياً)». الوحدات المخصصة
+      //  تظل خياراً صريحاً بضغطة واحدة على رقائقها.
+      setChosenUnitId(preferUnitId ?? null);
+      // v37: المتغير الافتراضي = أول متغير متوفر منه مخزون (وليس
+      //  أول صف قد يكون نافداً) — الملابس والأحجام جاهزة للبيع
+      //  فور فتح المنتج.
+      const inStockVariant = variants.find(v => v.stock_quantity > 0);
       setChosenVariantId(
-        variants.length > 0 ? variants[0].id : null,
+        (inStockVariant ?? variants[0] ?? null)?.id ?? null,
       );
-      setQtyText(
-        Number(product.sold_by_weight) === 1 ? '1' : '1',
-      );
+      // v37: الكمية الافتراضية 1 — القراءة عبر parseNumber فتقبل
+      //  الأرقام العربية والفاصلة العربية في حقل الكمية.
+      setQtyText('1');
     },
     [results, toast],
   );
@@ -2124,9 +2146,11 @@ function ExchangeSheet({
     return openProductRow.cost_price;
   })();
 
-  const qtyNum = Number(qtyText.replace(',', '.'));
-  const qtyValid =
-    Number.isFinite(qtyNum) && qtyNum > 0;
+  // v37 (الجولة 45 #2د): القراءة عبر parseNumber المطوّر — يقبل
+  //  الأرقام العربية ٢ والفاصلة العربية ٫ كما في أي حقل آخر؛
+  //  القديم كان يقصّها فيصبح الحقل فارغاً والمجموع «—».
+  const qtyNum = parseNumber(qtyText);
+  const qtyValid = !Number.isNaN(qtyNum) && qtyNum > 0;
 
   const variantStock = openVariant != null
     ? openVariant.stock_quantity
@@ -2140,6 +2164,30 @@ function ExchangeSheet({
   const addCurrent = useCallback(() => {
     if (openProductRow == null || !qtyValid) {
       return;
+    }
+    // v37 (الجولة 45 #2د): حارس المخزون الصريح — متغير نافد أو
+    //  كمية فوق المتوفر تُرفض برسالة عربية واضحة (كانت تُضاف
+    //  بصمت فوق المخزون المتوفر). بلا تتبع يُتجاوز الحارس
+    //  كعادته (مطعم/كافيتريا).
+    const untrackedOpen = openProductRow.stock_untracked === 1;
+    if (!untrackedOpen) {
+      if (openVariant != null && openVariant.stock_quantity < qtyNum) {
+        toast(
+          `المتغير ${openVariant.color ? openVariant.color + ' ' : ''}${openVariant.size} المتوفر منه ${formatQty(openVariant.stock_quantity)} فقط — راجع الكمية`,
+          'error',
+        );
+        return;
+      }
+      if (
+        openVariant == null &&
+        openProductRow.stock_quantity < qtyNum
+      ) {
+        toast(
+          `المتوفر من ${openProductRow.name} ${formatQty(openProductRow.stock_quantity)} فقط — راجع الكمية`,
+          'error',
+        );
+        return;
+      }
     }
     const label = openVariant != null
       ? `${openVariant.color ? openVariant.color + ' · ' : ''}${openVariant.size}`
@@ -2284,13 +2332,21 @@ function ExchangeSheet({
                 contentContainerStyle={excStyles(c).chipRow}>
                 {openVariants.map(v => {
                   const active = v.id === chosenVariantId;
+                  // v37 (الجولة 45 #2د): متغير نافد (منتج متتبع) —
+                  //  معتم وبلا ضغط: لا يُختار خطأً في زيادة قيمة
+                  //  الاستبدال فوق المخزون المتوفر.
+                  const out =
+                    openProductRow.stock_untracked !== 1 &&
+                    v.stock_quantity <= 0;
                   return (
                     <TouchableOpacity
                       key={v.id}
                       style={[
                         excStyles(c).chip,
                         active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
+                        out ? {opacity: 0.45} : null,
                       ]}
+                      disabled={out}
                       onPress={() => setChosenVariantId(v.id)}>
                       <Text
                         style={[
@@ -2298,7 +2354,8 @@ function ExchangeSheet({
                           active ? {color: c.onAccent} : null,
                         ]}>
                         {v.color ? `${v.color} · ` : ''}
-                        {v.size} ({formatQty(v.stock_quantity)})
+                        {v.size}
+                        {out ? ' (نافد)' : ` (${formatQty(v.stock_quantity)})`}
                       </Text>
                     </TouchableOpacity>
                   );
@@ -2310,6 +2367,26 @@ function ExchangeSheet({
                 horizontal
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={excStyles(c).chipRow}>
+                {/* v37 (الجولة 45 #2د): وحدة الأساس أولاً — الافتراض
+                    عند فتح أي منتج (طلب التاجر: السلة بوحدة البيع
+                    الافتراضية، والوحدات الأكبر خيار صريح). */}
+                <TouchableOpacity
+                  style={[
+                    excStyles(c).chip,
+                    chosenUnitId == null
+                      ? {backgroundColor: c.accent, borderColor: c.accent}
+                      : null,
+                  ]}
+                  onPress={() => setChosenUnitId(null)}>
+                  <Text
+                    style={[
+                      excStyles(c).chipText,
+                      chosenUnitId == null ? {color: c.onAccent} : null,
+                    ]}>
+                    {openProductRow.base_unit_name ?? 'قطعة'} (الأساس) —{' '}
+                    {formatMoney(openProductRow.retail_price)}
+                  </Text>
+                </TouchableOpacity>
                 {openUnits.map(u => {
                   const active = u.id === chosenUnitId;
                   const price =
@@ -2342,7 +2419,15 @@ function ExchangeSheet({
                 style={excStyles(c).qtyInput}
                 value={qtyText}
                 onChangeText={t =>
-                  setQtyText(t.replace(',', '.').replace(/[^\d.]/g, ''))
+                  // v37 (الجولة 45 #2د): يقبل الأرقام العربية
+                  //  ٠-٩/۰-۹ والفاصلة العربية ٫ والفاصلة
+                  //  الإنجليزية كعشرية — لا يقصّها بعد الآن
+                  //  (القديم كان يفرغ الحقل مع لوحة عربية).
+                  setQtyText(
+                    t
+                      .replace(/,/g, '.')
+                      .replace(/[^\d.٫٠-٩۰-۹]/g, ''),
+                  )
                 }
                 keyboardType="decimal-pad"
                 autoCorrect={false}
@@ -2729,6 +2814,21 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
       padding: 10,
       marginBottom: 10,
       gap: 6,
+    },
+    /** v37 (الجولة 45 #2ج): قسم أصناف الاستبدال داخل التمرير —
+     *  يتقلص ويمرّره ScrollView بدل أن يدفع التذييل أسفل الشاشة. */
+    exchangeListScrollSection: {
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.lg,
+      padding: 10,
+      marginTop: 4,
+      gap: 6,
+    },
+    exchangeSectionTitle: {
+      fontFamily: fonts.bold,
+      fontSize: 12.5,
+      color: c.accent,
+      marginBottom: 2,
     },
     exchangeRow: {
       flexDirection: 'row',

@@ -629,22 +629,32 @@ export function ReportsScreen() {
               </Text>
             </Card>
 
-            {/* ── 5) Top products ─────────────────────────────── */}
+            {/* ── 5) Top products — v37 (الجولة 45 #3أ) ──────────
+                إعادة تصميم قسم «الأكثر إيراداً وربحاً» بشكل احترافي:
+                ترويسة متمركزة في منتصف الشاشة (العنوان ثم المبدّل
+                تحته — إزالة المسافات الواسعة)، وكل منتج صف مضغوط:
+                ميدالية مرتبة (ذهب/فضة/برونز) + الاسم والقيمة في
+                سطر واحد + شريط نسبي يقيس قيمته مقابل الأعلى في
+                الفترة + الربح والكمية في سطر الميتا. المحاذاة
+                جدولية بأرقام ثابتة العرض. */}
             <Card>
-              <SectionTitle
-                title="الأفضل مبيعاً"
-                action={
-                  <Segmented
-                    compact
-                    value={topMode}
-                    onChange={setTopMode}
-                    options={[
-                      {value: 'revenue', label: 'إيراداً'},
-                      {value: 'profit', label: 'ربحاً'},
-                    ]}
-                  />
-                }
-              />
+              <View style={styles.topHead}>
+                <Text style={styles.topHeadTitle}>
+                  الأكثر إيراداً وربحاً
+                </Text>
+                <Text style={styles.topHeadSub}>
+                  أفضل خمسة منتجات في الفترة — والبقية في التصدير
+                </Text>
+                <Segmented
+                  compact
+                  value={topMode}
+                  onChange={setTopMode}
+                  options={[
+                    {value: 'revenue', label: 'إيراداً'},
+                    {value: 'profit', label: 'ربحاً'},
+                  ]}
+                />
+              </View>
               {topProducts.length === 0 ? (
                 <EmptyState
                   icon="box"
@@ -654,37 +664,73 @@ export function ReportsScreen() {
               ) : (
                 /* v26 (round-34 #6): the TOP FIVE only — «يظهر فقط
                     أكثر خمسة فقط» — the rest live in the CSV export. */
-                topProducts.slice(0, 5).map((product, index) => (
-                  <View key={product.productId} style={styles.topRow}>
-                    <View style={styles.topRank}>
-                      <Text style={styles.topRankText}>{index + 1}</Text>
-                    </View>
-                    <View style={styles.topInfo}>
-                      <Text style={styles.topName} numberOfLines={1}>
-                        {product.name}
-                      </Text>
-                      <Text style={styles.topMeta}>
-                        {product.quantity} قطعة مبيعة
-                      </Text>
-                    </View>
-                    <View style={styles.topEnd}>
-                      <Text style={styles.topRevenue}>
-                        {formatMoney(
-                          topMode === 'revenue'
-                            ? product.revenue
-                            : product.profit,
-                        )}
-                      </Text>
-                      <Text
-                        style={[
-                          styles.topProfit,
-                          {color: product.profit >= 0 ? c.success : c.danger},
-                        ]}>
-                        ربح {formatMoney(product.profit)}
-                      </Text>
-                    </View>
-                  </View>
-                ))
+                (() => {
+                  const five = topProducts.slice(0, 5);
+                  const valueOf = (p: (typeof five)[number]) =>
+                    Math.max(
+                      topMode === 'revenue' ? p.revenue : p.profit,
+                      0,
+                    );
+                  const maxShown = Math.max(
+                    ...five.map(valueOf),
+                    0.0001,
+                  );
+                  return five.map((product, index) => {
+                    const shown = valueOf(product);
+                    const pct = Math.max(6, Math.round((shown / maxShown) * 100));
+                    return (
+                      <View key={product.productId} style={styles.topRow}>
+                        <View
+                          style={[
+                            styles.topRank,
+                            index === 0
+                              ? styles.topRankGold
+                              : index === 1
+                              ? styles.topRankSilver
+                              : index === 2
+                              ? styles.topRankBronze
+                              : null,
+                          ]}>
+                          <Text style={styles.topRankText}>{index + 1}</Text>
+                        </View>
+                        <View style={styles.topInfo}>
+                          <View style={styles.topLineRow}>
+                            <Text style={styles.topName} numberOfLines={1}>
+                              {product.name}
+                            </Text>
+                            <Text style={styles.topRevenue}>
+                              {formatMoney(shown)}
+                            </Text>
+                          </View>
+                          <View style={styles.topBarTrack}>
+                            <View
+                              style={[
+                                styles.topBarFill,
+                                {width: `${pct}%`},
+                                product.profit < 0 ? styles.topBarLoss : null,
+                              ]}
+                            />
+                          </View>
+                          <Text style={styles.topMeta}>
+                            {product.quantity} قطعة مبيعة · ربح{' '}
+                            <Text
+                              style={[
+                                styles.topProfit,
+                                {
+                                  color:
+                                    product.profit >= 0
+                                      ? c.success
+                                      : c.danger,
+                                },
+                              ]}>
+                              {formatMoney(product.profit)}
+                            </Text>
+                          </Text>
+                        </View>
+                      </View>
+                    );
+                  });
+                })()
               )}
             </Card>
 
@@ -979,32 +1025,90 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro,
       textAlign: 'center',
     },
+    /** v37 (الجولة 45 #3أ): ترويسة القسم المتمركزة — العنوان
+     *  والوصف والمبدّل في منتصف الشاشة (كانت الترويسة بلا محاذاة
+     *  والمبدّل بزاوية). */
+    topHead: {
+      alignItems: 'center',
+      gap: 5,
+      marginBottom: spacing.sm,
+    },
+    topHeadTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      textAlign: 'center',
+    },
+    topHeadSub: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+    },
+    /** v37: الصف المضغوط — فجوة أضيق (md→sm) وحشوة أقل: إزالة
+     *  المسافات الواسعة التي اشتكى منها التاجر. */
     topRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      paddingVertical: 9,
+      gap: spacing.sm,
+      paddingVertical: 8,
       borderBottomWidth: 1,
       borderBottomColor: c.borderSoft,
     },
+    /** v37: ميداليات المرتبة — ذهب/فضة/برونز للثلاثة الأولى. */
     topRank: {
-      width: 28,
-      height: 28,
-      borderRadius: 9,
+      width: 30,
+      height: 30,
+      borderRadius: 10,
       backgroundColor: c.accentSoft,
       alignItems: 'center',
       justifyContent: 'center',
     },
+    topRankGold: {
+      backgroundColor: '#F59E0B',
+    },
+    topRankSilver: {
+      backgroundColor: '#94A3B8',
+    },
+    topRankBronze: {
+      backgroundColor: '#B45309',
+    },
     topRankText: {
-      color: c.accent,
+      color: c.onAccent,
       fontFamily: fonts.black,
       fontSize: typography.small,
     },
     topInfo: {flex: 1},
+    /** v37: سطر الاسم والقيمة — الاسم يمتد والقيمة بنهاية السطر
+     *  بأرقام جدولية ثابتة العرض. */
+    topLineRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
     topName: {
       color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.caption,
+      flex: 1,
+    },
+    /** v37: الشريط النسبي — يقيس قيمة المنتج مقابل الأعلى في
+     *  الفترة؛ يتعبّأ من بداية السطر (يمين RTL). */
+    topBarTrack: {
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: c.surfaceHi,
+      marginTop: 5,
+      marginBottom: 4,
+      overflow: 'hidden',
+    },
+    topBarFill: {
+      height: '100%',
+      borderRadius: 3,
+      backgroundColor: c.accent,
+    },
+    topBarLoss: {
+      backgroundColor: c.danger,
     },
     topMeta: {
       color: c.textDim,
@@ -1012,7 +1116,6 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
       marginTop: 1,
     },
-    topEnd: {alignItems: 'flex-end'},
     topRevenue: {
       color: c.text,
       fontFamily: fonts.black,

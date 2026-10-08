@@ -168,6 +168,13 @@ export function ProductFormScreen() {
   const wholesaleRef = useRef<FieldHandle>(null);
   const stockRef = useRef<FieldHandle>(null);
   const thresholdRef = useRef<FieldHandle>(null);
+  /** v37 (الجولة 45 #1أ+1ب): المخزون المحمّل من القاعدة عند فتح
+   *  المنتج للتعديل — يُستعمل لحفظ المخزون القائم كما هو عند أي
+   *  تعديل عام لمنتج «بلا تتبع» (كان يُصفَّر 0 مع كل تعديل عام:
+   *  جذر شكوى «تصفير المخزون عند التعديل»)، ومرجعاً للتحقق
+   *  القارئ بعد الحفظ (read-back) ضد القيمة المقصودة. */
+  const loadedStockRef = useRef(0);
+  const loadedUntrackedRef = useRef(0);
   /** v34: سلسلة حقول استلام البضاعة — التالي ينتقل داخل القسم ثم
    *  يقفز لسعر التكلفة المُملأ تلقائياً فالأسعار فالكمية. */
   const receiveCountRef = useRef<FieldHandle>(null);
@@ -308,6 +315,11 @@ export function ProductFormScreen() {
             setRetailPrice(String(product.retail_price));
             setWholesalePrice(String(product.wholesale_price));
             setStock(String(product.stock_quantity));
+            // v37 (الجولة 45 #1أ+1ب): القيم الحية كما حُفظت في
+            //  القاعدة — مرجع الحفظ الأمين للمنتجات بلا تتبع ومرجع
+            //  التحقق القارئ بعد الحفظ.
+            loadedStockRef.current = Number(product.stock_quantity ?? 0);
+            loadedUntrackedRef.current = product.stock_untracked === 1 ? 1 : 0;
             setThreshold(
               product.low_stock_threshold != null
                 ? String(product.low_stock_threshold)
@@ -1435,19 +1447,40 @@ export function ProductFormScreen() {
     // v8.3: weight products keep fractional kg stock (12.5 كغ) —
     // only PIECE products round the entered stock to whole units.
     const stockConversion = weighted ? 1 : validConversion(stockUnitId) ?? 1;
-    const stockRaw = stock.trim() ? parseNumber(stock) * stockConversion : 0;
-    // v35: مخزون بلا تتبع أو موديل ملابس — الكمية من المتغيرات
-    //  لا من حقل يدوي.
+    // v37 (الجولة 45 #1أ): قراءة الكمية مرة واحدة عبر parseNumber
+    //  المطوّر (يقبل الأرقام العربية ٠٥ والفاصلة العربية 12٫5).
+    const stockTyped = stock.trim().length > 0;
+    const stockParsed = stockTyped ? parseNumber(stock) : 0;
+    // v37: الحارس الصريح — كمية مكتوبة لا تُقرأ رقماً توقف الحفظ
+    //  فوراً برسالة خطأ واضحة. لم يعد هناك أي مسار يحوّل NaN إلى
+    //  0 بصمت ثم يعرض «تم الحفظ بنجاح» — هذا كان جذر «المخزون
+    //  الوهمي» بالنص الحرفي، عبر كل المودات.
+    if (stockTyped && Number.isNaN(stockParsed)) {
+      toast(
+        'قيمة الكمية غير مقروءة — اكتبها بأرقام (0-9 أو ٠-٩) مع فاصل عشري، ثم أعد الحفظ',
+        'error',
+      );
+      return;
+    }
+    const stockRaw = stockTyped ? stockParsed * stockConversion : 0;
+    // v35: موديل ملابس — الكمية من المتغيرات لا من حقل يدوي.
     const isClothingModel =
       modeConfig.lotEntry === true && variantDrafts.length > 0;
+    // v37 (الجولة 45 #1ب): منتج «بلا تتبع» (مطعم/كافيتريا):
+    //  • عند الإنشاء → 0 كما صُمم المود (لا كمية يدوية).
+    //  • عند التعديل → يُحفظ المخزون القائم كما هو؛ كان أي تعديل
+    //    عام (اسم/سعر/صلاحية/باركود) يكتب 0 فوق الكمية مهما كانت
+    //    — وهذا هو «تصفير المخزون عند التعديل» بالنص الحرفي.
+    //    الكمية تبقى مصدرها الجرد (بعد إصلاح شمولية الجرد في
+    //    StocktakeRepo) أو أي تعديل لاحق يفعّل التتبع.
     const stockValue = untrackedStock
-      ? 0
+      ? productId != null
+        ? loadedStockRef.current
+        : 0
       : isClothingModel
       ? variantDrafts.reduce((sum, v) => sum + Math.max(0, v.stock), 0)
       : weighted
-      ? Math.round((Number.isNaN(stockRaw) ? 0 : stockRaw) * 1000) / 1000
-      : Number.isNaN(stockRaw)
-      ? 0
+      ? Math.round(stockRaw * 1000) / 1000
       : Math.round(stockRaw);
     const thresholdValue = threshold.trim() ? parseNumber(threshold) : null;
 
@@ -1582,6 +1615,30 @@ export function ProductFormScreen() {
       }
       if (targetId == null || targetId < 0) {
         throw new Error('فشل حفظ المنتج');
+      }
+
+      // v37 (الجولة 45 #1أ): التتبع الدائم المطلوب نصاً — «تتبع دائم
+      //  لعمليات الحفظ والتعديل في الكود للتحقق من وصول قيم
+      //  stock_quantity وتحديثها بدقة في قاعدة البيانات عبر جميع
+      //  مودات المتجر»: بعد كل حفظ/تعديل يُعاد قراءة السطر من
+      //  القاعدة نفسها ويُطابَق مع القيمة المقصودة. أي انحراف
+      //  (ولو كسرياً صغيراً) يفشل العملية برسالة خطأ عربية — لن
+      //  تظهر رسالة نجاح أبداً فوق حفظ لم يصل فعلاً إلى القاعدة.
+      //  المسار مشترك لكل المودات (بقالة/كافيتريا/ملابس/صيدلية/
+      //  فواكه/مطعم) لأنه هنا في جذر الحفظ نفسه.
+      const verify = await ProductRepo.getById(targetId);
+      if (verify == null) {
+        throw new Error('فشل التحقق: المنتج غير موجود بعد الحفظ');
+      }
+      if (Math.abs((verify.stock_quantity ?? 0) - stockValue) > 0.0001) {
+        throw new Error(
+          `تعذر تحديث المخزون بدقة — القصد ${stockValue} والمحفوظ فعلاً ${
+            verify.stock_quantity ?? 0
+          }. أعد المحاولة`,
+        );
+      }
+      if ((verify.stock_untracked ?? 0) !== (untrackedStock ? 1 : 0)) {
+        throw new Error('تعذر تحديث حالة تتبع المخزون — أعد المحاولة');
       }
 
       await UnitRepo.replaceForProduct(targetId, cleanedUnits);
@@ -2430,7 +2487,10 @@ export function ProductFormScreen() {
               قطعة = counted pieces (default). وزن = weighed — the
               prices below become PER KILO, stock is fractional kg,
               and the POS opens a weight pad (with وقية/نصف كغ
-              quick chips) instead of adding whole pieces. */}
+              quick chips) instead of adding whole pieces.
+              v37 (الجولة 45 #1د): لا مود يستعمل المبدّل الآن —
+              البقالة نزعته (يُحدد عند الاستلام)، وكل مود آخر كان
+              نزعه من قبل. الفرع يبقى صالحاً لأي مود قادم يحتاجه. */}
           <SectionTitle
             title="طريقة البيع"
             hint={
@@ -2702,6 +2762,27 @@ export function ProductFormScreen() {
             ) : null}
           </View>
   </>
+) : modeConfig.key === 'grocery' ? (
+  /* v37 (الجولة 45 #1د): البقالة بلا مبدّل «طريقة البيع» نهائياً —
+   *  يُحدد عند إدخال البضاعة (كرتونة = قطعة، كيس/شيكارة = وزن)
+   *  ويعود مع المنتج عند التعديل كما حُفظ. عرض الحالة فقط، لا
+   *  اختيار — طلب التاجر نصاً: «إزالة قسم اختيار طريقة البيع
+   *  في صفحة المنتج بهذا المود لأنه يتم تحديدها مسبقاً عند
+   *  إدخال البضاعة». */
+  <View style={styles.saleModeRow}>
+    <View style={[styles.saleModeChip, styles.saleModeChipActive]}>
+      <Icon
+        name={saleMode === 'weight' ? 'scale' : 'box'}
+        size={18}
+        color={c.onAccent}
+      />
+      <Text style={[styles.saleModeText, {color: c.onAccent}]}>
+        {saleMode === 'weight'
+          ? 'بالوزن (كغ) — من استلام البضاعة'
+          : 'بالقطعة — يُحدد عند إدخال البضاعة'}
+      </Text>
+    </View>
+  </View>
 ) : null}
 {modeConfig.receiving ? (
   <View style={styles.receiveSection}>
@@ -2962,12 +3043,9 @@ export function ProductFormScreen() {
             ref={costRef}
             label={
               saleMode === 'weight'
-                ? modeConfig.productCopy.costLabel.replace('(₪)', '(₪) *')
+                ? 'سعر التكلفة للكيلو (₪) *'
                 : baseUnitName != null
-                ? `${modeConfig.productCopy.costLabel.replace(
-                    '(₪)',
-                    '',
-                  )}لل${baseUnitName} (₪) *`
+                ? `سعر التكلفة لل${baseUnitName} (₪) *`
                 : `${modeConfig.productCopy.costLabel} *`
             }
             value={costPrice}
@@ -2985,11 +3063,7 @@ export function ProductFormScreen() {
               <View style={{flex: 1}}>
                 <Field
                   ref={retailRef}
-                  label={
-                    saleMode === 'weight'
-                      ? `${modeConfig.productCopy.retailLabel} *`
-                      : `${modeConfig.productCopy.retailLabel} *`
-                  }
+                  label={`${modeConfig.productCopy.retailLabel} *`}
                   value={retailPrice}
                   onChangeText={setRetailPrice}
                   keyboardType="numeric"

@@ -74,7 +74,15 @@ export const StocktakeRepo = {
     return (result.rows?._array ?? []).map(rowToStocktake);
   },
 
-  /** Creates a session and snapshots current stock for every product. */
+  /** Creates a session and snapshots current stock for every product.
+   * v37 (الجولة 45 #1ج): شمولية الجرد — تُزال فلاتر «بلا تتبع»
+   *  نهائياً: كان المود الذي افتراضه stock_untracked=1 (الكافيتريا/
+   *  المطعم) يُقصّ كلياً من جلسة الجرد فلا تظهر منتجاته في قائمة
+   *  الجرد إطلاقاً (شكوى التاجر نصاً). الآن كل منتج غير مؤرشف يدخل
+   *  الجلسة — المخزون القائم يُلتقط كمرجع، والتاجر يعدّ ما يشاء
+   *  منه، والتسوية عند الإتمام تكتب العدّ فور اختيار «تطبيق
+   *  التعديلات». بلا تتبع تبقى الكمية مرجعاً (لا تُخصم بالبيع)
+   *  لكنها صادقة بعد كل جرد. */
   async start(): Promise<Stocktake> {
     const db = getDb();
     const open = await this.getOpen();
@@ -89,10 +97,7 @@ export const StocktakeRepo = {
     await db.execute(
       `INSERT INTO stocktake_items (stocktake_id, product_id, system_qty)
        SELECT ?, p.id, p.stock_quantity FROM products p
-        WHERE p.is_archived = 0
-          -- v35 (الجولة 43): المخزون بلا تتبع (مطعم/كافيتريا) لا
-          --  شيء يُعدّ فيه — الطبق خدمة لا مخزون.
-          AND p.stock_untracked = 0`,
+        WHERE p.is_archived = 0`,
       [id],
     );
     const result = await db.execute('SELECT * FROM stocktakes WHERE id = ?', [

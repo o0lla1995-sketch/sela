@@ -3601,6 +3601,17 @@ function SaleSheetView({
     null;
   const untracked = product.stock_untracked === 1;
 
+  // v37 (الجولة 45 #2أ+2ج): القيم الحية للتذييل المثبّت — كانت
+  //  داخل IIFE في نهاية كل فرع داخل التمرير؛ الآن محسوبة مرة
+  //  واحدة في نطاق المكون لأن التذييل يحتاجها خارج ScrollView.
+  const pickedSizeVariant =
+    sizeVariants.find(v => v.id === pickedSizeId) ?? null;
+  const pickedUnitRow =
+    (unitRows ?? []).find(row => row.unit_id === pickedUnitId) ?? null;
+  const pickedSizePrice =
+    pickedSizeVariant?.retail_price ?? product.retail_price;
+  const pickedUnitPrice = unitPriceFor(product, pickedUnitRow, pricingMode);
+
   // ── أسعار الملابس ──
   const perPieceRetail = product.retail_price;
   const perPieceWholesale =
@@ -3653,7 +3664,7 @@ function SaleSheetView({
         </View>
 
         <ScrollView
-          style={{flex: 1}}
+          style={styles.variantScroll}
           contentContainerStyle={styles.variantList}
           showsVerticalScrollIndicator={false}>
           {/* ════ ملابس ════ */}
@@ -3771,27 +3782,9 @@ function SaleSheetView({
                       onDecrement={() => setQty(prev => Math.max(1, prev - 1))}
                     />
                   </View>
-                  <Text style={styles.sheetTotalText}>
-                    {activeVariant != null
-                      ? `${qty} × ${formatMoney(perPieceRetail)} = ${formatMoney(
-                          qty * perPieceRetail,
-                        )}`
-                      : 'اختر المقاس'}
-                  </Text>
-                  <AppButton
-                    title={`إضافة للسلة${
-                      activeVariant != null
-                        ? ` · ${formatMoney(qty * perPieceRetail)}`
-                        : ''
-                    }`}
-                    icon="plus"
-                    disabled={activeVariant == null}
-                    onPress={() => {
-                      if (activeVariant != null) {
-                        onAddVariant(product, activeVariant, qty);
-                      }
-                    }}
-                  />
+                  {/* v37 (الجولة 45 #2أ+2ج): المجموع وزر التأكيد
+                      انتقلا للتذييل المثبّت أسفل النافذة — لا يمكن
+                      أن يختفا تحت التمرير أبداً. */}
                 </>
               ) : (
                 /* جملة: ربطة = قطعة من كل مقاس باللون المختار */
@@ -3825,23 +3818,7 @@ function SaleSheetView({
                       }
                     />
                   </View>
-                  <Text style={styles.sheetTotalText}>
-                    {bundles} ربطة × {formatMoney(bundlePrice)} ={' '}
-                    {formatMoney(bundles * bundlePrice)} ({bundles * sizesCount}{' '}
-                    قطعة)
-                  </Text>
-                  <AppButton
-                    title={`إضافة للسلة · ${formatMoney(
-                      bundles * bundlePrice,
-                    )}`}
-                    icon="plus"
-                    disabled={minStockOfColor <= 0}
-                    onPress={() => {
-                      if (activeColor != null) {
-                        onAddBundle(product, activeColor, bundles);
-                      }
-                    }}
-                  />
+                  {/* v37: المجموع وزر الربطة — للتذييل المثبّت. */}
                 </>
               )}
             </>
@@ -3889,35 +3866,7 @@ function SaleSheetView({
                   onDecrement={() => setQty(prev => Math.max(1, prev - 1))}
                 />
               </View>
-              {(() => {
-                const picked =
-                  sizeVariants.find(v => v.id === pickedSizeId) ?? null;
-                const price =
-                  picked?.retail_price ?? product.retail_price;
-                return (
-                  <>
-                    <Text style={styles.sheetTotalText}>
-                      {picked != null
-                        ? `${qty} × ${picked.size} × ${formatMoney(price)} = ${formatMoney(
-                            qty * price,
-                          )}`
-                        : 'اختر الحجم أولاً'}
-                    </Text>
-                    <AppButton
-                      title={`إضافة للسلة${
-                        picked != null ? ` · ${formatMoney(qty * price)}` : ''
-                      }`}
-                      icon="plus"
-                      disabled={picked == null}
-                      onPress={() => {
-                        if (picked != null) {
-                          onAddSized(product, picked, qty);
-                        }
-                      }}
-                    />
-                  </>
-                );
-              })()}
+              {/* v37: مجموع الحجم وزرّه — للتذييل المثبّت. */}
             </>
           ) : null}
 
@@ -3999,27 +3948,103 @@ function SaleSheetView({
                   onDecrement={() => setQty(prev => Math.max(1, prev - 1))}
                 />
               </View>
-              {(() => {
-                const pickedUnit =
-                  (unitRows ?? []).find(row => row.unit_id === pickedUnitId) ??
-                  null;
-                const price = unitPriceFor(product, pickedUnit, pricingMode);
-                return (
-                  <>
-                    <Text style={styles.sheetTotalText}>
-                      {qty} × {formatMoney(price)} = {formatMoney(qty * price)}
-                    </Text>
-                    <AppButton
-                      title={`إضافة للسلة · ${formatMoney(qty * price)}`}
-                      icon="plus"
-                      onPress={() => onAddUnit(product, pickedUnit)}
-                    />
-                  </>
-                );
-              })()}
+              {/* v37: مجموع الوحدة وزرّها — للتذييل المثبّت. */}
             </>
           ) : null}
 
+        </ScrollView>
+
+        {/* ═══ v37 (الجولة 45 #2أ+2ج): التذييل المثبّت ═══
+            إصلاح جذر «نافذة البيع تظهر الترويسة فقط والباقي
+            فارغ/مقتطع» + «زر التأكيد مختفٍ أسفل الشاشة»:
+            • التمرير الأوسط صار بنمط ورقة الوزن المُثبتة
+              (flexShrink بدل flex:1 داخل أب maxHeight) — نفس
+              النمط الذي اشتغل بلا أخطاء على جهاز التاجر منذ
+              عدة جولات؛ flex:1 داخل أب maxHeight-only كان ينهار
+              على بعض الأجهزة فيرسم الترويسة وحدها.
+            • المجموع + زر التأكيد + الحاشية في تذييل مثبّت
+              تحت التمرير — لا يمكن أن يخرج عن الشاشة مهما طال
+              المحتوى (ملابس بكثير من الألوان/المقاسات). */}
+        <View style={styles.sheetFooter}>
+          {sheet.kind === 'clothing' && !wholesaleMode ? (
+            <>
+              <Text style={styles.sheetTotalText}>
+                {activeVariant != null
+                  ? `${qty} × ${formatMoney(perPieceRetail)} = ${formatMoney(
+                      qty * perPieceRetail,
+                    )}`
+                  : 'اختر المقاس'}
+              </Text>
+              <AppButton
+                title={`إضافة للسلة${
+                  activeVariant != null
+                    ? ` · ${formatMoney(qty * perPieceRetail)}`
+                    : ''
+                }`}
+                icon="plus"
+                disabled={activeVariant == null}
+                onPress={() => {
+                  if (activeVariant != null) {
+                    onAddVariant(product, activeVariant, qty);
+                  }
+                }}
+              />
+            </>
+          ) : sheet.kind === 'clothing' && wholesaleMode ? (
+            <>
+              <Text style={styles.sheetTotalText}>
+                {bundles} ربطة × {formatMoney(bundlePrice)} ={' '}
+                {formatMoney(bundles * bundlePrice)} ({bundles * sizesCount}{' '}
+                قطعة)
+              </Text>
+              <AppButton
+                title={`إضافة للسلة · ${formatMoney(bundles * bundlePrice)}`}
+                icon="plus"
+                disabled={minStockOfColor <= 0}
+                onPress={() => {
+                  if (activeColor != null) {
+                    onAddBundle(product, activeColor, bundles);
+                  }
+                }}
+              />
+            </>
+          ) : sheet.kind === 'sizes' ? (
+            <>
+              <Text style={styles.sheetTotalText}>
+                {pickedSizeVariant != null
+                  ? `${qty} × ${pickedSizeVariant.size} × ${formatMoney(
+                      pickedSizePrice,
+                    )} = ${formatMoney(qty * pickedSizePrice)}`
+                  : 'اختر الحجم أولاً'}
+              </Text>
+              <AppButton
+                title={`إضافة للسلة${
+                  pickedSizeVariant != null
+                    ? ` · ${formatMoney(qty * pickedSizePrice)}`
+                    : ''
+                }`}
+                icon="plus"
+                disabled={pickedSizeVariant == null}
+                onPress={() => {
+                  if (pickedSizeVariant != null) {
+                    onAddSized(product, pickedSizeVariant, qty);
+                  }
+                }}
+              />
+            </>
+          ) : sheet.kind === 'unit' ? (
+            <>
+              <Text style={styles.sheetTotalText}>
+                {qty} × {formatMoney(pickedUnitPrice)} ={' '}
+                {formatMoney(qty * pickedUnitPrice)}
+              </Text>
+              <AppButton
+                title={`إضافة للسلة · ${formatMoney(qty * pickedUnitPrice)}`}
+                icon="plus"
+                onPress={() => onAddUnit(product, pickedUnitRow)}
+              />
+            </>
+          ) : null}
           <Text style={styles.variantFootnote}>
             {sheet.kind === 'clothing'
               ? 'بيع بالقطعة: اختر اللون والمقاس — وبالجملة: الربطة تخصم قطعة من كل مقاس باللون المختار.'
@@ -4027,7 +4052,7 @@ function SaleSheetView({
               ? 'كل حجم بسعره — يظهر في السلة والفاتورة باسمه.'
               : 'الوحدة الأساس افتراضية — العلبة والوحدات الأكبر بأسعارها المشتقة.'}
           </Text>
-        </ScrollView>
+        </View>
       </View>
     </View>
   );
@@ -4835,7 +4860,9 @@ const useStyles = makeStyles(c =>
       borderTopRightRadius: radius.lg + 4,
       padding: spacing.lg,
       gap: spacing.sm,
-      maxHeight: '72%',
+      // v37 (الجولة 45 #2أ): 72% → 78% — مساحة أرحب للمحتوى مع
+      //  التذييل المثبّت (المجموع + زر التأكيد + الحاشية).
+      maxHeight: '78%',
     },
     variantSheetHeader: {
       flexDirection: 'row',
@@ -4865,7 +4892,26 @@ const useStyles = makeStyles(c =>
     },
     variantList: {
       gap: 8,
-      paddingBottom: spacing.xl,
+      // v37: كان paddingBottom ضخماً ليغطي الأزرار التي كانت
+      //  داخل التمرير — انتقلت للتذييل المثبّت فاستُبدل بحشوة
+      //  صغيرة أنيقة.
+      paddingBottom: spacing.sm,
+    },
+    /** v37 (الجولة 45 #2أ): التمرير الأوسط بنمط ورقة الوزن
+     *  المُثبتة — flexShrink بدل flex:1. flex:1 داخل أب
+     *  maxHeight-only كان يرسم الترويسة وحدها على بعض الأجهزة
+     *  (شكوى: «تظهر الترويسة فقط والباقي فارغ/مقتطع»). */
+    variantScroll: {
+      flexShrink: 1,
+    },
+    /** v37 (الجولة 45 #2ج): التذييل المثبّت — المجموع + زر
+     *  التأكيد + الحاشية تحت خط فاصل؛ لا يتحرك مع التمرير
+     *  ولا يمكن أن يخرج عن الشاشة مهما طال المحتوى. */
+    sheetFooter: {
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+      paddingTop: spacing.sm,
+      gap: spacing.xs,
     },
     /** v35 (الجولة 43): نافذة البيع الموحدة — مقاطع مفرق/جملة
      *  وشرائح اللون والمقاس والحجم والوحدة وبطاقة الربطة. */

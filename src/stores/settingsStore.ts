@@ -24,8 +24,14 @@ export interface AppSettings {
   /** Store logo (local file path) shown in-app and on receipts. */
   storeLogoPath: string | null;
   defaultPricingMode: PricingMode;
-  /** Scanner engine: barcode / visual / both (merchant's choice). */
+  /** Scanner engine: barcode / visual / both (merchant's choice).
+   *  v37 (الجولة 45 #2ب): الافتراض «باركود» فقط (طلب التاجر
+   *  نصاً) — كان «both». */
   scannerMode: ScannerMode;
+  /** v37 (الجولة 45 #2ب): هل عدّل التاجر طريقة المسح بنفسه؟
+   *  يُستعمل لترحيل الافتراض القديم «both» إلى «barcode» مرة
+   *  واحدة بلا طغيان على اختيار التاجر الصريح. */
+  scannerModeTouched: boolean;
   /** Vision */
   recognitionEnabled: boolean;
   matchThreshold: number;
@@ -57,7 +63,10 @@ const DEFAULTS: AppSettings = {
   footerMessage: 'شكراً لتعاملكم معنا — لا يوجد إرجاع أو استبدال بعد الفاتورة',
   storeLogoPath: null,
   defaultPricingMode: 'RETAIL',
-  scannerMode: 'both',
+  // v37 (الجولة 45 #2ب): طريقة المسح الافتراضية أثناء البيع =
+  //  الباركود فقط (طلب التاجر نصاً) — كانت «both».
+  scannerMode: 'barcode',
+  scannerModeTouched: false,
   recognitionEnabled: true,
   matchThreshold: DEFAULT_MATCH_THRESHOLD,
   recognitionCooldownMs: DEFAULT_RECOGNITION_COOLDOWN_MS,
@@ -82,7 +91,16 @@ interface SettingsState {
 
 function loadInitial(): AppSettings {
   const stored = getJson<Partial<AppSettings>>(KEYS.settings, {});
-  return {...DEFAULTS, ...stored};
+  const merged = {...DEFAULTS, ...stored};
+  // v37 (الجولة 45 #2ب): الترحيل الأحادي — «both» المخزنة كانت
+  //  مجرد افتراض قديم لا اختيار التاجر: إن لم يلمس التاجر
+  //  الإعداد بنفسه (لا علم scannerModeTouched) يُرحَّل إلى
+  //  «باركود فقط». أي اختيار صريح بعد اليوم يُحترم حرفياً ولا
+  //  يُلمس مرة أخرى.
+  if (!merged.scannerModeTouched && merged.scannerMode === 'both') {
+    merged.scannerMode = 'barcode';
+  }
+  return merged;
 }
 
 function persist(settings: AppSettings): void {
