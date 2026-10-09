@@ -888,7 +888,8 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
           val noteLeftLimit = colAmount + Math.max(amountWidth, 48f) + 8f
           val noteMaxWidth = colNote - noteLeftLimit
           if (noteMaxWidth > 24f) {
-            val notePaint = android.graphics.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            // (TextPaint من حزمة android.text — صنو Paint بوسوم النص.)
+            val notePaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
               typeface = regular
               textSize = 10f
               color = android.graphics.Color.DKGRAY
