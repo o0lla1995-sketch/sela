@@ -16,6 +16,15 @@ import {
 import type {PricingMode} from '../core/types';
 import type {StoreMode} from '../core/storeModes';
 
+/** v40 (الجولة 48 #5): شكل عرض المنتجات داخل نقطة البيع — الافتراض
+ *  الشبكة الحالية (طلب التاجر: «اجعل الشكل الافتراضي هو الحالي»).
+ *  grid: البلاطات المربعة الحالية بالصور.
+ *  list: صفوف مضغوطة (مصغّر + اسم + سعر + مخزون) — أكثر أصناف في
+ *  الشاشة للمخازن الكبيرة.
+ *  cards: بطاقات كبيرة بصور كبيرة (اثنتان في الصف) — للملابس
+ *  والبصريين حيث الصورة تبيع. */
+export type PosProductView = 'grid' | 'list' | 'cards';
+
 export interface AppSettings {
   storeName: string;
   storePhone: string;
@@ -54,6 +63,9 @@ export interface AppSettings {
   /** v32 (round-40 #3): نافذة التنبيه قبل انتهاء الصلاحية (أيام). */
   expiryAlertDays: number;
   systemNotificationsEnabled: boolean;
+  /** v40 (الجولة 48 #5): شكل عرض المنتجات في نقطة البيع — الشبكة
+   *  الحالية هي الافتراض. */
+  posProductView: PosProductView;
 }
 
 const DEFAULTS: AppSettings = {
@@ -81,6 +93,7 @@ const DEFAULTS: AppSettings = {
   storeMode: 'grocery',
   expiryAlertDays: DEFAULT_EXPIRY_ALERT_DAYS,
   systemNotificationsEnabled: true,
+  posProductView: 'grid',
 };
 
 interface SettingsState {

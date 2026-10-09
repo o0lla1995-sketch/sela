@@ -477,11 +477,27 @@ export const SaleRepo = {
     /** Pro-rata discount ratio of the original invoice (0..1]. */
     discountRatio: number;
     lines: ReturnLineInput[];
-    /** v36: الاستبدال بقيمة المرجع — بضاعة تخرج من المخزون بدل
-     *  الإرجاع المالي. موجودة وغير فارغة = وضع الاستبدال: لا أثر
-     *  مالي إطلاقاً (لا استرداد نقدي ولا خصم دين ولا عكس رفع لصلة)
-     *  — فقط المخزون: المرتجع يعود والبديل يخرج. */
+    /** v36→v40 (الجولة 48 #2): الاستبدال بقيمة المرجع — بضاعة تخرج
+     *  من المخزون بدل المرتجع. موجودة وغير فارغة = وضع الاستبدال:
+     *  الفرق بين قيمة المرتجع وقيمة البدائل يُسوّى مالياً —
+     *  صف RET يحمل الصافي (إيراد/تكلفة/ربح الفرق) فيبقى حساب
+     *  الخزينة متوازناً في كل سيناريو، والدين (محلي أو صلة)
+     *  يزيد أو ينقص بالفرق بدل إبقائه جامداً. */
     exchange?: ExchangeLineInput[];
+    /** v40 (الجولة 48 #2): زيادة دين صِلة المتزامن — حين تكون قيمة
+     *  البدائل أعلى من المرتجع على فاتورة INV-D مرفوعة للخادم،
+     *  يُنشأ صف دين جديد (state pending) يرفع الفرق للخادم كسدادٍ
+     *  معكوس تماماً: pos_invoice_ref = رقم الإشعار + "-EX" (فريد
+     *  دائماً لأن أرقام الإشعارات فريدة). */
+    silaDebtIncrease?: {
+      customerId: string | null;
+      customerName: string | null;
+      customerPhoneLast4: string | null;
+      amountMinor: number;
+      posInvoiceRef: string;
+      idempotencyKey: string;
+      description: string;
+    } | null;
     /** sila reversal payload when the queue row is already synced. */
     silaReversal?: {
       customerId: string | null;
@@ -517,14 +533,22 @@ export const SaleRepo = {
     const totalCost = lineValues.reduce((sum, l) => sum + l.lineCost, 0);
     const createdAt = localNow();
 
-    // ── v36: حساب الاستبدال (إن وجد) ─────────────────────────
-    // قيمة البضاعة البديلة بأسعارها الحالية — للمقارنة بقيمة
-    // المرتجع وللسجل، لا تدخل أي تجميعة مالية (صف المرتجع نفسه
-    // يُقيَّد بأصفار مالية في وضع الاستبدال).
+    // ── v36→v40: حساب الاستبدال (إن وجد) ─────────────────────
+    // قيمة البضاعة البديلة بأسعارها الحالية. v36 كانت تُصفّر كل
+    // الأثر المالي؛ v40 (الجولة 48 #2) تسوّي الفرق بالسعر كما طلب
+    // التاجر: صف RET يحمل الصافي —
+    //   total  = قيمة البدائل − قيمة المرتجع  (فرق موجب = دخل نقد)
+    //   cost   = تكلفة البدائل − تكلفة المرتجع (بضاعة غادرت بدل أخرى)
+    //   profit = total − cost
+    // وبذلك يبقى معادلة الخزينة (الإيراد − مبيعات الدين + المقبوضات)
+    // متوازنة في كل السيناريوهات: زبون نقدي يدفع/يستلم الفرق نقداً
+    // (الإيراد يتحرك بالفرق)، ودين محلي/صلة يزيد أو ينقص بالفرق
+    // (الإيراد وكرديت المبيعات يتحركان معاً فينعادلان — لا نقد تحرك).
     const exchangeMode = (input.exchange?.length ?? 0) > 0;
     const exchangeValues = (input.exchange ?? []).map(line => ({
       ...line,
       lineTotal: line.unitPrice * line.quantity,
+      lineCost: line.costPrice * line.quantity,
       baseQty: line.quantity * line.basePerUnit,
     }));
     const exchangeValue = exchangeValues.reduce(
@@ -535,6 +559,11 @@ export const SaleRepo = {
     if (exchangeMode && exchangeMinor <= 0) {
       throw new Error('قيمة الاستبدال غير صالحة');
     }
+    const exchangeCost = exchangeValues.reduce((sum, l) => sum + l.lineCost, 0);
+    // v40: الفرق بالسعر — موجب: المرتجع أغلى (يُرد للزبون أو يُخصم
+    // من دينه)؛ سالب: البدائل أغلى (يدفعها الزبون نقداً أو تُضاف
+    // لدينه).
+    const diffMinor = exchangeMode ? refundMinor - exchangeMinor : 0;
 
     let returnId = -1;
 
@@ -549,11 +578,17 @@ export const SaleRepo = {
          VALUES (?, ?, ?, ?, 0, 'RETAIL', ?, ?)`,
         [
           input.returnNumber,
-          // v36: وضع الاستبدال = أصفار مالية كاملة — لا يتحرك
-          // إيراد ولا تكلفة ولا ربح ولا خزينة إطلاقاً؛ فقط المخزون.
-          exchangeMode ? 0 : -refundValue,
-          exchangeMode ? 0 : -totalCost,
-          exchangeMode ? 0 : -(refundValue - totalCost),
+          // v40 (الجولة 48 #2): وضع الاستبدال يحمل الصافي —
+          //   total = البدائل − المرتجع (موجب = الزبون دفع فرقاً
+          //   نقدياً دخل الخزينة، سالب = الكاشير سلّم الفرق منها)
+          //   cost = تكلفة البدائل − تكلفة المرتجع، وprofit = الفرق.
+          //   زبون الدين: الصافي نفسه ينعكس في دفتره بالفرق (خصم أو
+          //   زيادة) فتنعادل معادلة الخزينة — لا نقد تحرك.
+          exchangeMode ? exchangeValue - refundValue : -refundValue,
+          exchangeMode ? exchangeCost - totalCost : -totalCost,
+          exchangeMode
+            ? exchangeValue - refundValue - (exchangeCost - totalCost)
+            : -(refundValue - totalCost),
           createdAt,
           input.book,
         ],
@@ -769,12 +804,17 @@ export const SaleRepo = {
         [refundMinor, input.saleId],
       );
 
-      // 5) The DEBT reversal — same transaction, no half states.
-      //    v36: في وضع الاستبدال لا يُمس أي دين إطلاقاً — لا خصم
-      //    من دفتر المتجر ولا تقليص طابور صلة ولا عكس رفع: البضاعة
-      //    بدّلت بضاعة، والعملية المالية كما هي.
+      // 5) The DEBT adjustment — same transaction, no half states.
+      //    v40 (الجولة 48 #2): في وضع الاستبدال يُعدَّل الدين بالفرق
+      //    بين قيمة المرتجع وقيمة البدائل — المرتجع أغلى → يُخصم
+      //    الفرق من دين الزبون (محلي أو صلة)؛ البدائل أغلى → يزيد
+      //    الدين بالفرق. الإرجاع المالي العادي كما كان: يُخصم كامل
+      //    قيمة المرتجع. الزبون النقدي: لا دين يُمس هنا إطلاقاً —
+      //    الفرق يمر عبر صف RET نفسه (نقد خرج من الخزينة أو دخلها).
       let debtAdjustedMinor = 0;
-      if (!exchangeMode && input.book === 'local') {
+      if (input.book === 'local') {
+        // v40: الاستبدال يعدّل بالفرق؛ الإرجاع العادي بكامل القيمة.
+        const adjustMinor = exchangeMode ? diffMinor : refundMinor;
         // v26 (round-34 #2): local_debts.amount_minor carries
         // CHECK (amount_minor > 0) — the old blind
         // `SET amount_minor = MAX(0, amount_minor - ?)` CRASHED with
@@ -793,30 +833,46 @@ export const SaleRepo = {
         const localDebt = localRow.rows?._array?.[0] as
           | {amount_minor?: number | null}
           | undefined;
-        if (localDebt != null) {
+        if (localDebt != null && adjustMinor !== 0) {
           const currentLocal = Number(localDebt.amount_minor ?? 0);
-          if (refundMinor >= currentLocal) {
-            await tx.execute(
-              'DELETE FROM local_debts WHERE invoice_ref = ? AND migrated = 0',
-              [input.invoiceRef],
-            );
-            debtAdjustedMinor = currentLocal;
+          if (adjustMinor > 0) {
+            // خصم — ينكمش الدين ويحذف الصف عند الاستهلاك الكامل.
+            if (adjustMinor >= currentLocal) {
+              await tx.execute(
+                'DELETE FROM local_debts WHERE invoice_ref = ? AND migrated = 0',
+                [input.invoiceRef],
+              );
+              debtAdjustedMinor = currentLocal;
+            } else {
+              await tx.execute(
+                `UPDATE local_debts
+                   SET amount_minor = amount_minor - ?
+                 WHERE invoice_ref = ? AND migrated = 0`,
+                [adjustMinor, input.invoiceRef],
+              );
+              debtAdjustedMinor = adjustMinor;
+            }
           } else {
+            // v40: زيادة — البدائل أغلى من المرتجع فدين الزبون يزيد
+            // بالفرق. الصف موجود (الطبقة العليا ترفض الحالة المفقودة
+            // قبل المعاملة برسالة واضحة) وCHECK البقاء موجباً مضمون
+            // لأننا نضيف فقط.
             await tx.execute(
               `UPDATE local_debts
-                 SET amount_minor = amount_minor - ?
+                 SET amount_minor = amount_minor + ?
                WHERE invoice_ref = ? AND migrated = 0`,
-              [refundMinor, input.invoiceRef],
+              [-adjustMinor, input.invoiceRef],
             );
-            debtAdjustedMinor = refundMinor;
           }
         }
-      } else if (!exchangeMode && input.book === 'sila') {
+      } else if (input.book === 'sila') {
         if (input.silaReversal != null) {
           // Synced debt — the reverse operation: a payment upload
           // (kind 'return_reversal') reduces the customer's debt on
           // the صلة server exactly like a repayment, but never
           // counts as collected cash in the store's statistics.
+          // v40: في الاستبدال مبلغ العكس = الفرق فقط (المرتجع أغلى)،
+          // وفي الإرجاع العادي = كامل قيمة المرتجع كما كان.
           await tx.execute(
             `INSERT INTO sila_payment_queue (
               idempotency_key, customer_id, customer_name, customer_phone_last4,
@@ -835,10 +891,36 @@ export const SaleRepo = {
             ],
           );
           debtAdjustedMinor = input.silaReversal.amountMinor;
+        } else if (input.silaDebtIncrease != null) {
+          // v40 (الجولة 48 #2): دين متزامن والبدائل أغلى — صف دين
+          // جديد (pending) يرفع الفرق للخادم مع أول مزامنة؛ المرجع
+          // فريد بحكم تفرّد رقم الإشعار (RET-…-EX) فلا يتضارب مع
+          // فاتورة الديون الأصلية أبداً، والوصف يشرح مصدره للتاجر
+          // في سجل الزبون على الخادم.
+          await tx.execute(
+            `INSERT INTO sila_debt_queue (
+              idempotency_key, customer_id, customer_name, customer_phone_last4,
+              amount_minor, currency, pos_invoice_ref, description,
+              scanned_at, state
+            ) VALUES (?, ?, ?, ?, ?, 'ILS', ?, ?, ?, 'pending')`,
+            [
+              input.silaDebtIncrease.idempotencyKey,
+              input.silaDebtIncrease.customerId,
+              input.silaDebtIncrease.customerName,
+              input.silaDebtIncrease.customerPhoneLast4,
+              input.silaDebtIncrease.amountMinor,
+              input.silaDebtIncrease.posInvoiceRef,
+              input.silaDebtIncrease.description,
+              createdAt,
+            ],
+          );
         } else {
-          // Pending/failed queue row — shrink it directly; the
-          // server never learns the returned part. Zero → the row
-          // disappears entirely (no zero-amount upload).
+          // Pending/failed queue row — the server never learned the
+          // original amounts, so BOTH directions adjust the row
+          // directly: shrink (or delete at zero) when the returned
+          // goods outweigh the replacements, GROW by the difference
+          // when the customer took more (v40) — the upload then
+          // carries the net debt to the server in one number.
           const row = await tx.execute(
             'SELECT amount_minor, credit_covered_minor FROM sila_debt_queue WHERE pos_invoice_ref = ?',
             [input.invoiceRef],
@@ -848,22 +930,34 @@ export const SaleRepo = {
             | undefined;
           if (debtRow != null) {
             const current = Number(debtRow.amount_minor ?? 0);
-            const nextAmount = Math.max(0, current - refundMinor);
-            if (nextAmount === 0) {
-              await tx.execute(
-                'DELETE FROM sila_debt_queue WHERE pos_invoice_ref = ?',
-                [input.invoiceRef],
-              );
+            const adjustMinor = exchangeMode ? diffMinor : refundMinor;
+            if (adjustMinor >= 0) {
+              const nextAmount = Math.max(0, current - adjustMinor);
+              if (nextAmount === 0) {
+                await tx.execute(
+                  'DELETE FROM sila_debt_queue WHERE pos_invoice_ref = ?',
+                  [input.invoiceRef],
+                );
+              } else {
+                await tx.execute(
+                  `UPDATE sila_debt_queue
+                     SET amount_minor = ?,
+                         credit_covered_minor = MIN(COALESCE(credit_covered_minor, 0), ?)
+                   WHERE pos_invoice_ref = ?`,
+                  [nextAmount, nextAmount, input.invoiceRef],
+                );
+              }
+              debtAdjustedMinor = Math.min(adjustMinor, current);
             } else {
+              // v40: البدائل أغلى — الدين المعلق يزيد بالفرق.
               await tx.execute(
                 `UPDATE sila_debt_queue
-                   SET amount_minor = ?,
-                       credit_covered_minor = MIN(COALESCE(credit_covered_minor, 0), ?)
+                   SET amount_minor = amount_minor + ?,
+                       credit_covered_minor = MIN(COALESCE(credit_covered_minor, 0), amount_minor + ?)
                  WHERE pos_invoice_ref = ?`,
-                [nextAmount, nextAmount, input.invoiceRef],
+                [-adjustMinor, -adjustMinor, input.invoiceRef],
               );
             }
-            debtAdjustedMinor = Math.min(refundMinor, current);
           }
         }
       }

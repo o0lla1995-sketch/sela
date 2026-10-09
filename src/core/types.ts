@@ -294,8 +294,9 @@ export interface SaleReturnRecord {
   refund_minor: number;
   /** The part that reduced a DEBT book (sila queue / local row). */
   debt_adjusted_minor: number;
-  /** v36: 1 = استبدال بضاعة بدل الإرجاع المالي — لا أثر مالي
-   *  إطلاقاً؛ فقط المخزون: المرتجع يعود والبديل يخرج. */
+  /** v36→v40 (الجولة 48 #2): 1 = استبدال بضاعة بدل الإرجاع المالي —
+   *  المرتجع يعود والبديل يخرج، والفرق بين قيمتيهما يُسوّى مالياً
+   *  (نقد من/إلى الخزينة، أو خصم/زيادة دين الزبون). */
   is_exchange: 0 | 1;
   /** v36: قيمة البضاعة المستبدلة الخارجة من المخزن (قرشاً). */
   exchange_minor: number;

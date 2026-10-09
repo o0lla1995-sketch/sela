@@ -72,7 +72,13 @@ async function stockOf(productId: number): Promise<number> {
 }
 
 describe('v36 — الاستبدال بقيمة المرجع (المصفوفة الوظيفية)', () => {
-  test('كتاب نقدي: المرتجع يعود والبديل يخرج والصف المالي أصفار بالكامل', async () => {
+  /* v40 (الجولة 48 #2): سلوك الاستبدال تطوّر — الفرق بين قيمة
+   * المرتجع والبدائل يُسوّى مالياً (كان أصفاراً بالكامل في v36):
+   * زبون نقدي يستلم الفرق من الخزينة أو يدفعه، ودين الدفتر
+   * يخصم منه الفرق أو يزيد به. الاختبارات أدناه محدّثة للسلوك
+   * الجديد؛ اختبارات v40 المخصصة في v40-round48.test.ts تغطي
+   * الاتجاهات الأربعة بالتفصيل. */
+  test('كتاب نقدي: المرتجع يعود والبديل يخرج والفرق يُسوّى في صف RET', async () => {
     const app = freshApp();
     await app.connection.initDatabase();
     const {InvoiceService} = load('src/services/InvoiceService');
@@ -129,10 +135,13 @@ describe('v36 — الاستبدال بقيمة المرجع (المصفوفة �
     expect(await stockOf(cola.id)).toBe(94);
     expect(await stockOf(water.id)).toBe(40);
 
-    // المالية: إيراد الخزينة = البيع الأصلي فقط (80₪) — صف المرتجع
-    // أصفار فلا يتحرك إيراد ولا ربح ولا خزينة إطلاقاً.
+    // v40 (الجولة 48 #2): المالية الصافية — المرتجع (32₪) أغلى من
+    // البدائل (30₪) بفرق 2₪ يُسلّم للزبون نقداً من الخزينة: صف
+    // RET يحمل −2 (كما يخصم الإرجاع المالي قيمته كاملة من
+    // الإيراد، الاستبدال يخصم الفرق فقط) وإيراد الخزينة =
+    // البيع الأصلي 80₪ − الفرق 2₪ = 78₪.
     const revenue = await SaleRepo.allTimeRevenue();
-    expect(revenue).toBeCloseTo(80, 5);
+    expect(revenue).toBeCloseTo(78, 5);
 
     // الفاتورة الأصلية موسومة بقيمة ما رُجع منها (بضاعةً، لا مالاً).
     const original = await SaleRepo.getById(sale.sale.id);
@@ -158,7 +167,7 @@ describe('v36 — الاستبدال بقيمة المرجع (المصفوفة �
     expect(colaLine?.quantity).toBe(-4); // سالب — عاد للمخزن
   });
 
-  test('كتاب دين المتجر: الاستبدال لا يمس الدين إطلاقاً', async () => {
+  test('كتاب دين المتجر: الاستبدال يخصم الفرق من الدين', async () => {
     const app = freshApp();
     await app.connection.initDatabase();
     const {InvoiceService} = load('src/services/InvoiceService');
@@ -221,11 +230,13 @@ describe('v36 — الاستبدال بقيمة المرجع (المصفوفة �
     } as never);
 
     expect(ret.is_exchange).toBe(1);
-    expect(ret.debt_adjusted_minor).toBe(0);
-    // «لا تأثير على العملية المالية»: الدين كما هو تماماً — 30₪.
+    // v40 (الجولة 48 #2): المرتجع (2×6=12₪) أغلى من البدائل
+    // (5×2=10₪) — الدين ينقص بالفرق 2₪ فقط (30→28) ودين_المعدل
+    // يسجل 2₪.
+    expect(ret.debt_adjusted_minor).toBe(200);
     const after = await LocalDebtsRepo.debtRowByRef(sale.sale.invoice_number);
     expect(after).not.toBeNull();
-    expect(Number(after!.amountMinor)).toBe(3000);
+    expect(Number(after!.amountMinor)).toBe(2800);
     // المخزون: الحليب عاد (95→97) والخبز خرج (80→75).
     expect(await stockOf(milk.id)).toBe(97);
     expect(await stockOf(bread.id)).toBe(75);
@@ -316,21 +327,31 @@ describe('v36 — حرّوس عزل المتاجر الجذري (0078) في ال
     expect(screen).toContain('serverCapMinor + pendingUnsyncedMinor');
   });
 
-  test('نافذة الإرجاع: زر الاستبدال + النافذة + حارس القيمة', () => {
+  test('نافذة الإرجاع: زر الاستبدال + النافذة + شريط الفرق', () => {
     const src = read(INVOICES);
     expect(src).toContain('الاستبدال بقيمة المرجع');
     expect(src).toContain('function ExchangeSheet');
-    expect(src).toContain('قيمة الاستبدال أعلى من قيمة المرتجع');
-    expect(src).toContain('بلا أثر مالي');
+    // v40 (الجولة 48 #2+#3): شريط الفرق الحي وتسويته بدل حظر
+    // الزيادة — الزبون يدفع الفرق نقداً أو يزيد به دينه.
+    expect(src).toContain('exchangeDiff');
+    expect(src).toContain('سلّمه نقداً من الخزينة');
+    expect(src).toContain('اقبضه نقداً من الزبون');
+    // v40 #3: القيمتان في صف واحد + زر الاستبدال بجانب التأكيد.
+    expect(src).toContain('valuesPairRow');
+    expect(src).toContain('actionsRow');
     // المسح داخل نافذة الاستبدال + الوحدات والمتغيرات.
     expect(src).toContain('UnitRepo.listForProduct');
     expect(src).toContain('VariantRepo.listByProduct');
   });
 
-  test('إيصال الطباعة: قسم البدائل + العبارة «بلا أثر مالي»', () => {
+  test('إيصال الطباعة: قسم البدائل + الفرق وتسويته', () => {
     const src = read('src/services/printer/returnReceipt.ts');
     expect(src).toContain('EXCHANGED ITEMS (out of stock)');
-    expect(src).toContain('no financial effect');
+    // v40 (الجولة 48 #2): سطرا الفرق وطريقة تسويته.
+    expect(src).toContain('DIFFERENCE (Refund - Exchange)');
+    expect(src).toContain('Cash difference PAID TO customer');
+    expect(src).toContain('Cash difference RECEIVED FROM customer');
+    expect(src).toContain('Debt INCREASED by the difference');
     expect(src).toContain('exchanges?: SaleReturnExchange[]');
   });
 });

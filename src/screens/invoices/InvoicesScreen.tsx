@@ -1450,6 +1450,10 @@ function ReturnSheet({
     0,
   );
   const exchangeModeOn = exchangePicks.length > 0;
+  // v40 (الجولة 48 #2): الفرق الحي بين قيمة المرتجع والبدائل —
+  // موجب: المرتجع أغلى (يُرَد للزبون نقداً أو يُخصم من دينه)؛
+  // سالب: البدائل أغلى (يدفعها الزبون نقداً أو تُضاف لدينه).
+  const exchangeDiff = refundTotal - exchangeTotal;
 
   /* v39 (الجولة 47): ملاحظة الإرجاع (debtAction) حُذفت من نافذة
    *  التأكيد بطلب التاجر نصاً — صندوق «يُخصم من دين الزبون…» لم
@@ -1461,20 +1465,25 @@ function ReturnSheet({
     if (busy || refundTotal <= 0) {
       return;
     }
-    // v36: في وضع الاستبدال — قيمة البدائل لا تتجاوز قيمة المرتجع
-    // («الاستبدال بقيمتها»): الزيادة تُرفض برسالة واضحة.
+    // v40 (الجولة 48 #2): في وضع الاستبدال تُسوّى قيمة الفرق — لا
+    //  رفض للزيادة بعد الآن (البدائل الأغلى يدفع فرقها الزبون نقداً
+    //  أو يُضاف لدينه). الحارسان الوحيدان: قيمة بديلة صالحة، ودين
+    //  محلي مفقود لا يمكن زيادته تلقائياً (الزيادة على دين مسدَّد
+    //  محذوف تتطلب معرفة الزبون — تُرفض برسالة واضحة).
     if (exchangePicks.length > 0) {
       if (exchangeTotal <= 0) {
         toast('قيمة الاستبدال غير صالحة — راجع الأصناف البديلة', 'error');
         return;
       }
-      if (exchangeTotal > refundTotal + 0.0001) {
+      if (
+        exchangeDiff < -0.0001 &&
+        book === 'local' &&
+        debtState.kind === 'missing'
+      ) {
         toast(
-          `قيمة الاستبدال (${formatMoney(exchangeTotal)}) أعلى من قيمة المرتجع (${formatMoney(
-            refundTotal,
-          )}) — راجع الأصناف البديلة أو كمياتها`,
+          'دين هذه الفاتورة مسدَّد ومحذوف من الدفتر — لا يمكن زيادة دين غير موجود تلقائياً؛ سجّل الفرق يدوياً من دفتر الزبائن أو أرجع مالياً وبِع البدائل',
           'error',
-          6000,
+          7000,
         );
         return;
       }
@@ -1518,8 +1527,9 @@ function ReturnSheet({
           variantColor: line.item.variant_color ?? null,
           variantLabel: line.item.variant_label ?? null,
         }));
-      // v36: أصناف الاستبدال (إن اختيرت) — تخرج من المخزون بدل
-      // الإرجاع المالي، بلا أثر مالي إطلاقاً.
+      // v36→v40 (الجولة 48 #2): أصناف الاستبدال (إن اختيرت) — تخرج
+      //  من المخزون بدل الإرجاع المالي، والفرق بالسعر يُسوّى:
+      //  نقدي للزبون/منه، أو خصم/زيادة دين.
       const exchangePayload: ExchangeLineInput[] | undefined =
         exchangePicks.length > 0
           ? exchangePicks.map(pick => ({
@@ -1555,11 +1565,23 @@ function ReturnSheet({
         },
         exchange: exchangePayload,
       });
+      // v40 (الجولة 48 #2): رسالة النجاح تشرح تسوية الفرق بوضوح —
+      //  ماذا حدث للفرق بالضبط (نقد خارج/داخل، خصم/زيادة دين، أو
+      //  استبدال متكافئ) كي يعرف الكاشير ما ينفذه فوراً.
       toast(
         exchangePayload != null
-          ? 'سُجّل الاستبدال — المرتجع عاد للمخزون والبديل خرج منه، بلا أثر مالي'
+          ? exchangeDiff > 0.0001
+            ? book === 'cash'
+              ? `سُجّل الاستبدال — سلّم الزبون الفرق ${formatMoney(exchangeDiff)} نقداً من الخزينة`
+              : `سُجّل الاستبدال — خُصم الفرق ${formatMoney(exchangeDiff)} من دين الزبون`
+            : exchangeDiff < -0.0001
+            ? book === 'cash'
+              ? `سُجّل الاستبدال — قبض الفرق ${formatMoney(-exchangeDiff)} نقداً من الزبون إلى الخزينة`
+              : `سُجّل الاستبدال — زاد دين الزبون بالفرق ${formatMoney(-exchangeDiff)}`
+            : 'سُجّل الاستبدال المتكافئ — المرتجع عاد والبديل خرج ولا فرق'
           : 'سُجّل المرتجع وأُعيدت الكميات للمخزون',
         'success',
+        6000,
       );
       onDone();
     } catch (err) {
@@ -1572,6 +1594,7 @@ function ReturnSheet({
     refundTotal,
     exchangePicks,
     exchangeTotal,
+    exchangeDiff,
     lines,
     quantities,
     book,
@@ -1779,42 +1802,14 @@ function ReturnSheet({
                 البديلة انتقلت للتمرير أعلاه فلا يمكن لشيء أن يدفع
                 زر التأكيد خارج الشاشة. ── */}
             <View style={retStyles(c).summaryBox}>
-              {/* v36: الاستبدال بقيمة المرجع — زر فتح نافذة الاختيار.
-                  v38 (الجولة 46 #6): يظهر دائماً ما دامت في الفاتورة
-                  أصناف قابلة للإرجاع — كان يظهر فقط بعد اختيار كميات
-                  (refundTotal > 0) فيظن التاجر أن الفاتورة النقدية بلا
-                  زبون لا تدعم الاستبدال. الضغط بلا كميات يرشد
-                  برسالة واضحة بدل لا شيء. */}
-              {lines.length > 0 ? (
-                <TouchableOpacity
-                  style={[
-                    retStyles(c).exchangeBtn,
-                    exchangeModeOn ? {borderColor: c.accent} : null,
-                  ]}
-                  onPress={() => {
-                    if (pickedCount === 0) {
-                      toast(
-                        'اختر كميات المرتجع أولاً — الاستبدال يقابل قيمة ما تُرجعه',
-                        'info',
-                        5000,
-                      );
-                    }
-                    setExchangeOpen(true);
-                  }}
-                  disabled={busy}>
-                  <Icon name="swap" size={16} color={c.accent} />
-                  <View style={{flex: 1}}>
-                    <Text style={retStyles(c).exchangeBtnTitle}>
-                      الاستبدال بقيمة المرجع
-                    </Text>
-                    <Text style={retStyles(c).exchangeBtnSub}>
-                      {exchangeModeOn
-                        ? `${exchangePicks.length} صنف بقيمة ${formatMoney(exchangeTotal)} — انقر للتعديل`
-                        : 'أخذ بضاعة أخرى بدل المرتجع — يفتح نافذة بحث ومسح باركود. لا أثر مالي؛ فقط المخزون'}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              ) : null}
+              {/* ═══ v40 (الجولة 48 #3): تذييل مضغوط بطلب التاجر نصاً —
+                  «اجعل قيمة المرجع وقيمة المستبدل في نفس الصف
+                  واضغطهم جيداً حتى نقلل المساحة، وزر الاستبدال اجعل
+                  له مكاناً مناسباً في الأسفل بجانب زر التأكيد».
+                  البنية: (١) طريقة الاسترداد عند الحاجة، (٢) صندوق واحد
+                  يجمع قيمة المرتجع وقيمة الاستبدال جنباً إلى جنب،
+                  (٣) شريط الفرق الحي وتسويته، (٤) صف الأزرار: زر
+                  الاستبدال المضغوط بجانب زر التأكيد المهيمن. ═══ */}
               {book === 'cash' && !exchangeModeOn ? (
                 <View style={retStyles(c).methodRow}>
                   <TouchableOpacity
@@ -1849,65 +1844,158 @@ function ReturnSheet({
                         refundMethod === 'none' ? {color: c.onAccent} : null,
                       ]}>
                       {/* v38 (الجولة 46 #6): التسمية الدقيقة — هذا ليس
-                          نافذة الاستبدال (فوق) بل إرجاع بلا استرداد
-                          نقدي؛ الاسم القديم «استبدال بضاعة» أوهم التاجر
-                          بأن الفواتير النقدية لا تدعم الاستبدال. */}
+                          نافذة الاستبدال (في الأسفل) بل إرجاع بلا
+                          استرداد نقدي. */}
                       إرجاع بلا استرداد نقدي
                     </Text>
                   </TouchableOpacity>
                 </View>
               ) : null}
-              {/*
-                v39 (الجولة 47): حُذفت ملاحظة الإرجاع من نافذة التأكيد
-                بطلب التاجر نصاً («في نافذة تأكيد الارجاع لا اريد
-                الملاحظة الخاصة بالارجاع احذفها») — صندوق شرح أثر
-                الإرجاع (يُخصم من دين الزبون…) لم يعد يُعرض هنا؛ أثر
-                العملية نفسه لم يتغير إطلاقاً، وتحذيرا الحواف الحرجة
-                (سجل دين مفقود/مُرحّل) يظهران توست لحظة التأكيد
-                بدل شغل مساحة النافذة دائماً.
-              */}
-              <View style={retStyles(c).totalRow}>
-                <Text style={retStyles(c).totalLabel}>
-                  {exchangeModeOn
-                    ? `قيمة المرتجع (${pickedCount} صنف)`
-                    : `إجمالي قيمة المرتجع (${pickedCount} صنف)`}
-                </Text>
-                <Text style={retStyles(c).totalValue}>
-                  {formatMoney(refundTotal)}
-                </Text>
-              </View>
+
+              {/* v40 #3: قيمتا المرتجع والاستبدال في صف واحد — نصفي
+                  صندوق مضغوطين (وضع الاستبدال) أو صندوق واحد كامل
+                  العرض (الإرجاع المالي)؛ نفس الارتفاع دائماً فلا
+                  يقفز التذييل بين الوضعين. */}
               {exchangeModeOn ? (
-                <>
-                  <View style={retStyles(c).totalRow}>
+                <View style={retStyles(c).valuesPairRow}>
+                  <View style={retStyles(c).valueHalf}>
+                    <Text style={retStyles(c).valueHalfLabel}>
+                      المرتجع ({pickedCount} صنف)
+                    </Text>
+                    <Text style={retStyles(c).valueHalfAmount}>
+                      {formatMoney(refundTotal)}
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      retStyles(c).valueHalf,
+                      retStyles(c).valueHalfAccent,
+                    ]}>
                     <Text
                       style={[
-                        retStyles(c).totalLabel,
+                        retStyles(c).valueHalfLabel,
                         {color: c.accent},
                       ]}>
-                      قيمة الاستبدال ({exchangePicks.length} صنف)
+                      المستبدل ({exchangePicks.length} صنف)
                     </Text>
                     <Text
                       style={[
-                        retStyles(c).totalValue,
+                        retStyles(c).valueHalfAmount,
                         {color: c.accent},
                       ]}>
                       {formatMoney(exchangeTotal)}
                     </Text>
                   </View>
-                  <Text style={retStyles(c).exchangeBalanced}>
-                    {exchangeTotal > refundTotal + 0.0001
-                      ? 'قيمة الاستبدال أعلى من قيمة المرتجع — قلّل الكميات أو الأصناف قبل التأكيد'
-                      : 'الفرق لصالح المتجر — لا يُسترد ولا يُخصم شيء: استبدال بضاعة فقط'}
+                </View>
+              ) : (
+                <View style={retStyles(c).valuesPairRow}>
+                  <View style={retStyles(c).valueHalf}>
+                    <Text style={retStyles(c).valueHalfLabel}>
+                      إجمالي قيمة المرتجع ({pickedCount} صنف)
+                    </Text>
+                    <Text style={retStyles(c).valueHalfAmount}>
+                      {formatMoney(refundTotal)}
+                    </Text>
+                  </View>
+                </View>
+              )}
+
+              {/* v40 (الجولة 48 #2+#3): شريط الفرق الحي وتسويته —
+                  سطر واحد مضغوط يخبر الكاشير بالضبط ماذا سيحدث
+                  للفرق قبل أن يضغط التأكيد (نقد خارج/داخل أو خصم/
+                  زيادة دين أو تكافؤ). */}
+              {exchangeModeOn ? (
+                <View
+                  style={[
+                    retStyles(c).diffStrip,
+                    exchangeDiff > 0.0001
+                      ? {borderColor: c.warning}
+                      : exchangeDiff < -0.0001
+                      ? {borderColor: c.success}
+                      : null,
+                  ]}>
+                  <Text
+                    style={[
+                      retStyles(c).diffText,
+                      exchangeDiff < -0.0001
+                        ? {color: c.success}
+                        : exchangeDiff > 0.0001
+                        ? {color: c.warning}
+                        : null,
+                    ]}>
+                    {Math.abs(exchangeDiff) < 0.0001
+                      ? 'استبدال متكافئ — لا فرق'
+                      : exchangeDiff > 0
+                      ? `الفرق ${formatMoney(exchangeDiff)} — ${
+                          book === 'cash'
+                            ? 'سلّمه نقداً من الخزينة'
+                            : debtState.kind === 'migrated'
+                            ? 'دين مُرحّل لصلة — عالجه يدوياً'
+                            : 'يُخصم من دين الزبون'
+                        }`
+                      : `الفرق ${formatMoney(-exchangeDiff)} — ${
+                          book === 'cash'
+                            ? 'اقبضه نقداً من الزبون'
+                            : debtState.kind === 'migrated' ||
+                              debtState.kind === 'missing'
+                            ? 'دين غير قابل للزيادة هنا — عالجه يدوياً'
+                            : 'يُضاف إلى دين الزبون'
+                        }`}
                   </Text>
-                </>
+                </View>
               ) : null}
-              <AppButton
-                title={exchangeModeOn ? 'تأكيد الاستبدال' : 'تأكيد الإرجاع'}
-                icon={exchangeModeOn ? 'swap' : 'undo'}
-                onPress={() => void confirm()}
-                loading={busy}
-                disabled={refundTotal <= 0 || pickedCount === 0}
-              />
+
+              {/* v40 #3: صف الأزرار — زر الاستبدال المضغوط بجانب زر
+                  التأكيد (كان زراً عريضاً بعنوان وشرح يأخذ صفاً
+                  كاملاً). v38: يظهر دائماً ما دامت في الفاتورة أصناف
+                  قابلة للإرجاع؛ الضغط بلا كميات يرشد برسالة. */}
+              <View style={retStyles(c).actionsRow}>
+                {lines.length > 0 ? (
+                  <TouchableOpacity
+                    style={[
+                      retStyles(c).exchangeCompactBtn,
+                      exchangeModeOn
+                        ? {borderColor: c.accent, backgroundColor: c.accentSoft}
+                        : null,
+                    ]}
+                    onPress={() => {
+                      if (pickedCount === 0) {
+                        toast(
+                          'اختر كميات المرتجع أولاً — الاستبدال يقابل قيمة ما تُرجعه',
+                          'info',
+                          5000,
+                        );
+                      }
+                      setExchangeOpen(true);
+                    }}
+                    disabled={busy}
+                    activeOpacity={0.75}>
+                    <Icon
+                      name="swap"
+                      size={15}
+                      color={exchangeModeOn ? c.accent : c.textDim}
+                    />
+                    <Text
+                      style={[
+                        retStyles(c).exchangeCompactText,
+                        exchangeModeOn ? {color: c.accent} : null,
+                      ]}
+                      numberOfLines={1}>
+                      {exchangeModeOn
+                        ? `الاستبدال (${exchangePicks.length})`
+                        : 'استبدال'}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                <AppButton
+                  title={exchangeModeOn ? 'تأكيد الاستبدال' : 'تأكيد الإرجاع'}
+                  icon={exchangeModeOn ? 'swap' : 'undo'}
+                  onPress={() => void confirm()}
+                  loading={busy}
+                  disabled={refundTotal <= 0 || pickedCount === 0}
+                  style={{flex: 1.6}}
+                />
+              </View>
               {printerConnected ? null : (
                 <Text style={retStyles(c).printHint}>
                   لا طابعة متصلة — سيُسجّل المرتجع دون طباعة إشعار
@@ -1968,7 +2056,8 @@ interface ExchangePick {
  * ─────────────────────────────────────────────────────────────────
  * بحث بالاسم + قارئ باركود → اختيار منتج → خياراته (الكمية،
  * الوحدة، المتغير لون×مقاس/حجم) → «أضف إلى الاستبدال» — يُوضع في
- * سلة الاستبدال بدل المنتجات المرتجعة. العملية كلها بلا أثر مالي:
+ * سلة الاستبدال بدل المنتجات المرتجعة؛ الفرق بين قيمة المرتجع
+ * والبدائل يُسوّى عند التأكيد (نقد أو دين) — v40 (الجولة 48 #2).
  * فقط المخزون (المرتجع يعود عند التنفيذ والبديل يخرج).
  * Inline overlay — NEVER a RN Modal (نفس درس هذا الروم).
  */
@@ -2277,7 +2366,8 @@ function ExchangeSheet({
               الاستبدال بقيمة المرجع
             </Text>
             <Text style={excStyles(c).headSub}>
-              اختر البضاعة البديلة — تخرج من المخزن بدل المرتجع، بلا أثر مالي
+              اختر البضاعة البديلة — تخرج من المخزن بدل المرتجع، والفرق
+              يُسوّى عند التأكيد (نقد أو دين)
             </Text>
           </View>
           <TouchableOpacity
@@ -2535,16 +2625,24 @@ function ExchangeSheet({
             </ScrollView>
             <View style={excStyles(c).balanceRow}>
               <Text style={excStyles(c).balanceText}>
-                قيمة المرتجع: {formatMoney(refundTotal)} · قيمة الاستبدال:{' '}
+                {/* v40 (الجولة 48 #2): لا رفض للزيادة — الفرق يُسوّى
+                    عند التأكيد (نقد أو دين) كما يعرض شريط الفرق في
+                    نافذة الإرجاع. */}
+                المرتجع: {formatMoney(refundTotal)} · المستبدل:{' '}
                 <Text
                   style={[
                     excStyles(c).balanceText,
                     picksTotal > refundTotal + 0.0001
-                      ? {color: c.danger, fontWeight: '700'}
+                      ? {color: c.accent, fontWeight: '700'}
                       : {color: c.success, fontWeight: '700'},
                   ]}>
                   {formatMoney(picksTotal)}
                 </Text>
+                {Math.abs(picksTotal - refundTotal) < 0.0001
+                  ? ' · تكافؤ'
+                  : picksTotal > refundTotal
+                  ? ` · الفرق ${formatMoney(picksTotal - refundTotal)} على الزبون`
+                  : ` · الفرق ${formatMoney(refundTotal - picksTotal)} للزبون`}
               </Text>
             </View>
           </View>
@@ -2792,31 +2890,77 @@ function excStyles(c: ReturnType<typeof useThemeColors>) {
 /** The ReturnSheet's own styles (kept separate from the screen's). */
 function retStyles(c: ReturnType<typeof useThemeColors>) {
   return StyleSheet.create({
-    // v36: زر الاستبدال وقائمة الأصناف البديلة داخل نافذة الإرجاع.
-    // v38 (الجولة 46 #7): حجوم مضغوطة — طلب التاجر نصاً «حجمها كبير
-    //  جداً ويأخذ مساحة كبيرة»؛ البطاقات والخطوط والفراغات صُغّرت
-    //  مع إبقاء أهداف اللمس مريحة (28+ مع hitSlop).
-    exchangeBtn: {
+    // ═══ v40 (الجولة 48 #3): تذييل الإرجاع المضغوط — قيمتا المرتجع
+    // والمستبدل في صف واحد، شريط فرق حي، وزر الاستبدال المضغوط
+    // بجانب زر التأكيد (كان زراً عريضاً بصف كامل). ═══
+    valuesPairRow: {
       flexDirection: 'row',
-      alignItems: 'center',
       gap: 8,
-      borderWidth: 1,
-      borderColor: c.border,
-      borderRadius: radius.md,
-      padding: 8,
+    },
+    valueHalf: {
+      flex: 1,
       backgroundColor: c.surfaceAlt,
-      marginBottom: 8,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      gap: 1,
     },
-    exchangeBtnTitle: {
-      fontFamily: fonts.bold,
-      fontSize: 13,
-      color: c.text,
+    valueHalfAccent: {
+      borderColor: c.border,
     },
-    exchangeBtnSub: {
+    valueHalfLabel: {
       fontFamily: fonts.regular,
       fontSize: 11,
       color: c.textDim,
-      marginTop: 1,
+    },
+    valueHalfAmount: {
+      fontFamily: fonts.black,
+      fontSize: 16.5,
+      color: c.text,
+      fontVariant: ['tabular-nums'],
+    },
+    diffStrip: {
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.sm,
+      alignItems: 'center',
+      paddingVertical: 5,
+      paddingHorizontal: 8,
+      marginTop: 2,
+      marginBottom: 2,
+      backgroundColor: c.surfaceAlt,
+    },
+    diffText: {
+      fontFamily: fonts.bold,
+      fontSize: 11.5,
+      color: c.text,
+      textAlign: 'center',
+    },
+    actionsRow: {
+      flexDirection: 'row',
+      gap: 8,
+      alignItems: 'stretch',
+      marginTop: 4,
+    },
+    exchangeCompactBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 5,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      backgroundColor: c.surfaceAlt,
+      minWidth: 92,
+    },
+    exchangeCompactText: {
+      fontFamily: fonts.bold,
+      fontSize: 12.5,
+      color: c.textDim,
     },
     exchangeList: {
       backgroundColor: c.surfaceAlt,
@@ -2869,13 +3013,6 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
       fontFamily: fonts.medium,
       fontSize: 12,
       color: c.danger,
-    },
-    exchangeBalanced: {
-      fontFamily: fonts.regular,
-      fontSize: 11.5,
-      color: c.textDim,
-      textAlign: 'center',
-      marginBottom: 6,
     },
     backdrop: {
       position: 'absolute',

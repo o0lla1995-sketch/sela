@@ -95,7 +95,11 @@ export type IconName =
   /** v28 (round-36 #4): Google Drive cloud backups. */
   | 'cloud'
   | 'cloudUp'
-  | 'cloudDown';
+  | 'cloudDown'
+  /** v40 (الجولة 48 #5): أشكال عرض المنتجات في نقطة البيع. */
+  | 'layoutGrid'
+  | 'layoutList'
+  | 'layoutCards';
 
 interface IconProps {
   name: IconName;
@@ -595,6 +599,32 @@ const P: Record<IconName, React.ReactNode> = {
       <Path d="M7 18.5a4.5 4.5 0 1 1 .7-8.95A6 6 0 0 1 19.4 11.4a3.55 3.55 0 0 1-.9 7.1H7z" />
       <Path d="M12 11.5V16" />
       <Path d="m9.8 14.3 2.2 2.2 2.2-2.2" />
+    </G>
+  ),
+  /** v40 (الجولة 48 #5): شبكة مربعات — الشكل الافتراضي الحالي
+   *  لنقطة البيع (بلاطات مربعة بصور). */
+  layoutGrid: (
+    <G>
+      <Rect x={3.5} y={3.5} width={7.4} height={7.4} rx={1.4} />
+      <Rect x={13.1} y={3.5} width={7.4} height={7.4} rx={1.4} />
+      <Rect x={3.5} y={13.1} width={7.4} height={7.4} rx={1.4} />
+      <Rect x={13.1} y={13.1} width={7.4} height={7.4} rx={1.4} />
+    </G>
+  ),
+  /** v40: صفوف مضغوطة — أقصى عدد أصناف في الشاشة. */
+  layoutList: (
+    <G>
+      <Rect x={3.5} y={4} width={17} height={4.6} rx={1.3} />
+      <Rect x={3.5} y={9.7} width={17} height={4.6} rx={1.3} />
+      <Rect x={3.5} y={15.4} width={17} height={4.6} rx={1.3} />
+    </G>
+  ),
+  /** v40: بطاقات عريضة — صورتان كبيرتان في الصف (للملابس
+   *  والبصريين). */
+  layoutCards: (
+    <G>
+      <Rect x={3} y={4.5} width={8} height={13.5} rx={1.6} />
+      <Rect x={13} y={4.5} width={8} height={13.5} rx={1.6} />
     </G>
   ),
 };

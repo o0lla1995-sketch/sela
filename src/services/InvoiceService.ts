@@ -1003,9 +1003,10 @@ export const InvoiceService = {
     print: boolean;
     receiptSettings: ReceiptSettings;
     onPrintError?: (message: string) => void;
-    /** v36: الاستبدال بقيمة المرجع — إن وُجدت أصناف فالعملية
-     *  استبدال بضاعة بلا أثر مالي: لا استرداد ولا خصم دين ولا
-     *  عكس رفع لصلة؛ فقط المخزون (المرتجع يعود والبديل يخرج). */
+    /** v36→v40 (الجولة 48 #2): الاستبدال بقيمة المرجع — الفرق بين
+     *  قيمة المرتجع وقيمة البدائل يُسوّى مالياً: زبون دين (محلي أو
+     *  صلة) يزيد أو ينقص دينه بالفرق؛ زبون نقدي يستلم الفرق من
+     *  الخزينة أو يدفعه إليها (عبر صف RET الصافي). */
     exchange?: ExchangeLineInput[];
   }): Promise<SaleReturnRecord> {
     const prep = await this.prepareReturn(input.saleId);
@@ -1026,11 +1027,45 @@ export const InvoiceService = {
       }
     }
 
+    // ── v40 (الجولة 48 #2): الفرق بالسعر بين المرتجع والبدائل ──
+    const exchangeMode = (input.exchange?.length ?? 0) > 0;
+    const refundDiffMinor = exchangeMode
+      ? Math.round(
+          (input.lines.reduce(
+            (sum, line) => sum + line.unitPrice * line.quantity,
+            0,
+          ) -
+            (input.exchange ?? []).reduce(
+              (sum, line) => sum + line.unitPrice * line.quantity,
+              0,
+            )) *
+            prep.discountRatio *
+            100,
+        )
+      : 0;
+    // v40: دين محلي مفقود (سُدّد وحُذف) + بدائل أغلى = زيادة دين لا
+    // يمكن تسجيلها تلقائياً (الصف غير موجود لنعرف الزبون) — تُرفض
+    // العملية برسالة واضحة قبل أي كتابة، والتاجر يسجلها يدوياً من
+    // دفتر الزبائن (نفس انضباط migrated في الإرجاع العادي).
+    if (
+      exchangeMode &&
+      prep.book === 'local' &&
+      refundDiffMinor < 0 &&
+      prep.debtState.kind === 'missing'
+    ) {
+      throw new Error(
+        'دين هذه الفاتورة مسدَّد ومحذوف من الدفتر — لا يمكن زيادة دين غير موجود تلقائياً؛ سجّل الفرق يدوياً من دفتر الزبائن أو أرجع مالياً وبِع البدائل',
+      );
+    }
+
     // The sila reversal payload — ONLY for already-synced debts (the
     // queue row keeps its amount; the reversal payment reduces the
     // customer's debt on the صلة server, exactly like a repayment).
     // The upload receipt ref uses the API's own RCP-… series (kept
     // unique by the same reservation as cashier repayments).
+    // v40 (الجولة 48 #2): في وضع الاستبدال مبلغ العكس = الفرق فقط
+    // حين يكون المرتجع أغلى (فرق موجب)؛ البدائل الأغلى تتحول إلى
+    // زيادة دين (silaDebtIncrease أدناه) بدل العكس.
     let silaReversal: {
       customerId: string | null;
       customerName: string | null;
@@ -1039,29 +1074,53 @@ export const InvoiceService = {
       posReceiptRef: string;
       idempotencyKey: string;
     } | null = null;
-    if (
-      prep.book === 'sila' &&
-      prep.debtState.kind === 'sila-synced' &&
-      (input.exchange?.length ?? 0) === 0
-    ) {
+    // v40: زيادة دين صلة المتزامن — البدائل أغلى من المرتجع بفارق
+    // يُرفع للخادم كصف دين جديد فوري التسمية (رقم الإشعار + -EX).
+    let silaDebtIncrease: {
+      customerId: string | null;
+      customerName: string | null;
+      customerPhoneLast4: string | null;
+      amountMinor: number;
+      posInvoiceRef: string;
+      idempotencyKey: string;
+      description: string;
+    } | null = null;
+    if (prep.book === 'sila' && prep.debtState.kind === 'sila-synced') {
       const debt = await SilaRepo.byInvoiceRef(prep.sale.invoice_number);
       if (debt != null) {
-        const refundMinor = Math.round(
-          input.lines.reduce(
-            (sum, line) => sum + line.unitPrice * line.quantity,
-            0,
-          ) *
-            prep.discountRatio *
-            100,
-        );
-        silaReversal = {
-          customerId: debt.customer_id,
-          customerName: debt.customer_name,
-          customerPhoneLast4: debt.customer_phone_last4,
-          amountMinor: Math.min(refundMinor, debt.amount_minor),
-          posReceiptRef: await SilaRepo.reserveReceiptRef(),
-          idempotencyKey: uuidV4(),
-        };
+        if (!exchangeMode || refundDiffMinor > 0) {
+          // الإرجاع العادي: عكس كامل قيمة المرتجع؛ الاستبدال بمرتجع
+          // أغلى: عكس الفرق فقط.
+          const reverseMinor = exchangeMode
+            ? refundDiffMinor
+            : Math.round(
+                input.lines.reduce(
+                  (sum, line) => sum + line.unitPrice * line.quantity,
+                  0,
+                ) *
+                  prep.discountRatio *
+                  100,
+              );
+          silaReversal = {
+            customerId: debt.customer_id,
+            customerName: debt.customer_name,
+            customerPhoneLast4: debt.customer_phone_last4,
+            amountMinor: Math.min(reverseMinor, debt.amount_minor),
+            posReceiptRef: await SilaRepo.reserveReceiptRef(),
+            idempotencyKey: uuidV4(),
+          };
+        } else if (exchangeMode && refundDiffMinor < 0) {
+          // v40: البدائل أغلى — دين إضافي على الزبون يرفع للخادم.
+          silaDebtIncrease = {
+            customerId: debt.customer_id,
+            customerName: debt.customer_name,
+            customerPhoneLast4: debt.customer_phone_last4,
+            amountMinor: -refundDiffMinor,
+            posInvoiceRef: '',
+            idempotencyKey: uuidV4(),
+            description: '',
+          };
+        }
       }
     }
 
@@ -1070,6 +1129,17 @@ export const InvoiceService = {
     for (let attempt = 0; attempt < 4 && result == null; attempt += 1) {
       const returnNumber = await reserveReturnNumber();
       try {
+        // v40 (الجولة 48 #2): مرجع زيادة دين صلة يُشتق من رقم هذا
+        // الإشعار نفسه — فريد بحكم تفرّد الأرقام، ومستقر عبر محاولات
+        // UNIQUE-retry (كل محاولة برقمها ومعرّف تكرار جديد).
+        const debtIncreasePayload =
+          silaDebtIncrease != null
+            ? {
+                ...silaDebtIncrease,
+                posInvoiceRef: `${returnNumber}-EX`,
+                description: `فرق استبدال بضاعة — فاتورة ${prep.sale.invoice_number} (إشعار ${returnNumber})`,
+              }
+            : null;
         result = await SaleRepo.createReturn({
           returnNumber,
           saleId: input.saleId,
@@ -1081,6 +1151,7 @@ export const InvoiceService = {
           silaReversal,
           note: input.note,
           exchange: input.exchange,
+          silaDebtIncrease: debtIncreasePayload,
         });
       } catch (error) {
         lastError = error;
@@ -1102,13 +1173,29 @@ export const InvoiceService = {
     }
 
     if ((input.exchange?.length ?? 0) > 0) {
+      // v40 (الجولة 48 #2): رسالة السجل تشرح تسوية الفرق — نقدي
+      // (خرج/دخل الخزينة) أو دين (خصم/زيادة) أو استبدال متكافئ.
+      const diffText =
+        refundDiffMinor === 0
+          ? 'استبدال متكافئ — لا فرق'
+          : refundDiffMinor > 0
+          ? `الفرق ${(refundDiffMinor / 100).toFixed(2)} ₪ لصالح الزبون — ${
+              prep.book === 'cash'
+                ? 'سُلِّم نقداً من الخزينة'
+                : 'خُصم من دينه'
+            }`
+          : `الفرق ${(-refundDiffMinor / 100).toFixed(2)} ₪ على الزبون — ${
+              prep.book === 'cash'
+                ? 'قُبض نقداً للخزينة'
+                : 'زاد به دينه'
+            }`;
       logDiag(
         'sale',
         `استبدال بقيمة المرجع: ${input.lines.length} صنف مرتجع و${
           (input.exchange ?? []).length
         } بديل من ${prep.sale.invoice_number} بإيصال ${
           result.return_number
-        } — لا أثر مالي؛ فقط المخزون`,
+        } — ${diffText}`,
       );
     } else {
       logDiag(
@@ -1128,7 +1215,9 @@ export const InvoiceService = {
     // focus, instead of waiting for the periodic cycle. Lazy require:
     // SilaSync imports THIS module (counters), so a top-level import
     // would create a cycle.
-    if (silaReversal != null) {
+    // v40 (الجولة 48 #2): زيادة دين الاستبدال في الطابور أيضاً —
+    // نفس الدفعة الفورية كي يرتفع دين الزبون على الخادم فوراً.
+    if (silaReversal != null || silaDebtIncrease != null) {
       try {
         const {SilaSync} = require('./sila/SilaSync') as typeof import(
           './sila/SilaSync'
@@ -1136,7 +1225,7 @@ export const InvoiceService = {
         void SilaSync.syncNow().catch(() => undefined);
       } catch {
         // The sync engine is unavailable mid-test — the queue keeps
-        // the reversal; the next cycle uploads it either way.
+        // the row; the next cycle uploads it either way.
       }
     }
 

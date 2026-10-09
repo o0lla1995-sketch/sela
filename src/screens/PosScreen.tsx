@@ -40,7 +40,7 @@ import {
 import {Icon} from '../components/Icon';
 import {useCartStore, cartTotals, unitPriceFor} from '../stores/cartStore';
 import {useCatalogStore} from '../stores/catalogStore';
-import {useSettingsStore} from '../stores/settingsStore';
+import {useSettingsStore, type PosProductView} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
 import {useToastStore} from '../stores/toastStore';
 import {useSilaStore} from '../stores/silaStore';
@@ -111,6 +111,9 @@ const GRID_TILE = Math.floor(
   (SCREEN_WIDTH - spacing.lg * 2 - spacing.sm * (GRID_COLUMNS - 1)) /
     GRID_COLUMNS,
 );
+/** v40 (الجولة 48 #5): عرض بطاقة الأشكال «بطاقات كبيرة» — عمودان
+ *  بفجوة واحدة (الشكل المفضل لتصفح الملابس بصرياً). */
+const CARD_TILE = Math.floor((SCREEN_WIDTH - spacing.lg * 2 - spacing.sm) / 2);
 
 /** v9.2 (round-15 #4): ONE shared session context for every scan
  *  engine (barcode / visual / combined) — tracks the CONFIRMED add
@@ -188,6 +191,7 @@ export function PosScreen({
   const embeddingsCount = useCatalogStore(state => state.embeddingsCount);
 
   const settings = useSettingsStore(state => state.settings);
+  const updateSettings = useSettingsStore(state => state.update);
   const printerStatus = usePrinterStore(state => state.status);
   const toast = useToastStore(state => state.show);
   // v11 (SILA): pairing drives the debt button's readiness + the
@@ -210,6 +214,12 @@ export function PosScreen({
   // camera state left. scanBusy guards the launch. In 'both' mode
   // (v9.2) ONE combined window opens with in-camera engine switching.
   const [scanBusy, setScanBusy] = useState(false);
+  // v40 (الجولة 48 #5): شكل عرض المنتجات في نقطة البيع — لوحة
+  // الخيارات مفتوحة أم لا (INLINE بجانب صف جملة/مفرق — لا Modal
+  // أبداً، درس هذا الروم)؛ الشكل نفسه محفوظ في الإعدادات
+  //  والافتراض الشبكة الحالية.
+  const [viewPickerOpen, setViewPickerOpen] = useState(false);
+  const posView: PosProductView = settings.posProductView ?? 'grid';
   // v8.2 (round-11 #3): cart expand toggle — the cart grows to fill
   // the whole screen (grid folds away) so the merchant can review a
   // long sale comfortably, then shrinks back to keep selling.
@@ -700,6 +710,45 @@ export function PosScreen({
               added: 1,
             };
           }
+          // v40 (الجولة 48 #1): منتج متعدد الخصائص (ملابس/أحذية بلون
+          //  ومقاس، أو أحجام مطعم بسعر لكل حجم) — البصمة للمنتج
+          //  ككل لا للمتغير بعينه، فالبيع بالقطعة المباشر لا معنى
+          //  له (أي لون؟ أي حجم؟ بأي سعر؟). فور التعرف يُغلق الماسح
+          //  وتفتح نافذة البيع الخاصة به فوق شاشة نقطة البيع ليختار
+          //  الكاشير اللون والمقاس أو الحجم ثم تُضاف السلة بشكل
+          //  طبيعي — نفس مسار الباركود العام تماماً.
+          if (
+            (product.variants ?? []).some(
+              v => v.kind === 'variant' || v.kind === 'size',
+            )
+          ) {
+            // منتج متتبع ولا متغير منه متوفر = نفد كله؛ بلا تتبع
+            // (مطعم/كافيتريا غالباً) تفتح النافذة دائماً.
+            const variantsHaveStock =
+              product.stock_untracked === 1 ||
+              (product.variants ?? []).some(v => v.stock_quantity > 0);
+            if (!variantsHaveStock) {
+              return {
+                part: `نفدت كمية ${product.name}`,
+                ok: false,
+                added: 0,
+              };
+            }
+            session.confirmed += 1;
+            session.counts.set(
+              product.id,
+              (session.counts.get(product.id) ?? 0) + 1,
+            );
+            setPendingSheets(prev =>
+              prev.some(p => p.id === product.id) ? prev : [...prev, product],
+            );
+            void closeScannerNow();
+            return {
+              part: `${product.name} — اختر الخصائص الآن`,
+              ok: true,
+              added: 1,
+            };
+          }
           let added = 0;
           let blockedReason: string | null = null;
           for (let i = 0; i < units; i += 1) {
@@ -1072,7 +1121,15 @@ export function PosScreen({
           //  التعرف على منتج متعدد الخصائص (ملابس/أحذية) فيختار
           //  الكاشير اللون والمقاس ويضاف للسلة في الحال (طلب التاجر
           //  نصاً: «يجب أن يفتح مباشرة الخصائص للمنتج»).
-          if ((product.variants ?? []).some(v => v.kind === 'variant')) {
+          //  v40 (الجولة 48 #1): منتج الأحجام (مطعم/كافيتريا — كل
+          //  حجم بسعره) نفس المسار تماماً — الباركود العام لا يسعّر
+          //  الحجم، فمسحه يغلق الماسح ويفتح نافذة اختيار الحجم فوراً
+          //  (طلب التاجر: «أو الحجم في المنتجات التي لها أحجام»).
+          if (
+            (product.variants ?? []).some(
+              v => v.kind === 'variant' || v.kind === 'size',
+            )
+          ) {
             setPendingSheets(prev =>
               prev.some(p => p.id === product.id) ? prev : [...prev, product],
             );
@@ -1970,6 +2027,9 @@ export function PosScreen({
    * flips between باركود and بصري while the camera keeps running —
    * the separate picker sheet is gone. */
   const openScanner = useCallback(() => {
+    // v40 (الجولة 48 #5): فتح الماسح يطوي لوحة الأشكال — لا تعيق
+    //  نافذة البيع المفتوحة فوق الشاشة.
+    setViewPickerOpen(false);
     if (scannerMode === 'barcode') {
       void runBarcodeScan();
     } else if (scannerMode === 'visual') {
@@ -2036,17 +2096,48 @@ export function PosScreen({
           // فالحشوة الأصلية تماماً.
           {paddingTop: topGap ?? insets.top + spacing.sm},
         ]}>
-        {/* ── Pricing mode + search + scan ─────────────────── */}
+        {/* ── Pricing mode + view shape + search + scan ────── */}
         <View style={styles.controlsRow}>
-          <Segmented
-            value={pricingMode}
-            onChange={setPricingMode}
-            options={[
-              {value: 'RETAIL', label: 'مفرق'},
-              {value: 'WHOLESALE', label: 'جملة'},
-            ]}
-            compact
-          />
+          <View style={styles.modeRow}>
+            <Segmented
+              value={pricingMode}
+              onChange={setPricingMode}
+              options={[
+                {value: 'RETAIL', label: 'مفرق'},
+                {value: 'WHOLESALE', label: 'جملة'},
+              ]}
+              compact
+            />
+            {/* v40 (الجولة 48 #5): زر شكل عرض المنتجات بجانب جملة/مفرق —
+                يفتح لوحة INLINE صغيرة (لا Modal — درس الروم) لاختيار
+                شكل المنتجات في نقطة البيع؛ الشكل الافتراضي هو الحالي
+                (الشبكة) ويُحفظ الاختيار في الإعدادات. */}
+            <TouchableOpacity
+              style={[
+                styles.viewShapeBtn,
+                viewPickerOpen || posView !== 'grid'
+                  ? {borderColor: c.accent}
+                  : null,
+              ]}
+              onPress={() => setViewPickerOpen(v => !v)}
+              activeOpacity={0.75}
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              <Icon
+                name={
+                  posView === 'list'
+                    ? 'layoutList'
+                    : posView === 'cards'
+                    ? 'layoutCards'
+                    : 'layoutGrid'
+                }
+                size={16}
+                color={
+                  viewPickerOpen || posView !== 'grid' ? c.accent : c.textDim
+                }
+              />
+              <Icon name="chevronDown" size={9} color={c.textFaint} />
+            </TouchableOpacity>
+          </View>
           <View style={styles.searchRow}>
             {/* v8.1: scan button FIRST in the RTL row → it sits on the
                 RIGHT edge of the screen and the search fills the LEFT. */}
@@ -2071,12 +2162,99 @@ export function PosScreen({
                   // it back — results must be visible for search to
                   // mean anything.
                   setCartExpanded(false);
+                  // v40 (الجولة 48 #5): البحث يطوي لوحة الأشكال —
+                  //  النتائج أهم.
+                  setViewPickerOpen(false);
                 }}
                 onBlur={() => setSearchFocused(false)}
               />
             </View>
           </View>
         </View>
+
+        {/* ═══ v40 (الجولة 48 #5): لوحة أشكال عرض المنتجات — INLINE
+            في مجرى الشاشة تحت صف جملة/مفرق مباشرة (نمط شريط المرشحين
+            البصريين؛ لا Modal أبداً — درس هذا الروم). ثلاثة أشكال
+            بأيقونات ووصف قصير؛ الاختيار يُطبَّق فوراً ويُحفظ في
+            الإعدادات، والشبكة الحالية هي الافتراض وعلامتها ظاهرة،
+            وزر الشكل نفسه يغلق اللوحة. ═══ */}
+        {viewPickerOpen ? (
+          <View style={styles.viewPickerPanel}>
+            <View style={styles.viewPickerHead}>
+              <Text style={styles.viewPickerTitle}>
+                شكل المنتجات في نقطة البيع
+              </Text>
+              <TouchableOpacity
+                onPress={() => setViewPickerOpen(false)}
+                hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                <Icon name="x" size={14} color={c.textDim} />
+              </TouchableOpacity>
+            </View>
+            {(
+              [
+                {
+                  key: 'grid' as PosProductView,
+                  icon: 'layoutGrid' as const,
+                  label: 'شبكة مربعات',
+                  hint: 'الشكل الحالي — بلاطات بصور (الافتراضي)',
+                },
+                {
+                  key: 'list' as PosProductView,
+                  icon: 'layoutList' as const,
+                  label: 'قائمة مضغوطة',
+                  hint: 'صفوف صغيرة — أكبر عدد أصناف في الشاشة',
+                },
+                {
+                  key: 'cards' as PosProductView,
+                  icon: 'layoutCards' as const,
+                  label: 'بطاقات كبيرة',
+                  hint: 'صورتان عريضتان في الصف — للملابس والبصريات',
+                },
+              ]
+            ).map(option => {
+              const active = posView === option.key;
+              return (
+                <TouchableOpacity
+                  key={option.key}
+                  style={[
+                    styles.viewPickerRow,
+                    active ? {backgroundColor: c.accentSoft} : null,
+                  ]}
+                  onPress={() => {
+                    updateSettings({posProductView: option.key});
+                    setViewPickerOpen(false);
+                  }}
+                  activeOpacity={0.75}>
+                  <View
+                    style={[
+                      styles.viewPickerIcon,
+                      active ? {borderColor: c.accent} : null,
+                    ]}>
+                    <Icon
+                      name={option.icon}
+                      size={19}
+                      color={active ? c.accent : c.textDim}
+                    />
+                  </View>
+                  <View style={{flex: 1}}>
+                    <Text
+                      style={[
+                        styles.viewPickerLabel,
+                        active ? {color: c.accent} : null,
+                      ]}>
+                      {option.label}
+                      {option.key === 'grid' ? ' · الافتراضي' : ''}
+                    </Text>
+                    <Text style={styles.viewPickerHint}>{option.hint}</Text>
+                  </View>
+                  {active ? (
+                    <Icon name="check" size={16} color={c.accent} />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : null}
 
         {/* ── v9 (round-13 #1): visual-scan candidate strip ─────
             INLINE (never a Modal — this ROM blacks RN Modals after
@@ -2131,7 +2309,13 @@ export function PosScreen({
           ) : (
             <ScrollView
               style={{flex: 1}}
-              contentContainerStyle={styles.grid}
+              contentContainerStyle={
+                posView === 'list'
+                  ? styles.listCol
+                  : posView === 'cards'
+                  ? styles.cardsGrid
+                  : styles.grid
+              }
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled">
               {displayItems.length === 0 ? (
@@ -2146,7 +2330,11 @@ export function PosScreen({
                 displayItems.map(product => {
                   /* v35 (الجولة 43): كل منتج تجان واحد — اللمسة تفتح
                    * نافذة البيع المناسبة لموده (ملابس/أحجام/وحدات)
-                   * أو تضيف مباشرة للمجالات البسيطة. */
+                   * أو تضيف مباشرة للمجالات البسيطة.
+                   * v40 (الجولة 48 #5): الشكل قابل للتبديل من زر بجانب
+                   * جملة/مفرق — شبكة (الافتراضي الحالي) / قائمة مضغوطة /
+                   * بطاقات كبيرة؛ كل القيم المشتركة تُحسب مرة واحدة
+                   * وتشترك الأشكال الثلاثة فيها. */
                   const stockState = stockStateOf(
                     product,
                     settings.lowStockDefaultThreshold,
@@ -2160,6 +2348,187 @@ export function PosScreen({
                     v => v.kind === 'size',
                   );
                   const variantCount = clothingVariants.length;
+                  const priceLabel = `${
+                    sizeVariants.length > 0
+                      ? `${formatMoney(
+                          Math.min(
+                            ...sizeVariants.map(
+                              v => v.retail_price ?? product.retail_price,
+                            ),
+                          ),
+                        )}+`
+                      : formatMoney(priceOf(product))
+                  }${weighted ? '/كغ' : ''}`;
+                  const stockLabel = untracked
+                    ? 'يُباع دائماً'
+                    : stockState === 'out'
+                    ? 'نفد'
+                    : `${formatQty(product.stock_quantity)} ${
+                        weighted
+                          ? WEIGHT_UNIT_NAME
+                          : product.base_unit_name ?? BASE_UNIT_NAME
+                      }`;
+                  const stockColor =
+                    stockState === 'out'
+                      ? c.danger
+                      : stockState === 'low'
+                      ? c.warning
+                      : c.success;
+
+                  /* ── v40: قائمة مضغوطة — صف عريض بمصغّر صغير؛ أكبر
+                   *  كثافة أصناف للمخازن الكبيرة، وكل المعلومات في
+                   *  سطرين (الاسم + السعر/المخزون). ── */
+                  if (posView === 'list') {
+                    return (
+                      <TouchableOpacity
+                        key={product.id}
+                        style={[
+                          styles.listRow,
+                          stockState === 'out' && !untracked
+                            ? {opacity: 0.55}
+                            : null,
+                        ]}
+                        onPress={() => openSaleSheet(product)}
+                        activeOpacity={0.75}>
+                        {product.image_uri ? (
+                          <Image
+                            source={{uri: `file://${product.image_uri}`}}
+                            style={styles.listThumb}
+                          />
+                        ) : (
+                          <View
+                            style={[
+                              styles.listThumb,
+                              styles.tileImageFallback,
+                            ]}>
+                            <Icon name="box" size={16} color={c.accent} />
+                          </View>
+                        )}
+                        <View style={{flex: 1, gap: 2}}>
+                          <Text style={styles.listName} numberOfLines={1}>
+                            {product.name}
+                            {variantCount > 0
+                              ? ` · ${new Set(
+                                  clothingVariants.map(v => v.color),
+                                ).size} لون × ${new Set(
+                                  clothingVariants.map(v => v.size),
+                                ).size} مقاس`
+                              : sizeVariants.length > 0
+                              ? ` · ${sizeVariants.length} أحجام`
+                              : ''}
+                          </Text>
+                          <View style={styles.listMetaRow}>
+                            <Text style={styles.listPrice}>{priceLabel}</Text>
+                            {untracked ? (
+                              <Text style={styles.tileStock}>{stockLabel}</Text>
+                            ) : (
+                              <>
+                                <View
+                                  style={[
+                                    styles.stockDot,
+                                    {backgroundColor: stockColor},
+                                  ]}
+                                />
+                                <Text style={styles.tileStock}>
+                                  {stockLabel}
+                                </Text>
+                              </>
+                            )}
+                            {product.barcode ? (
+                              <Icon
+                                name="barcode"
+                                size={11}
+                                color={c.textFaint}
+                              />
+                            ) : null}
+                          </View>
+                        </View>
+                        {weighted ? (
+                          <View style={styles.weightBadge}>
+                            <Icon name="scale" size={9} color={c.onAccent} />
+                          </View>
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  }
+
+                  /* ── v40: بطاقات كبيرة — اثنتان في الصف بصور عريضة؛
+                   *  للملابس والأحذية والبصريات حيث الصورة تبيع. ── */
+                  if (posView === 'cards') {
+                    return (
+                      <TouchableOpacity
+                        key={product.id}
+                        style={styles.cardTile}
+                        onPress={() => openSaleSheet(product)}
+                        activeOpacity={0.75}>
+                        {product.image_uri ? (
+                          <Image
+                            source={{uri: `file://${product.image_uri}`}}
+                            style={styles.cardImage}
+                          />
+                        ) : (
+                          <View
+                            style={[
+                              styles.cardImage,
+                              styles.tileImageFallback,
+                            ]}>
+                            <Icon name="box" size={34} color={c.accent} />
+                          </View>
+                        )}
+                        {weighted ? (
+                          <View style={styles.weightBadge}>
+                            <Icon name="scale" size={9} color={c.onAccent} />
+                          </View>
+                        ) : null}
+                        {variantCount > 0 ? (
+                          <View style={styles.styleSizesBadge}>
+                            <Text style={styles.styleSizesBadgeText}>
+                              {new Set(clothingVariants.map(v => v.color)).size}{' '}
+                              لون ·{' '}
+                              {new Set(clothingVariants.map(v => v.size)).size}{' '}
+                              مقاس
+                            </Text>
+                          </View>
+                        ) : sizeVariants.length > 0 ? (
+                          <View style={styles.styleSizesBadge}>
+                            <Text style={styles.styleSizesBadgeText}>
+                              {sizeVariants.length} أحجام
+                            </Text>
+                          </View>
+                        ) : null}
+                        <Text style={styles.cardName} numberOfLines={1}>
+                          {product.name}
+                        </Text>
+                        <Text style={styles.cardPrice}>{priceLabel}</Text>
+                        <View style={styles.tileStockRow}>
+                          {untracked ? (
+                            <Text style={styles.tileStock}>{stockLabel}</Text>
+                          ) : (
+                            <>
+                              <View
+                                style={[
+                                  styles.stockDot,
+                                  {backgroundColor: stockColor},
+                                ]}
+                              />
+                              <Text style={styles.tileStock}>
+                                {stockLabel}
+                              </Text>
+                            </>
+                          )}
+                          {product.barcode ? (
+                            <Icon
+                              name="barcode"
+                              size={11}
+                              color={c.textFaint}
+                            />
+                          ) : null}
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  }
+
+                  /* ── الافتراضي: الشبكة الحالية كما هي تماماً. ── */
                   return (
                     <TouchableOpacity
                       key={product.id}
@@ -2202,48 +2571,19 @@ export function PosScreen({
                       <Text style={styles.tileName} numberOfLines={1}>
                         {product.name}
                       </Text>
-                      <Text style={styles.tilePrice}>
-                        {sizeVariants.length > 0
-                          ? `${formatMoney(
-                              Math.min(
-                                ...sizeVariants.map(
-                                  v => v.retail_price ?? product.retail_price,
-                                ),
-                              ),
-                            )}+`
-                          : formatMoney(priceOf(product))}
-                        {weighted ? '/كغ' : ''}
-                      </Text>
+                      <Text style={styles.tilePrice}>{priceLabel}</Text>
                       <View style={styles.tileStockRow}>
                         {untracked ? (
-                          <Text style={styles.tileStock}>يُباع دائماً</Text>
+                          <Text style={styles.tileStock}>{stockLabel}</Text>
                         ) : (
                           <>
                             <View
                               style={[
                                 styles.stockDot,
-                                {
-                                  backgroundColor:
-                                    stockState === 'out'
-                                      ? c.danger
-                                      : stockState === 'low'
-                                      ? c.warning
-                                      : c.success,
-                                },
+                                {backgroundColor: stockColor},
                               ]}
                             />
-                            <Text style={styles.tileStock}>
-                              {stockState === 'out'
-                                ? 'نفد'
-                                : `${formatQty(
-                                    product.stock_quantity,
-                                  )} ${
-                                    weighted
-                                      ? WEIGHT_UNIT_NAME
-                                      : product.base_unit_name ??
-                                        BASE_UNIT_NAME
-                                  }`}
-                            </Text>
+                            <Text style={styles.tileStock}>{stockLabel}</Text>
                           </>
                         )}
                         {product.barcode ? (
@@ -4186,6 +4526,73 @@ const useStyles = makeStyles(c =>
 
     // Controls
     controlsRow: {gap: spacing.sm},
+    // v40 (الجولة 48 #5): صف جملة/مفرق + زر شكل العرض بجانبه.
+    modeRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    viewShapeBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 1,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: 9,
+      height: 38,
+      backgroundColor: c.surface,
+    },
+    // v40: لوحة اختيار الشكل — INLINE في مجرى الشاشة.
+    viewPickerPanel: {
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      padding: spacing.sm,
+      gap: 4,
+    },
+    viewPickerHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 4,
+      paddingBottom: 2,
+    },
+    viewPickerTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption + 0.5,
+    },
+    viewPickerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderRadius: radius.md,
+      paddingVertical: 7,
+      paddingHorizontal: 6,
+    },
+    viewPickerIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.surface,
+    },
+    viewPickerLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.caption + 0.5,
+    },
+    viewPickerHint: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small - 0.5,
+      marginTop: 1,
+    },
     searchRow: {flexDirection: 'row', gap: spacing.sm, alignItems: 'center'},
     searchWrap: {
       flexDirection: 'row',
@@ -4254,6 +4661,77 @@ const useStyles = makeStyles(c =>
       flexWrap: 'wrap',
       gap: spacing.sm,
       paddingBottom: spacing.sm,
+    },
+    // v40 (الجولة 48 #5): شكل القائمة المضغوطة — عمود من صفوف عريضة.
+    listCol: {
+      gap: 6,
+      paddingBottom: spacing.sm,
+    },
+    listRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: 7,
+    },
+    listThumb: {
+      width: 46,
+      height: 46,
+      borderRadius: radius.sm,
+      backgroundColor: c.surfaceAlt,
+    },
+    listName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    listMetaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    listPrice: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    // v40: شكل البطاقات الكبيرة — عمودان بصور عريضة.
+    cardsGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+      paddingBottom: spacing.sm,
+    },
+    cardTile: {
+      width: CARD_TILE,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      padding: spacing.sm,
+      gap: 4,
+    },
+    cardImage: {
+      width: CARD_TILE - spacing.sm * 2,
+      height: Math.floor((CARD_TILE - spacing.sm * 2) * 0.92),
+      borderRadius: radius.md,
+      backgroundColor: c.surfaceAlt,
+    },
+    cardName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body - 1,
+      minHeight: 20,
+    },
+    cardPrice: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      fontVariant: ['tabular-nums'],
     },
     tile: {
       width: GRID_TILE,

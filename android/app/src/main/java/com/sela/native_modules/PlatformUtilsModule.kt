@@ -1107,6 +1107,302 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     }
   }
 
+  /**
+   * v40 (الجولة 48 #4): يرسم شكل الفاتورة الحرارية كصورة PNG ويحفظها
+   * في مجلد التنزيلات — معاينة مطابقة لما ستطبعه الطابعة (نفس
+   * البنية: الشعار، الترويسة، الأسطر، السطرين (تسمية/قيمة)،
+   * الفواصل، الباركود) بخط Tajawal المدمج. العملية نفسها التي
+   * يبنيها JS في receiptPreview.ts من إعدادات المتجر الحية.
+   *
+   * payloadJson:
+   *  { "paper": "58" | "80",
+   *    "rows": [
+   *      {"t":"logo","path":"…"}                // اختياري
+   *      {"t":"text","text":"…","align":"center|right|left","bold":true,"size":0|1|2}
+   *      {"t":"two","label":"…","value":"…","bold":true}
+   *      {"t":"sep"}
+   *      {"t":"barcode","value":"INV-…"}
+   *      {"t":"space","h":8}
+   *    ] }
+   */
+  @ReactMethod
+  fun exportReceiptImage(fileName: String, payloadJson: String, promise: Promise) {
+    try {
+      val json = org.json.JSONObject(payloadJson)
+      val paper = json.optString("paper", "58")
+      // 203dpi raster width ×2 لصورة حادة على الشاشة.
+      val baseWidth = if (paper == "80") 576 else 384
+      val scale = 2
+      val widthPx = baseWidth * scale
+      val margin = 14 * scale
+
+      val rows = json.optJSONArray("rows") ?: org.json.JSONArray()
+
+      val regular = loadTajawal(reactContext, "Tajawal-Regular.ttf")
+      val boldFont = loadTajawal(reactContext, "Tajawal-Bold.ttf")
+
+      fun paintFor(bold: Boolean, size: Int): android.graphics.Paint {
+        return android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+          typeface = if (bold) boldFont else regular
+          textSize = when (size) {
+            2 -> 19f * scale
+            1 -> 15.5f * scale
+            else -> 12f * scale
+          }
+          color = android.graphics.Color.BLACK
+        }
+      }
+
+      // ── المرور الأول: قياس ارتفاع كل سطر (والشعار) ──
+      val lineGap = 5f * scale
+      val measured = ArrayList<Pair<Int, Float>>(rows.length())
+      var totalHeight = margin.toFloat()
+      for (i in 0 until rows.length()) {
+        val row = rows.getJSONObject(i)
+        val type = row.optString("t", "text")
+        when (type) {
+          "logo" -> {
+            val path = row.optString("path", "")
+            var h = 0f
+            if (path.isNotBlank()) {
+              try {
+                val opts = android.graphics.BitmapFactory.Options().apply {
+                  inJustDecodeBounds = true
+                }
+                android.graphics.BitmapFactory.decodeFile(path, opts)
+                if (opts.outWidth > 0 && opts.outHeight > 0) {
+                  val drawW = (widthPx - margin * 2).toFloat()
+                  h = drawW * opts.outHeight / opts.outWidth
+                }
+              } catch (ignored: Throwable) {
+                h = 0f
+              }
+            }
+            measured.add(Pair(i, h))
+            totalHeight += h + lineGap
+          }
+          "text" -> {
+            val size = row.optInt("size", 0)
+            val p = paintFor(row.optBoolean("bold", false), size)
+            val fm = p.fontMetrics
+            val h = fm.descent - fm.ascent
+            measured.add(Pair(i, h + lineGap))
+            totalHeight += h + lineGap
+          }
+          "two" -> {
+            val p = paintFor(row.optBoolean("bold", false), 0)
+            val fm = p.fontMetrics
+            val h = fm.descent - fm.ascent
+            measured.add(Pair(i, h + lineGap))
+            totalHeight += h + lineGap
+          }
+          "sep" -> {
+            val h = 10f * scale
+            measured.add(Pair(i, h))
+            totalHeight += h
+          }
+          "barcode" -> {
+            val h = 46f * scale
+            measured.add(Pair(i, h + lineGap))
+            totalHeight += h + lineGap
+          }
+          "space" -> {
+            val h = row.optDouble("h", 8.0).toFloat() * scale
+            measured.add(Pair(i, h))
+            totalHeight += h
+          }
+          else -> {
+            measured.add(Pair(i, 0f))
+          }
+        }
+      }
+      totalHeight += margin
+
+      // ── الرسم على الورقة البيضاء ──
+      val heightPx = Math.max(Math.round(totalHeight), widthPx / 3)
+      val bitmap = android.graphics.Bitmap.createBitmap(
+        widthPx, heightPx, android.graphics.Bitmap.Config.ARGB_8888
+      )
+      val canvas = android.graphics.Canvas(bitmap)
+      canvas.drawColor(android.graphics.Color.WHITE)
+
+      val blackPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.BLACK
+        strokeWidth = 2f * scale
+      }
+      var y = margin.toFloat()
+
+      for ((index, h) in measured) {
+        val row = rows.getJSONObject(index)
+        val type = row.optString("t", "text")
+        when (type) {
+          "logo" -> {
+            if (h > 0f) {
+              val path = row.optString("path", "")
+              val bm = try {
+                android.graphics.BitmapFactory.decodeFile(path)
+              } catch (ignored: Throwable) {
+                null
+              }
+              if (bm != null) {
+                val drawW = (widthPx - margin * 2).toFloat()
+                val drawH = drawW * bm.height / bm.width
+                val dst = android.graphics.RectF(
+                  margin.toFloat(), y, widthPx - margin, y + drawH
+                )
+                canvas.drawBitmap(bm, null, dst, null)
+                bm.recycle()
+              }
+            }
+            y += h + lineGap
+          }
+          "text" -> {
+            val align = row.optString("align", "right")
+            val p = paintFor(row.optBoolean("bold", false), row.optInt("size", 0))
+            val text = row.optString("text", "")
+            val fm = p.fontMetrics
+            val cy = y - fm.ascent
+            p.textAlign = when (align) {
+              "center" -> android.graphics.Paint.Align.CENTER
+              "left" -> android.graphics.Paint.Align.LEFT
+              else -> android.graphics.Paint.Align.RIGHT
+            }
+            val x = when (align) {
+              "center" -> widthPx / 2f
+              "left" -> margin.toFloat()
+              else -> (widthPx - margin).toFloat()
+            }
+            canvas.drawText(text, x, cy, p)
+            y += h
+          }
+          "two" -> {
+            val p = paintFor(row.optBoolean("bold", false), 0)
+            val fm = p.fontMetrics
+            val cy = y - fm.ascent
+            val label = row.optString("label", "")
+            val value = row.optString("value", "")
+            // RTL: التسمية عند الهامش الأيمن والقيمة عند الأيسر —
+            // تماماً كما تطبعها ESC/POS ثنائية الأعمدة.
+            p.textAlign = android.graphics.Paint.Align.RIGHT
+            canvas.drawText(label, (widthPx - margin).toFloat(), cy, p)
+            p.textAlign = android.graphics.Paint.Align.LEFT
+            canvas.drawText(value, margin.toFloat(), cy, p)
+            y += h
+          }
+          "sep" -> {
+            val yMid = y + h / 2f
+            var x = margin.toFloat()
+            val dash = 7f * scale
+            val gap = 5f * scale
+            while (x < widthPx - margin) {
+              canvas.drawLine(x, yMid, x + dash, yMid, blackPaint)
+              x += dash + gap
+            }
+            y += h
+          }
+          "barcode" -> {
+            // معاينة باركود: نمط أعمدة حتمي مشتق من النص (الشكل
+            // كما تطبعه الطابعة؛ الفحص الفعلي للماسح ليس غرض
+            // المعاينة).
+            val value = row.optString("value", "")
+            val barTop = y + 2f * scale
+            val barBottom = y + 34f * scale
+            var x = margin.toFloat()
+            var i = 0
+            val thin = 2f * scale
+            val thick = 5f * scale
+            while (x < widthPx - margin && i < 220) {
+              val ch = if (value.isEmpty()) ' ' else value[i % value.length]
+              val w = when ((ch.code + i) % 4) {
+                0 -> thin
+                1 -> thick
+                2 -> thin
+                else -> thin * 2
+              }
+              if ((ch.code + i) % 2 == 0) {
+                canvas.drawRect(
+                  x, barTop, x + w, barBottom, blackPaint
+                )
+              }
+              x += w + thin
+              i += 1
+            }
+            val p = paintFor(false, 0)
+            p.textAlign = android.graphics.Paint.Align.CENTER
+            val cy = barBottom + 8f * scale - p.fontMetrics.ascent
+            canvas.drawText(value, widthPx / 2f, cy, p)
+            y += h
+          }
+          "space" -> {
+            y += h
+          }
+          else -> {}
+        }
+      }
+
+      // ── الحفظ PNG في مجلد التنزيلات (نمط exportFile نفسه) ──
+      val bytes = ByteArrayOutputStream().use { stream ->
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+        stream.toByteArray()
+      }
+      bitmap.recycle()
+      val displayName = sanitizeFileName(fileName)
+      val resultPath: String
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = reactContext.contentResolver
+        val values = ContentValues().apply {
+          put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+          put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+          put(
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            Environment.DIRECTORY_DOWNLOADS + "/" + EXPORT_DIR_NAME
+          )
+        }
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(collection, values)
+          ?: throw IllegalStateException("فشل إنشاء صورة الفاتورة")
+        resolver.openOutputStream(uri)?.use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        } ?: throw IllegalStateException("تعذّر فتح الصورة للكتابة")
+        resultPath = "Downloads/$EXPORT_DIR_NAME/$displayName"
+      } else {
+        @Suppress("DEPRECATION")
+        val downloadsDir =
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val targetDir = File(downloadsDir, EXPORT_DIR_NAME)
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+          throw IllegalStateException("تعذّر إنشاء مجلد التصدير")
+        }
+        val targetFile = File(targetDir, displayName)
+        FileOutputStream(targetFile).use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        }
+        resultPath = targetFile.absolutePath
+      }
+
+      val activity = currentActivity
+      val handler = android.os.Handler((activity ?: reactContext).mainLooper)
+      handler.post {
+        try {
+          Toast.makeText(
+            reactContext,
+            "تم حفظ شكل الفاتورة في: $resultPath",
+            Toast.LENGTH_LONG
+          ).show()
+        } catch (ignored: Exception) {
+          // Cosmetic only.
+        }
+      }
+
+      promise.resolve(resultPath)
+    } catch (t: Throwable) {
+      promise.reject("RECEIPT_IMAGE_FAILED", "فشل إنشاء صورة الفاتورة: ${t.message}")
+    }
+  }
+
   /** Loads a Tajawal TTF from the app's bundled assets — the
    *  fonts ship uncompressed in assets/fonts (aaptOptions
    *  noCompress keeps them loadable by Typeface). */

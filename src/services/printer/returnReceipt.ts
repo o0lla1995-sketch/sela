@@ -32,8 +32,14 @@ const LABELS = {
   // v36: الاستبدال بقيمة المرجع
   exchangeTitle: 'EXCHANGED ITEMS (out of stock)',
   exchangeTotal: 'Exchange Value',
-  exchangeNote:
-    'Goods exchange - no financial effect: returned back to stock, exchanged out. No cash, no debt change.',
+  // v40 (الجولة 48 #2): تسوية الفرق بين قيمة المرتجع والبدائل.
+  diffTitle: 'DIFFERENCE (Refund - Exchange)',
+  diffZero: 'Even exchange - no difference',
+  diffCashOut: 'Cash difference PAID TO customer',
+  diffCashIn: 'Cash difference RECEIVED FROM customer',
+  diffDebtDown: 'Debt REDUCED by the difference',
+  diffDebtUp: 'Debt INCREASED by the difference',
+  diffDebtUpQueued: 'SILA debt increase queued',
   qty: 'Qty x Price = Amount',
   thanks: 'Thank You!',
 } as const;
@@ -122,18 +128,50 @@ export function buildReturnReceiptJob(
     .bold(true)
     .size(1, 1)
     .twoColumns(
-      exchanges.length > 0 ? LABELS.exchangeTotal : LABELS.refundTotal,
-      exchanges.length > 0
-        ? data.ret.exchange_minor / 100
-        : data.ret.refund_minor / 100,
+      LABELS.refundTotal,
+      data.ret.refund_minor / 100,
       Math.max(width - 4, 16),
     )
     .size(0, 0)
     .bold(false);
 
   if (exchanges.length > 0) {
-    // v36: استبدال بضاعة — لا أثر مالي إطلاقاً.
-    b.align(2).textLine(LABELS.exchangeNote);
+    // v40 (الجولة 48 #2): قيمة البدائل ثم الفرق وتسويته — نقدي خارج
+    // للزبون أو داخل للخزينة، أو خصم/زيادة دين الزبون.
+    b.bold(true)
+      .twoColumns(
+        LABELS.exchangeTotal,
+        data.ret.exchange_minor / 100,
+        Math.max(width - 4, 16),
+      )
+      .bold(false);
+    const diffMinor =
+      data.ret.refund_minor - (data.ret.exchange_minor ?? 0);
+    if (diffMinor === 0) {
+      b.align(2).textLine(LABELS.diffZero);
+    } else {
+      b.bold(true)
+        .twoColumns(
+          LABELS.diffTitle,
+          Math.abs(diffMinor) / 100,
+          Math.max(width - 4, 16),
+        )
+        .bold(false)
+        .align(2);
+      if (data.ret.book === 'cash') {
+        b.textLine(
+          diffMinor > 0 ? LABELS.diffCashOut : LABELS.diffCashIn,
+        );
+      } else if (diffMinor > 0) {
+        b.textLine(LABELS.diffDebtDown);
+      } else {
+        b.textLine(
+          data.ret.book === 'sila'
+            ? LABELS.diffDebtUpQueued
+            : LABELS.diffDebtUp,
+        );
+      }
+    }
   } else if (data.ret.debt_adjusted_minor > 0) {
     b.bold(true)
       .twoColumns(

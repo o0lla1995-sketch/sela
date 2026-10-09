@@ -93,6 +93,13 @@ interface PlatformUtilsNative {
     fileName: string,
     payloadJson: string,
   ): Promise<string>;
+  /** v40 (الجولة 48 #4): يرسم شكل الفاتورة الحرارية كصورة PNG
+   *  (صفوف JSON بنفس بنية الفاتورة → Tajawal على ورقة بيضاء
+   *  بمقاس 58/80مم) ويحفظها في مجلد التنزيلات → المسار. */
+  exportReceiptImage(
+    fileName: string,
+    payloadJson: string,
+  ): Promise<string>;
   /** v25: opens the system share sheet for an exported PDF. */
   shareExportedPdf(fileName: string, title: string): Promise<boolean>;
   /** v25: prints an exported PDF via Android's system print

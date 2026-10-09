@@ -26,6 +26,7 @@ import {
   ensureBluetoothPermissions,
 } from '../../services/printer/ThermalPrinterService';
 import {buildTestJob} from '../../services/printer/receipt';
+import {exportReceiptPreviewImage} from '../../services/printer/receiptPreview';
 import {useToastStore} from '../../stores/toastStore';
 import {
   makeStyles,
@@ -137,6 +138,37 @@ export function PrinterSettingsScreen() {
       setTesting(false);
     }
   }, [status, settings, toast]);
+
+  // v40 (الجولة 48 #4): تحميل شكل الفاتورة كصورة — معاينة مطابقة
+  //  لما ستطبعه الطابعة بإعدادات المتجر الحية (الاسم، الشعار، عرض
+  //  الورق، التذييل، إظهار الربح) تُرسم بخط Tajawal وتُحفظ PNG في
+  //  مجلد التنزيلات؛ بلا حاجة لطابعة متصلة أصلاً.
+  const [savingPreview, setSavingPreview] = useState(false);
+  const savePreviewImage = useCallback(async () => {
+    if (savingPreview) {
+      return;
+    }
+    setSavingPreview(true);
+    try {
+      const path = await exportReceiptPreviewImage({
+        storeName: settings.storeName,
+        storePhone: settings.storePhone,
+        footerMessage: settings.footerMessage,
+        storeLogoPath: settings.storeLogoPath,
+        paperWidth: settings.paperWidth,
+        codepage: settings.codepage,
+        showProfit: settings.showProfitOnReceipt,
+      });
+      toast(`حُفظ شكل الفاتورة كصورة في: ${path}`, 'success', 6000);
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : String(error),
+        'error',
+      );
+    } finally {
+      setSavingPreview(false);
+    }
+  }, [savingPreview, settings, toast]);
 
   const connectedAddress = usePrinterStore(state => state.deviceAddress);
 
@@ -290,13 +322,34 @@ export function PrinterSettingsScreen() {
             الطابعات الصينية (Xprinter/Gprinter) تدعم CP1256
           </Text>
 
-          <AppButton
-            title="🖨️ طباعة تجريبية"
-            variant="ghost"
-            onPress={testPrint}
-            loading={testing}
-            disabled={status !== 'connected'}
-          />
+          {/* v40 (الجولة 48 #4): زر تحميل شكل الفاتورة كصورة بجانب
+              الطباعة التجريبية — يشرح للتاجر شكل فاتورته المطبوعة
+              قبل الطباعة، ويعمل حتى بلا طابعة متصلة. */}
+          <View style={styles.previewButtonsRow}>
+            <AppButton
+              title="طباعة تجريبية"
+              icon="printer"
+              variant="ghost"
+              onPress={testPrint}
+              loading={testing}
+              disabled={status !== 'connected'}
+              style={{flex: 1}}
+            />
+            <AppButton
+              title="تحميل شكل الفاتورة كصورة"
+              icon="image"
+              variant="ghost"
+              onPress={() => void savePreviewImage()}
+              loading={savingPreview}
+              style={{flex: 1}}
+            />
+          </View>
+          <Text style={styles.hint}>
+            «تحميل شكل الفاتورة كصورة» يرسم فاتورة نموذجية بإعدادات
+            متجرك الحقيقية (الشعار، عرض الورق، الرسالة الختامية) ويحفظها
+            صورة في مجلد التنزيلات — هكذا ستبدو فاتورتك المطبوعة تماماً،
+            وبلا حاجة لطابعة متصلة
+          </Text>
         </Card>
 
         {/* ── Help ────────────────────────────────────────────── */}
@@ -330,6 +383,12 @@ const useStyles = makeStyles(c =>
     },
     statusValue: {color: c.text, fontWeight: '900', fontSize: typography.body},
     statusButtons: {flexDirection: 'row', gap: spacing.md},
+    // v40 (الجولة 48 #4): الطباعة التجريبية بجانب تحميل شكل الفاتورة.
+    previewButtonsRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      marginTop: spacing.md,
+    },
     errorText: {
       color: c.danger,
       fontSize: typography.small,
