@@ -202,6 +202,20 @@ export const ReportService = {
     custom?: DateRange,
   ): Promise<ReportBundle> {
     const range = rangeFor(key, custom);
+    // v42 (الجولة 50 #3): حبيبية الرسم تتبع الفترة المحددة —
+    //  الفترات القصيرة (اليوم/أمس/٧ أيام/الشهر) سلسلة يومية،
+    //  وما تجاوز ٦٢ يوماً (مثل «الكل») سلسلة شهرية مجمّعة تبدأ
+    //  من أول شهر نشاط؛ قبل هذا كان «الكل» يعدّ الأيام من
+    //  2000-01-01 فيقطعه الحارس عند ١٢٠ يوماً ويعرض الرسم أشهراً
+    //  خاوية من العقد الماضي بدل مبيعاته الفعلية.
+    const spanMs =
+      new Date(`${range.to}T00:00:00`).getTime() -
+      new Date(`${range.from}T00:00:00`).getTime();
+    const spanDays = Math.round(spanMs / 86400000) + 1;
+    const dailySeriesPromise =
+      spanDays > 62
+        ? ReportRepo.monthlySeries(range)
+        : ReportRepo.dailySeries(range);
     const [
       summary,
       topByRevenue,
@@ -225,7 +239,7 @@ export const ReportService = {
     ] = await Promise.all([
       ReportRepo.summary(range),
       ReportRepo.topProducts(range, 10),
-      ReportRepo.dailySeries(range),
+      dailySeriesPromise,
       ReportRepo.hourlySeries(range),
       ReportRepo.debtSalesSummary(range),
       SilaRepo.paymentsInRange(range.from, range.to),

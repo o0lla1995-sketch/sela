@@ -225,6 +225,20 @@ export function PosScreen({
   // the whole screen (grid folds away) so the merchant can review a
   // long sale comfortably, then shrinks back to keep selling.
   const [cartExpanded, setCartExpanded] = useState(false);
+  // v42 (الجولة 50 #5): تصغير السلة — زر مخصص بجانب زر التكبير
+  //  يطوي السلة كاملة إلى شريط سطر واحد (نفس شريط نظرة البحث)
+  //  فيتحرر عرض الشبكة كله للتصفح؛ لمسة على الشريط تعيدها،
+  //  وأي إضافة سطر جديد تعيدها تلقائياً كي يرى التاجر ما أُضيف.
+  const [cartMinimized, setCartMinimized] = useState(false);
+  // v42 (الجولة 50 #5): إعادة فتح السلة تلقائياً عند إضافة سطر
+  //  جديد وهي مطوية — التاجر يرى فوراً أن المنتج أُضيف فعلاً.
+  const prevLinesCountRef = useRef(0);
+  useEffect(() => {
+    if (lines.length > prevLinesCountRef.current) {
+      setCartMinimized(false);
+    }
+    prevLinesCountRef.current = lines.length;
+  }, [lines.length]);
   const [busy, setBusy] = useState(false);
   const [unitPickerLine, setUnitPickerLine] = useState<CartLine | null>(null);
   const [unitPickerRows, setUnitPickerRows] = useState<ProductUnit[] | null>(
@@ -2100,6 +2114,23 @@ export function PosScreen({
     setCartExpanded(value => !value);
   }, []);
 
+  /** v42 (الجولة 50 #5): تصغير السلة — زر مستقل بجانب زر التكبير
+   *  يطوي اللوحة كاملة إلى شريط السطر الواحد (نفس حركة البحث)
+   *  فيتحرر الشبكة كلها للتصفح؛ اللمس على الشريط أو إضافة سطر
+   *  جديد يعيدانها. بنفس أنيميشن التكبير كي تظل الحركة أنيقة. */
+  const minimizeCart = useCallback(() => {
+    try {
+      if (UIManager.setLayoutAnimationEnabledExperimental != null) {
+        UIManager.setLayoutAnimationEnabledExperimental(true);
+      }
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    } catch {
+      // Cosmetic only — never block the fold.
+    }
+    setCartExpanded(false);
+    setCartMinimized(true);
+  }, []);
+
   return (
     <View style={styles.screen}>
       {/* v8.2 (round-11 #3): NO top header — every millimeter of the
@@ -2115,23 +2146,31 @@ export function PosScreen({
         ]}>
         {/* ── Pricing mode + view shape + search + scan ────── */}
         <View style={styles.controlsRow}>
+          {/* v42 (الجولة 50 #1): الصف مضغوط بطلب التاجر — مبدّل
+              جملة/مفرق بالقياس المضغوط (dense) قابل للانكماش
+              (flexShrink) حتى لا يدفع زر الشكل خارج الشاشة مهما
+              كان حجم خط الجهاز، وزر الشكل أيقونة فقط دون نص
+              (مربع ٤٠×٤٠ بخلفية برتقالية هادئة) — لا نص يلتهم
+              عرض الصف ولا انزلاق نحو الزاوية اليسرى. */}
           <View style={styles.modeRow}>
-            <Segmented
-              value={pricingMode}
-              onChange={setPricingMode}
-              options={[
-                {value: 'RETAIL', label: 'مفرق'},
-                {value: 'WHOLESALE', label: 'جملة'},
-              ]}
-              compact
-            />
-            {/* v40 (الجولة 48 #5): زر شكل عرض المنتجات بجانب جملة/مفرق —
-                يفتح لوحة INLINE صغيرة (لا Modal — درس الروم) لاختيار
-                شكل المنتجات في نقطة البيع؛ الشكل الافتراضي هو الحالي
-                (الشبكة) ويُحفظ الاختيار في الإعدادات.
-                v41 (الجولة 49 #1): لم يعد أيقونة صغيرة معتمة في أقصى
-                يسار الصف — زر معنون «الشكل» بخلفية برتقالية هادئة
-                وظاهر بوضوح، فلا يمر عليه التاجر دون أن يراه. */}
+            <View style={styles.modeSegWrap}>
+              <Segmented
+                value={pricingMode}
+                onChange={setPricingMode}
+                options={[
+                  {value: 'RETAIL', label: 'مفرق'},
+                  {value: 'WHOLESALE', label: 'جملة'},
+                ]}
+                dense
+              />
+            </View>
+            {/* v40 (الجولة 48 #5): زر شكل عرض المنتجات بجانب
+                جملة/مفرق — يفتح لوحة INLINE صغيرة (لا Modal — درس
+                الروم) لاختيار شكل المنتجات في نقطة البيع؛ الشكل
+                الافتراضي هو الحالي (الشبكة) ويُحفظ الاختيار في
+                الإعدادات. v42 (الجولة 50 #1): أيقونة فقط دون نص —
+                مربع ثابت الحجم لا ينكمش ولا يُدف خارج الشاشة،
+                والأيقونة نفسها تعكس الشكل الحالي. */}
             <TouchableOpacity
               style={[
                 styles.viewShapeBtn,
@@ -2141,7 +2180,8 @@ export function PosScreen({
               ]}
               onPress={() => setViewPickerOpen(v => !v)}
               activeOpacity={0.75}
-              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}
+              accessibilityLabel="تغيير شكل عرض المنتجات">
               <Icon
                 name={
                   posView === 'list'
@@ -2150,21 +2190,9 @@ export function PosScreen({
                     ? 'layoutCards'
                     : 'layoutGrid'
                 }
-                size={17}
-                color={
-                  viewPickerOpen || posView !== 'grid' ? c.accent : c.text
-                }
+                size={20}
+                color={viewPickerOpen || posView !== 'grid' ? c.accent : c.text}
               />
-              <Text
-                style={[
-                  styles.viewShapeBtnText,
-                  viewPickerOpen || posView !== 'grid'
-                    ? {color: c.accent}
-                    : null,
-                ]}>
-                الشكل
-              </Text>
-              <Icon name="chevronDown" size={9} color={c.textFaint} />
             </TouchableOpacity>
           </View>
           <View style={styles.searchRow}>
@@ -2632,14 +2660,20 @@ export function PosScreen({
             vanishes when empty) — with adjustResize + a 50% cart
             the products used to get squeezed to nothing behind the
             keyboard, making search useless. Tapping the strip
-            dismisses the keyboard and the full cart returns. */}
-        {searchFocused && !cartExpanded ? (
+            dismisses the keyboard and the full cart returns.
+            v42 (الجولة 50 #5): نفس الشريط يخدم تصغير السلة —
+            زر التصغير بجانب زر التكبير يطوي السلة كلها إليه،
+            ولمسته تعيدها كاملة (مع إسدال لوحة المفاتيح إن
+            كانت مفتوحة). */}
+        {(searchFocused || cartMinimized) && !cartExpanded ? (
           lines.length === 0 ? null : (
             <TouchableOpacity
               style={styles.cartPeekRow}
               activeOpacity={0.8}
               onPress={() => {
                 Keyboard.dismiss();
+                // v42 (الجولة 50 #5): إعادة فتح السلة المطوية.
+                setCartMinimized(false);
               }}>
               <Icon name="cart" size={15} color={c.accent} />
               <Text style={styles.cartPeekText} numberOfLines={1}>
@@ -2683,26 +2717,51 @@ export function PosScreen({
               </TouchableOpacity>
             ) : (
               <>
-                {/* Compact header: expand toggle + title + live count +
-                  EMPTY button (round-8). v8.2 (round-11 #3): تكبير
-                  grows the cart to the full screen, تصغير folds it
-                  back — reviewing a long sale is now comfortable. */}
+                {/* Compact header: cart size buttons + title + live
+                  count + EMPTY button (round-8). v8.2 (round-11 #3):
+                  تكبير grows the cart to the full screen. v42
+                  (الجولة 50 #5): زران أيقونيان متجاوران بجانب
+                  بعضهما — التكبير (سهم لأعلى، وعند التوسيع يعود
+                  لأسفل لاستعادة الشكل العادي) والتصغير (شريط
+                  أفقي يطوي السلة كلها إلى شريط سطر واحد) — طلب
+                  التاجر الصريح: زر تصغير بجانب زر التكبير. */}
                 <View style={styles.cartHeaderRow}>
-                  <TouchableOpacity
-                    style={styles.expandBtn}
-                    onPress={toggleCartExpanded}
-                    activeOpacity={0.75}
-                    hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
-                    <View
-                      style={{
-                        transform: [{rotate: cartExpanded ? '0deg' : '180deg'}],
-                      }}>
-                      <Icon name="chevronDown" size={13} color={c.accent} />
-                    </View>
-                    <Text style={styles.expandBtnText}>
-                      {cartExpanded ? 'تصغير' : 'تكبير'}
-                    </Text>
-                  </TouchableOpacity>
+                  <View style={styles.cartSizeBtns}>
+                    <TouchableOpacity
+                      style={[
+                        styles.cartSizeBtn,
+                        cartExpanded ? {borderColor: c.accent} : null,
+                      ]}
+                      onPress={toggleCartExpanded}
+                      activeOpacity={0.75}
+                      hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}
+                      accessibilityLabel={
+                        cartExpanded
+                          ? 'استعادة حجم السلة'
+                          : 'تكبير السلة لملء الشاشة'
+                      }>
+                      <View
+                        style={{
+                          transform: [
+                            {rotate: cartExpanded ? '0deg' : '180deg'},
+                          ],
+                        }}>
+                        <Icon
+                          name="chevronDown"
+                          size={15}
+                          color={cartExpanded ? c.accent : c.textDim}
+                        />
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.cartSizeBtn}
+                      onPress={minimizeCart}
+                      activeOpacity={0.75}
+                      hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}
+                      accessibilityLabel="تصغير السلة إلى شريط">
+                      <Icon name="minus" size={15} color={c.textDim} />
+                    </TouchableOpacity>
+                  </View>
                   <View style={styles.cartHeaderTitle}>
                     <Icon name="cart" size={14} color={c.accent} />
                     <Text style={styles.cartHeaderText}>سلة البيع</Text>
@@ -4556,28 +4615,32 @@ const useStyles = makeStyles(c =>
     // Controls
     controlsRow: {gap: spacing.sm},
     // v40 (الجولة 48 #5): صف جملة/مفرق + زر شكل العرض بجانبه.
+    // v42 (الجولة 50 #1): الصف مضغوط — فجوة أصغر والمبدّل قابل
+    //  للانكماش كي يتسع الزر دائماً.
     modeRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
-    },
-    viewShapeBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
       gap: 6,
-      borderWidth: 1,
+    },
+    // v42 (الجولة 50 #1): غلاف المبدّل — flexShrink كي ينكمش مبدّل
+    //  جملة/مفرق (مع اقتطاع نصه) بدل دفع زر الشكل خارج الشاشة
+    //  على الأجهزة الضيقة أو ذات الخط الكبير.
+    modeSegWrap: {
+      flexShrink: 1,
+      minWidth: 0,
+    },
+    // v42 (الجولة 50 #1): زر الشكل أيقونة فقط — مربع ثابت ٤٠×٤٠
+    //  بخلفية برتقالية هادئة وإطار يضيء عند التفعيل/الاختيار؛
+    //  لا نص يلتهم العرض ولا انكماش.
+    viewShapeBtn: {
+      width: 40,
+      height: 40,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1.5,
       borderColor: c.border,
       borderRadius: radius.md,
-      paddingHorizontal: 12,
-      height: 38,
-      // v41 (الجولة 49 #1): خلفية برتقالية هادئة — الزر مرئي بوضوح
-      //  بجانب جملة/مفرق بدل أيقونة معتمة مدفونة في الزاوية.
       backgroundColor: c.accentSoft,
-    },
-    viewShapeBtnText: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: 12.5,
     },
     // v40: لوحة اختيار الشكل — INLINE في مجرى الشاشة.
     viewPickerPanel: {
@@ -4991,19 +5054,26 @@ const useStyles = makeStyles(c =>
       minHeight: 88,
       overflow: 'hidden',
     },
-    expandBtn: {
+    /** v42 (الجولة 50 #5): زرا حجم السلة — أيقونيان فقط (تكبير
+     *  وتصغير) متجاوران في كبسولة واحدة بجانب عنوان السلة؛
+     *  التصغير يطوي اللوحة إلى شريط السطر الواحد. */
+    cartSizeBtns: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 4,
       backgroundColor: c.accentSofter,
       borderRadius: radius.sm,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 3,
+      padding: 3,
     },
-    expandBtnText: {
-      color: c.accent,
-      fontFamily: fonts.bold,
-      fontSize: typography.micro,
+    cartSizeBtn: {
+      width: 30,
+      height: 26,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: radius.sm - 2,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      backgroundColor: c.surface,
     },
     cartLine: {
       flexDirection: 'row',

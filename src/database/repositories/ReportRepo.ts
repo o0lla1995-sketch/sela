@@ -4,7 +4,7 @@
  * `sales.created_at` is always written as local device time.
  */
 import {getDb, toMessage} from '../connection';
-import {weekdayLabel} from '../../core/format';
+import {monthLabel, weekdayLabel} from '../../core/format';
 import type {
   DailyPoint,
   DateRange,
@@ -204,11 +204,15 @@ export const ReportRepo = {
       });
     }
     // Fill gaps so charts show continuous days.
+    // v42 (الجولة 50 #3): الحارس ١٢٠ كان يقطع السلسلة عند الفترات
+    //  الطويلة (مثل «الكل») فيسقط أحدث الأيام خارج الرسم — رُفع
+    //  إلى ٤٠٠، والفترات الأطول من ذلك أصلاً تتحول للسلسلة
+    //  الشهرية في ReportService فلا تمر من هنا إطلاقاً.
     const points: DailyPoint[] = [];
     const cursor = new Date(`${range.from}T00:00:00`);
     const last = new Date(`${range.to}T00:00:00`);
     let guard = 0;
-    while (cursor.getTime() <= last.getTime() && guard < 120) {
+    while (cursor.getTime() <= last.getTime() && guard < 400) {
       const day = toLocalDayString(cursor);
       points.push(
         byDay.get(day) ?? {
@@ -219,6 +223,77 @@ export const ReportRepo = {
         },
       );
       cursor.setDate(cursor.getDate() + 1);
+      guard += 1;
+    }
+    return points;
+  },
+
+  /** v42 (الجولة 50 #3): السلسلة الشهرية — نفس محاسبة السلسلة
+   *  اليومية (المرتجع يُسند لفترة فاتورته الأصلية) لكن مجمّعة
+   *  شهرياً؛ تبدأ من أول شهر فيه نشاط فعلي (لا من بداية النطاق
+   *  المطلق مثل 2000-01-01 في «الكل») فلا يبتلع الرسم سنوات
+   *  فارغة، وتُسد فجوات الشهور بلا نشاط كي يبقى المحور متصلاً.
+   *  day يحمل 'YYYY-MM' و label يحمل اسم الشهر الشامي. */
+  async monthlySeries(range: DateRange): Promise<DailyPoint[]> {
+    const [start, end] = rangeBounds(range);
+    const result = await getDb().execute(
+      `SELECT
+         substr(${EFFECTIVE_AT}, 1, 7) AS month,
+         SUM(s.total_amount) AS revenue,
+         SUM(s.total_profit) AS profit
+       FROM sales s
+       LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
+         ON link.ret_number = s.invoice_number
+       WHERE ${EFFECTIVE_IN_RANGE}
+       GROUP BY month
+       ORDER BY month ASC`,
+      [start, end],
+    );
+    const rows = result.rows?._array ?? [];
+    // لا مبيعات إطلاقاً — سلسلة فارغة (الرسم يعرض حالة الفراغ).
+    if (rows.length === 0) {
+      return [];
+    }
+    const byMonth = new Map<string, DailyPoint>();
+    let firstMonth = String(rows[0].month ?? '');
+    for (const row of rows) {
+      const month = String(row.month ?? '');
+      byMonth.set(month, {
+        day: month,
+        label: monthLabel(month),
+        revenue: Number(row.revenue ?? 0),
+        profit: Number(row.profit ?? 0),
+      });
+      if (month < firstMonth) {
+        firstMonth = month;
+      }
+    }
+    // البدء من أول شهر نشاط (وليس من بداية النطاق) — الشهور
+    // الفارغة قبله لا معنى لها في الرسم.
+    if (firstMonth < range.from.slice(0, 7)) {
+      firstMonth = range.from.slice(0, 7);
+    }
+    const points: DailyPoint[] = [];
+    const [fy, fm] = firstMonth.split('-').map(Number);
+    const [ty, tm] = range.to.slice(0, 7).split('-').map(Number);
+    let y = fy;
+    let m = fm;
+    let guard = 0;
+    while ((y < ty || (y === ty && m <= tm)) && guard < 600) {
+      const month = `${y}-${String(m).padStart(2, '0')}`;
+      points.push(
+        byMonth.get(month) ?? {
+          day: month,
+          label: monthLabel(month),
+          revenue: 0,
+          profit: 0,
+        },
+      );
+      m += 1;
+      if (m > 12) {
+        m = 1;
+        y += 1;
+      }
       guard += 1;
     }
     return points;

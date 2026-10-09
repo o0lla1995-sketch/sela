@@ -254,16 +254,15 @@ export function HomeScreen() {
         showsVerticalScrollIndicator={false}>
         {/* ── الخزينة والديون — FIRST (v33 round-41 #10): طلب التاجر —
             قسم الخزينة والديون بالأعلى ثم قسم اليوم أسفله (ماذا بعت
-            وكم ربحت يُقرأ بعد «كم في الخزينة وكم لي من دين»). ──── */}
+            وكم ربحت يُقرأ بعد «كم في الخزينة وكم لي من دين»).
+            v42 (الجولة 50 #4): عنوان القسم حُذف بطلب التاجر —
+            البطاقة نفسها بترويسة «النقد بالخزينة / الدين القائم
+            لك» تشرح نفسها، والشاشة تبدأ مباشرة بالأرقام. ──── */}
         {/* v27 (round-35 #4): the header carries NO link chips
             anymore — «دفتر الديون» and «دفتر صِلة» live in the quick
             actions row above (always the same place, no
             duplication), and the debts button is renamed
             «دفتر الديون» there. */}
-        <SectionTitle
-          title="الخزينة والديون"
-          hint="رصيدك وديونك الآن + مبيعات اليوم وربحه"
-        />
         <Card style={styles.moneyCard}>
           <View style={styles.moneyRow}>
             <View style={styles.moneyCell}>

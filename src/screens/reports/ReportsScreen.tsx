@@ -43,8 +43,9 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {formatMoney} from '../../core/format';
+import {formatMoney, dayMonthLabel, weekdayLabel} from '../../core/format';
 import type {ReportRangeKey} from '../../core/types';
+import type {BarDatum} from '../../components/charts/BarChart';
 
 const CHART_WIDTH =
   Dimensions.get('window').width - spacing.lg * 2 - spacing.lg * 2;
@@ -120,10 +121,47 @@ export function ReportsScreen() {
     [rangeKey, toast],
   );
 
-  const dailyData = (bundle?.daily ?? []).slice(-10).map(point => ({
-    value: Math.round(point.revenue * 100) / 100,
-    label: point.label,
-  }));
+  // v42 (الجولة 50 #3): رسم المبيعات يتبع الفترة المحددة بدقة
+  //  — لا اقتطاع لآخر عشرة أعمدة بعد اليوم ولا أسماء أسابيع
+  //  مكررة تُضيّع موضع اليوم:
+  //  • فترة قصيرة (اليوم/أمس/٧ أيام): كل عمود يحمل تاريخه الفعلي
+  //    (٩/١٠) فوق اسم يومه — العمود وموضعه لا لبس فيهما.
+  //  • الشهر: أرقام أيام الشهر ١..٣١ (الفترة كلها ظاهرة).
+  //  • ما تجاوز ٦٢ يوماً («الكل»): سلسلة شهرية من المستودع —
+  //    أسماء الشهور الشامية والسنة تحتها، مع تخفيف التسميات
+  //    عند الازدحام.
+  const dailyPoints = bundle?.daily ?? [];
+  const isMonthlySeries = dailyPoints.some(p => p.day.length === 7);
+  const dailyData: BarDatum[] = dailyPoints.map((point, index) => {
+    const value = Math.round(point.revenue * 100) / 100;
+    if (isMonthlySeries) {
+      const total = dailyPoints.length;
+      const step = Math.max(1, Math.ceil(total / 8));
+      const [year, monthNum] = point.day.split('-');
+      const showLabel = index % step === 0 || index === total - 1;
+      return {
+        value,
+        label: showLabel ? point.label : '',
+        sublabel:
+          showLabel && (monthNum === '01' || index === 0) ? year : '',
+      };
+    }
+    // الشهر الحالي (أو أي سلسلة يومية مزدحمة > ١٤ يوماً): رقم
+    //  اليوم فقط — أوسع تغطية بأصغر مساحة.
+    if (rangeKey === 'thisMonth' || dailyPoints.length > 14) {
+      return {
+        value,
+        label: String(Number(point.day.slice(8, 10))),
+        sublabel: '',
+      };
+    }
+    // اليوم/أمس/آخر ٧ أيام: التاريخ فوق اسم اليوم.
+    return {
+      value,
+      label: dayMonthLabel(point.day),
+      sublabel: weekdayLabel(point.day),
+    };
+  });
 
   const hourlyData = (bundle?.hourly ?? []).map(point => ({
     value: Math.round(point.revenue * 100) / 100,
@@ -590,11 +628,21 @@ export function ReportsScreen() {
               </Text>
             </Card>
 
-            {/* ── 3) Daily sales chart ────────────────────────── */}
+            {/* ── 3) Sales performance chart ─────────────────── */}
             <Card>
+              {/* v42 (الجولة 50 #3): العنوان يتبع حبيبية السلسلة —
+                  يومية للفترات القصيرة وشهرية لما طال («الكل»). */}
               <SectionTitle
-                title="أداء المبيعات اليومي"
-                hint="القيم بالشيكل ₪"
+                title={
+                  isMonthlySeries
+                    ? 'أداء المبيعات الشهري'
+                    : 'أداء المبيعات اليومي'
+                }
+                hint={
+                  isMonthlySeries
+                    ? 'إجمالي كل شهر بالشيكل ₪'
+                    : 'القيم بالشيكل ₪ — كل عمود يحمل تاريخه'
+                }
               />
               <ErrorBoundary inline label="رسم المبيعات">
                 <BarChart

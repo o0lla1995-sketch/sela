@@ -816,27 +816,44 @@ export function Segmented<T extends string | number>({
   onChange,
   options,
   compact = false,
+  dense = false,
 }: {
   value: T;
   onChange: (value: T) => void;
   options: {value: T; label: string}[];
   compact?: boolean;
+  /** v42 (الجولة 50 #1): القياس المضغوط — أصغر وأضيق لصف
+   *  جملة/مفرق في نقطة البيع حتى يتسع صف التحكم كاملاً مع زر
+   *  شكل العرض بجانبه (طلب التاجر: ضغط الصف وملاءمة حجم
+   *  المبدّل). */
+  dense?: boolean;
 }) {
   const c = useThemeColors();
   const styles = useInputStyles();
   return (
-    <View style={[styles.segmented, compact && styles.segmentedCompact]}>
+    <View
+      style={[
+        styles.segmented,
+        compact && styles.segmentedCompact,
+        dense && styles.segmentedDense,
+      ]}>
       {options.map(option => {
         const active = option.value === value;
         return (
           <TouchableOpacity
             key={String(option.value)}
-            style={[styles.segItem, active && {backgroundColor: c.accent}]}
+            style={[
+              styles.segItem,
+              dense && styles.segItemDense,
+              active && {backgroundColor: c.accent},
+            ]}
             onPress={() => onChange(option.value)}
             activeOpacity={0.8}>
             <Text
               style={[
-                compact ? styles.segTextCompact : styles.segText,
+                styles.segText,
+                compact && !dense ? styles.segTextCompact : null,
+                dense ? styles.segTextDense : null,
                 {color: active ? c.onAccent : c.textDim},
               ]}
               numberOfLines={1}>
@@ -911,6 +928,22 @@ const useInputStyles = makeStyles(c =>
     },
     segmentedCompact: {
       borderRadius: radius.sm,
+    },
+    // v42 (الجولة 50 #1): القياس المضغوط — حاوية أرق وقطع بحشو
+    // أفقي محسوب؛ ارتفاع الكل ≈ ٣٣dp بدل ≈ ٤٠dp.
+    segmentedDense: {
+      padding: 2,
+      borderRadius: radius.sm,
+    },
+    segItemDense: {
+      flex: 0,
+      paddingVertical: 7,
+      paddingHorizontal: 12,
+    },
+    segTextDense: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: 11.5,
     },
     segItem: {
       flex: 1,

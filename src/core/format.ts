@@ -88,6 +88,46 @@ export function weekdayLabel(dateStr: string): string {
   return WEEKDAYS_AR[d.getDay()] ?? dateStr;
 }
 
+/** v42 (الجولة 50 #3): أسماء الشهور الميلاسية (الاستعمال
+ *  الفلسطيني/الشامي) — لسلسلة المبيعات الشهرية في التقارير حين
+ *  تمتد الفترة لأكثر من شهرين (مثل «الكل»). */
+const MONTHS_AR = [
+  'كانون الثاني',
+  'شباط',
+  'آذار',
+  'نيسان',
+  'أيار',
+  'حزيران',
+  'تموز',
+  'آب',
+  'أيلول',
+  'تشرين الأول',
+  'تشرين الثاني',
+  'كانون الأول',
+];
+
+/** '2026-10' → "تشرين الأول" (اسم الشهر الشامي). */
+export function monthLabel(monthStr: string): string {
+  const parts = monthStr.split('-');
+  const idx = Number(parts[1]) - 1;
+  if (parts.length !== 2 || Number.isNaN(idx) || MONTHS_AR[idx] == null) {
+    return monthStr;
+  }
+  return MONTHS_AR[idx];
+}
+
+/** v42 (الجولة 50 #3): '2026-10-09' → "9/10" (يوم/شهر مضغوط —
+ *  السطر الفرعي تحت اسم اليوم في رسم المبيعات، فيعرف التاجر
+ *  تاريخ كل عمود بالتحديد لا اسم أسبوعي مكرر فقط). */
+export function dayMonthLabel(dateStr: string): string {
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return dateStr;
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  if (Number.isNaN(month) || Number.isNaN(day)) return dateStr;
+  return `${day}/${month}`;
+}
+
 /** '2026-01-02 14:03:09' → "2026/01/02 - 02:03 م" */
 export function formatDateTime(value: string): string {
   if (!value) return '';

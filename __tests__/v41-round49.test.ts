@@ -26,15 +26,17 @@ const read = (path: string) =>
   require('fs').readFileSync(path, 'utf8') as string;
 
 describe('v41 — حرّوس المصدر: الستة إصلاحات', () => {
-  test('① زر الشكل معنون ومرئي بجانب جملة/مفرق', () => {
+  test('① زر الشكل ظاهر بجانب جملة/مفرق (v42: أيقونة فقط مربعة — لا نص يلتهم الصف)', () => {
     const pos = read('src/screens/PosScreen.tsx');
-    // النص المعروض على الزر نفسه + نمط نصه.
-    expect(pos).toContain('الشكل');
-    expect(pos).toContain('styles.viewShapeBtnText');
-    // خلفية برتقالية هادئة بدل سطح معتم.
+    // v42 (الجولة 50 #1): التاجر طلب أيقونة فقط دون نص — مربع
+    // ثابت مع غلاف قابل للانكماش للمبدّل كي لا يُدف خارج الشاشة.
+    expect(pos).toContain('styles.viewShapeBtn');
     expect(pos).toContain('backgroundColor: c.accentSoft');
-    // الزر يعرض نصاً بعد الأيقونة (لم يعد أيقونة صامتة فقط).
-    expect(pos).toMatch(/<Icon[^/]*\/>\s*<Text\s+style=\{\[/);
+    expect(pos).toContain('styles.modeSegWrap');
+    // النص القديم على الزر زال (أيقونة فقط).
+    expect(pos).not.toContain('styles.viewShapeBtnText');
+    // المبدّل بالقياس المضغوط.
+    expect(pos.match(/<Segmented[\s\S]*?dense\s*\/?>/)).not.toBeNull();
   });
 
   test('② أ — معاينة الفاتورة ترسم CODE128 حقيقياً (لا نمط زخرفي)', () => {

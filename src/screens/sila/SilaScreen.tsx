@@ -33,6 +33,7 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Alert,
+  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -86,6 +87,11 @@ type SilaTab = 'overview' | 'debts' | 'customers' | 'payments' | 'vouchers';
 type DebtFilter = 'all' | 'pending' | 'failed' | 'synced';
 
 const PAGE_SIZE = 20;
+
+/** v42 (الجولة 50 #2): صفحة تطبيق صِلة على متجر Google Play —
+ *  زر التحميل في بطاقة الربط يفتح هذا الرابط مباشرة. */
+const SILA_PLAY_URL =
+  'https://play.google.com/store/apps/details?id=com.sila.pay';
 
 const TAB_OPTIONS: {value: SilaTab; label: string}[] = [
   {value: 'overview', label: 'نظرة عامة'},
@@ -438,6 +444,18 @@ export function SilaScreen() {
       ],
     );
   }, [clearPairing, toast]);
+
+  /** v42 (الجولة 50 #2): تحميل تطبيق صِلة — أيقونة داخل بطاقة
+   *  الربط تفتح متجر Google Play مباشرة على صفحة تطبيق صِلة
+   *  (com.sila.pay)؛ الخطوة ١ من الربط تفترض وجود التطبيق، وهذا
+   *  الزر يوصله بضغطة واحدة إن لم يكن مثبتاً. */
+  const openSilaStorePage = useCallback(async () => {
+    try {
+      await Linking.openURL(SILA_PLAY_URL);
+    } catch {
+      toast('تعذر فتح المتجر — تأكد من وجود متجر Google Play على الجهاز', 'error');
+    }
+  }, [toast]);
 
   // ── Queue actions ──────────────────────────────────────────────
 
@@ -1413,6 +1431,20 @@ export function SilaScreen() {
                   أدخل الرمز هنا أو امسح رمز الربط مباشرة
                 </Text>
               </View>
+
+              {/* v42 (الجولة 50 #2): أيقونة تحميل تطبيق صِلة — تفتح
+                  متجر Google Play مباشرة على صفحة التطبيق؛ الخطوة ١
+                  تفترض وجود التطبيق على الجهاز وهذا الزر يوصله
+                  إليه إن لم يكن مثبتاً بعد. */}
+              <TouchableOpacity
+                style={styles.downloadAppBtn}
+                onPress={() => void openSilaStorePage()}
+                activeOpacity={0.8}>
+                <Icon name="download" size={16} color={c.onAccent} />
+                <Text style={styles.downloadAppText}>
+                  تحميل تطبيق صِلة من Google Play
+                </Text>
+              </TouchableOpacity>
             </Card>
 
             <Card style={styles.pairCard}>
@@ -1713,6 +1745,23 @@ const useStyles = makeStyles(c =>
     },
     scanPairText: {
       color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    // v42 (الجولة 50 #2): زر تحميل تطبيق صِلة — بارز (برتقالي
+    //  كامل) أسفل خطوات الربط لأنه بوابة الخطوة ١ نفسها.
+    downloadAppBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      backgroundColor: c.accent,
+      borderRadius: radius.md,
+      paddingVertical: spacing.sm + 2,
+      marginTop: spacing.xs,
+    },
+    downloadAppText: {
+      color: c.onAccent,
       fontFamily: fonts.bold,
       fontSize: typography.small,
     },

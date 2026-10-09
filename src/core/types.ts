@@ -469,8 +469,11 @@ export interface TopProduct {
 }
 
 export interface DailyPoint {
-  day: string; // 'YYYY-MM-DD'
-  label: string; // short day name
+  /** 'YYYY-MM-DD' — أو 'YYYY-MM' في السلسلة الشهرية (v42 الجولة 50 #3
+   *  للفترات الأطول من ٦٢ يوماً مثل «الكل»). */
+  day: string;
+  /** short day name — أو اسم الشهر الشامي في السلسلة الشهرية. */
+  label: string;
   revenue: number;
   profit: number;
 }

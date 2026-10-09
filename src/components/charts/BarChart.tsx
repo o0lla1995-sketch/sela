@@ -25,6 +25,10 @@ import {Icon} from '../Icon';
 export interface BarDatum {
   value: number;
   label: string;
+  /** v42 (الجولة 50 #3): سطر فرعي اختياري تحت التسمية — تاريخ
+   *  اليوم (٤/١٠) تحت اسم اليوم في رسم المبيعات، أو السنة تحت
+   *  اسم الشهر في السلسلة الشهرية؛ يُرسم بحجم أصغر وأخفت. */
+  sublabel?: string;
 }
 
 interface BarChartProps {
@@ -99,9 +103,14 @@ export function BarChart({
     return <ChartEmpty text={emptyText} />;
   }
 
+  // v42 (الجولة 50 #3): منطقة التسميات تتوسع سطراً إضافياً عندما
+  //  يحمل أي عمود تسمية فرعية (تاريخ اليوم/السنة).
+  const hasSublabels = data.some(d => d.sublabel != null && d.sublabel !== '');
+
   const paddingLeft = 42;
   const paddingRight = 6;
-  const labelArea = 22;
+  // v42 (الجولة 50 #3): مساحة التسميات — سطر واحد أو سطران.
+  const labelArea = hasSublabels ? 34 : 22;
   const chartW = Math.max(40, width - paddingLeft - paddingRight);
   const chartH = height;
   const n = data.length;
@@ -159,7 +168,10 @@ export function BarChart({
           })}
         </G>
       </Svg>
-      {/* X labels as RN Text for proper Arabic shaping */}
+      {/* X labels as RN Text for proper Arabic shaping.
+          v42 (الجولة 50 #3): التسمية الفرعية (تاريخ اليوم/السنة)
+          تحت التسمية الرئيسية — كل عمود يعلن تاريخه بنفسه فلا
+          يضيع موضع اليوم كما كان بأسماء الأسابيع المكررة. */}
       <View
         style={{
           flexDirection: 'row-reverse',
@@ -171,6 +183,11 @@ export function BarChart({
             <Text style={styles.axisLabel} numberOfLines={1}>
               {d.label}
             </Text>
+            {hasSublabels ? (
+              <Text style={styles.axisSubLabel} numberOfLines={1}>
+                {d.sublabel ?? ''}
+              </Text>
+            ) : null}
           </View>
         ))}
       </View>
@@ -196,6 +213,14 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro,
       fontFamily: fonts.regular,
       textAlign: 'center',
+    },
+    // v42 (الجولة 50 #3): السطر الفرعي — أصغر وأخفت من الرئيسي.
+    axisSubLabel: {
+      color: c.textFaint,
+      fontSize: typography.micro - 1.5,
+      fontFamily: fonts.regular,
+      textAlign: 'center',
+      marginTop: 1,
     },
     empty: {
       alignItems: 'center',
