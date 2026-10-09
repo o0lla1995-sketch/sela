@@ -1248,7 +1248,7 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
                 val drawW = (widthPx - margin * 2).toFloat()
                 val drawH = drawW * bm.height / bm.width
                 val dst = android.graphics.RectF(
-                  margin.toFloat(), y, widthPx - margin, y + drawH
+                  margin.toFloat(), y, (widthPx - margin).toFloat(), y + drawH
                 )
                 canvas.drawBitmap(bm, null, dst, null)
                 bm.recycle()
