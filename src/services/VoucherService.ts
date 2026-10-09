@@ -190,6 +190,19 @@ export interface VoucherRedeemSuccess {
   shortfallMinor: number;
   /** The redemption row's local id (for the deferred completion). */
   localId: number;
+  /** v43 (الجولة 51 #3): TRUE when the server booked the redemption
+   *  but the LOCAL INV-V goods sale FAILED (insufficient stock, an
+   *  invoice-number conflict, a DB failure…). Before v43 that
+   *  failure was swallowed silently: the POS said «اكتمل الصرف
+   *  وسُلّمت البضاعة», the cart cleared, and the coupon value never
+   *  entered today's sales while the claim on the institution stood
+   *  — exactly the merchant's report. Now the handover is BLOCKED
+   *  exactly like needsTopUp: no receipt, no cart clear, the POS
+   *  banner carries the failure reason and the cashier completes
+   *  after fixing the cause (completeCartRedemption). */
+  saleBookingFailed: boolean;
+  /** v43: the cashier-ready Arabic reason when saleBookingFailed. */
+  bookingError: string | null;
 }
 
 export interface RedeemVoucherOptions {
@@ -226,6 +239,16 @@ export class VoucherRedeemError extends Error {
     this.name = 'VoucherRedeemError';
     this.permanent = permanent;
     this.pendingRetry = pendingRetry;
+  }
+}
+
+/** v43 (الجولة 51 #3): فشل إنشاء فاتورة البضاعة محلياً بعد نجاح
+ *  الصرف على الخادم — خطأ صلب لا يُبتلع أبداً (انظر createGoodsSale).
+ *  الرسالة عربية جاهزة للكاشير وتحمل السبب الأصلي. */
+export class VoucherSaleBookingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VoucherSaleBookingError';
   }
 }
 
@@ -269,17 +292,45 @@ async function bookRedemption(
 
 /** Creates the INV-V goods sale from a cart (cart-tied only) —
  *  plain sale + items + stock decrements, exactly like a cash sale;
- *  the claim on the institution lives in campaign_debts. A LOCAL
- *  sale failure never hides the server-side redemption truth. */
+ *  the claim on the institution lives in campaign_debts.
+ *  v43 (الجولة 51 #3): الصلب بدل الابتلاع — أي فشل في إنشاء
+ *  الفاتورة (نفاد كمية، تضارب رقم الفاتورة UNIQUE، فشل قاعدة
+ *  البيانات) يُرمى كـ VoucherSaleBookingError ولا يُخفى أبداً؛
+ *  كان الابتلاع القديم يجعل «إتمام صرف القسيمة» ينجح ظاهرياً
+ *  ويُفرّغ السلة بينما لا فاتورة في مبيعات اليوم إطلاقاً.
+ *  Idempotent: إن كانت الفاتورة موجودة سلفاً بنفس الرقم (نافذة
+ *  انهيار: الفاتورة هبطت ثم فشل ربطها بالصف) تُربط وتُعاد كما
+ *  هي بدل الانفجار بقيود UNIQUE. */
 async function createGoodsSale(
   row: VoucherRedemptionRow,
   lines: CartLine[],
   discount: number,
   pricingMode: PricingMode,
 ): Promise<{sale: SaleRecord | null; items: SaleItemRecord[]}> {
+  const ref = row.pos_receipt_ref ?? '';
+  // نافذة الانهيار: فاتورة هبطت لكن attachSale فشل — صف الصرف بلا
+  // sale_id وفاتورة يتيمة بنفس الرقم. أولاً نتبلّغ عنها ونربطها.
+  try {
+    const existing = await SaleRepo.byInvoiceNumber(ref);
+    if (existing != null) {
+      try {
+        await VouchersRepo.attachSale(row.local_id, existing.id);
+      } catch {
+        // الربط محاولة ثانية لاحقاً — المهم ألا تُنشأ فاتورة مزدوجة.
+      }
+      try {
+        const items = await SaleRepo.getItemsForSale(existing.id);
+        return {sale: existing, items};
+      } catch {
+        return {sale: existing, items: []};
+      }
+    }
+  } catch {
+    // فحص الوجود استطلاعي — نكمل الإنشاء الطبيعي.
+  }
   try {
     const created = await SaleRepo.createSale({
-      invoiceNumber: row.pos_receipt_ref ?? '',
+      invoiceNumber: ref,
       lines,
       discount,
       paymentType: pricingMode,
@@ -290,37 +341,52 @@ async function createGoodsSale(
     const message = error instanceof Error ? error.message : String(error);
     logDiag(
       'sila',
-      `صُرفت القسيمة ${
-        row.pos_receipt_ref ?? ''
-      } لكن إنشاء فاتورة البضاعة فشل: ${message}`,
+      `صُرفت القسيمة ${ref} وفشل إنشاء فاتورة البضاعة (سيُعاد من لافتة الإتمام): ${message}`,
       'warn',
     );
-    return {sale: null, items: []};
+    throw new VoucherSaleBookingError(message);
   }
 }
 
 async function bookSuccess(
   row: VoucherRedemptionRow,
   result: SilaVoucherRedeemResult,
-): Promise<{sale: SaleRecord | null; items: SaleItemRecord[]}> {
+): Promise<{
+  sale: SaleRecord | null;
+  items: SaleItemRecord[];
+  /** v43: سبب عربي إن فشل إنشاء فاتورة البضاعة (لا يُرمى —
+   *  المتصل يقرر: المسار الحي يعيده للواجهة، ومحرّك المزامنة
+   *  يسجّله ويعتمد على لافتة الاسترجاع في نقطة البيع). */
+  bookingError: string | null;
+}> {
   // 1) The redemption + the campaign claim mirror (v22 split).
   await bookRedemption(row, result);
 
   // 2) The INV-V sale from the stored snapshot (cart-tied only).
   let sale: SaleRecord | null = null;
   let items: SaleItemRecord[] = [];
+  let bookingError: string | null = null;
   const snapshot = parseSnapshot(row.cart_json);
   if (snapshot != null) {
     const booked = await VouchersRepo.byId(row.local_id);
     if (booked?.sale_id == null) {
-      const created = await createGoodsSale(
-        row,
-        snapshot.lines,
-        snapshot.discount,
-        snapshot.pricingMode,
-      );
-      sale = created.sale;
-      items = created.items;
+      try {
+        const created = await createGoodsSale(
+          row,
+          snapshot.lines,
+          snapshot.discount,
+          snapshot.pricingMode,
+        );
+        sale = created.sale;
+        items = created.items;
+      } catch (error) {
+        if (error instanceof VoucherSaleBookingError) {
+          bookingError = error.message;
+        } else {
+          bookingError =
+            error instanceof Error ? error.message : String(error);
+        }
+      }
     } else {
       // A replay whose sale already exists — load it for the receipt.
       try {
@@ -333,7 +399,7 @@ async function bookSuccess(
     }
   }
 
-  return {sale, items};
+  return {sale, items, bookingError};
 }
 
 export const VoucherService = {
@@ -422,8 +488,11 @@ export const VoucherService = {
           `كود طرد (${result.campaign_name}) صُرف من سلة البيع — حُسم من الخادم وسُجّل، ولا تُسلّم بضاعة من هنا`,
           'warn',
         );
+        // v43 (الجولة 51 #4): زر صرف الطرد حُذف من صفحة القسائم بطلب
+        //  التاجر — الرسالة لم تعد تحيل إليه؛ الطرود لم يعد لها زر
+        //  صرف في التطبيق، فالكود حُسم وسُجّل وتسويته عبر دعم صِلة.
         throw new VoucherRedeemError(
-          `هذا كود طرد لحملة «${result.campaign_name}» — الطرود تُصرف من صفحة القسائم في دفتر صِلة فقط (زر صرف الطرد).\nالكود حُسم من خادم صِلة باسم متجرك وسُجّل في سجل الصرف — لم تُنشأ فاتورة بضاعة والسلة كما هي، راجع سجل الصرف في صفحة القسائم أو تواصل مع دعم صِلة لتسويته.`,
+          `هذا كود طرد لحملة «${result.campaign_name}» — الطرود ليست قسائم شرائية ولا تُصرف من سلة البيع.\nالكود حُسم من خادم صِلة باسم متجرك وسُجّل في سجل الصرف — لم تُنشأ فاتورة بضاعة والسلة كما هي، راجع سجل الصرف في صفحة القسائم أو تواصل مع دعم صِلة لتسويته.`,
           true,
           false,
         );
@@ -465,10 +534,36 @@ export const VoucherService = {
           needsTopUp: true,
           shortfallMinor: result.value_minor - totalMinor,
           localId: row.local_id,
+          saleBookingFailed: false,
+          bookingError: null,
         };
       }
 
-      const {sale, items} = await bookSuccess(row, result);
+      const {sale, items, bookingError} = await bookSuccess(row, result);
+
+      // v43 (الجولة 51 #3): فشل إنشاء فاتورة البضاعة محلياً — الصرف
+      // محجوز على الخادم لكن لا فاتورة ولا تسليم: أعد النتيجة للواجهة
+      // كتسليم محجوب (مثل needsTopUp تماماً) — لا طباعة، لا تفريغ
+      // سلة، واللافتة في نقطة البيع تحمل السبب ويُتمّها الكاشير بعد
+      // معالجة السبب (مثلاً تحديث المخزون). كان هذا الفشل يُبتلع
+      // فتفقد مبيعات اليوم قيمة القسيمة نهائياً بينما الدين على
+      // المؤسسة قائم — بلاغ التاجر حرفياً.
+      if (bookingError != null) {
+        return {
+          result,
+          receiptRef,
+          sale: null,
+          items: [],
+          cartMinor: snapshot ? totalMinor : null,
+          counterExtraMinor: 0,
+          surplusMinor: 0,
+          needsTopUp: false,
+          shortfallMinor: 0,
+          localId: row.local_id,
+          saleBookingFailed: true,
+          bookingError,
+        };
+      }
       const counterExtra = Math.max(0, totalMinor - result.value_minor);
 
       if (options.print) {
@@ -525,6 +620,8 @@ export const VoucherService = {
         needsTopUp: false,
         shortfallMinor: 0,
         localId: row.local_id,
+        saleBookingFailed: false,
+        bookingError: null,
       };
     } catch (error) {
       // v24 (round-31 #5): a flow-mismatch error thrown above is
@@ -623,14 +720,29 @@ export const VoucherService = {
     let sale: SaleRecord | null = null;
     let items: SaleItemRecord[] = [];
     if (row.sale_id == null) {
-      const created = await createGoodsSale(
-        row,
-        cart.lines,
-        cart.discount,
-        cart.pricingMode,
-      );
-      sale = created.sale;
-      items = created.items;
+      // v43 (الجولة 51 #3): فشل إنشاء فاتورة البضاعة هنا كان يُبتلع
+      //  فيُظهر «اكتمل الصرف بنجاح» ويُفرّغ السلة بلا فاتورة — القيمة
+      //  تدخل ديون الحملات ولا تدخل مبيعات اليوم أبداً. الآن:
+      //  الخطأ يظهر للكاشير بالسبب، اللافتة والسلة تبقيان، ويُعاد
+      //  الضغط بعد معالجة السبب (لا شيء كُتب مرتين — الإجراء idempotent).
+      try {
+        const created = await createGoodsSale(
+          row,
+          cart.lines,
+          cart.discount,
+          cart.pricingMode,
+        );
+        sale = created.sale;
+        items = created.items;
+      } catch (error) {
+        const reason =
+          error instanceof Error ? error.message : String(error);
+        throw new VoucherRedeemError(
+          `فشل إنشاء فاتورة البضاعة: ${reason}\nالقسيمة مصروفة على خادم صِلة ومطالبتك على المؤسسة محفوظة، والبضاعة لم تُسلّم بعد — عالج السبب أعلاه (مثلاً حدّث كمية المخزون) ثم اضغط «إتمام الصرف» مرة أخرى`,
+          true,
+          false,
+        );
+      }
     } else {
       try {
         items = await SaleRepo.getItemsForSale(row.sale_id);
@@ -698,6 +810,8 @@ export const VoucherService = {
       needsTopUp: false,
       shortfallMinor: 0,
       localId,
+      saleBookingFailed: false,
+      bookingError: null,
     };
   },
 
@@ -725,7 +839,19 @@ export const VoucherService = {
         },
         APP_VERSION,
       );
-      await bookSuccess(row, result);
+      const booked = await bookSuccess(row, result);
+      if (booked.bookingError != null) {
+        // v43: الخادم حسم القسيمة لكن فاتورة البضاعة فشلت محلياً —
+        //  الصف بقي ok بلا sale_id؛ لافتة الاسترجاع في نقطة البيع
+        //  (incompleteCartRedemptions) تحمله للكاشير ليُتمّه بعد
+        //  معالجة السبب. لا نعيد المحاولة هنا — المزامنة تعيد نداء
+        //  الخادم فقط، والفاتورة مسؤولية الإتمام.
+        logDiag(
+          'sila',
+          `اكتمل صرف ${result.reference_code} على الخادم لكن فاتورة البضاعة فشلت (${booked.bookingError}) — ستظهر لافتة الإتمام في نقطة البيع`,
+          'warn',
+        );
+      }
       logDiag(
         'sila',
         `اكتمل صرف قسيمة ${result.reference_code} — ${result.campaign_name}`,

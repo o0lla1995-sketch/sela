@@ -423,7 +423,7 @@ describe('v24: parcel ↔ purchase separation', () => {
         cart: {lines: [cartLine(rice, 5)], discount: 0, pricingMode: 'RETAIL'},
         ...NO_PRINT,
       } as never),
-    ).rejects.toThrow('الطرود تُصرف من صفحة القسائم في دفتر صِلة فقط');
+    ).rejects.toThrow('الطرود ليست قسائم شرائية ولا تُصرف من سلة البيع');
 
     // Booked ok — but no INV-V invoice was created for the cart.
     const {VouchersRepo} = load('src/services/sila/VouchersRepo');

@@ -71,6 +71,11 @@ export const KEYS = {
   /** v20 §6: when the last settlements sync succeeded (shown on the
    *  campaigns screen as «آخر مزامنة»). */
   silaSettlementsSyncedAt: 'sila_settlements_synced_at_v1',
+  /** v43 (الجولة 51 #3): أرقام عمليات صرف القسائم (local_id) التي
+   *  ألغى التاجر إتمام تسليمها صراحة من لافتة نقطة البيع — لا
+   *  تُسترجع اللافتة لها مجدداً بعد إعادة التشغيل، والمطالبة
+   *  تبقى في دفتر الحملات كما أخبره تنبيه الإلغاء. */
+  voucherHandoverDismissed: 'voucher_handover_dismissed_v1',
   /** v28 (round-36 #4): Google Drive cloud-backup link + auto-upload
    *  state (OAuth credentials, tokens, folder, schedule, history). */
   driveClientId: 'drive_client_id_v1',

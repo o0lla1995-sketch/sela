@@ -788,6 +788,36 @@ export const VouchersRepo = {
     );
   },
 
+  /** v43 (الجولة 51 #3): عمليات الصرف المكتملة على الخادم (state='ok')
+   *  والمقيّدة بسلة (cart_json) التي لم تُنشأ لها فاتورة بضاعة بعد
+   *  (sale_id IS NULL) — قسائم شرائية فقط (المصنِّف الموحّد بالعنوان
+   *  أولاً). هذه هي لافتات الإتمام في نقطة البيع: تشمل (١) قسائم
+   *  «أكمل السلة» التي كانت تُفقد إلى الأبد بإغلاق التطبيق (كانت
+   *  state في الذاكرة فقط)، و(٢) العمليات التي فشل فيها إنشاء
+   *  فاتورة البضاعة بعد نجاح الصرف — بلاغ التاجر: القيمة دخلت
+   *  ديون الحملات ولم تدخل مبيعات اليوم. المتصل يستبني ما ألغاه
+   *  التاجر صراحة (مجموعة MMKV). */
+  async incompleteCartRedemptions(): Promise<VoucherRedemptionRow[]> {
+    try {
+      const result = await getDb().execute(
+        `SELECT * FROM voucher_redemptions
+         WHERE state = 'ok' AND sale_id IS NULL AND cart_json IS NOT NULL
+         ORDER BY redeemed_at ASC, local_id ASC`,
+      );
+      return (result.rows?._array ?? [])
+        .map(row => rowToRedemption(row as Record<string, unknown>))
+        .filter(
+          row =>
+            row.cart_json != null &&
+            row.cart_json.length > 2 &&
+            classifyCampaignKind(row.campaign_kind, row.campaign_name) ===
+              'voucher',
+        );
+    } catch {
+      return [];
+    }
+  },
+
   /** Latest mirrored settlements across campaigns (for the screen).
    *  v22 (round-28 #4): ACTIVATED campaigns only (active +
    *  completed — a completed campaign's settlements still arrive

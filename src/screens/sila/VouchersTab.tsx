@@ -88,22 +88,11 @@ const STATE_BADGE: Record<
 interface Props {
   receiptSettings: ReceiptSettings;
   printerConnected: boolean;
-  /** v24 (round-31 #4c): opens the PARCELS redemption sheet — the
-   *  sheet itself lives in SilaScreen (Screen level) because an
-   *  absolute overlay inside this tab's ScrollView sticks to the
-   *  page bottom (the scroll-to-see complaint). */
-  onOpenParcelRedeem: () => void;
-  /** v24 (round-31 #4c): bumped by SilaScreen every time the parcel
-   *  sheet closes — reloads the books (a redemption may have
-   *  landed while it was open). */
-  refreshKey: number;
 }
 
 export function VouchersTab({
   receiptSettings,
   printerConnected,
-  onOpenParcelRedeem,
-  refreshKey,
 }: Props) {
   const c = useThemeColors();
   const styles = useStyles();
@@ -151,14 +140,6 @@ export function VouchersTab({
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
-
-  // v24 (round-31 #4c): SilaScreen bumps refreshKey when the parcel
-  // sheet closes — a redemption may have landed while it was open.
-  useEffect(() => {
-    if (refreshKey > 0) {
-      void loadAll();
-    }
-  }, [refreshKey, loadAll]);
 
   // v22: the history search — debounced reload of page 0.
   useEffect(() => {
@@ -367,9 +348,7 @@ export function VouchersTab({
               {campaign.campaign_name}
             </Text>
             <Text style={styles.campaignMeta}>
-              {campaign.kind === 'parcel'
-                ? 'طرد — يُصرف من صفحة القسائم فقط'
-                : 'قسيمة شرائية — تُصرف من سلة البيع فقط'}{' '}
+              {campaign.kind === 'parcel' ? 'طرد' : 'قسيمة شرائية — تُصرف من سلة البيع فقط'}{' '}
               · {campaign.redeemed_count} عملية صرف
               {campaign.ends_at
                 ? ` · تنتهي ${campaign.ends_at.slice(0, 10)}`
@@ -495,20 +474,9 @@ export function VouchersTab({
             </Text>
           </View>
         ) : null}
-        {/* v21 → v24 (round-31 #4/#5): the standalone redemption
-            entry — PARCELS ONLY now (the button's name, hint and the
-            sheet itself all say طرد). Purchase coupons redeem from
-            the POS cart's قسيمة button and are REJECTED here. */}
-        <AppButton
-          title="صرف طرد صِلة (بدون سلة)"
-          icon="qrFrame"
-          onPress={onOpenParcelRedeem}
-          style={{marginTop: spacing.sm}}
-        />
-        <Text style={styles.parcelBtnHint}>
-          لحملات الطرود فقط — أما القسائم الشرائية فتُصرف من سلة البيع في شاشة
-          البيع (زر قسيمة)
-        </Text>
+        {/* v43 (الجولة 51 #4): زر «صرف طرد صِلة (بدون سلة)» حُذف بطلب
+            التاجر مع تلميحه — القسائم الشرائية تُصرف من سلة البيع
+            وحدها، والطرود لم يعد لها زر صرف في التطبيق. */}
       </Card>
 
       {/* v22 (round-28 #4): the two sub-views — the campaigns book
@@ -531,7 +499,7 @@ export function VouchersTab({
             title={`الحملات الفعّالة${
               activeCampaigns.length > 0 ? ` (${activeCampaigns.length})` : ''
             }`}
-            hint="المفعّلة في متجرك — حملات القسائم الشرائية يظهر زرها في سلة البيع وتُصرف منها، وحملات الطرود تُصرف من زر صرف الطرد هنا فقط"
+            hint="المفعّلة في متجرك — حملات القسائم الشرائية يظهر زرها في سلة البيع وتُصرف منها"
           />
           {activeCampaigns.length === 0 && !loading ? (
             <EmptyState
@@ -623,7 +591,7 @@ export function VouchersTab({
                             </Text>
                             <Text style={styles.campaignMeta}>
                               {campaign.kind === 'parcel'
-                                ? 'طرد — يُصرف من صفحة القسائم'
+                                ? 'طرد'
                                 : 'قسيمة شرائية — تُصرف من سلة البيع'}
                               {campaign.merchant_status === 'accepted'
                                 ? ' · متعاقد فيها'
@@ -855,14 +823,6 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.micro,
       lineHeight: 15,
-    },
-    /** v24 (round-31 #4/#5): the parcels-only button's charter. */
-    parcelBtnHint: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro,
-      lineHeight: 15,
-      textAlign: 'center',
     },
     /** v22 (round-28 #4): the campaign/history search boxes. */
     searchBox: {

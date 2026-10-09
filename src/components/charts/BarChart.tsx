@@ -107,8 +107,13 @@ export function BarChart({
   //  يحمل أي عمود تسمية فرعية (تاريخ اليوم/السنة).
   const hasSublabels = data.some(d => d.sublabel != null && d.sublabel !== '');
 
-  const paddingLeft = 42;
-  const paddingRight = 6;
+  // v43 (الجولة 51 #1): محور القيم إلى اليمين — التطبيق كله RTL
+  //  فكان محور القيم في اليسار غريباً عن عين التاجر («عمود اتجاه
+  //  القيمة في اليسار وليس اليمين»). البادينغ العريض انتقل لليمين
+  //  حيث تُرسم تسميات القيم، والأعمدة وتسميات الأيام بقيت كما
+  //  هي تماماً (أول عنصر عن اليمين) — لا شيء آخر تغيّر في الرسم.
+  const paddingLeft = 6;
+  const paddingRight = 42;
   // v42 (الجولة 50 #3): مساحة التسميات — سطر واحد أو سطران.
   const labelArea = hasSublabels ? 34 : 22;
   const chartW = Math.max(40, width - paddingLeft - paddingRight);
@@ -133,10 +138,13 @@ export function BarChart({
                   stroke={c.borderSoft}
                   strokeWidth={i === 0 ? 1.2 : 1}
                 />
+                {/* v43: التسمية على يمين الرسم — تبدأ من حافة منطقة
+                    المحور وتمتد يميناً (textAnchor=start) بدل
+                    المرساة اليسرى القديمة. */}
                 <SvgText
-                  x={paddingLeft - 6}
+                  x={width - paddingRight + 6}
                   y={y + 3.5}
-                  textAnchor="end"
+                  textAnchor="start"
                   fill={c.textFaint}
                   fontSize={typography.micro}
                   fontFamily={fonts.regular}>

@@ -77,13 +77,19 @@ interface Props {
   /** v22 (round-28 #1): fired when the voucher turned out BIGGER
    *  than the cart — the redemption is booked server-side but no
    *  goods may be handed over; the POS shows the pending-voucher
-   *  banner and the cashier completes after topping the cart up. */
+   *  banner and the cashier completes after topping the cart up.
+   *  v43 (الجولة 51 #3): يُستخدم أيضاً حين فشل إنشاء فاتورة البضاعة
+   *  محلياً بعد نجاح الصرف (saleBookingFailed) — نفس اللافتة تحمل
+   *  السبب في bookingError ويُتمّها الكاشير بعد معالجة السبب. */
   onNeedsTopUp?: (info: {
     localId: number;
     valueMinor: number;
     campaignName: string;
     shortfallMinor: number;
     receiptRef: string;
+    /** v43: سبب فشل إنشاء الفاتورة (عندما يكون التسليم محجوباً
+     *  لفشل الحجز المحلي لا لنقص السلة). */
+    bookingError?: string;
   }) => void;
 }
 
@@ -122,7 +128,8 @@ export function VoucherRedeemSheet({
   const [scanBusy, setScanBusy] = useState(false);
 
   /** v22 (round-28 #1): the blocked handover — tell the POS (the
-   *  banner + the deferred completion) and close the sheet. */
+   *  banner + the deferred completion) and close the sheet.
+   *  v43: bookingError (فشل حجز الفاتورة) يسافر مع اللافتة أيضاً. */
   const handleNeedsTopUp = useCallback(
     (data: VoucherRedeemSuccess) => {
       onNeedsTopUp?.({
@@ -131,6 +138,7 @@ export function VoucherRedeemSheet({
         campaignName: data.result.campaign_name,
         shortfallMinor: data.shortfallMinor,
         receiptRef: data.receiptRef,
+        bookingError: data.bookingError ?? undefined,
       });
       onClose();
     },
@@ -194,6 +202,29 @@ export function VoucherRedeemSheet({
           onPrintError: message =>
             toast(`تم الصرف لكن الطباعة فشلت: ${message}`, 'error'),
         });
+        // v43 (الجولة 51 #3): الصرف نجح على الخادم لكن فاتورة البضاعة
+        //  فشلت محلياً — لا شاشة نجاح (لا تسليم!): اللافتة في نقطة
+        //  البيع تحمل السبب والسلة محفوظة كما هي، والرسالة الصريحة
+        //  تشرح ما جرى. كان هذا المسار يُظهر النجاح ويُفرّغ السلة
+        //  فتضيع القيمة من مبيعات اليوم نهائياً (بلاغ التاجر).
+        if (success.saleBookingFailed) {
+          onNeedsTopUp?.({
+            localId: success.localId,
+            valueMinor: success.result.value_minor,
+            campaignName: success.result.campaign_name,
+            shortfallMinor: 0,
+            receiptRef: success.receiptRef,
+            bookingError: success.bookingError ?? undefined,
+          });
+          onClose();
+          toast(
+            success.bookingError ??
+              'فشل إنشاء فاتورة البضاعة — أكمل العملية من لافتة القسيمة في شاشة البيع بعد معالجة السبب',
+            'error',
+            6000,
+          );
+          return;
+        }
         setStep({phase: 'success', data: success});
         // v22 (round-28 #1): the needs-top-up path keeps the cart —
         // onRedeemed (which clears it) fires on the COMPLETED path
@@ -221,7 +252,7 @@ export function VoucherRedeemSheet({
         }
       }
     },
-    [pairing, flow, cart, printerConnected, receiptSettings, toast, onRedeemed],
+    [pairing, flow, cart, printerConnected, receiptSettings, toast, onRedeemed, onNeedsTopUp, onClose],
   );
 
   const runScan = useCallback(async () => {

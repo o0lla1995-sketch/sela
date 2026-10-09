@@ -46,6 +46,8 @@ import {useToastStore} from '../stores/toastStore';
 import {useSilaStore} from '../stores/silaStore';
 import {InvoiceService} from '../services/InvoiceService';
 import {VoucherService, VoucherRedeemError} from '../services/VoucherService';
+import {VouchersRepo} from '../services/sila/VouchersRepo';
+import {getJson, setJson, KEYS} from '../storage/storage';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {VariantRepo} from '../database/repositories/VariantRepo';
@@ -269,6 +271,55 @@ export function PosScreen({
    *  — they wait here and their weight pads open one by one when the
    *  scanner closes (the Loyverse scale-item pattern). */
   const [pendingWeight, setPendingWeight] = useState<Product[]>([]);
+  /** v43 (الجولة 51 #5): مرايا النافذتين المفتوحتين — سباق ازدواج
+   *  الالتقاط/القراءة (ضغطة مصرّاعين متتابعتين أو قراءة باركود
+   *  مكررة قبل أن يهبط closeScannerNow) كانت تُدخل المنتج نفسه في
+   *  الطابور مرة ثانية بعد أن فُتحت نافذته، فتفتح نافذة البيع
+   *  مرتين (بلاغ التاجر). المرآة تُقرأ لحظة الإدراج فتُقصّ التكرار
+   *  حتى والنافذة مفتوحة — الفحص القديم كان يرى الطابور فقط وقد
+   *  فرغته النافذة. */
+  const saleSheetRef = useRef<{
+    kind: 'clothing' | 'sizes' | 'unit';
+    product: Product;
+  } | null>(null);
+  const weightProductRef = useRef<Product | null>(null);
+  useEffect(() => {
+    saleSheetRef.current = saleSheet;
+  }, [saleSheet]);
+  useEffect(() => {
+    weightProductRef.current = weightProduct;
+  }, [weightProduct]);
+  /** v43: إدراج نافذة بيع في الطابور — مضاد للتكرار ضد الطابور
+   *  والنافذة المفتوحة الآن معاً. */
+  const queueSaleSheet = useCallback((product: Product) => {
+    setPendingSheets(prev => {
+      if (prev.some(p => p.id === product.id)) {
+        return prev;
+      }
+      if (
+        saleSheetRef.current != null &&
+        saleSheetRef.current.product.id === product.id
+      ) {
+        return prev;
+      }
+      return [...prev, product];
+    });
+  }, []);
+  /** v43: إدراج لوحة وزن في الطابور — نفس الحماية. */
+  const queueWeightPad = useCallback((product: Product) => {
+    setPendingWeight(prev => {
+      if (prev.some(entry => entry.id === product.id)) {
+        return prev;
+      }
+      if (
+        weightProductRef.current != null &&
+        weightProductRef.current.id === product.id
+      ) {
+        return prev;
+      }
+      return [...prev, product];
+    });
+  }, []);
   /** v9 (round-13 #1): the visual-scan candidate strip — an INLINE
    *  row (a regular View, NOT a Modal: this ROM renders RN Modals
    *  black right after the native scanner window closes, the exact
@@ -310,7 +361,11 @@ export function PosScreen({
   /** v22 (round-28 #1): voucher redemptions the server ACCEPTED but
    *  whose cart was SMALLER than the voucher — the handover is
    *  blocked until the cashier tops the cart up (to the voucher
-   *  value at least) and completes from the banner. */
+   *  value at least) and completes from the banner.
+   *  v43 (الجولة 51 #3): bookingError — حين فشل إنشاء فاتورة البضاعة
+   *  محلياً بعد نجاح الصرف (نفس اللافتة، والسبب معروض)، واللافتة
+   *  الآن تُستعاد من قاعدة البيانات عند فتح الشاشة (لا تضيع بإعادة
+   *  تشغيل التطبيق) ما لم يُلغها التاجر صراحة. */
   const [pendingVouchers, setPendingVouchers] = useState<
     {
       localId: number;
@@ -318,6 +373,7 @@ export function PosScreen({
       campaignName: string;
       shortfallMinor: number;
       receiptRef: string;
+      bookingError?: string;
     }[]
   >([]);
   const [voucherBusy, setVoucherBusy] = useState(false);
@@ -357,6 +413,61 @@ export function PosScreen({
     });
     return unsubscribe;
   }, [navigation]);
+
+  /** v43 (الجولة 51 #3): استرجاع لافتات الإتمام من قاعدة البيانات —
+   *  كل عملية صرف قسيمة ناجحة على الخادم ومقيّدة بسلة بلا فاتورة
+   *  بضاعة بعد (قسيمة «أكمل السلة» أو فشل إنشاء الفاتورة) تظهر
+   *  لافتتها هنا عند فتح الشاشة وعند كل عودة إليها. قبل v43 كانت
+   *  اللافتات في الذاكرة فقط: إغلاق التطبيق يفقدها إلى الأبد،
+   *  وفشل الفاتورة الصامت يجعل القيمة تدخل ديون الحملات ولا تدخل
+   *  مبيعات اليوم أبداً (بلاغ التاجر). ما ألغاه التاجر صراحة يُحترم
+   *  (مجموعة MMKV) — والمطالبة تبقى في دفتر الحملات كما وُعد.
+   *  لا تُسترجع إلا القسائم الشرائية (المصنّف الموحّد). */
+  const recoverPendingVouchers = useCallback(async () => {
+    try {
+      const rows = await VouchersRepo.incompleteCartRedemptions();
+      if (rows.length === 0) {
+        return;
+      }
+      const dismissed = new Set<number>(
+        getJson<number[]>(KEYS.voucherHandoverDismissed, []),
+      );
+      const recovered = rows
+        .filter(row => !dismissed.has(row.local_id))
+        .map(row => ({
+          localId: row.local_id,
+          valueMinor: row.value_minor,
+          campaignName: row.campaign_name ?? 'حملة صِلة',
+          shortfallMinor: 0,
+          receiptRef: row.pos_receipt_ref ?? '',
+        }));
+      if (recovered.length === 0) {
+        return;
+      }
+      setPendingVouchers(previous => {
+        const merged = [...previous];
+        for (const item of recovered) {
+          if (!merged.some(entry => entry.localId === item.localId)) {
+            merged.push(item);
+          }
+        }
+        return merged;
+      });
+    } catch {
+      // قاعدة بيانات فتية قبل أول ترحيل — بلا لافتات.
+    }
+  }, []);
+
+  useEffect(() => {
+    void recoverPendingVouchers();
+  }, [recoverPendingVouchers]);
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      void recoverPendingVouchers();
+    });
+    return unsubscribe;
+  }, [navigation, recoverPendingVouchers]);
 
   /** v22 (round-28 #1): completes a blocked (needs-top-up) voucher
    *  redemption — the server already redeemed it, the cashier has
@@ -442,7 +553,10 @@ export function PosScreen({
 
   /** v22 (round-28 #1): drop a blocked redemption's banner — the
    *  claim stays recorded in دفتر الحملات (the server redeemed the
-   *  voucher); the merchant completes the handover manually. */
+   *  voucher); the merchant completes the handover manually.
+   *  v43 (الجولة 51 #3): الإلغاء يُحفظ في MMKV — لافتة الاسترجاع
+   *  عند فتح الشاشة لا تُعيدها (قرار التاجر يُحترم)، والمطالبة
+   *  تبقى في دفتر الحملات كما أخبره التنبيه. */
   const dismissPendingVoucher = useCallback((localId: number) => {
     Alert.alert(
       'إلغاء إتمام القسيمة',
@@ -452,10 +566,25 @@ export function PosScreen({
         {
           text: 'إلغاء الإتمام',
           style: 'destructive',
-          onPress: () =>
+          onPress: () => {
             setPendingVouchers(previous =>
               previous.filter(item => item.localId !== localId),
-            ),
+            );
+            try {
+              const dismissed = getJson<number[]>(
+                KEYS.voucherHandoverDismissed,
+                [],
+              );
+              if (!dismissed.includes(localId)) {
+                setJson(KEYS.voucherHandoverDismissed, [
+                  ...dismissed,
+                  localId,
+                ]);
+              }
+            } catch {
+              // الحفظ استطلاعي — الإلغاء يعمل لهذه الجلسة على الأقل.
+            }
+          },
         },
       ],
     );
@@ -713,11 +842,9 @@ export function PosScreen({
             //  (طلب التاجر حرفياً: «فور التقاطه والتعرف عليه أن يفتح
             //  نافذة البيع الخاصة به»). الكشف عن باقي الأصناف في
             //  الصورة نفسها يكتمل أولاً ثم تُغلق النافذة.
-            setPendingWeight(prev =>
-              prev.some(entry => entry.id === product.id)
-                ? prev
-                : [...prev, product],
-            );
+            // v43 (الجولة 51 #5): الإدراج عبر الدالة المدمجة — يفحص
+            //  الطابور والنافذة المفتوحة معاً فيقتل التكرار.
+            queueWeightPad(product);
             void closeScannerNow();
             return {
               part: `${product.name} — أدخل وزنه الآن`,
@@ -754,9 +881,7 @@ export function PosScreen({
               product.id,
               (session.counts.get(product.id) ?? 0) + 1,
             );
-            setPendingSheets(prev =>
-              prev.some(p => p.id === product.id) ? prev : [...prev, product],
-            );
+            queueSaleSheet(product);
             void closeScannerNow();
             return {
               part: `${product.name} — اختر الخصائص الآن`,
@@ -940,7 +1065,9 @@ export function PosScreen({
         }
       }
     },
-    [addProduct, beep],
+    // v43 (الجولة 51 #5): مساعدات الإدراج المضادة للتكرار دخلت
+    //  التبعيات (ثابتة المستقر بذاتها).
+    [addProduct, beep, queueSaleSheet, queueWeightPad],
   );
 
   /** v9.2: the post-close settle step shared by the visual and
@@ -954,7 +1081,15 @@ export function PosScreen({
           const merged = [...prev];
           for (const product of session.weightQueue) {
             if (!merged.some(entry => entry.id === product.id)) {
-              merged.push(product);
+              // v43 (الجولة 51 #5): الدمج يفحص اللوحة المفتوحة الآن
+              //  أيضاً — آخر صورة في الطابور قد تكون تكراراً لمنتج
+              //  فُتحت لوحته للتو.
+              if (
+                weightProductRef.current == null ||
+                weightProductRef.current.id !== product.id
+              ) {
+                merged.push(product);
+              }
             }
           }
           return merged;
@@ -1131,11 +1266,9 @@ export function PosScreen({
                 reason: `نفدت الكمية — ${product.name}`,
               };
             }
-            setPendingWeight(prev =>
-              prev.some(entry => entry.id === product.id)
-                ? prev
-                : [...prev, product],
-            );
+            // v43 (الجولة 51 #5): الإدراج عبر الدالة المدمجة — يفحص
+            //  الطابور والنافذة المفتوحة معاً فيقتل التكرار.
+            queueWeightPad(product);
             beep();
             // v39 (الجولة 47 #2+#7): منتج وزن — سعره لا يعرفه إلا
             //  لوحة الوزن (الوزن يُدخل يدوياً والباركود لا يستطيع
@@ -1161,9 +1294,7 @@ export function PosScreen({
               v => v.kind === 'variant' || v.kind === 'size',
             )
           ) {
-            setPendingSheets(prev =>
-              prev.some(p => p.id === product.id) ? prev : [...prev, product],
-            );
+            queueSaleSheet(product);
             beep();
             await closeScannerNow();
             return {status: 'queued', name: product.name};
@@ -1223,7 +1354,9 @@ export function PosScreen({
         };
       }
     },
-    [addProduct, beep],
+    // v43 (الجولة 51 #5): مساعدات الإدراج المضادة للتكرار — نفس
+    //  حماية البصري لمسار الباركود (قراءة مكررة قبل هبوط الإغلاق).
+    [addProduct, beep, queueSaleSheet, queueWeightPad],
   );
 
   /**
@@ -2937,16 +3070,30 @@ export function PosScreen({
                     pending.valueMinor - totalMinor,
                   );
                   const ready = lines.length > 0 && remaining === 0;
+                  // v43 (الجولة 51 #3): لافتة فشل حجز الفاتورة — نفس
+                  //  مكان لافتة «أكمل السلة» لكن السبب واضح: القسيمة
+                  //  مصروفة والفاتورة لم تُنشأ (نفاد كمية مثلاً)؛
+                  //  عالج السبب ثم اضغط إتمام الصرف.
+                  const bookingBlocked = pending.bookingError != null;
                   return (
                     <View
                       key={pending.localId}
                       style={styles.pendingVoucherBox}>
                       <View style={styles.pendingVoucherHead}>
-                        <Icon name="ticket" size={15} color={c.warning} />
+                        <Icon
+                          name="ticket"
+                          size={15}
+                          color={bookingBlocked ? c.danger : c.warning}
+                        />
                         <Text
-                          style={styles.pendingVoucherTitle}
+                          style={[
+                            styles.pendingVoucherTitle,
+                            bookingBlocked ? {color: c.danger} : null,
+                          ]}
                           numberOfLines={1}>
-                          قسيمة «{pending.campaignName}» بانتظار إكمال السلة
+                          {bookingBlocked
+                            ? `قسيمة «${pending.campaignName}» بلا فاتورة بضاعة`
+                            : `قسيمة «${pending.campaignName}» بانتظار إكمال السلة`}
                         </Text>
                         <TouchableOpacity
                           onPress={() => dismissPendingVoucher(pending.localId)}
@@ -2959,17 +3106,34 @@ export function PosScreen({
                         السلة الآن {formatMoney(totals.total)} · الإيصال{' '}
                         {pending.receiptRef}
                       </Text>
-                      <Text
-                        style={[
-                          styles.pendingVoucherHint,
-                          ready ? {color: c.success} : null,
-                        ]}>
-                        {ready
-                          ? 'السلة غطّت قيمة القسيمة — اضغط إتمام الصرف لتسليم البضاعة'
-                          : `أضف بضاعة بفارق ${formatMoney(
-                              remaining / 100,
-                            )} على الأقل حتى تكتمل السلة`}
-                      </Text>
+                      {bookingBlocked ? (
+                        <>
+                          <Text
+                            style={[
+                              styles.pendingVoucherHint,
+                              {color: c.danger},
+                            ]}>
+                            فشل إنشاء فاتورة البضاعة: {pending.bookingError}
+                          </Text>
+                          <Text style={styles.pendingVoucherHint}>
+                            عالج السبب أعلاه (مثلاً حدّث كمية المخزون) ثم
+                            اضغط إتمام الصرف — القسيمة مصروفة ومطالبتك
+                            على المؤسسة محفوظة، والبضاعة لم تُسلّم بعد
+                          </Text>
+                        </>
+                      ) : (
+                        <Text
+                          style={[
+                            styles.pendingVoucherHint,
+                            ready ? {color: c.success} : null,
+                          ]}>
+                          {ready
+                            ? 'السلة غطّت قيمة القسيمة — اضغط إتمام الصرف لتسليم البضاعة'
+                            : `أضف بضاعة بفارق ${formatMoney(
+                                remaining / 100,
+                              )} على الأقل حتى تكتمل السلة`}
+                        </Text>
+                      )}
                       <View style={styles.pendingVoucherActions}>
                         <AppButton
                           title="إتمام الصرف وتسليم البضاعة"

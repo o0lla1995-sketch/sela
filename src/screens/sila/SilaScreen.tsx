@@ -81,7 +81,6 @@ import type {SilaDebtRow, SilaCustomer, SilaPaymentRow} from '../../core/types';
 import {uuidV4} from '../../services/sila/qr';
 import {VouchersRepo} from '../../services/sila/VouchersRepo';
 import {VouchersTab} from './VouchersTab';
-import {VoucherRedeemSheet} from './VoucherRedeemSheet';
 
 type SilaTab = 'overview' | 'debts' | 'customers' | 'payments' | 'vouchers';
 type DebtFilter = 'all' | 'pending' | 'failed' | 'synced';
@@ -181,15 +180,8 @@ export function SilaScreen() {
   const [payAmountText, setPayAmountText] = useState('');
   const [payBusy, setPayBusy] = useState(false);
 
-  // v24 (round-31 #4c): the PARCEL redemption sheet lives HERE, at
-  // the Screen level — an absolute overlay rendered inside the
-  // VouchersTab sticks to the ScrollView's CONTENT (the merchant's
-  // «النافذة تظهر أسفل الصفحة ونضطر للسكرول» complaint); hoisted
-  // out it always covers the visible screen. Parcels ONLY (the
-  // tab's button passes mode='parcel'). refreshKey bumps on every
-  // close so the tab reloads whatever landed while it was open.
-  const [parcelSheetOpen, setParcelSheetOpen] = useState(false);
-  const [parcelRefresh, setParcelRefresh] = useState(0);
+  // v43 (الجولة 51 #4): نافذة صرف الطرود (بدون سلة) حُذفت بطلب
+  // التاجر مع زرها من صفحة القسائم — لا حالة لها هنا بعد اليوم.
 
   // ── v20: the campaigns headline (Σ server-stated dues) shown on
   // the overview — the §4.2 indicator the merchant should see.
@@ -426,7 +418,62 @@ export function SilaScreen() {
     }
   }, [doPair, pairingBusy, setPairingBusy, toast]);
 
-  const confirmUnpair = useCallback(() => {
+  /** v43 (الجولة 51 #2): فك الربط محكوم بتسديد الديون أولاً — طلب
+   *  التاجر نصاً: «إذا أراد المستخدم فك ارتباط المتجر بتطبيق صِلة
+   *  وكان هناك ديون على زبائن صِلة الخاصين بهذا المتجر يجب أن
+   *  يُسدَّد الدين قبل فك الارتباط». الفحص يجري لحظة الضغط (لا يعتمد
+   *  على أرقام محمّلة مسبقاً قد تكون قديمة): دين متجرك من دفاترك
+   *  المحلية (فواتير INV-D بعد كل السدادّات والتحصيلات) + دين هذه
+   *  النقطة كما يذكره خادم صِلة (يغطي فواتير من اقتران سابق أو
+   *  نسخة احتياطية مستعادة). أي رقم فوق الصفر = الفك ممنوع برسالة
+   *  تحمل المبلغ وعدد المدينين وتوجيه التاجر للتسديد ثم المزامنة. */
+  const confirmUnpair = useCallback(async () => {
+    let ownMinor = 0;
+    let ownDebtors = 0;
+    let deviceMinor = 0;
+    try {
+      const [own, server] = await Promise.all([
+        SilaRepo.storeOwnOutstandingTotal(),
+        SilaRepo.customersOutstandingTotal(),
+      ]);
+      ownMinor = own.ownMinor;
+      ownDebtors = own.debtorsCount;
+      deviceMinor = server.deviceTotalMinor;
+    } catch {
+      // تعذر الفحص — لا نفك الربط على عمياء؛ الرسالة تطلب المحاولة
+      // بعد الاتصال (الأأمن للديون).
+      Alert.alert(
+        'تعذر التحقق من الديون',
+        'لا يمكن فك الربط قبل التأكد من عدم وجود ديون على زبائن صِلة المرتبطين بمتجرك. تحقق من اتصال الإنترنت واضغط فك الربط مرة أخرى.',
+        [{text: 'حسناً', style: 'cancel'}],
+      );
+      return;
+    }
+    if (ownMinor > 0 || deviceMinor > 0) {
+      const lines: string[] = [];
+      if (ownMinor > 0) {
+        lines.push(
+          `• دين زبائن صِلة من فواتير متجرك: ${formatMoney(
+            ownMinor / 100,
+          )} على ${ownDebtors} زبون.`,
+        );
+      }
+      if (deviceMinor > 0 && deviceMinor !== ownMinor) {
+        lines.push(
+          `• ديون هذه النقطة كما يذكرها خادم صِلة: ${formatMoney(
+            deviceMinor / 100,
+          )}.`,
+        );
+      }
+      Alert.alert(
+        'لا يمكن فك الربط — عليك تسديد الديون أولاً',
+        `فك ارتباط المتجر بتطبيق صِلة ممنوع ما دام هناك ديون على زبائن صِلة المرتبطين بهذا المتجر:\n\n${lines.join(
+          '\n',
+        )}\n\nسدّد هذه الديون من الكاشير أو عبر تطبيق صِلة (أو اقبضها من الزبائن)، ثم اضغط «زامن الآن» ليستقر الرصيد، وبعدها يمكن فك الربط.`,
+        [{text: 'حسناً', style: 'cancel'}],
+      );
+      return;
+    }
     Alert.alert(
       'فك ربط صِلة',
       'سيُلغى ربط هذا الجهاز بحساب التاجر. الديون المسجلة محلياً تبقى محفوظة ويمكن مزامنتها بعد إعادة الربط.',
@@ -1528,8 +1575,6 @@ export function SilaScreen() {
                   showProfit: settings.showProfitOnReceipt,
                 }}
                 printerConnected={printerStatus === 'connected'}
-                onOpenParcelRedeem={() => setParcelSheetOpen(true)}
-                refreshKey={parcelRefresh}
               />
             ) : (
               renderPayments()
@@ -1545,32 +1590,6 @@ export function SilaScreen() {
             at the Screen level it always covers the visible screen.
             STRICT validation + overpayment confirmation. */}
       </ScrollView>
-      {parcelSheetOpen ? (
-        /* v24 (round-31 #4c/#5): the PARCELS-only redemption sheet —
-            hoisted to the Screen level (an absolute overlay inside
-            the VouchersTab's ScrollView sticks to the page bottom).
-            mode='parcel': purchase coupons are rejected here and
-            belong to the POS cart only. */
-        <VoucherRedeemSheet
-          visible={parcelSheetOpen}
-          mode="parcel"
-          onClose={() => {
-            setParcelSheetOpen(false);
-            setParcelRefresh(key => key + 1);
-          }}
-          cart={null}
-          receiptSettings={{
-            storeName: settings.storeName,
-            storePhone: settings.storePhone,
-            footerMessage: settings.footerMessage,
-            storeLogoPath: settings.storeLogoPath,
-            paperWidth: settings.paperWidth,
-            codepage: settings.codepage,
-            showProfit: settings.showProfitOnReceipt,
-          }}
-          printerConnected={printerStatus === 'connected'}
-        />
-      ) : null}
       {paySheet != null ? (
         <View style={styles.payOverlay}>
           <TouchableOpacity
