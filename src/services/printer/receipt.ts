@@ -89,10 +89,10 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
       data.productNameById.get(item.product_id) ?? `#${item.product_id}`;
     // v35 (الجولة 43): وصف المتغير (لون · مقاس / حجم / ربطة) بعد
     //  الاسم — الفاتورة تميز ما بيع تحديداً من كل موديل.
-    const variantSuffix =
-      (item as {variant_label?: string | null}).variant_label
-        ? ` (${(item as {variant_label?: string | null}).variant_label})`
-        : '';
+    const variantSuffix = (item as {variant_label?: string | null})
+      .variant_label
+      ? ` (${(item as {variant_label?: string | null}).variant_label})`
+      : '';
     const unitSuffix =
       item.unit_name && item.unit_name !== 'قطعة' ? ` (${item.unit_name})` : '';
     b.truncate(`${name}${variantSuffix}${unitSuffix}`, width);
@@ -131,7 +131,17 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
   //  printed receipt from the invoices center's قارئ الباركود and
   //  the exact invoice opens instantly (returns, reprints, debt
   //  collection). HRI off; the number is already printed above.
-  b.align(1).barcode('CODE128', data.sale.invoice_number, 60).feed(3).cut();
+  //  v41 (الجولة 49 #2): GS w بعرض وحدة محسوب يتسع داخل الورق —
+  //  رقم الفاتورة (17 محرفاً = 222 وحدة) كان يتجاوز 58مم فيخرج
+  //  الباركود مشوهاً لا يقرؤه الماسح.
+  const invoiceModuleWidth = b.barcodeModuleWidthFor(
+    b.code128Modules(data.sale.invoice_number.length),
+    rasterWidth,
+  );
+  b.align(1)
+    .barcode('CODE128', data.sale.invoice_number, 60, invoiceModuleWidth)
+    .feed(3)
+    .cut();
 
   return b.build();
 }

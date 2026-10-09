@@ -48,6 +48,7 @@ import {InvoiceService} from '../services/InvoiceService';
 import {VoucherService, VoucherRedeemError} from '../services/VoucherService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
+import {VariantRepo} from '../database/repositories/VariantRepo';
 import {SilaRepo} from '../services/sila/SilaRepo';
 import {SilaSync} from '../services/sila/SilaSync';
 import {parseSilaQr} from '../services/sila/qr';
@@ -1084,7 +1085,23 @@ export function PosScreen({
     async (code: string): Promise<BarcodeOutcome | void> => {
       try {
         // 1. Base product barcode.
-        const product = await ProductRepo.findByBarcode(code);
+        // v41 (الجولة 49 #4): جذر «الماسح لا يفتح نافذة البيع» —
+        //  findByBarcode يعيد صف المنتج الخام من قاعدة البيانات بلا
+        //  مصفوفة المتغيرات (variants)، فكان فحص الخصائص تحته يسقط
+        //  دائماً ويُضاف منتج الملابس/الأحجام للسلة مباشرة بوحدة
+        //  الأساس. الحل: إن كان العلم has_variants مرفوعاً نحمّل
+        //  صفوف متغيراته الحية ونلصقها به قبل أي قرار — فيعمل مسار
+        //  «أغلق الماسح وافتح نافذة البيع» الموجود أصلاً كما صُمم.
+        const found = await ProductRepo.findByBarcode(code);
+        const product =
+          found != null &&
+          found.has_variants === 1 &&
+          (found.variants ?? []).length === 0
+            ? {
+                ...found,
+                variants: await VariantRepo.listByProduct(found.id),
+              }
+            : found;
         if (product != null) {
           if (isWeightProduct(product)) {
             // v10 (round-16 #3): an exhausted WEIGHT product must not
@@ -2111,7 +2128,10 @@ export function PosScreen({
             {/* v40 (الجولة 48 #5): زر شكل عرض المنتجات بجانب جملة/مفرق —
                 يفتح لوحة INLINE صغيرة (لا Modal — درس الروم) لاختيار
                 شكل المنتجات في نقطة البيع؛ الشكل الافتراضي هو الحالي
-                (الشبكة) ويُحفظ الاختيار في الإعدادات. */}
+                (الشبكة) ويُحفظ الاختيار في الإعدادات.
+                v41 (الجولة 49 #1): لم يعد أيقونة صغيرة معتمة في أقصى
+                يسار الصف — زر معنون «الشكل» بخلفية برتقالية هادئة
+                وظاهر بوضوح، فلا يمر عليه التاجر دون أن يراه. */}
             <TouchableOpacity
               style={[
                 styles.viewShapeBtn,
@@ -2130,11 +2150,20 @@ export function PosScreen({
                     ? 'layoutCards'
                     : 'layoutGrid'
                 }
-                size={16}
+                size={17}
                 color={
-                  viewPickerOpen || posView !== 'grid' ? c.accent : c.textDim
+                  viewPickerOpen || posView !== 'grid' ? c.accent : c.text
                 }
               />
+              <Text
+                style={[
+                  styles.viewShapeBtnText,
+                  viewPickerOpen || posView !== 'grid'
+                    ? {color: c.accent}
+                    : null,
+                ]}>
+                الشكل
+              </Text>
               <Icon name="chevronDown" size={9} color={c.textFaint} />
             </TouchableOpacity>
           </View>
@@ -4535,13 +4564,20 @@ const useStyles = makeStyles(c =>
     viewShapeBtn: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 1,
+      gap: 6,
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: radius.md,
-      paddingHorizontal: 9,
+      paddingHorizontal: 12,
       height: 38,
-      backgroundColor: c.surface,
+      // v41 (الجولة 49 #1): خلفية برتقالية هادئة — الزر مرئي بوضوح
+      //  بجانب جملة/مفرق بدل أيقونة معتمة مدفونة في الزاوية.
+      backgroundColor: c.accentSoft,
+    },
+    viewShapeBtnText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: 12.5,
     },
     // v40: لوحة اختيار الشكل — INLINE في مجرى الشاشة.
     viewPickerPanel: {

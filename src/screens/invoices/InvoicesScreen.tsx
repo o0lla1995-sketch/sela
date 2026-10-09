@@ -12,7 +12,7 @@
  *     grand total — and إعادة الطباعة reprint on the thermal
  *     printer with the store's receipt settings.
  */
-import React, {useCallback, useEffect, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -2060,7 +2060,67 @@ interface ExchangePick {
  * والبدائل يُسوّى عند التأكيد (نقد أو دين) — v40 (الجولة 48 #2).
  * فقط المخزون (المرتجع يعود عند التنفيذ والبديل يخرج).
  * Inline overlay — NEVER a RN Modal (نفس درس هذا الروم).
+ *
+ * v41 (الجولة 49 #3): كان تبديل الوحدات في رقائق المنتج المفتوح
+ * بطيئاً بشكل ملحوظ — كل ضغطة على رقاقة وحدة تعيد رسم النافذة
+ * بأكملها، وexcStyles(c) كانت تُستدعى داخل كل عنصر JSX (٤٦ موضعاً)،
+ * وكل استدعاء يبني StyleSheet.create كاملة بعشرات الأنماط، فضلاً
+ * عن إعادة رسم قائمة النتائج (حتى ٨٠ صفاً) بلا أي سبب. الإصلاح:
+ *  1) ذاكرة أنماط على مستوى الوحدة مفتاحها لوحة الألوان المستقرة
+ *     من المتجر — تُبنى الأنماط مرة واحدة لكل ثيم.
+ *  2) صفوف النتائج مكوّن مذكّر (React.memo) بدالة فتح مستقرة عبر
+ *     ref — فلا تُلمس القائمة إطلاقاً عند تبديل الوحدات/المتغيرات.
  */
+
+/** v41: ذاكرة أنماط ExchangeSheet — مفتاحها كائن اللوحة المستقر
+ *  من useThemeColors (zustand يعيد نفس المرجع ما لم يتغير الثيم). */
+let exchangeStylesCache: {
+  theme: ReturnType<typeof useThemeColors>;
+  styles: ReturnType<typeof excStyles>;
+} | null = null;
+
+function exchangeStyles(c: ReturnType<typeof useThemeColors>) {
+  if (exchangeStylesCache != null && exchangeStylesCache.theme === c) {
+    return exchangeStylesCache.styles;
+  }
+  const built = excStyles(c);
+  exchangeStylesCache = {theme: c, styles: built};
+  return built;
+}
+
+/** v41 (الجولة 49 #3): صف منتج في نتائج بحث الاستبدال — مكوّن
+ *  مذكّر: لا يُعاد رسمه عند تبديل الوحدات/المتغيرات في صندوق
+ *  الخيارات، فيبقى تبديل الوحدة لحظياً حتى مع ٨٠ نتيجة معروضة. */
+const ExchangeProductRow = React.memo(function ExchangeProductRow({
+  product,
+  onOpen,
+}: {
+  product: Product;
+  onOpen: (productId: number) => void;
+}) {
+  const c = useThemeColors();
+  const styles = exchangeStyles(c);
+  return (
+    <TouchableOpacity
+      style={styles.productRow}
+      onPress={() => onOpen(product.id)}
+      activeOpacity={0.75}>
+      <View style={{flex: 1}}>
+        <Text style={styles.productName} numberOfLines={1}>
+          {product.name}
+        </Text>
+        <Text style={styles.productMeta}>
+          {formatMoney(product.retail_price)}
+          {Number(product.stock_untracked) === 1
+            ? ' · بلا تتبع مخزون'
+            : ` · متوفر ${formatQty(product.stock_quantity)}`}
+        </Text>
+      </View>
+      <Icon name="chevronLeft" size={16} color={c.textFaint} />
+    </TouchableOpacity>
+  );
+});
+
 function ExchangeSheet({
   refundTotal,
   picks,
@@ -2077,6 +2137,9 @@ function ExchangeSheet({
   onClose: () => void;
 }) {
   const c = useThemeColors();
+  // v41 (الجولة 49 #3): الأنماط عبر الذاكرة — تُبنى مرة واحدة لكل
+  //  ثيم بدل ٤٦ استدعاء StyleSheet.create في كل إعادة رسم.
+  const styles = exchangeStyles(c);
   const toast = useToastStore(state => state.show);
   const [search, setSearch] = useState('');
   const [results, setResults] = useState<Product[]>([]);
@@ -2200,6 +2263,15 @@ function ExchangeSheet({
     setChosenUnitId(null);
     setChosenVariantId(null);
     setQtyText('1');
+  }, []);
+
+  // v41 (الجولة 49 #3): دالة فتح مستقرة عبر latest-ref — مرجع صفوف
+  //  النتائج المذكّرة لا يتغير عند تحديث النتائج أو الخيارات، فلا
+  //  تُعاد الصفوف عند تبديل الوحدات/المتغيرات أبداً.
+  const openProductRef = useRef(openProduct);
+  openProductRef.current = openProduct;
+  const openProductStable = useCallback((productId: number) => {
+    void openProductRef.current(productId, null);
   }, []);
 
   const openProductRow = results.find(x => x.id === openId) ?? null;
@@ -2347,7 +2419,7 @@ function ExchangeSheet({
   const sheetHeight = Math.round(Dimensions.get('window').height * 0.88);
 
   return (
-    <View style={excStyles(c).backdrop}>
+    <View style={styles.backdrop}>
       <Pressable
         style={{flex: 1}}
         onPress={() => {
@@ -2356,31 +2428,31 @@ function ExchangeSheet({
           }
         }}
       />
-      <View style={[excStyles(c).sheet, {height: sheetHeight}]}>
-        <View style={excStyles(c).head}>
-          <View style={excStyles(c).headIcon}>
+      <View style={[styles.sheet, {height: sheetHeight}]}>
+        <View style={styles.head}>
+          <View style={styles.headIcon}>
             <Icon name="swap" size={20} color={c.accent} />
           </View>
           <View style={{flex: 1}}>
-            <Text style={excStyles(c).headTitle}>
+            <Text style={styles.headTitle}>
               الاستبدال بقيمة المرجع
             </Text>
-            <Text style={excStyles(c).headSub}>
+            <Text style={styles.headSub}>
               اختر البضاعة البديلة — تخرج من المخزن بدل المرتجع، والفرق
               يُسوّى عند التأكيد (نقد أو دين)
             </Text>
           </View>
           <TouchableOpacity
             onPress={onClose}
-            style={excStyles(c).closeBtn}>
+            style={styles.closeBtn}>
             <Icon name="x" size={16} color={c.textDim} />
           </TouchableOpacity>
         </View>
 
         {/* البحث + المسح */}
-        <View style={excStyles(c).searchRow}>
+        <View style={styles.searchRow}>
           <TextInput
-            style={excStyles(c).searchInput}
+            style={styles.searchInput}
             value={search}
             onChangeText={setSearch}
             placeholder="ابحث بالاسم أو امسح الباركود…"
@@ -2388,7 +2460,7 @@ function ExchangeSheet({
             autoCorrect={false}
           />
           <TouchableOpacity
-            style={excStyles(c).scanBtn}
+            style={styles.scanBtn}
             onPress={() => void doScan()}
             disabled={scanning || loading}>
             {scanning ? (
@@ -2401,13 +2473,13 @@ function ExchangeSheet({
 
         {/* المنتج المفتوح بخياراته */}
         {openProductRow != null ? (
-          <View style={excStyles(c).optionBox}>
-            <View style={excStyles(c).optionHead}>
+          <View style={styles.optionBox}>
+            <View style={styles.optionHead}>
               <View style={{flex: 1}}>
-                <Text style={excStyles(c).optionName} numberOfLines={1}>
+                <Text style={styles.optionName} numberOfLines={1}>
                   {openProductRow.name}
                 </Text>
-                <Text style={excStyles(c).optionMeta}>
+                <Text style={styles.optionMeta}>
                   {productStock != null
                     ? `المتوفر: ${formatQty(productStock)}`
                     : 'مخزون بلا تتبع'}
@@ -2416,7 +2488,7 @@ function ExchangeSheet({
                     : ''}
                 </Text>
               </View>
-              <TouchableOpacity onPress={closeProduct} style={excStyles(c).closeBtn}>
+              <TouchableOpacity onPress={closeProduct} style={styles.closeBtn}>
                 <Icon name="x" size={14} color={c.textDim} />
               </TouchableOpacity>
             </View>
@@ -2424,7 +2496,7 @@ function ExchangeSheet({
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                contentContainerStyle={excStyles(c).chipRow}>
+                contentContainerStyle={styles.chipRow}>
                 {openVariants.map(v => {
                   const active = v.id === chosenVariantId;
                   // v37 (الجولة 45 #2د): متغير نافد (منتج متتبع) —
@@ -2437,7 +2509,7 @@ function ExchangeSheet({
                     <TouchableOpacity
                       key={v.id}
                       style={[
-                        excStyles(c).chip,
+                        styles.chip,
                         active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
                         out ? {opacity: 0.45} : null,
                       ]}
@@ -2445,7 +2517,7 @@ function ExchangeSheet({
                       onPress={() => setChosenVariantId(v.id)}>
                       <Text
                         style={[
-                          excStyles(c).chipText,
+                          styles.chipText,
                           active ? {color: c.onAccent} : null,
                         ]}>
                         {v.color ? `${v.color} · ` : ''}
@@ -2461,13 +2533,13 @@ function ExchangeSheet({
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                contentContainerStyle={excStyles(c).chipRow}>
+                contentContainerStyle={styles.chipRow}>
                 {/* v37 (الجولة 45 #2د): وحدة الأساس أولاً — الافتراض
                     عند فتح أي منتج (طلب التاجر: السلة بوحدة البيع
                     الافتراضية، والوحدات الأكبر خيار صريح). */}
                 <TouchableOpacity
                   style={[
-                    excStyles(c).chip,
+                    styles.chip,
                     chosenUnitId == null
                       ? {backgroundColor: c.accent, borderColor: c.accent}
                       : null,
@@ -2475,7 +2547,7 @@ function ExchangeSheet({
                   onPress={() => setChosenUnitId(null)}>
                   <Text
                     style={[
-                      excStyles(c).chipText,
+                      styles.chipText,
                       chosenUnitId == null ? {color: c.onAccent} : null,
                     ]}>
                     {openProductRow.base_unit_name ?? 'قطعة'} (الأساس) —{' '}
@@ -2492,13 +2564,13 @@ function ExchangeSheet({
                     <TouchableOpacity
                       key={u.id}
                       style={[
-                        excStyles(c).chip,
+                        styles.chip,
                         active ? {backgroundColor: c.accent, borderColor: c.accent} : null,
                       ]}
                       onPress={() => setChosenUnitId(u.id)}>
                       <Text
                         style={[
-                          excStyles(c).chipText,
+                          styles.chipText,
                           active ? {color: c.onAccent} : null,
                         ]}>
                         {u.unitName} — {formatMoney(price)}
@@ -2508,10 +2580,10 @@ function ExchangeSheet({
                 })}
               </ScrollView>
             ) : null}
-            <View style={excStyles(c).qtyRow}>
-              <Text style={excStyles(c).qtyLabel}>الكمية</Text>
+            <View style={styles.qtyRow}>
+              <Text style={styles.qtyLabel}>الكمية</Text>
               <TextInput
-                style={excStyles(c).qtyInput}
+                style={styles.qtyInput}
                 value={qtyText}
                 onChangeText={t =>
                   // v37 (الجولة 45 #2د): يقبل الأرقام العربية
@@ -2527,7 +2599,7 @@ function ExchangeSheet({
                 keyboardType="decimal-pad"
                 autoCorrect={false}
               />
-              <Text style={excStyles(c).qtyTotal}>
+              <Text style={styles.qtyTotal}>
                 {qtyValid
                   ? `${formatQty(qtyNum)} × ${formatMoney(liveUnitPrice)} = ${formatMoney(
                       liveUnitPrice * qtyNum,
@@ -2548,90 +2620,75 @@ function ExchangeSheet({
         {/* نتائج البحث */}
         <ScrollView
           style={{flex: 1}}
-          contentContainerStyle={excStyles(c).list}
+          contentContainerStyle={styles.list}
           showsVerticalScrollIndicator={false}>
           {loading ? (
-            <View style={excStyles(c).centerBox}>
+            <View style={styles.centerBox}>
               <ActivityIndicator size="large" color={c.accent} />
             </View>
           ) : results.length === 0 ? (
-            <View style={excStyles(c).centerBox}>
-              <Text style={excStyles(c).emptyText}>
+            <View style={styles.centerBox}>
+              <Text style={styles.emptyText}>
                 لا نتائج — جرّب بحثاً آخر أو امسح الباركود
               </Text>
             </View>
           ) : (
-            results.map(product => {
-              const price = product.retail_price;
-              return (
-                <TouchableOpacity
-                  key={product.id}
-                  style={excStyles(c).productRow}
-                  onPress={() => void openProduct(product.id, null)}>
-                  <View style={{flex: 1}}>
-                    <Text style={excStyles(c).productName} numberOfLines={1}>
-                      {product.name}
-                    </Text>
-                    <Text style={excStyles(c).productMeta}>
-                      {formatMoney(price)}
-                      {Number(product.stock_untracked) === 1
-                        ? ' · بلا تتبع مخزون'
-                        : ` · متوفر ${formatQty(product.stock_quantity)}`}
-                    </Text>
-                  </View>
-                  <Icon name="chevronLeft" size={16} color={c.textFaint} />
-                </TouchableOpacity>
-              );
-            })
+            results.map(product => (
+              <ExchangeProductRow
+                key={product.id}
+                product={product}
+                onOpen={openProductStable}
+              />
+            ))
           )}
         </ScrollView>
 
         {/* سلة الاستبدال + الخلاصة */}
         {picks.length > 0 ? (
-          <View style={excStyles(c).cartBox}>
-            <View style={excStyles(c).cartHead}>
-              <Text style={excStyles(c).cartTitle}>
+          <View style={styles.cartBox}>
+            <View style={styles.cartHead}>
+              <Text style={styles.cartTitle}>
                 سلة الاستبدال ({picks.length})
               </Text>
               <TouchableOpacity onPress={onClear}>
-                <Text style={excStyles(c).cartClear}>تفريغ</Text>
+                <Text style={styles.cartClear}>تفريغ</Text>
               </TouchableOpacity>
             </View>
             <ScrollView
               style={{maxHeight: 110}}
               showsVerticalScrollIndicator={false}>
               {picks.map(pick => (
-                <View key={pick.key} style={excStyles(c).cartRow}>
+                <View key={pick.key} style={styles.cartRow}>
                   <View style={{flex: 1}}>
-                    <Text style={excStyles(c).cartRowName} numberOfLines={1}>
+                    <Text style={styles.cartRowName} numberOfLines={1}>
                       {pick.name}
                       {pick.variantLabel ? ` (${pick.variantLabel})` : ''}
                       {pick.unitName && pick.unitName !== 'قطعة'
                         ? ` · ${pick.unitName}`
                         : ''}
                     </Text>
-                    <Text style={excStyles(c).cartRowMeta}>
+                    <Text style={styles.cartRowMeta}>
                       {formatQty(pick.quantity)} × {formatMoney(pick.unitPrice)} ={' '}
                       {formatMoney(pick.unitPrice * pick.quantity)}
                     </Text>
                   </View>
                   <TouchableOpacity
-                    style={excStyles(c).exchangeRemove}
+                    style={styles.exchangeRemove}
                     onPress={() => onRemove(pick.key)}>
                     <Icon name="x" size={13} color={c.danger} />
                   </TouchableOpacity>
                 </View>
               ))}
             </ScrollView>
-            <View style={excStyles(c).balanceRow}>
-              <Text style={excStyles(c).balanceText}>
+            <View style={styles.balanceRow}>
+              <Text style={styles.balanceText}>
                 {/* v40 (الجولة 48 #2): لا رفض للزيادة — الفرق يُسوّى
                     عند التأكيد (نقد أو دين) كما يعرض شريط الفرق في
                     نافذة الإرجاع. */}
                 المرتجع: {formatMoney(refundTotal)} · المستبدل:{' '}
                 <Text
                   style={[
-                    excStyles(c).balanceText,
+                    styles.balanceText,
                     picksTotal > refundTotal + 0.0001
                       ? {color: c.accent, fontWeight: '700'}
                       : {color: c.success, fontWeight: '700'},
@@ -2648,7 +2705,7 @@ function ExchangeSheet({
           </View>
         ) : null}
 
-        <View style={excStyles(c).actions}>
+        <View style={styles.actions}>
           <AppButton
             title="تم — عودة للمرتجع"
             variant="primary"

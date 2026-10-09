@@ -72,14 +72,45 @@ export class ReceiptBuilder {
    * used for product LABEL printing. EAN13 takes 12 digits (the
    * printer computes + prints the check digit); CODE128 takes any
    * ASCII payload. Height is in dots (24–162, typical label 72).
+   *
+   * v41 (الجولة 49 #2): moduleWidth (GS w) — عرض الوحدة بالنقاط.
+   * الطابعة لا تقلّص الباركود تلقائياً؛ بدون GS w صريح يُطبع
+   * بالعرض الافتراضي للثابتة (3 غالباً) فباركود CODE128 طويل
+   * كرقم الفاتورة (222 وحدة) يتجاوز عرض ورق 58مم ويخرج مشوهاً
+   * لا يقرؤه الماسح. المُرِر يحسب العرض الأقصى الذي يتسع داخل
+   * الورق ويمرره هنا.
    */
   barcode(
     system: 'EAN13' | 'CODE128',
     value: string,
     heightDots = 72,
+    moduleWidth = 2,
   ): this {
-    this.ops.push({op: 'barcode', system, value, height: heightDots});
+    this.ops.push({
+      op: 'barcode',
+      system,
+      value,
+      height: heightDots,
+      width: moduleWidth,
+    });
     return this;
+  }
+
+  /** v41 (الجولة 49 #2): عدد وحدات (modules) باركود CODE128-B
+   *  للحمولة: START(11) + n×11 (البيانات) + CHECK(11) + STOP(13)
+   *  = 11n + 35 — يُستخدم لحساب عرض الوحدة الأقصى الذي يتسع
+   *  داخل عرض الورق قبل أن يتشوه الباركود أو يُقص. */
+  code128Modules(payloadLength: number): number {
+    return 11 * payloadLength + 35;
+  }
+
+  /** v41 (الجولة 49 #2): أكبر عرض وحدة (GS w) يتسع به باركود
+   *  داخل عرض الورق بالنقاط (rasterWidth: 58مم=384، 80مم=576)
+   *  مع هامش أمان — ولا يقل عن 1 ولا يزيد عن 3 (فوق 3 تتسع
+   *  الأشرطة عبثاً وتستهلك الورق). */
+  barcodeModuleWidthFor(modules: number, rasterWidth: number): number {
+    const usable = Math.max(48, rasterWidth - 32);
+    return Math.max(1, Math.min(3, Math.floor(usable / Math.max(1, modules))));
   }
 
   /** A dashed separator across the paper width. */

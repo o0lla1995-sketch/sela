@@ -145,7 +145,9 @@ export function buildDebtReceiptJob(
       : null;
   if (totalDebtsMinor != null) {
     b.bold(true)
-      .textLine(`${LABELS.totalCustomerDebts}: ${(totalDebtsMinor / 100).toFixed(2)}`)
+      .textLine(
+        `${LABELS.totalCustomerDebts}: ${(totalDebtsMinor / 100).toFixed(2)}`,
+      )
       .bold(false);
   }
   b.separator(width);
@@ -249,7 +251,19 @@ export function buildDebtReceiptJob(
     .textLine(LABELS.thanks)
     .bold(false);
   // v25 (round-32 #4): the invoice barcode — scan-to-open.
-  b.align(1).barcode('CODE128', data.sale.invoice_number, 60).feed(3).cut();
+  // v41 (الجولة 49 #2): عرض وحدة GS w محسوب يتسع داخل الورق.
+  b.align(1)
+    .barcode(
+      'CODE128',
+      data.sale.invoice_number,
+      60,
+      b.barcodeModuleWidthFor(
+        b.code128Modules(data.sale.invoice_number.length),
+        rasterWidth,
+      ),
+    )
+    .feed(3)
+    .cut();
 
   return b.build();
 }

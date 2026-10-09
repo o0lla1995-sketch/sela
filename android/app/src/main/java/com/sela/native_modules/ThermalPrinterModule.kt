@@ -587,9 +587,22 @@ class ThermalPrinterModule(private val reactContext: ReactApplicationContext) :
               //              printer firmware computes + prints the
               //              check digit itself),
               //   CODE128 -> m = 73, data = ASCII (code set B).
+              //
+              // v41 (الجولة 49 #2) — سببان جعلا الباركود المطبوع
+              // غير قابل للقراءة، وكلاهما مُصلَح هنا:
+              //   1) GS w (عرض الوحدة) لم يكن يُرسل أبداً — الطابعة
+              //      تطبع بعرض الثابتة الافتراضي (3 غالباً) فباركود
+              //      CODE128 طويل كرقم الفاتورة (222 وحدة) يتجاوز
+              //      عرض 58مم ويُقص/يتشوه. الآن يُرسل JS عرضاً
+              //      محسوباً يتسع داخل الورق (المفتاح "width").
+              //   2) معيار Epson لـ CODE128 في الدالة B يتطلب محرف
+              //      اختيار مجموعة الرموز "{B" داخل البيانات — بدونه
+              //      تتصرف بعض الثوابت الرخيصة بشكل غير معرف فتطبع
+              //      أشرطة عشوائية. الأقواس الحرفية "{" تُضاعف "{{".
               val value = if (command.hasKey("value")) command.getString("value") ?: "" else ""
               val system = if (command.hasKey("system")) command.getString("system") ?: "CODE128" else "CODE128"
               val height = if (command.hasKey("height")) command.getInt("height").coerceIn(24, 162) else 72
+              val moduleWidth = if (command.hasKey("width")) command.getInt("width").coerceIn(1, 6) else 2
               if (value.isNotEmpty()) {
                 val (m, data) = if (system == "EAN13") {
                   val digits = value.filter { it.isDigit() }
@@ -601,10 +614,15 @@ class ThermalPrinterModule(private val reactContext: ReactApplicationContext) :
                 } else {
                   val ascii = String(value.toByteArray(Charsets.US_ASCII), Charsets.US_ASCII)
                     .filter { it.code in 32..126 }
-                  73 to ascii
+                  // v41: محرف اختيار مجموعة الرموز B حرفياً كما في
+                  //  دليل Epson — الطابعة تحسب خانة التحقق وتضيف
+                  //  START/STOP بنفسها.
+                  73 to ("{B" + ascii.replace("{", "{{"))
                 }
                 if (m != 0 && data.isNotEmpty()) {
                   val bytes = data.toByteArray(Charsets.US_ASCII)
+                  // GS w n — module width in dots (v41: explicit, fit).
+                  buffer.write(byteArrayOf(0x1D, 0x77, moduleWidth.toByte()))
                   // GS h n — barcode height in dots.
                   buffer.write(byteArrayOf(0x1D, 0x68, height.toByte()))
                   // GS k m n d1..dn — function B barcode.

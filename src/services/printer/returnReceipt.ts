@@ -145,8 +145,7 @@ export function buildReturnReceiptJob(
         Math.max(width - 4, 16),
       )
       .bold(false);
-    const diffMinor =
-      data.ret.refund_minor - (data.ret.exchange_minor ?? 0);
+    const diffMinor = data.ret.refund_minor - (data.ret.exchange_minor ?? 0);
     if (diffMinor === 0) {
       b.align(2).textLine(LABELS.diffZero);
     } else {
@@ -159,9 +158,7 @@ export function buildReturnReceiptJob(
         .bold(false)
         .align(2);
       if (data.ret.book === 'cash') {
-        b.textLine(
-          diffMinor > 0 ? LABELS.diffCashOut : LABELS.diffCashIn,
-        );
+        b.textLine(diffMinor > 0 ? LABELS.diffCashOut : LABELS.diffCashIn);
       } else if (diffMinor > 0) {
         b.textLine(LABELS.diffDebtDown);
       } else {
@@ -200,7 +197,19 @@ export function buildReturnReceiptJob(
     .bold(false);
   // v25 (round-32 #4): the RETURN receipt's own barcode — scanning
   //  it opens the RET row (its lines/history) directly.
-  b.align(1).barcode('CODE128', data.ret.return_number, 60).feed(2).cut();
+  // v41 (الجولة 49 #2): عرض وحدة GS w محسوب يتسع داخل الورق.
+  b.align(1)
+    .barcode(
+      'CODE128',
+      data.ret.return_number,
+      60,
+      b.barcodeModuleWidthFor(
+        b.code128Modules(data.ret.return_number.length),
+        rasterWidth,
+      ),
+    )
+    .feed(2)
+    .cut();
 
   return b.build();
 }

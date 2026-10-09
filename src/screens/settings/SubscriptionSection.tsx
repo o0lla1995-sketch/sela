@@ -10,15 +10,8 @@
  *    subscription to a new phone
  *  - management contact card for buying/renewing subscriptions
  */
-import React, {useCallback, useState} from 'react';
-import {
-  Alert,
-  Linking,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {Alert, Animated, StyleSheet, Text, View} from 'react-native';
 import {Icon} from '../../components/Icon';
 import {AppButton} from '../../components/ui';
 import {ContactButtons} from '../../components/ContactButtons';
@@ -28,7 +21,6 @@ import {
   radius,
   spacing,
   useThemeColors,
-  typography,
 } from '../../core/theme';
 import {LICENSE_CONTACT_FALLBACK} from '../../core/config';
 import {useLicenseStore} from '../../stores/licenseStore';
@@ -68,10 +60,56 @@ export function SubscriptionSection() {
   const contact = getCachedContact() ?? LICENSE_CONTACT_FALLBACK;
 
   const license = status?.license ?? null;
-  const remainingDays =
-    license != null
-      ? Math.max(0, Math.ceil((license.expiresAt - Date.now()) / 86400000))
-      : 0;
+
+  // ══ v41 (الجولة 49 #6): عدّاد حي للمدة المتبقية ══
+  // القديم كان رقماً ثابتاً (أيام) يُحسب مرة عند فتح الشاشة — طلب
+  // التاجر: «عداد المدة المتبقية للاشتراك يعمل بشكل حي عداد حي».
+  // الآن دقات كل ثانية: أيام وساعات ودقائق وثوانٍ تتحدّث أمام
+  // عينيه، مع نقطة نبض تؤكد أنه حي، وتلوّن تحذيري عند ٥ أيام
+  // أو أقل، و«انتهى» حمراء عند الصفر.
+  const [now, setNow] = useState(() => Date.now());
+  const hasLicense = license != null;
+  useEffect(() => {
+    if (!hasLicense) {
+      return;
+    }
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [hasLicense]);
+
+  const remainingMs =
+    license != null ? Math.max(0, license.expiresAt - now) : 0;
+  const remainingDays = Math.floor(remainingMs / 86400000);
+  const remainingHours = Math.floor((remainingMs % 86400000) / 3600000);
+  const remainingMinutes = Math.floor((remainingMs % 3600000) / 60000);
+  const remainingSeconds = Math.floor((remainingMs % 60000) / 1000);
+  const expired = license != null && remainingMs <= 0;
+  const pad2 = (value: number) => String(value).padStart(2, '0');
+
+  // نبض النقطة الخضراء — دليل مرئي أن العدّاد ينبض فعلاً.
+  const pulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (!hasLicense || expired) {
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 0.25,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, hasLicense, expired]);
+
   const state = status?.state ?? 'needs_activation';
   const isGrace = state === 'grace';
   const isActive = state === 'active';
@@ -142,26 +180,53 @@ export function SubscriptionSection() {
 
       {license != null ? (
         <>
+          {/* ══ v41 (الجولة 49 #6): عدّاد المدة المتبقية الحي — بطاقة
+              بعرض كامل تتحدّث كل ثانية (أيام + ساعات:دقائق:ثوانٍ)
+              مع نقطة نبض خضراء. */}
+          <View
+            style={[
+              styles.countdownCard,
+              expired
+                ? {borderLeftColor: c.danger}
+                : remainingDays <= 5
+                ? {borderLeftColor: c.warning}
+                : null,
+            ]}>
+            <View style={styles.countdownHead}>
+              <Icon
+                name="clock"
+                size={14}
+                color={
+                  expired ? c.danger : remainingDays <= 5 ? c.warning : c.accent
+                }
+              />
+              <Text style={styles.countdownLabel}>المدة المتبقية</Text>
+              {expired ? null : (
+                <Animated.View style={[styles.liveDot, {opacity: pulse}]} />
+              )}
+            </View>
+            {expired ? (
+              <Text style={[styles.countdownValue, {color: c.danger}]}>
+                انتهى الاشتراك
+              </Text>
+            ) : (
+              <Text
+                style={[
+                  styles.countdownValue,
+                  remainingDays <= 5 ? {color: c.warning} : null,
+                ]}
+                numberOfLines={1}
+                adjustsFontSizeToFit>
+                {remainingDays} يوم و {pad2(remainingHours)}:
+                {pad2(remainingMinutes)}:{pad2(remainingSeconds)}
+              </Text>
+            )}
+          </View>
+
           <View style={styles.infoGrid}>
             <View style={styles.infoCell}>
               <Text style={styles.infoLabel}>الخطة</Text>
               <Text style={styles.infoValue}>{planLabel(license.plan)}</Text>
-            </View>
-            <View style={styles.infoCell}>
-              <Text style={styles.infoLabel}>المدة المتبقية</Text>
-              <Text
-                style={[
-                  styles.infoValue,
-                  remainingDays <= 5 ? {color: c.warning} : null,
-                ]}>
-                {remainingDays} يوم
-              </Text>
-            </View>
-            <View style={styles.infoCell}>
-              <Text style={styles.infoLabel}>بداية الخطة (من الخادم)</Text>
-              <Text style={styles.infoValue}>
-                {new Date(license.activatedAt).toLocaleDateString('ar-EG')}
-              </Text>
             </View>
             <View style={styles.infoCell}>
               <Text style={styles.infoLabel}>تاريخ الانتهاء</Text>
@@ -169,17 +234,6 @@ export function SubscriptionSection() {
                 {new Date(license.expiresAt).toLocaleDateString('ar-EG')}
               </Text>
             </View>
-          </View>
-          {/* v33 (round-41 #5): بداية الخطة من الخادم — أول تفعيل
-              للمفتاح على الإطلاق (موقّعة من الخادم)، فحذف التطبيق
-              وإعادة التفعيل بنفس المفتاح لا يعيد عدّاد المدة. */}
-          <View style={styles.serverAnchorNote}>
-            <Icon name="shield" size={13} color={c.success} />
-            <Text style={styles.serverAnchorText}>
-              نقطة بداية الاشتراك محفوظة على الخادم منذ أول تفعيل للمفتاح —
-              حذف التطبيق وإعادة التفعيل بنفس المفتاح لا يعيد المدة من
-              جديد، والمتبقي أعلاه هو الصحيح دائماً.
-            </Text>
           </View>
 
           {isGrace ? (
@@ -308,21 +362,38 @@ const useStyles = makeStyles(c =>
       fontSize: 14.5,
       color: c.text,
     },
-    /** v33 (round-41 #5): ملاحظة مرساة الخادم لبداية الخطة. */
-    serverAnchorNote: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-      gap: spacing.sm,
-      backgroundColor: c.successSoft,
+    /** v41 (الجولة 49 #6): بطاقة العدّاد الحي للمدة المتبقية. */
+    countdownCard: {
+      backgroundColor: c.surfaceAlt,
       borderRadius: radius.md,
-      padding: spacing.md,
+      padding: 13,
+      gap: 6,
+      borderLeftWidth: 3,
+      borderLeftColor: c.accent,
     },
-    serverAnchorText: {
-      flex: 1,
-      color: c.success,
+    countdownHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    countdownLabel: {
       fontFamily: fonts.regular,
-      fontSize: typography.micro + 2,
-      lineHeight: 17,
+      fontSize: 11.5,
+      color: c.textDim,
+      flex: 1,
+    },
+    countdownValue: {
+      fontFamily: fonts.bold,
+      fontSize: 21,
+      color: c.text,
+      letterSpacing: 0.5,
+      fontVariant: ['tabular-nums'],
+    },
+    liveDot: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: c.success,
     },
     graceNote: {
       flexDirection: 'row',

@@ -829,12 +829,21 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
       text("الحركات (${rows.size})", pageWidth - margin, y, cellBold)
       y += 20f
       // Column layout (RTL): التاريخ | المرجع | النوع | الفئة | الملاحظة | المبلغ
+      // v41 (الجولة 49 #5): الملاحظة كانت تُرسم بمحاذاة يمين عند
+      // colNote وتمتد يساراً حتى ~24 محرفاً (130 نقطة) بينما المبلغ
+      // يبدأ من colAmount يمتد يميناً — فتتداخل الملاحظة الطويلة
+      // فوق المبلغ حرفياً. الجذر: القص بعدد المحارف لا بالقياس،
+      // ولا حد يساري للملاحظة. الإصلاح: كل خلية تُقص بعرض مُقاس
+      // (measureText) إلى حدود جارتها اليسرى، والملاحظة تُلف على
+      // سطرين كحد أقصى داخل صندوق لا يتجاوز حافة المبلغ المقيسة
+      // أبداً — استحالة هندسية للتداخل.
       val colDate = pageWidth - margin
-      val colRef = colDate - 92f
+      val colRef = colDate - 90f
       val colKind = colRef - 92f
-      val colCat = colKind - 66f
-      val colNote = colCat - 150f
+      val colCat = colKind - 62f
+      val colNote = colCat - 92f
       val colAmount = margin + 10f
+      val cellPad = 6f
       // Header row with a light background.
       canvas.drawRect(margin, y - 13f, pageWidth - margin, y + 6f, headerBgPaint)
       text("التاريخ", colDate, y, cellBold)
@@ -844,21 +853,85 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
       text("ملاحظة", colNote, y, cellBold)
       text("المبلغ (₪)", colAmount, y, cellBold, android.graphics.Paint.Align.LEFT)
       y += 24f
+
+      /** v41: قص نص بعرض مُقاس (وليس بعدد محارف) مع علامة
+       *  اقتطاع «...» — لا يمكن أن يتجاوز حده أبداً. (نقاط ASCII
+       *  ثلاث — مضمونة الرسم في كل الخطوط، بخلاف محرف «…».) */
+      fun ellipsizeTo(value: String, maxWidth: Float, paint: android.graphics.Paint): String {
+        if (value.isEmpty() || maxWidth <= 10f) return ""
+        if (paint.measureText(value) <= maxWidth) return value
+        val marker = "..."
+        val markerW = paint.measureText(marker)
+        var out = value
+        while (out.length > 1 && paint.measureText(out) + markerW > maxWidth) {
+          out = out.substring(0, out.length - 1)
+        }
+        return out.trimEnd() + marker
+      }
+
       for (row in rows) {
-        ensureSpace(18f)
         val date = row.optString("date", "")
         val ref = row.optString("ref", "")
         val kind = row.optString("kind", "")
         val category = row.optString("category", "")
         val note = row.optString("note", "")
         val amount = row.optString("amount", "")
-        text(date.take(16), colDate, y, cellPaint)
-        text(ref, colRef, y, cellPaint)
-        text(kind, colKind, y, cellPaint)
-        text(category.take(14), colCat, y, cellPaint)
-        text(note.take(24), colNote, y, cellPaint)
+
+        // المبلغ أولاً (العمود الأيسر) — عرضه المقيس يحدد الحد
+        // الأيسر المسموح للملاحظة.
+        val amountWidth = cellBold.measureText(amount)
+
+        // الملاحظة: تُلف على سطرين كحد أقصى داخل صندوق عرضه
+        // colNote − (حافة المبلغ + فاصل)، فلا تلمس المبلغ إطلاقاً.
+        var noteLayout: android.text.StaticLayout? = null
+        if (note.isNotEmpty()) {
+          val noteLeftLimit = colAmount + Math.max(amountWidth, 48f) + 8f
+          val noteMaxWidth = colNote - noteLeftLimit
+          if (noteMaxWidth > 24f) {
+            val notePaint = android.graphics.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+              typeface = regular
+              textSize = 10f
+              color = android.graphics.Color.DKGRAY
+            }
+            noteLayout = android.text.StaticLayout(
+              note, notePaint, noteMaxWidth.toInt(),
+              android.text.Layout.Alignment.ALIGN_NORMAL, 1f, 2f, true
+            )
+            // سطران كحد أقصى — الملاحظات الأطول تُقتطع بـ «...».
+            if (noteLayout.lineCount > 2) {
+              val shown = note.substring(0, noteLayout.getLineEnd(1)).trimEnd()
+              noteLayout = android.text.StaticLayout(
+                ellipsizeTo(shown, noteMaxWidth, notePaint) + " ",
+                notePaint, noteMaxWidth.toInt(),
+                android.text.Layout.Alignment.ALIGN_NORMAL, 1f, 2f, true
+              )
+            }
+          }
+        }
+        val rowHeight = if (noteLayout != null && noteLayout.height + 6f > 18f) {
+          noteLayout.height + 6f
+        } else {
+          18f
+        }
+        ensureSpace(rowHeight)
+
+        text(ellipsizeTo(date, colDate - colRef - cellPad, cellPaint), colDate, y, cellPaint)
+        text(ellipsizeTo(ref, colRef - colKind - cellPad, cellPaint), colRef, y, cellPaint)
+        text(ellipsizeTo(kind, colKind - colCat - cellPad, cellPaint), colKind, y, cellPaint)
+        text(ellipsizeTo(category, colCat - colNote - cellPad, cellPaint), colCat, y, cellPaint)
+        if (noteLayout != null) {
+          // محاذاة السطر الأول مع سطر أسطر الصف: أعلى التخطيط
+          // يرفع بحيث يقع baseline سطره الأول على baseline الصف.
+          canvas.save()
+          canvas.translate(
+            colNote - noteLayout.width.toFloat(),
+            y - noteLayout.getLineBaseline(0)
+          )
+          noteLayout.draw(canvas)
+          canvas.restore()
+        }
         text(amount, colAmount, y, cellBold, android.graphics.Paint.Align.LEFT)
-        y += 18f
+        y += rowHeight
       }
 
       // ── Footer on the last page ──
@@ -1301,31 +1374,35 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
             y += h
           }
           "barcode" -> {
-            // معاينة باركود: نمط أعمدة حتمي مشتق من النص (الشكل
-            // كما تطبعه الطابعة؛ الفحص الفعلي للماسح ليس غرض
-            // المعاينة).
+            // v41 (الجولة 49 #2): باركود CODE128-B حقيقي — النمط
+            // القديم كان أعمدة عشوائية بفرغات واسعة (شكل خاطئ ولا
+            // يقرؤه ماسح). الآن يُرمَّز رقم الفاتورة بجدول معيار
+            // CODE128 كاملاً (START B + بيانات + خانة تحقق + STOP)
+            // وتُرسم الأشرطة متلاصقة بعرض وحدة موحد مع منطقة سكون
+            // صحيحة على الجانبين — الصورة الناتجة قابلة للمسح
+            // فعلاً ومطابقة لطبيعة ما تطبعه الطابعة.
             val value = row.optString("value", "")
+            val modules = code128BModules(value)
             val barTop = y + 2f * scale
             val barBottom = y + 34f * scale
-            var x = margin.toFloat()
-            var i = 0
-            val thin = 2f * scale
-            val thick = 5f * scale
-            while (x < widthPx - margin && i < 220) {
-              val ch = if (value.isEmpty()) ' ' else value[i % value.length]
-              val w = when ((ch.code + i) % 4) {
-                0 -> thin
-                1 -> thick
-                2 -> thin
-                else -> thin * 2
+            if (modules.isNotEmpty()) {
+              // منطقة السكون: 10 وحدات على الأقل من كل جانب
+              // (متطلب معيار قابلية القراءة) — وبلا أقل من هامش
+              // الورقة نفسه.
+              val moduleW = 3f
+              val quiet = Math.max(margin.toFloat(), moduleW * 10f)
+              val availW = widthPx - quiet * 2f
+              val fitted = Math.min(moduleW, (availW / modules.length))
+              val totalW = fitted * modules.length
+              var x = (widthPx - totalW) / 2f
+              var mi = 0
+              while (mi < modules.length) {
+                if (modules[mi] == '1') {
+                  canvas.drawRect(x, barTop, x + fitted, barBottom, blackPaint)
+                }
+                x += fitted
+                mi += 1
               }
-              if ((ch.code + i) % 2 == 0) {
-                canvas.drawRect(
-                  x, barTop, x + w, barBottom, blackPaint
-                )
-              }
-              x += w + thin
-              i += 1
             }
             val p = paintFor(false, 0)
             p.textAlign = android.graphics.Paint.Align.CENTER
@@ -1415,5 +1492,64 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     } catch (t: Throwable) {
       android.graphics.Typeface.DEFAULT
     }
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // v41 (الجولة 49 #2): مرمّز CODE128-B حقيقي لمعاينة الفاتورة.
+  // النمط القديم كان زخرفياً (أعمدة عشوائية بفرغات واسعة) فشكل
+  // الباركود في صورة الفاتورة خاطئ ولا يقرؤه أي ماسح. هذا الجدول
+  // هو جدول معيار CODE128 الرسمي (107 أنماط: القيم 0-102 للبيانات،
+  // 103-105 لرموز START، 106 لـ STOP) — كل نمط سلسلة أعراض متناوبة
+  // (شريط/فراغ) بعرض 1-4 وحدات.
+  // ────────────────────────────────────────────────────────────────
+  private val CODE128_PATTERNS = arrayOf(
+    "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
+    "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
+    "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211",
+    "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313",
+    "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331",
+    "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111",
+    "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214",
+    "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111",
+    "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+    "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141",
+    "114131", "311141", "411131", "211412", "211214", "211232", "2331112"
+  )
+
+  /**
+   * يرمّز النص كباركود CODE128-B كامل الوحدات: سلسلة '1'/'0'
+   * بطول 11×(n+2)+2 — START B ثم البيانات ثم خانة التحقق ثم STOP.
+   * المحارف خارج ASCII 32..126 تُهمل (رقم الفاتورة لاتيني دائماً).
+   */
+  private fun code128BModules(value: String): String {
+    val clean = value.filter { it.code in 32..126 }
+    if (clean.isEmpty()) {
+      return ""
+    }
+    val sb = StringBuilder()
+    fun appendPattern(index: Int) {
+      val widths = CODE128_PATTERNS[index]
+      var bar = true
+      for (ch in widths) {
+        val count = ch - '0'
+        for (i in 0 until count) {
+          sb.append(if (bar) '1' else '0')
+        }
+        bar = !bar
+      }
+    }
+    // START B (النمط 104).
+    appendPattern(104)
+    var checksum = 104
+    clean.forEachIndexed { i, ch ->
+      val v = ch.code - 32
+      appendPattern(v)
+      checksum += v * (i + 1)
+    }
+    // خانة التحقق: (START + Σ قيمة×موقع) mod 103.
+    appendPattern(checksum % 103)
+    // STOP (النمط 106 — 13 وحدة).
+    appendPattern(106)
+    return sb.toString()
   }
 }

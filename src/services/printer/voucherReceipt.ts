@@ -161,7 +161,19 @@ export function buildVoucherReceiptJob(
     .textLine(LABELS.thanks)
     .bold(false);
   // v25 (round-32 #4): the invoice barcode — scan-to-open.
-  b.align(1).barcode('CODE128', data.receiptRef, 60).feed(3).cut();
+  // v41 (الجولة 49 #2): عرض وحدة GS w محسوب يتسع داخل الورق.
+  b.align(1)
+    .barcode(
+      'CODE128',
+      data.receiptRef,
+      60,
+      b.barcodeModuleWidthFor(
+        b.code128Modules(data.receiptRef.length),
+        rasterWidth,
+      ),
+    )
+    .feed(3)
+    .cut();
 
   return b.build();
 }
