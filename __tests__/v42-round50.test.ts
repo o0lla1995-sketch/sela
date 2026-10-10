@@ -28,28 +28,34 @@ import {freshApp, load} from './helpers/app';
 const read = (path: string) =>
   require('fs').readFileSync(path, 'utf8') as string;
 
-// حرس: مبدّل جملة/مفرق في نقطة البيع يستخدم القياس المضغوط dense.
+// v44 (الجولة 52 #2): المبدّل عاد للحجم الطبيعي الواسع وغلافه
+// يتمدد flex:1 — لا انكماش ولا اقتطاع نص (هجر قياس v42 المضغوط
+// بطلب التاجر: توسيع الزرين مع بقاء زر الشكل بجوارهما دائماً).
 const POS_DENSE_SEGMENTED =
   /<Segmented[\s\S]*?options=\{[\s\S]*?\}\s*\n\s*dense\s*\n\s*\/>/;
 
 describe('v42 — حرّوس المصدر: الستة طلبات', () => {
-  test('① صف جملة/مفرق مضغوط + زر الشكل أيقونة فقط', () => {
+  test('① صف جملة/مفرق + زر الشكل (محدّث للجولة 52: صف واسع بلا انكماش)', () => {
     const pos = read('src/screens/PosScreen.tsx');
     const ui = read('src/components/ui.tsx');
 
-    // المبدّل داخل غلاف قابل للانكماش — لا يدفع الزر خارج الشاشة.
+    // v44: الغلاف يتمدد ليأخذ كل عرض الصف — المبدّل وزر الشكل
+    // ظاهران معاً دائماً ولا يُدف شيء خارج الشاشة.
     expect(pos).toContain('styles.modeSegWrap');
-    expect(pos).toContain('flexShrink: 1');
+    expect(pos).toContain('flex: 1');
+    // كتلة modeSegWrap تحديداً هجرت الانكماش (بقية flexShrink
+    // في الشاشة استخدامات مشروعة لأجزاء أخرى — السلة والبحث).
+    expect(pos).not.toContain('modeSegWrap: {\n      flexShrink: 1');
     // زر الشكل أيقونة فقط: مربع ثابت بلا نص ولا سهم.
     expect(pos).not.toContain('styles.viewShapeBtnText');
     expect(pos).toContain('accessibilityLabel="تغيير شكل عرض المنتجات"');
-    // المبدّل بالقياس المضغوط.
+    // مكوّن المبدّل ما زال يدعم القياس المضغوط لبقية الشاشات.
     expect(ui).toContain('dense?: boolean');
     expect(ui).toContain('segmentedDense');
     expect(ui).toContain('segItemDense');
     expect(ui).toContain('segTextDense');
-    // المبدّل في نقطة البيع يستخدم dense فعلاً.
-    expect(pos.match(POS_DENSE_SEGMENTED)).not.toBeNull();
+    // v44: مبدّل نقطة البيع تحديداً هجر dense — الزران واسعان.
+    expect(pos.match(POS_DENSE_SEGMENTED)).toBeNull();
   });
 
   test('② صفحة الربط: زر تحميل تطبيق صِلة يفتح متجر Google Play مباشرة', () => {

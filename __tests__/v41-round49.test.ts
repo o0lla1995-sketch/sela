@@ -28,20 +28,22 @@ const read = (path: string) =>
 describe('v41 — حرّوس المصدر: الستة إصلاحات', () => {
   test('① زر الشكل ظاهر بجانب جملة/مفرق (v42: أيقونة فقط مربعة — لا نص يلتهم الصف)', () => {
     const pos = read('src/screens/PosScreen.tsx');
-    // v42 (الجولة 50 #1): التاجر طلب أيقونة فقط دون نص — مربع
-    // ثابت مع غلاف قابل للانكماش للمبدّل كي لا يُدف خارج الشاشة.
+    // v44 (الجولة 52 #2): التاجر طلب توسيع الزرين — المبدّل عاد
+    // للحجم الطبيعي وغلافه يتمدد flex:1، وزر الشكل مربع ثابت في
+    // نهاية الصف؛ الثلاثة معاً دائماً ولا يُدف شيء خارج الشاشة.
     expect(pos).toContain('styles.viewShapeBtn');
     expect(pos).toContain('backgroundColor: c.accentSoft');
     expect(pos).toContain('styles.modeSegWrap');
     // النص القديم على الزر زال (أيقونة فقط).
     expect(pos).not.toContain('styles.viewShapeBtnText');
-    // المبدّل بالقياس المضغوط.
-    expect(pos.match(/<Segmented[\s\S]*?dense\s*\/?>/)).not.toBeNull();
+    // v44: المبدّل هجر القياس المضغوط — الزران واسعان بلا اقتطاع.
+    expect(pos.match(/<Segmented[\s\S]*?dense\s*\/?>/)).toBeNull();
+    expect(pos).toContain('flex: 1');
   });
 
   test('② أ — معاينة الفاتورة ترسم CODE128 حقيقياً (لا نمط زخرفي)', () => {
     const native = read(
-      'android/app/src/main/java/com/sela/native_modules/PlatformUtilsModule.kt',
+      'android/app/src/main/java/com/sela/pal/native_modules/PlatformUtilsModule.kt',
     );
     // جدول المعيار الكامل (107 أنماط — من 212222 حتى 2331112).
     expect(native).toContain('CODE128_PATTERNS');
@@ -58,7 +60,7 @@ describe('v41 — حرّوس المصدر: الستة إصلاحات', () => {
 
   test('② ب — الطباعة الحرارية: GS w + «{B» لمعيار Epson', () => {
     const thermal = read(
-      'android/app/src/main/java/com/sela/native_modules/ThermalPrinterModule.kt',
+      'android/app/src/main/java/com/sela/pal/native_modules/ThermalPrinterModule.kt',
     );
     // GS w (0x1D 0x77) يُرسل قبل GS h.
     expect(thermal).toContain('0x1D, 0x77');
@@ -110,7 +112,7 @@ describe('v41 — حرّوس المصدر: الستة إصلاحات', () => {
 
   test('⑤ — كشف المصروفات: قص مقاس وتلفيف الملاحظة بعيداً عن المبلغ', () => {
     const native = read(
-      'android/app/src/main/java/com/sela/native_modules/PlatformUtilsModule.kt',
+      'android/app/src/main/java/com/sela/pal/native_modules/PlatformUtilsModule.kt',
     );
     // قص بعرض مقاس (وليس بعدد محارف).
     expect(native).toContain('fun ellipsizeTo(');

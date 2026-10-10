@@ -26,9 +26,9 @@ const CASH_REPO = 'src/database/repositories/CashRepo.ts';
 const CASH_SCREEN = 'src/screens/cash/CashMovementsScreen.tsx';
 const INVOICES = 'src/screens/invoices/InvoicesScreen.tsx';
 const SCANNER_MODULE =
-  'android/app/src/main/java/com/sela/native_modules/SelaScannerModule.kt';
+  'android/app/src/main/java/com/sela/pal/native_modules/SelaScannerModule.kt';
 const SCANNER_ACTIVITY =
-  'android/app/src/main/java/com/sela/native_modules/ScannerActivity.kt';
+  'android/app/src/main/java/com/sela/pal/native_modules/ScannerActivity.kt';
 const SCAN_FLOW = 'src/services/vision/scanFlow.ts';
 const BRIDGE = 'src/native/nativeBridge.ts';
 

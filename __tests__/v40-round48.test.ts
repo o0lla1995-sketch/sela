@@ -399,7 +399,7 @@ describe('v40 — حرّوس المصدر: المسح الذكي والأشكا�
   const PREVIEW = 'src/services/printer/receiptPreview.ts';
   const BRIDGE = 'src/native/nativeBridge.ts';
   const NATIVE =
-    'android/app/src/main/java/com/sela/native_modules/PlatformUtilsModule.kt';
+    'android/app/src/main/java/com/sela/pal/native_modules/PlatformUtilsModule.kt';
 
   test('المسح الذكي: منتج الأحجام (kind=size) يفتح نافذة البيع كالملابس', () => {
     const src = read(POS);
@@ -459,12 +459,12 @@ describe('v40 — حرّوس المصدر: المسح الذكي والأشكا�
     expect(native).toContain('image/png');
   });
 
-  test('الإصدار: 43.0.0 (51) في الإعدادات والبناء (محدّث للجولة 51)', () => {
+  test('الإصدار: 44.0.0 (52) في الإعدادات والبناء (محدّث للجولة 52)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '43.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 51');
+    expect(config).toContain("APP_VERSION = '44.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 52');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 51');
-    expect(gradle).toContain('versionName "43.0.0"');
+    expect(gradle).toContain('versionCode 52');
+    expect(gradle).toContain('versionName "44.0.0"');
   });
 });

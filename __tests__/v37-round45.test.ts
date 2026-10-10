@@ -24,7 +24,7 @@ const INVOICES = 'src/screens/invoices/InvoicesScreen.tsx';
 const REPORTS = 'src/screens/reports/ReportsScreen.tsx';
 const CONTACT = 'src/components/ContactButtons.tsx';
 const SCANNER_KT =
-  'android/app/src/main/java/com/sela/native_modules/ScannerActivity.kt';
+  'android/app/src/main/java/com/sela/pal/native_modules/ScannerActivity.kt';
 const STOCKTAKE = 'src/database/repositories/StocktakeRepo.ts';
 const SETTINGS = 'src/stores/settingsStore.ts';
 const MODES = 'src/core/storeModes.ts';
