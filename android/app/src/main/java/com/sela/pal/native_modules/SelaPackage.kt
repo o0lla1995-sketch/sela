@@ -1,4 +1,4 @@
-package com.sela.native_modules
+package com.sela.pal.native_modules
 
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule

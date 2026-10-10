@@ -1,4 +1,4 @@
-package com.sela
+package com.sela.pal
 
 import android.app.Application
 import android.content.Context
@@ -12,8 +12,8 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.load
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
 import com.facebook.soloader.SoLoader
-import com.sela.native_modules.SelaPackage
-import com.sela.native_modules.StockAlertsWorker
+import com.sela.pal.native_modules.SelaPackage
+import com.sela.pal.native_modules.StockAlertsWorker
 import java.util.Locale
 
 class MainApplication : Application(), ReactApplication {

@@ -1,4 +1,4 @@
-package com.sela
+package com.sela.pal
 
 import android.content.Context
 import android.content.res.Configuration

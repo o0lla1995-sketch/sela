@@ -1,4 +1,4 @@
-package com.sela.native_modules
+package com.sela.pal.native_modules
 
 import android.app.Activity
 import android.content.Intent
