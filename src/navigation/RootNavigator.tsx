@@ -42,6 +42,8 @@ import {LocalDebtsScreen} from '../screens/debts/LocalDebtsScreen';
 import {SecuritySettingsScreen} from '../screens/settings/SecuritySettingsScreen';
 import {CashMovementsScreen} from '../screens/cash/CashMovementsScreen';
 import {DriveBackupScreen} from '../screens/settings/DriveBackupScreen';
+import {OnlineOrdersScreen} from '../screens/online/OnlineOrdersScreen';
+import {OnlineSellingScreen} from '../screens/online/OnlineSellingScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -77,6 +79,10 @@ export type RootStackParamList = {
   /** v28 (round-36 #4): Google Drive cloud backups — linking,
    *  auto-upload schedule, the Drive backups list + restore. */
   DriveBackup: undefined;
+  /** v48 (الجولة 56): طلبات البيع أونلاين — متابعة وفلائر وأفعال. */
+  OnlineOrders: undefined;
+  /** v48: إعدادات البيع أونلاين (تفعيل/ملف المتجر/توصيل). */
+  OnlineSelling: undefined;
 };
 
 export type MainTabParamList = {
@@ -210,6 +216,8 @@ export function RootNavigator() {
         {/* v25 (round-32 #3): الخزينة والمصروفات — from Reports. */}
         <Stack.Screen name="CashMovements" component={CashMovementsScreen} />
         <Stack.Screen name="DriveBackup" component={DriveBackupScreen} />
+      <Stack.Screen name="OnlineOrders" component={OnlineOrdersScreen} />
+      <Stack.Screen name="OnlineSelling" component={OnlineSellingScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

@@ -137,7 +137,10 @@ export function ReportsScreen() {
   // إقلاع الوحدة بـ Dimensions.get فبقي العرض القديم بعد الدوران
   // واقتُطع الرسم على التابلت.
   const {width: winW} = useWindowDimensions();
-  const chartWidth = Math.max(220, winW - spacing.lg * 4);
+  // v48 (الجولة 56 #2): خصم حدّي البطاقة (1px لكل جانب) أيضاً —
+  // بدونهما كان الرسم أعرض من المتاح ببكسلين فيطرد الصف الأخير
+  // خارج حدود البطاقة.
+  const chartWidth = Math.max(220, winW - spacing.lg * 4 - 2);
 
   // v42 (الجولة 50 #3): رسم المبيعات يتبع الفترة المحددة بدقة
   //  — لا اقتطاع لآخر عشرة أعمدة بعد اليوم ولا أسماء أسابيع

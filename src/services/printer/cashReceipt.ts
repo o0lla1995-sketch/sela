@@ -20,6 +20,8 @@ const TITLES: Record<CashMovementKind, string> = {
   expense: 'سند مصروف من الخزينة',
   withdrawal: 'سند سحب رصيد من الخزينة',
   deposit: 'سند إيداع نقدي للخزينة',
+  online_collection: 'سند تحصيل طلب أونلاين',
+  online_refund: 'سند استرداد مرتجع طلب أونلاين',
 };
 
 const AUTH_LABEL: Record<CashAuthMethod, string> = {

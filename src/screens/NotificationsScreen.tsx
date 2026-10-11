@@ -100,6 +100,14 @@ function kindMeta(kind: NotificationKind, c: Palette) {
       color: c.success,
       label: 'تسوية حملة',
     },
+  
+    // v48 (الجولة 56): طلبات البيع أونلاين من متجر سيلا.
+    online_order: {
+      icon: 'cart',
+      bg: c.accentSoft,
+      color: c.accent,
+      label: 'طلب أونلاين',
+    },
   };
   return map[kind] ?? map.info;
 }

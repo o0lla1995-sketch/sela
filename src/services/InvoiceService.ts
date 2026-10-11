@@ -22,6 +22,7 @@ import {ThermalPrinterService} from './printer/ThermalPrinterService';
 import {SilaRepo} from './sila/SilaRepo';
 import {VoucherService} from './VoucherService';
 import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
+import {OnlineRepo} from '../database/repositories/OnlineRepo';
 import {uuidV4} from './sila/qr';
 import type {
   CartLine,
@@ -886,7 +887,11 @@ export const InvoiceService = {
       | {kind: 'migrated'}
       | {kind: 'missing'}
       | {kind: 'none'}
-      | {kind: 'blocked'; reason: string};
+      | {kind: 'blocked'; reason: string}
+      /** v48 (الجولة 56): فاتورة طلب أونلاين — المرتجع ينقص الدين
+       *  المؤقت قبل التسليم، ويسترد نقداً
+       *  من الخزينة بعده. */
+      | {kind: 'online'; status: string; outstandingMinor: number};
     returnsSoFar: SaleReturnRecord[];
   }> {
     const sale = await SaleRepo.getById(saleId);
@@ -945,7 +950,10 @@ export const InvoiceService = {
       | {kind: 'migrated'}
       | {kind: 'missing'}
       | {kind: 'none'}
-      | {kind: 'blocked'; reason: string} = {kind: 'none'};
+      | {kind: 'blocked'; reason: string}
+      | {kind: 'online'; status: string; outstandingMinor: number} = {
+      kind: 'none',
+    };
 
     if (ref.startsWith('INV-D-')) {
       book = 'sila';
@@ -977,6 +985,35 @@ export const InvoiceService = {
         debtState = {kind: 'migrated'};
       } else {
         debtState = {kind: 'local', amountMinor: debt.amountMinor};
+      }
+    } else if (ref.startsWith('INV-O-')) {
+      // v48 (الجولة 56): فاتورة طلب أونلاين — المرتجع يتصرف
+      // حسب حالة الطلب: مرسل → ينقص الدين المؤقت؛
+      // مسلّم → استرداد نقدي من الخزينة (دخل
+      // بسند COLL).
+      book = 'online';
+      const order = await OnlineRepo.byInvoiceRef(ref);
+      debtLabel = order?.customer_name ?? 'زبون المتجر أونلاين';
+      if (order == null) {
+        debtState = {kind: 'missing'};
+      } else if (order.status === 'sent') {
+        debtState = {
+          kind: 'online',
+          status: order.status,
+          outstandingMinor: order.total_minor - order.returned_minor,
+        };
+      } else if (order.status === 'delivered' || order.status === 'returned') {
+        debtState = {
+          kind: 'online',
+          status: order.status,
+          outstandingMinor: 0,
+        };
+      } else {
+        debtState = {
+          kind: 'blocked',
+          reason:
+            'حالة الطلب لا تسمح بالإرجاع — حدّث الطلبات الأونلاين ثم أعد المحاولة',
+        };
       }
     }
 
@@ -1124,6 +1161,93 @@ export const InvoiceService = {
       }
     }
 
+    // v48 (الجولة 56): حمولة المرتجع الأونلاين — يُبنى
+    // قبل المعاملة لأن حجز مراجع السندات يقرأ MMKV
+    // خارجها: قيمة المرتجع تزيد عدد الطلب، والفرق
+    // (استبدال) يُسوّى نقدياً باتجاهين.
+    let onlineReturn:
+      | {
+          orderNumber: string;
+          addReturnedMinor: number;
+          refundCash: {ref: string; amountMinor: number; note: string} | null;
+          collectCash: {ref: string; amountMinor: number; note: string} | null;
+        }
+      | null = null;
+    let onlineServerReturnMinor = 0;
+    if (prep.book === 'online') {
+      const order = await OnlineRepo.byInvoiceRef(prep.sale.invoice_number);
+      if (order == null) {
+        throw new Error('طلب البيع أونلاين غير موجود محلياً — حدّث الطلبات');
+      }
+      if (!exchangeMode) {
+        const refundMinorValue = Math.round(
+          input.lines.reduce(
+            (sum, line) => sum + line.unitPrice * line.quantity,
+            0,
+          ) *
+            prep.discountRatio *
+            100,
+        );
+        const capped = Math.min(
+          refundMinorValue,
+          order.items_total_minor - order.returned_minor,
+        );
+        if (capped <= 0) {
+          throw new Error('أُرجعت كل أصناف هذا الطلب سابقاً');
+        }
+        onlineServerReturnMinor = capped;
+        // قبل التسليم: خصم من الدين المؤقت فقط.
+        // بعده: المبلغ دخل الخزينة بسند COLL فيسترد
+        // نقداً منها (RFD).
+        const refundCash =
+          order.status !== 'sent' && input.refundMethod === 'cash'
+            ? {
+                ref: await reserveOnlineCashRef('online_refund'),
+                amountMinor: capped,
+                note: `استرداد مرتجع طلب ${order.order_number} — ${order.customer_name}`,
+              }
+            : null;
+        onlineReturn = {
+          orderNumber: order.order_number,
+          addReturnedMinor: capped,
+          refundCash,
+          collectCash: null,
+        };
+      } else if (refundDiffMinor !== 0) {
+        // استبدال على طلب أونلاين: قيمة الطلب
+        // على الخادم ثابتة — الفرق يُسوّى نقدًا
+        // باتجاهين حسب من يدفعه.
+        onlineReturn = {
+          orderNumber: order.order_number,
+          addReturnedMinor: 0,
+          refundCash:
+            refundDiffMinor > 0
+              ? {
+                  ref: await reserveOnlineCashRef('online_refund'),
+                  amountMinor: refundDiffMinor,
+                  note: `فرق استبدال لصالح الزبون — طلب ${order.order_number}`,
+                }
+              : null,
+          collectCash:
+            refundDiffMinor < 0
+              ? {
+                  ref: await reserveOnlineCashRef('online_collection'),
+                  amountMinor: -refundDiffMinor,
+                  note: `فرق استبدال دفعه الزبون — طلب ${order.order_number}`,
+                }
+              : null,
+        };
+      } else {
+        // استبدال متكافئ — لا أثر مالي.
+        onlineReturn = {
+          orderNumber: order.order_number,
+          addReturnedMinor: 0,
+          refundCash: null,
+          collectCash: null,
+        };
+      }
+    }
+
     let result: SaleReturnRecord | null = null;
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 4 && result == null; attempt += 1) {
@@ -1152,6 +1276,7 @@ export const InvoiceService = {
           note: input.note,
           exchange: input.exchange,
           silaDebtIncrease: debtIncreasePayload,
+          onlineReturn: onlineReturn ?? undefined,
         });
       } catch (error) {
         lastError = error;
@@ -1229,6 +1354,25 @@ export const InvoiceService = {
       }
     }
 
+    // v48 (الجولة 56): إبلاغ الخادم بالمرتجع (ناري وآمن) —
+    // الفشل لا يلغي المرتجع المحلي، والاستطلاع
+    // الدوري سيلحق الحالة مع المرجع على الخادم
+    // (معاوضة returned_minor المحلية).
+    if (prep.book === 'online' && onlineServerReturnMinor > 0) {
+      try {
+        const {OnlineApi} = require('./online/OnlineApi') as typeof import(
+          './online/OnlineApi'
+        );
+        void OnlineApi.action({
+          orderNumber: onlineReturn?.orderNumber ?? '',
+          action: 'return',
+          returnedMinor: onlineServerReturnMinor,
+        }).catch(() => undefined);
+      } catch {
+        // Best effort.
+      }
+    }
+
     if (input.print) {
       try {
         const items: SaleReturnItem[] = await SaleRepo.returnItems(result.id);
@@ -1250,3 +1394,15 @@ export const InvoiceService = {
     return result;
   },
 };
+
+/** v48 (الجولة 56): حجز مرجع سند خزينة للسداد النقدي للتسويات
+ *  الأونلاين (استرداد RFD / تحصيل فرق COLL) — يستخدم قبل معاملة
+ *  الإرجاع لأن الحجز يقرأ MMKV خارج المعاملة. */
+async function reserveOnlineCashRef(
+  kind: 'online_refund' | 'online_collection',
+): Promise<string> {
+  const cashModule = require('../database/repositories/CashRepo') as typeof import(
+    '../database/repositories/CashRepo'
+  );
+  return cashModule.reserveRef(kind);
+}

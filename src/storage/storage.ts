@@ -92,6 +92,18 @@ export const KEYS = {
   driveAutoIntervalDays: 'drive_auto_interval_days_v1',
   driveLastUploadAt: 'drive_last_upload_at_v1',
   driveHistory: 'drive_history_v1',
+  /** v48 (الجولة 56): وحدة البيع أونلاين — الإعدادات + حالة المزامنة.
+   *  online_settings_v1: OnlineSellingSettings كاملة؛
+   *  online_poll_cursor_v1: مؤشر updated_at لآخر استطلاع طلبات؛
+   *  online_invoice_counter/day: سلسلة فواتير INV-O (نفس انضباط
+   *  الحجز الذي لا يعود للخلف أبداً)؛
+   *  online_seen_orders: أرقام الطلبات التي نُبّه عنها (كل طلب ينبّه
+   *  مرة واحدة فقط). */
+  onlineSettings: 'online_settings_v1',
+  onlinePollCursor: 'online_poll_cursor_v1',
+  onlineInvoiceCounter: 'online_invoice_counter_v1',
+  onlineInvoiceDay: 'online_invoice_day_v1',
+  onlineSeenOrders: 'online_seen_orders_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {

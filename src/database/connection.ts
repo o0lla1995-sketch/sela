@@ -1576,6 +1576,138 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 23;
   }
 
+  if (version < 24) {
+    // ── v48 (الجولة 56): البيع أونلاين — سيلا ماركت ────────────────
+    // (1) جدولا الطلبات: مرآة محلية لطلبات متجر المستخدمين مع كل
+    //     حالة وأطرافها؛ «الإرسال» يربط الطلب بفاتورة INV-O في
+    //     نفس معاملة البيع، و«التسليم» يرحّل المبلغ من الدين
+    //     الأونلاين المؤقت إلى الخزينة بسند تحصيل COLL.
+    await database.execute(`CREATE TABLE IF NOT EXISTS online_orders (
+      server_id INTEGER PRIMARY KEY,
+      order_number TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL
+        CHECK (status IN ('new','accepted','rejected','sent','delivered','cancelled','returned')),
+      customer_name TEXT NOT NULL DEFAULT '',
+      customer_phone TEXT NOT NULL DEFAULT '',
+      customer_id_number TEXT NOT NULL DEFAULT '',
+      region_name TEXT,
+      address TEXT,
+      note TEXT,
+      delivery_fee_minor INTEGER NOT NULL DEFAULT 0,
+      items_total_minor INTEGER NOT NULL DEFAULT 0,
+      total_minor INTEGER NOT NULL DEFAULT 0,
+      returned_minor INTEGER NOT NULL DEFAULT 0,
+      invoice_ref TEXT,
+      sale_id INTEGER,
+      reject_reason TEXT,
+      cancel_reason TEXT,
+      revision INTEGER NOT NULL DEFAULT 1,
+      server_created_at INTEGER NOT NULL DEFAULT 0,
+      server_updated_at INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_online_orders_status ON online_orders(status, server_updated_at)',
+    );
+    await database.execute(`CREATE TABLE IF NOT EXISTS online_order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_order_id INTEGER NOT NULL REFERENCES online_orders(server_id) ON DELETE CASCADE,
+      product_id INTEGER,
+      product_ref TEXT,
+      product_name TEXT NOT NULL,
+      unit_price_minor INTEGER NOT NULL DEFAULT 0,
+      quantity REAL NOT NULL DEFAULT 0,
+      line_total_minor INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(server_order_id, product_ref)
+    )`);
+    // (2) توسيع قيود CHECK بإعادة بناء الجداول الثلاثة (مسار SQLite
+    //     الرسمي: بناء بديل ← نسخ ← حذف ← rename؛ الأبناء يربطون
+    //     بالاسم فلا ينكسر شيء) — 'online' في دفاتر المرتجعات،
+    //     و'online_collection'/'online_refund' في حركات الخزينة.
+    await database.execute('PRAGMA foreign_keys = OFF');
+    try {
+      await database.transaction(async () => {
+        // sales.return_kind: مرتجع فاتورة أونلاين يُسند لفترتها.
+        await database.execute(`CREATE TABLE sales_v24 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          invoice_number TEXT UNIQUE,
+          total_amount REAL NOT NULL,
+          total_cost REAL NOT NULL,
+          total_profit REAL NOT NULL,
+          discount REAL DEFAULT 0,
+          payment_type TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          returned_minor REAL NOT NULL DEFAULT 0,
+          return_kind TEXT
+            CHECK (return_kind IS NULL OR return_kind IN ('cash','sila','local','online'))
+        )`);
+        await database.execute(
+          `INSERT INTO sales_v24 SELECT id, invoice_number, total_amount, total_cost,
+             total_profit, discount, payment_type, created_at, returned_minor, return_kind
+           FROM sales`,
+        );
+        await database.execute('DROP TABLE sales');
+        await database.execute('ALTER TABLE sales_v24 RENAME TO sales');
+        // sale_returns.book: كتاب المرتجع الأونلاين. ملاحظة: البناء
+        // البديل يحمل كل أعمدة الجدول حتى هذا
+        // الترحيل (بما فيها أعمدة الاستبدال من
+        // الجولة 48) — لا يُفقد عمود واحد أبداً.
+        await database.execute(`CREATE TABLE sale_returns_v24 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          return_number TEXT NOT NULL UNIQUE,
+          sale_id INTEGER NOT NULL REFERENCES sales(id),
+          invoice_ref TEXT NOT NULL,
+          book TEXT NOT NULL
+            CHECK (book IN ('cash','sila','local','online')),
+          refund_method TEXT NOT NULL DEFAULT 'none'
+            CHECK (refund_method IN ('none','cash')),
+          refund_minor INTEGER NOT NULL CHECK (refund_minor > 0),
+          debt_adjusted_minor INTEGER NOT NULL DEFAULT 0,
+          is_exchange INTEGER NOT NULL DEFAULT 0,
+          exchange_minor INTEGER NOT NULL DEFAULT 0,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )`);
+        await database.execute(
+          `INSERT INTO sale_returns_v24
+             SELECT id, return_number, sale_id, invoice_ref, book, refund_method,
+                    refund_minor, debt_adjusted_minor, is_exchange, exchange_minor,
+                    note, created_at
+           FROM sale_returns`,
+        );
+        await database.execute('DROP TABLE sale_returns');
+        await database.execute('ALTER TABLE sale_returns_v24 RENAME TO sale_returns');
+        // cash_movements.kind: تحصيل/استرداد الطلبات الأونلاين.
+        await database.execute(`CREATE TABLE cash_movements_v24 (
+          local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ref TEXT NOT NULL UNIQUE,
+          kind TEXT NOT NULL
+            CHECK (kind IN ('expense','withdrawal','deposit','online_collection','online_refund')),
+          category TEXT NOT NULL DEFAULT 'أخرى',
+          note TEXT,
+          amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+          auth_method TEXT NOT NULL DEFAULT 'none'
+            CHECK (auth_method IN ('fingerprint','pin','none')),
+          photo_path TEXT,
+          created_at TEXT NOT NULL
+        )`);
+        await database.execute(
+          `INSERT INTO cash_movements_v24
+             SELECT local_id, ref, kind, category, note, amount_minor, auth_method,
+                    photo_path, created_at
+           FROM cash_movements`,
+        );
+        await database.execute('DROP TABLE cash_movements');
+        await database.execute('ALTER TABLE cash_movements_v24 RENAME TO cash_movements');
+      });
+    } finally {
+      await database.execute('PRAGMA foreign_keys = ON');
+    }
+    logDiag('db', 'ترحيل v24: البيع أونلاين — طلبات سيلا ماركت + دفتر مرتجع أونلاين + سندات الخزينة الأونلاين');
+    version = 24;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }
@@ -1672,8 +1804,11 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM campaign_debts');
   await database.execute('DELETE FROM voucher_redemptions');
   await database.execute('DELETE FROM cash_movements');
+  // v48: طلبات البيع أونلاين.
+  await database.execute('DELETE FROM online_order_items');
+  await database.execute('DELETE FROM online_orders');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sale_return_exchanges','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements','cash_movements')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sale_return_exchanges','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements','cash_movements','online_order_items')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

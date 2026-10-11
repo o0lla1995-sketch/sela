@@ -6,7 +6,7 @@
  * notifications, management (categories/units/stocktake), device,
  * data tools and about.
  */
-import React, {useCallback, useState} from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {
   Alert,
   Image,
@@ -68,6 +68,24 @@ import {UnitRepo} from '../../database/repositories/UnitRepo';
 const ThemedSlider = Slider as unknown as React.ComponentType<SliderProps>;
 
 export function SettingsScreen() {
+  // v48 (الجولة 56): حالة البيع أونلاين للقسم الخاص به.
+  const [onlineEnabled, setOnlineEnabled] = useState(false);
+  const [onlineNewCount, setOnlineNewCount] = useState(0);
+  const [onlineSettings, setOnlineSettings] = useState<{
+    storeName: string;
+  } | null>(null);
+  useEffect(() => {
+    try {
+      const {loadOnlineSettings} = require('../../services/online/OnlineStoreService') as typeof import('../../services/online/OnlineStoreService');
+      const {OnlineRepo} = require('../../database/repositories/OnlineRepo') as typeof import('../../database/repositories/OnlineRepo');
+      const current = loadOnlineSettings();
+      setOnlineEnabled(current.enabled);
+      setOnlineSettings({storeName: current.storeName});
+      void OnlineRepo.newOrdersCount().then(setOnlineNewCount);
+    } catch {
+      // Best effort.
+    }
+  }, []);
   const c = useThemeColors();
   const styles = useStyles();
   const navigation = useNavigation<any>();
@@ -778,6 +796,38 @@ export function SettingsScreen() {
               small
               loading={silaSyncing}
               onPress={() => void syncSilaNow()}
+            />
+          ) : null}
+        </Card>
+
+        {/* ── v48 (الجولة 56): البيع أونلاين — متجر سيلا ماركت ──────── */}
+        <Card style={styles.group}>
+          <SectionTitle
+            title="البيع أونلاين"
+            hint="نشر منتجاتك في متجر سيلا لمستخدمي المتجر واستقبال طلباتهم"
+          />
+          <SettingRow
+            icon="store"
+            label={
+              onlineEnabled
+                ? `متجر أونلاين — ${onlineSettings?.storeName || 'مفعّل'}`
+                : 'تفعيل البيع أونلاين'
+            }
+            hint={
+              onlineEnabled
+                ? onlineNewCount > 0
+                  ? `${onlineNewCount} طلب جديد بانتظار قرارك`
+                  : 'المنتجات منشورة والطلبات تصل مع إشعار'
+                : 'الملف ومناطق التوصيل والتفعيل — دقائق واحدة'
+            }
+            onPress={() => navigation.navigate('OnlineSelling' as never)}
+          />
+          {onlineEnabled ? (
+            <SettingRow
+              icon="cart"
+              label="طلبات البيع أونلاين"
+              hint="قبول · إرسال · تسليم · إرجاع"
+              onPress={() => navigation.navigate('OnlineOrders' as never)}
             />
           ) : null}
         </Card>

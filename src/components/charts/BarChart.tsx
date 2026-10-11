@@ -250,7 +250,12 @@ export function BarChart({
           v47 (الجولة 55 #3): الصف row-reverse في RTL — يتدفق أول
           تسمية من اليسار مثل الأعمدة نفسها (الأقدم يساراً) فتبقى كل
           تسمية تحت عمودها بالضبط، مع paddingLeft مطابق لبداية
-          منطقة الأعمدة فلا انزياح بكسل. */}
+          منطقة الأعمدة فلا انزياح بكسل.
+          v48 (الجولة 56 #2): كل خانة flex:1 بدل width:slot — عرض
+          slot الكسري كان يتراكم مع تقريب بكسلات يوغا فتجاوز آخر
+          خانة حدّ الرسم يميناً بقليل (خارج الإطار)؛ التقسيم المرن
+          يوزع المساحة بالضبط فلا يمكن أن يتجاوز الصف حدود الرسم
+          مهما كثرت الأعمدة. */}
       <View
         style={{
           flexDirection: I18nManager.isRTL ? 'row-reverse' : 'row',
@@ -259,7 +264,7 @@ export function BarChart({
           marginTop: 2,
         }}>
         {data.map((d, i) => (
-          <View key={`l${i}`} style={{width: slot, alignItems: 'center'}}>
+          <View key={`l${i}`} style={{flex: 1, alignItems: 'center'}}>
             <Text style={styles.axisLabel} numberOfLines={1}>
               {d.label}
             </Text>

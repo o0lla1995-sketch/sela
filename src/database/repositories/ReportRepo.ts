@@ -17,7 +17,7 @@ import type {
  *  count + totals from the sales table itself (INV-D-… rows), so
  *  restored backups count too (round-21 #2). */
 export interface DebtSalesSummary {
-  /** All credit invoices (INV-D + INV-L). */
+  /** All credit invoices (INV-D + INV-L + INV-O). */
   count: number;
   amount: number;
   /** v17 (round-23 #2): the صِلة series (INV-D-…). */
@@ -26,6 +26,10 @@ export interface DebtSalesSummary {
   /** v17 (round-23 #2): the store-local book series (INV-L-…). */
   localCount: number;
   localAmount: number;
+  /** v48 (الجولة 56): سلسلة البيع أونلاين (INV-O-…) — دين مؤقت
+   *  حتى تأكيد التسليم/الإرجاع. */
+  onlineCount: number;
+  onlineAmount: number;
 }
 
 function rangeBounds(range: DateRange): [string, string] {
@@ -349,13 +353,17 @@ export const ReportRepo = {
              + COALESCE(SUM(CASE WHEN s.return_kind = 'sila' THEN s.total_amount ELSE 0 END), 0) AS sila_amount,
            COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-L-%' THEN 1 ELSE 0 END), 0) AS local_cnt,
            COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-L-%' THEN s.total_amount ELSE 0 END), 0)
-             + COALESCE(SUM(CASE WHEN s.return_kind = 'local' THEN s.total_amount ELSE 0 END), 0) AS local_amount
+             + COALESCE(SUM(CASE WHEN s.return_kind = 'local' THEN s.total_amount ELSE 0 END), 0) AS local_amount,
+           COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-O-%' THEN 1 ELSE 0 END), 0) AS online_cnt,
+           COALESCE(SUM(CASE WHEN s.invoice_number LIKE 'INV-O-%' THEN s.total_amount ELSE 0 END), 0)
+             + COALESCE(SUM(CASE WHEN s.return_kind = 'online' THEN s.total_amount ELSE 0 END), 0) AS online_amount
          FROM sales s
          LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
            ON link.ret_number = s.invoice_number
          WHERE ${EFFECTIVE_IN_RANGE}
            AND (s.invoice_number LIKE 'INV-D-%'
              OR s.invoice_number LIKE 'INV-L-%'
+             OR s.invoice_number LIKE 'INV-O-%'
              OR s.return_kind IS NOT NULL)`,
         [start, end],
       );
@@ -364,18 +372,24 @@ export const ReportRepo = {
         sila_amount?: number | null;
         local_cnt?: number | null;
         local_amount?: number | null;
+        online_cnt?: number | null;
+        online_amount?: number | null;
       };
       const silaCount = Number(row.sila_cnt ?? 0);
       const localCount = Number(row.local_cnt ?? 0);
+      const onlineCount = Number(row.online_cnt ?? 0);
       const silaAmount = Number(row.sila_amount ?? 0);
       const localAmount = Number(row.local_amount ?? 0);
+      const onlineAmount = Number(row.online_amount ?? 0);
       return {
-        count: silaCount + localCount,
-        amount: silaAmount + localAmount,
+        count: silaCount + localCount + onlineCount,
+        amount: silaAmount + localAmount + onlineAmount,
         silaCount,
         silaAmount,
         localCount,
         localAmount,
+        onlineCount,
+        onlineAmount,
       };
     } catch {
       return {
@@ -385,6 +399,8 @@ export const ReportRepo = {
         silaAmount: 0,
         localCount: 0,
         localAmount: 0,
+        onlineCount: 0,
+        onlineAmount: 0,
       };
     }
   },

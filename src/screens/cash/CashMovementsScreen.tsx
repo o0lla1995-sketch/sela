@@ -168,6 +168,9 @@ const KIND_META: Record<
   expense: {label: 'مصروف', icon: 'send', tone: 'danger'},
   withdrawal: {label: 'سحب رصيد', icon: 'wallet', tone: 'warning'},
   deposit: {label: 'إيداع', icon: 'download', tone: 'success'},
+  // v48 (الجولة 56): دورة البيع أونلاين في الخزينة.
+  online_collection: {label: 'تحصيل طلب أونلاين', icon: 'download', tone: 'success'},
+  online_refund: {label: 'استرداد طلب أونلاين', icon: 'send', tone: 'danger'},
 };
 
 const AUTH_LABEL: Record<string, string> = {
@@ -1420,12 +1423,16 @@ const SHEET_TITLES: Record<CashMovementKind, string> = {
   expense: 'تسجيل مصروف من الخزينة',
   withdrawal: 'سحب رصيد من الخزينة',
   deposit: 'إيداع نقدي في الخزينة',
+  online_collection: 'تحصيل طلب أونلاين',
+  online_refund: 'استرداد مرتجع طلب أونلاين',
 };
 
 const SHEET_SUBS: Record<CashMovementKind, string> = {
   expense: 'يُخصم من الخزينة ويُطبع سنده فوراً',
   withdrawal: 'السقف ما في الدرج فقط',
   deposit: 'يُضاف للخزينة ويُطبع سنده فوراً',
+  online_collection: 'من الدين الأونلاين إلى الخزينة',
+  online_refund: 'من الخزينة إلى الزبون',
 };
 
 /** v27 (round-35 #3): the biometric prompt copy per movement. */
@@ -1445,7 +1452,17 @@ const BIO_PROMPTS: Record<CashMovementKind, {title: string; sub: string; cancel:
     sub: 'أكّد هويتك بالبصمة لإتمام الإيداع',
     cancel: 'إلغاء الإيداع',
   },
-};
+
+  online_collection: {
+    title: 'تحصيل طلب أونلاين',
+    sub: 'من الدين الأونلاين إلى الخزينة',
+    cancel: 'إلغاء',
+  },
+  online_refund: {
+    title: 'استرداد مرتجع طلب أونلاين',
+    sub: 'من الخزينة إلى الزبون',
+    cancel: 'إلغاء',
+  },};
 
 function MovementSheet({
   mode,

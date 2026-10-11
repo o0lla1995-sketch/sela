@@ -44,6 +44,20 @@ const PREFIX: Record<CashMovementKind, string> = {
   expense: 'EXP',
   withdrawal: 'WD',
   deposit: 'DEP',
+  /** v48 (الجولة 56): دورة البيع أونلاين — التحصيل عند تأكيد
+   *  التسليم، والاسترداد النقدي لمرتجع بعد التسليم أو فرق
+   *  استبدال لصالح الزبون. */
+  online_collection: 'COLL',
+  online_refund: 'RFD',
+};
+
+/** v48: تصنيف افتراضي لكل نوع (يُستخدم عند غياب فئة صريحة). */
+const DEFAULT_CATEGORY: Record<CashMovementKind, string> = {
+  expense: 'متفرقات',
+  withdrawal: 'سحب رصيد',
+  deposit: 'إيداع نقدي',
+  online_collection: 'تحصيل طلب أونلاين',
+  online_refund: 'استرداد مرتجع طلب أونلاين',
 };
 
 function rowToRecord(row: Record<string, unknown>): CashMovementRecord {
@@ -83,8 +97,10 @@ async function maxSequenceInDb(
   return max;
 }
 
-/** Reserves the next ref for the kind TODAY (counter + DB max). */
-async function reserveRef(kind: CashMovementKind): Promise<string> {
+/** Reserves the next ref for the kind TODAY (counter + DB max).
+ *  v48: صار عاماً — طبقة البيع أونلاين تحجز سنداتها قبل معاملة
+ *  الإرجاع (MMKV يقرأ خارج المعاملة). */
+export async function reserveRef(kind: CashMovementKind): Promise<string> {
   const today = localToday();
   const dbMax = await maxSequenceInDb(kind, today);
   const lastDay = getString(KEYS.day(kind), '');
@@ -114,11 +130,7 @@ export const CashRepo = {
       throw new Error('المبلغ غير صالح — يجب أن يكون أكبر من صفر');
     }
     const defaultCategory =
-      input.kind === 'withdrawal'
-        ? 'سحب رصيد'
-        : input.kind === 'deposit'
-        ? 'إيداع نقدي'
-        : 'متفرقات';
+      DEFAULT_CATEGORY[input.kind];
     const db = getDb();
     const ref = await reserveRef(input.kind);
     const photoPath =
@@ -265,9 +277,12 @@ export const CashRepo = {
     let expensesMinor = 0;
     let withdrawalsMinor = 0;
     let depositsMinor = 0;
+    let onlineCollectionsMinor = 0;
+    let onlineRefundsMinor = 0;
     let expensesCount = 0;
     let withdrawalsCount = 0;
     let depositsCount = 0;
+    let onlineCollectionsCount = 0;
     for (const raw of result.rows ?? []) {
       const row = raw as {kind?: string; cnt?: number; total?: number};
       if (row.kind === 'expense') {
@@ -279,16 +294,29 @@ export const CashRepo = {
       } else if (row.kind === 'deposit') {
         depositsMinor = Number(row.total ?? 0);
         depositsCount = Number(row.cnt ?? 0);
+      } else if (row.kind === 'online_collection') {
+        onlineCollectionsMinor = Number(row.total ?? 0);
+        onlineCollectionsCount = Number(row.cnt ?? 0);
+      } else if (row.kind === 'online_refund') {
+        onlineRefundsMinor = Number(row.total ?? 0);
       }
     }
     return {
       expensesMinor,
       withdrawalsMinor,
       depositsMinor,
+      onlineCollectionsMinor,
+      onlineRefundsMinor,
       expensesCount,
       withdrawalsCount,
       depositsCount,
-      netMinor: depositsMinor - expensesMinor - withdrawalsMinor,
+      onlineCollectionsCount,
+      netMinor:
+        depositsMinor +
+        onlineCollectionsMinor -
+        expensesMinor -
+        withdrawalsMinor -
+        onlineRefundsMinor,
     };
   },
 
@@ -297,6 +325,8 @@ export const CashRepo = {
     expensesMinor: number;
     withdrawalsMinor: number;
     depositsMinor: number;
+    onlineCollectionsMinor: number;
+    onlineRefundsMinor: number;
   }> {
     try {
       const result = await getDb().execute(
@@ -306,6 +336,8 @@ export const CashRepo = {
       let expensesMinor = 0;
       let withdrawalsMinor = 0;
       let depositsMinor = 0;
+      let onlineCollectionsMinor = 0;
+      let onlineRefundsMinor = 0;
       for (const raw of result.rows ?? []) {
         const row = raw as {kind?: string; total?: number};
         if (row.kind === 'expense') {
@@ -314,12 +346,28 @@ export const CashRepo = {
           withdrawalsMinor = Number(row.total ?? 0);
         } else if (row.kind === 'deposit') {
           depositsMinor = Number(row.total ?? 0);
+        } else if (row.kind === 'online_collection') {
+          onlineCollectionsMinor = Number(row.total ?? 0);
+        } else if (row.kind === 'online_refund') {
+          onlineRefundsMinor = Number(row.total ?? 0);
         }
       }
-      return {expensesMinor, withdrawalsMinor, depositsMinor};
+      return {
+        expensesMinor,
+        withdrawalsMinor,
+        depositsMinor,
+        onlineCollectionsMinor,
+        onlineRefundsMinor,
+      };
     } catch {
       // A fresh install has no table yet — the honest answer is 0.
-      return {expensesMinor: 0, withdrawalsMinor: 0, depositsMinor: 0};
+      return {
+        expensesMinor: 0,
+        withdrawalsMinor: 0,
+        depositsMinor: 0,
+        onlineCollectionsMinor: 0,
+        onlineRefundsMinor: 0,
+      };
     }
   },
 

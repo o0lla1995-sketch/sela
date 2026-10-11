@@ -364,9 +364,9 @@ describe('v34 — الرئيسية: بطاقة واحدة موحّدة (خزين
 
   test('الدين القائم يشمل دفتر المتجر + ديون صلة (هذا المتجر) + الحملات', () => {
     const src = read(HOME);
-    expect(src).toContain(
-      'localOutstandingShekels + silaOutstandingShekels + campaignDueShekels',
-    );
+    expect(src).toContain('localOutstandingShekels +');
+    expect(src).toContain('silaOutstandingShekels +');
+    expect(src).toContain('campaignDueShekels +');
     // ديون صلة من الدفاتر المحلية للمتجر — لا أرصدة الخادم.
     expect(src).toContain('storeOwnOutstandingTotal');
   });

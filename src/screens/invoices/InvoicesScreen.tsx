@@ -48,7 +48,7 @@ import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {InvoiceService} from '../../services/InvoiceService';
 import {SilaRepo} from '../../services/sila/SilaRepo';
 import {VouchersRepo} from '../../services/sila/VouchersRepo';
-import type {VoucherRedemptionRow} from '../../core/types';
+import type {VoucherRedemptionRow, ReturnBook} from '../../core/types';
 import {LocalDebtsRepo} from '../../database/repositories/LocalDebtsRepo';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {usePrinterStore} from '../../stores/printerStore';
@@ -1376,7 +1376,7 @@ function ReturnSheet({
   const [lines, setLines] = useState<
     {item: SaleItemRecord; productName: string; remaining: number}[]
   >([]);
-  const [book, setBook] = useState<'cash' | 'sila' | 'local'>('cash');
+  const [book, setBook] = useState<ReturnBook>('cash');
   const [ratio, setRatio] = useState(1);
   const [debtLabel, setDebtLabel] = useState<string | null>(null);
   const [debtState, setDebtState] = useState<{

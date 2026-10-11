@@ -14,6 +14,7 @@
 import {ReportRepo} from '../database/repositories/ReportRepo';
 import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {SaleRepo} from '../database/repositories/SaleRepo';
+import {OnlineRepo} from '../database/repositories/OnlineRepo';
 import {SilaRepo} from './sila/SilaRepo';
 import {VouchersRepo} from './sila/VouchersRepo';
 import {CashRepo} from '../database/repositories/CashRepo';
@@ -154,7 +155,15 @@ export interface TreasurySnapshot {
   voucherSalesAllTime: number;
   /** v20: الفرق النقدي الذي دفعه المستحقون بالكاشير عبر التاريخ. */
   voucherCounterExtraAllTime: number;
-  /** v25 (round-32 #3): المصروفات المسجّلة عبر التاريخ — خصم من
+  /** v48 (الجولة 56): المبيعات الأونلاين المفتورة صافية من
+   *  مرتجعاتها — دين أونلاين لم يدخل الخزينة
+   *  كنقد لدى البيع (يسوّيه سندات COLL). */
+  onlineCreditSalesAllTime: number;
+  /** v48: تحصيلات الطلبات الأونلاين عبر التاريخ (سندات COLL). */
+  onlineCollectionsAllTime: number;
+  /** v48: استردادات مرتجعات/فروق الطلبات (سندات RFD) — خصم. */
+  onlineRefundsAllTime: number;
+    /** v25 (round-32 #3): المصروفات المسجّلة عبر التاريخ — خصم من
    *  النقد المتوقع بالخزينة (كل مصروف دُفع من الدرج). */
   expensesAllTime: number;
   /** v25: مسحوبات الرصيد عبر التاريخ — خصم من الخزينة. */
@@ -371,6 +380,7 @@ export const ReportService = {
       campaignTotals,
       returnReversalsTotalMinor,
       cashTotals,
+      onlineInvoicedNetMinor,
     ] = await Promise.all([
       SaleRepo.allTimeRevenue(),
       SilaRepo.totals(),
@@ -385,6 +395,8 @@ export const ReportService = {
       // v25 (round-32 #3): the cash-movements ledger (expenses /
       // withdrawals / deposits) — the drawer's non-sale life.
       CashRepo.allTimeTotals(),
+      // v48 (الجولة 56): المفتور الأونلاين صافياً من المرتجعات.
+      OnlineRepo.invoicedNetTotal(),
     ]);
     // Credit sales that never entered the drawer as cash at sale
     // time: the whole INV-D queue (credit-covered parts return via
@@ -401,7 +413,11 @@ export const ReportService = {
     const creditSalesAllTime =
       debtQueueTotals.allMinor / 100 +
       localBook.debtsMinor / 100 -
-      returnReversalsTotalMinor / 100;
+      returnReversalsTotalMinor / 100 +
+      // v48: الدين الأونلاين المفتور — تسويه سندات COLL التي
+      // تضاف إلى المقبوضات أدناه (ليس إيراداً
+      // مزدوجاً — نفس قاعدة الأصل المحاسبية للقسائم).
+      onlineInvoicedNetMinor / 100;
     const localCollectionsAllTime = localBook.paymentsMinor / 100;
     const cashierCollectionsAllTime = cashierTotals.allMinor / 100;
     const appCollectionsAllTime = appTotals.allMinor / 100;
@@ -426,6 +442,10 @@ export const ReportService = {
       appCollectionsAllTime,
       prepaidCoveredAllTime,
       campaignSettlementsAllTime,
+      // v48: الأونلاين — المفتور الصافي، والمحصّل، والمسترد.
+      onlineCreditSalesAllTime: onlineInvoicedNetMinor / 100,
+      onlineCollectionsAllTime: cashTotals.onlineCollectionsMinor / 100,
+      onlineRefundsAllTime: cashTotals.onlineRefundsMinor / 100,
       // v21 (round-27 #3): the standing campaign claim — a DEBT on
       // the institutions until each settlement lands (then it turns
       // into received cash above), exactly like صِلة debts.
@@ -450,6 +470,10 @@ export const ReportService = {
         appCollectionsAllTime +
         prepaidCoveredAllTime +
         campaignSettlementsAllTime +
+        // v48: الأونلاين — التحصيل يدخل الدرج والاسترداد يخرج
+        // منه (والدين نفسه خُصم فوق ضمن creditSalesAllTime).
+        cashTotals.onlineCollectionsMinor / 100 -
+        cashTotals.onlineRefundsMinor / 100 +
         cashTotals.depositsMinor / 100 -
         cashTotals.expensesMinor / 100 -
         cashTotals.withdrawalsMinor / 100,

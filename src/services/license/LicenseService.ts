@@ -265,6 +265,8 @@ async function apiPost<T>(
       const code = data?.error ?? `HTTP_${response.status}`;
       throw new LicenseError(arabicError(code), code);
     }
+    // v48: تبنّي رابط التفعيل الموزّع من الإدارة إن وُجد في الرد.
+    adoptServerUrlIfProvided(data);
     return data as T;
   } catch (error) {
     if (error instanceof LicenseError) {
@@ -314,6 +316,57 @@ export function getServerUrl(): string {
 
 export function setServerUrl(url: string): void {
   setString(KEYS.licenseServerUrl, url.trim().replace(/\/+$/, ''));
+}
+
+/** v48 (الجولة 56): يتحقق أن رابطاً ما هو عنوان خادم تفعيل صالح
+ *  (http/https فقط) قبل تبنّيه — لا يُقبل أي مخطط آخر. */
+export function isValidServerUrl(url: string): boolean {
+  if (typeof url !== 'string') {
+    return false;
+  }
+  const trimmed = url.trim();
+  if (trimmed.length < 8 || trimmed.length > 200) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      parsed.hostname.length > 3
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** v48 (الجولة 56): رابط التفعيل يُدار من لوحة التحكم الآن — كل
+ *  رد من الخادم (تفعيل/نبضة) قد يحمل activationUrl فيتبناه الجهاز
+ *  بصمت، وحقل العنوان أُخفي من واجهة المستخدم نهائياً (طلب التاجر
+ *  المباشر). التبنّي مشروط بـ http/https صالح ويختلف عن الحالي. */
+export function adoptServerUrlIfProvided(data: unknown): void {
+  try {
+    const url = (data as {activationUrl?: unknown} | null)
+      ?.activationUrl;
+    if (typeof url !== 'string' || url.length === 0) {
+      return;
+    }
+    const normalized = url.trim().replace(/\/+$/, '');
+    if (!isValidServerUrl(normalized)) {
+      logDiag(
+        'license',
+        'تجاهُل رابط تفعيل غير صالح ورد من الخادم',
+        'warn',
+      );
+      return;
+    }
+    if (normalized === getServerUrl()) {
+      return;
+    }
+    setServerUrl(normalized);
+    logDiag('license', 'تم تبنّي رابط سيرفر التفعيل الجديد من الإدارة');
+  } catch {
+    // Never let URL adoption break an activation/heartbeat flow.
+  }
 }
 
 // ── Device identity ──────────────────────────────────────────────
@@ -477,6 +530,8 @@ interface ActivateResponse {
   serverTime: number;
   expiresInDays: number;
   contact?: LicenseContact;
+  /** v48: رابط تفعيل جديد توزعه الإدارة — يُتبنى بصمت. */
+  activationUrl?: string;
 }
 
 interface HeartbeatResponse {
@@ -488,6 +543,8 @@ interface HeartbeatResponse {
   /** Renewed license (plan extended by management). */
   license?: string;
   signature?: string;
+  /** v48: رابط تفعيل جديد توزعه الإدارة — يُتبنى بصمت. */
+  activationUrl?: string;
 }
 
 /** Activates a subscription key from the management server. */

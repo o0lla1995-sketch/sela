@@ -68,7 +68,9 @@ const QUICK_ACTIONS: {
     | 'Invoices'
     | 'Sila'
     | 'LocalDebts'
-    | 'CashMovements';
+    | 'CashMovements'
+    /** v48 (الجولة 56): طلبات البيع أونلاين. */
+    | 'OnlineOrders';
   accent?: boolean;
 }[] = [
   {key: 'sell', label: 'بيع جديد', icon: 'cart', target: 'Pos', accent: true},
@@ -84,6 +86,9 @@ const QUICK_ACTIONS: {
   // v26: دفتر صِلة joins the quick actions WHILE PAIRED (the same
   // gate as its Home links — never a dead shortcut when unlinked).
   {key: 'sila', label: 'دفتر صِلة', icon: 'qrFrame', target: 'Sila'},
+  // v48 (الجولة 56): الطلبات أونلاين — يظهر فقط عند تفعيل البيع
+  // أونلاين من الإعدادات (مع شارة عدد الجديد).
+  {key: 'online', label: 'طلبات أونلاين', icon: 'cart', target: 'OnlineOrders'},
 ];
 
 export function HomeScreen() {
@@ -94,6 +99,11 @@ export function HomeScreen() {
   const printerStatus = usePrinterStore(state => state.status);
   const silaPairing = useSilaStore(state => state.pairing);
   const silaPending = useSilaStore(state => state.pending);
+  // v48 (الجولة 56): البيع أونلاين — التفعيل + عدد الطلبات
+  // الجديدة للشارة على زر الوصول السريع.
+  const [onlineEnabled, setOnlineEnabled] = useState(false);
+  const [onlineNewCount, setOnlineNewCount] = useState(0);
+  const [onlineOutstanding, setOnlineOutstanding] = useState(0);
   const toast = useToastStore(state => state.show);
 
   const paired = silaPairing != null;
@@ -130,6 +140,17 @@ export function HomeScreen() {
   const [moneyDetailsOpen, setMoneyDetailsOpen] = useState(false);
 
   const loadData = useCallback(async () => {
+    // v48 (الجولة 56): حالة البيع أونلاين + شارة الطلبات الجديدة —
+    // أفضل جهد كامل: لا يعطل تحميل الرئيسية أبداً.
+    try {
+      const {loadOnlineSettings} = require('../services/online/OnlineStoreService') as typeof import('../services/online/OnlineStoreService');
+      const {OnlineRepo} = require('../database/repositories/OnlineRepo') as typeof import('../database/repositories/OnlineRepo');
+      setOnlineEnabled(loadOnlineSettings().enabled);
+      setOnlineNewCount(await OnlineRepo.newOrdersCount());
+      setOnlineOutstanding((await OnlineRepo.outstandingTotals()).minor);
+    } catch {
+      // Online best-effort only.
+    }
     try {
       const [todayBundle, latest, treasurySnapshot, localTotals] =
         await Promise.all([
@@ -167,6 +188,19 @@ export function HomeScreen() {
       });
     } catch {
       // Dashboard is informational — previous data stays shown.
+    }
+    // v48: استطلاع فوري للطلبات الجديدة عند كل عودة للرئيسية (إن
+    // كان البيع أونلاين مفعّلاً) — بلا انتظار الدورة الدورية.
+    try {
+      const {loadOnlineSettings, pollOrders} = require('../services/online/OnlineStoreService') as typeof import('../services/online/OnlineStoreService');
+      const {OnlineRepo} = require('../database/repositories/OnlineRepo') as typeof import('../database/repositories/OnlineRepo');
+      if (loadOnlineSettings().enabled) {
+        void pollOrders().then(async () => {
+          setOnlineNewCount(await OnlineRepo.newOrdersCount());
+        });
+      }
+    } catch {
+      // Best effort.
     }
   }, []);
 
@@ -213,7 +247,13 @@ export function HomeScreen() {
   const campaignDueShekels = treasury?.campaignDueAllTime ?? 0;
   const campaignsActiveCount = treasury?.campaignsActiveCount ?? 0;
   const debtTotal =
-    localOutstandingShekels + silaOutstandingShekels + campaignDueShekels;
+    localOutstandingShekels +
+    silaOutstandingShekels +
+    campaignDueShekels +
+    // v48 (الجولة 56): الدين الأونلاين المؤقت دين قائم
+    // بالمعنى المحاسبي — الطلبات المُرسلة غير
+    // المسلّمة بعد.
+    onlineOutstanding / 100;
   const debtorsTotal =
     (localBook?.debtorsCount ?? 0) + (paired ? silaDebt?.debtorsCount ?? 0 : 0);
   // Treasury breakdown (all-time sources of the cash number).
@@ -441,6 +481,18 @@ export function HomeScreen() {
                 </Text>
               </View>
             ) : null}
+            {/* v48 (الجولة 56): الدين الأونلاين المؤقت —
+                طلبات مُرسلة لم يؤكد تسليمها بعد. */}
+            {onlineOutstanding > 0 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  من الدين: طلبات أونلاين مُرسلة (مؤقت حتى التسليم)
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.warning}]}>
+                  {formatMoney(onlineOutstanding / 100)}
+                </Text>
+              </View>
+            ) : null}
             {/* v22 (round-28 #2): the campaign dues ARE part of the
                 standing debt above («قيمة المستحق للحملة في الدين
                 القائم») — a debt on the institutions until each
@@ -490,7 +542,8 @@ export function HomeScreen() {
               activeOpacity={0.8}>
               <Icon name="qrFrame" size={14} color={c.textDim} />
               <Text style={styles.silaLinkText}>
-                مربوط بالتطبيق؟ اربط صِلة لمزامنة الديون والتحصيلات سحابياً
+                مربوط بالتطبيق؟ اربط صِلة لمزامنة الديون والتحصيلات
+                سحابياً
               </Text>
               <Icon name="chevronLeft" size={13} color={c.textFaint} />
             </TouchableOpacity>
@@ -501,7 +554,11 @@ export function HomeScreen() {
         <SectionTitle title="إجراءات سريعة" />
         <View style={styles.quickGrid}>
           {/* v26: دفتر صِلة appears only while actually paired. */}
-          {QUICK_ACTIONS.filter(action => action.key !== 'sila' || paired).map(
+          {QUICK_ACTIONS.filter(
+            action =>
+              (action.key !== 'sila' || paired) &&
+              (action.key !== 'online' || onlineEnabled),
+          ).map(
             action => (
               <TouchableOpacity
                 key={action.key}
@@ -530,6 +587,14 @@ export function HomeScreen() {
                   ]}>
                   {action.label}
                 </Text>
+                {/* v48: شارة عدد الطلبات الأونلاين الجديدة. */}
+                {action.key === 'online' && onlineNewCount > 0 ? (
+                  <View style={styles.onlineBadge}>
+                    <Text style={styles.onlineBadgeText}>
+                      {onlineNewCount > 99 ? '99+' : onlineNewCount}
+                    </Text>
+                  </View>
+                ) : null}
               </TouchableOpacity>
             ),
           )}
@@ -871,18 +936,44 @@ const useStyles = makeStyles(c =>
     },
     // v18 (round-24 #3): a SUBTLE one-line hint — never a wall that
     // pushes the merchant's own numbers away.
+    // v48 (الجولة 56 #1): النص flexShrink:1 + توسيط — كان flex:0
+    // لا ينكمش أبداً فالسطر الطويل يدفعه وأيقوناته خارج حدود
+    // البطاقة على الشاشات الضيقة؛ الآن يلتف داخل البطاقة ويتوسّط
+    // فيها («يحتاج إلى وساطة»).
     silaLinkRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
       justifyContent: 'center',
+      gap: 6,
       paddingVertical: 6,
+      flexWrap: 'wrap',
     },
     silaLinkText: {
       color: c.textDim,
       fontFamily: fonts.regular,
       fontSize: typography.micro + 1,
-      flex: 0,
+      flexShrink: 1,
+      textAlign: 'center',
+    },
+    // v48 (الجولة 56): شارة الطلبات الأونلاين الجديدة.
+    onlineBadge: {
+      position: 'absolute',
+      top: 8,
+      start: 10,
+      minWidth: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: c.danger,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 5,
+      borderWidth: 2,
+      borderColor: c.surface,
+    },
+    onlineBadgeText: {
+      fontFamily: fonts.black,
+      fontSize: 10,
+      color: '#FFFFFF',
     },
     balancesStamp: {
       color: c.textFaint,

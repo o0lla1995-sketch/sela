@@ -100,6 +100,16 @@ export default function App(): React.JSX.Element {
         //    not due / offline.
         startAutoScheduler();
 
+        // 9. v48 (الجولة 56): محرك البيع أونلاين — استطلاع الطلبات كل
+        //    60 ثانية ومزامنة المنتجات كل 15 دقيقة ما دام
+        //    التفعيل مشغّلاً — لا يعمل شيئاً عند التعطيل.
+        try {
+          const {ensureEngineStarted} = require('./src/services/online/OnlineStoreService') as typeof import('./src/services/online/OnlineStoreService');
+          ensureEngineStarted();
+        } catch {
+          // Best effort — never blocks boot.
+        }
+
         if (mounted) {
           setBoot('ready');
         }

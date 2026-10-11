@@ -61,6 +61,15 @@ export interface CreateSaleInput {
     amountMinor: number;
     description: string;
   };
+  /** v48 (الجولة 56): when present the sale is an ONLINE order
+   *  fulfillment (سلسلة INV-O) — the online_orders row flips to
+   *  'sent' and links to the new invoice INSIDE the same SQLite
+   *  transaction as the invoice, items and stock decrements: أي
+   *  فشل (نفاد مخزون، تعارض رقم) يلغي كل شيء — لا نصف عملية
+   *  أبداً، والدين الأونلاين المؤقت يبدأ ويقفل ذرياً. */
+  onlineOrderRow?: {
+    orderNumber: string;
+  };
 }
 
 function rowToSale(row: Record<string, unknown>): SaleRecord {
@@ -348,6 +357,23 @@ export const SaleRepo = {
           ],
         );
       }
+      // v48 (الجولة 56): ربط طلب البيع أونلاين بفاتورته INV-O داخل
+      // نفس المعاملة — الحالة 'sent' + المرجع + معرّف الفاتورة.
+      // أي فشل قبلها (نفاد مخزون/تعارض رقم) يرجع كل شيء: لا طلب
+      // «مُرسل» بلا فاتورة ولا فاتورة بلا طلب.
+      if (input.onlineOrderRow != null) {
+        const linkResult = await tx.execute(
+          `UPDATE online_orders
+           SET status = 'sent', invoice_ref = ?, sale_id = ?, updated_at = datetime('now')
+           WHERE order_number = ? AND status IN ('new','accepted')`,
+          [input.invoiceNumber, saleId, input.onlineOrderRow.orderNumber],
+        );
+        if (linkResult.rowsAffected !== 1) {
+          throw new Error(
+            'حالة الطلب تغيّرت — حدّث الطلبات وحاول الإرسال مجدداً',
+          );
+        }
+      }
     });
 
     const saleResult = await db.execute('SELECT * FROM sales WHERE id = ?', [
@@ -510,6 +536,22 @@ export const SaleRepo = {
       posReceiptRef: string;
       idempotencyKey: string;
     } | null;
+    /** v48 (الجولة 56): مرتجع فاتورة طلب أونلاين (INV-O) — تعديل
+     *  الطلب داخل نفس المعاملة + سندات الخزينة النقدية للتسويات
+     *  (استرداد بعد التسليم أو فرق استبدال). المراجع محجوزة سلفاً
+     *  من الطبقة العليا (CashRepo) لأن الحجز يقرأ MMKV خارج
+     *  المعاملة. */
+    onlineReturn?: {
+      orderNumber: string;
+      /** زيادة قيمة المرتجع على الطلب (غير وضع الاستبدال). */
+      addReturnedMinor: number;
+      /** نقد خرج من الخزينة: استرداد بعد التسليم أو فرق استبدال
+       *  لصالح الزبون (سند RFD مُحجوز سلفاً). */
+      refundCash?: {ref: string; amountMinor: number; note: string} | null;
+      /** نقد دخل الخزينة: فرق استبدال دفعه الزبون (سند COLL
+       *  مُحجز سلفاً). */
+      collectCash?: {ref: string; amountMinor: number; note: string} | null;
+    };
     note?: string | null;
   }): Promise<SaleReturnRecord> {
     if (input.lines.length === 0) {
@@ -966,6 +1008,47 @@ export const SaleRepo = {
           'UPDATE sale_returns SET debt_adjusted_minor = ? WHERE id = ?',
           [debtAdjustedMinor, returnId],
         );
+      }
+
+      // v48 (الجولة 56): كتاب الأونلاين — الطلب يُعدّل داخل المعاملة
+      // نفسها: قيمة المرتجع تنقص الدين الأونلاين المؤقت (قبل
+      // التسليم)، والنقد الذي تحرك فعلياً يسجّل بسنداته (استرداد
+      // RFD بعد التسليم، أو تسوية فرق استبدال بالاتجاهين) فتبقى
+      // معادلة الخزينة متوازنة في كل سيناريو.
+      if (input.book === 'online' && input.onlineReturn != null) {
+        const on = input.onlineReturn;
+        if (on.addReturnedMinor > 0) {
+          const updated = await tx.execute(
+            `UPDATE online_orders
+               SET returned_minor = MIN(items_total_minor, returned_minor + ?),
+                   updated_at = datetime('now')
+             WHERE order_number = ? AND status IN ('sent','delivered')`,
+            [Math.round(on.addReturnedMinor), on.orderNumber],
+          );
+          if (updated.rowsAffected === 1) {
+            debtAdjustedMinor = Math.round(on.addReturnedMinor);
+            await tx.execute(
+              'UPDATE sale_returns SET debt_adjusted_minor = ? WHERE id = ?',
+              [debtAdjustedMinor, returnId],
+            );
+          }
+        }
+        if (on.refundCash != null && on.refundCash.amountMinor > 0) {
+          await tx.execute(
+            `INSERT INTO cash_movements
+               (ref, kind, category, note, amount_minor, auth_method, photo_path, created_at)
+             VALUES (?, 'online_refund', 'استرداد مرتجع طلب أونلاين', ?, ?, 'none', NULL, ?)`,
+            [on.refundCash.ref, on.refundCash.note, Math.round(on.refundCash.amountMinor), createdAt],
+          );
+        }
+        if (on.collectCash != null && on.collectCash.amountMinor > 0) {
+          await tx.execute(
+            `INSERT INTO cash_movements
+               (ref, kind, category, note, amount_minor, auth_method, photo_path, created_at)
+             VALUES (?, 'online_collection', 'تحصيل طلب أونلاين', ?, ?, 'none', NULL, ?)`,
+            [on.collectCash.ref, on.collectCash.note, Math.round(on.collectCash.amountMinor), createdAt],
+          );
+        }
       }
     });
 

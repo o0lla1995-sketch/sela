@@ -38,8 +38,6 @@ import {
 import {
   activateLicense,
   getDeviceId,
-  getServerUrl,
-  setServerUrl,
   LicenseError,
   getCachedContact,
   type LicenseStatus,
@@ -94,8 +92,6 @@ export function ActivationScreen({status}: {status: LicenseStatus}) {
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [serverUrlText, setServerUrlText] = useState(getServerUrl());
   const [deviceId, setDeviceId] = useState('');
 
   useMemo(() => {
@@ -117,7 +113,6 @@ export function ActivationScreen({status}: {status: LicenseStatus}) {
     }
     setBusy(true);
     try {
-      setServerUrl(serverUrlText);
       await activateLicense(keyText, setPhase);
       await refresh();
     } catch (e) {
@@ -138,7 +133,6 @@ export function ActivationScreen({status}: {status: LicenseStatus}) {
     setBusy(true);
     setPhase('جارٍ الاتصال بالسيرفر…');
     try {
-      setServerUrl(serverUrlText);
       await verifyOnline(true);
       await refresh();
     } catch {
@@ -293,34 +287,10 @@ export function ActivationScreen({status}: {status: LicenseStatus}) {
           <ContactButtons contact={contact} />
         </View>
 
-        {/* Advanced: server URL (for management migrations) */}
-        <TouchableOpacity
-          style={styles.advancedToggle}
-          onPress={() => setShowAdvanced(value => !value)}>
-          <Icon name="chevronDown" size={14} color={c.textDim} />
-          <Text style={styles.advancedText}>
-            إعدادات متقدمة (سيرفر التفعيل)
-          </Text>
-        </TouchableOpacity>
-        {showAdvanced ? (
-          <View style={styles.card}>
-            <Text style={styles.fieldLabel}>عنوان سيرفر التفعيل</Text>
-            <TextInput
-              style={styles.urlInput}
-              value={serverUrlText}
-              onChangeText={setServerUrlText}
-              placeholder="https://…"
-              placeholderTextColor={c.textDim}
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!busy}
-              textAlign="left"
-            />
-            <Text style={styles.urlHint}>
-              عدّل هذا العنوان فقط إذا طلبت منك الإدارة ذلك.
-            </Text>
-          </View>
-        ) : null}
+        {/* v48 (الجولة 56): حقل عنوان سيرفر التفعيل حُذف من الواجهة
+            نهائياً بطلب التاجر — الرابط يُدار من لوحة التحكم ويوزّعه
+            الخادم تلقائياً على الأجهزة (activationUrl) فيتبناه
+            التطبيق بصمت دون أي تدخل المستخدم. */}
 
         <Text style={styles.version}>sela {APP_VERSION}</Text>
       </ScrollView>
@@ -501,34 +471,6 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: 13.5,
       color: c.text,
-    },
-    advancedToggle: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      alignSelf: 'center',
-      padding: 10,
-    },
-    advancedText: {
-      fontFamily: fonts.regular,
-      fontSize: 12,
-      color: c.textDim,
-    },
-    urlInput: {
-      backgroundColor: c.surfaceAlt,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingVertical: 11,
-      paddingHorizontal: 12,
-      fontFamily: fonts.regular,
-      fontSize: 13,
-      color: c.text,
-    },
-    urlHint: {
-      fontFamily: fonts.regular,
-      fontSize: 11,
-      color: c.textDim,
     },
     version: {
       fontFamily: fonts.regular,

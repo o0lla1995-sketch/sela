@@ -279,8 +279,11 @@ export interface SaleItemRecord {
 // Returns (المرتجعات) — v23 (round-29 #2)
 // ────────────────────────────────────────────────────────────────
 
-/** Which book a return reverses — decides the debt adjustment path. */
-export type ReturnBook = 'cash' | 'sila' | 'local';
+/** Which book a return reverses — decides the debt adjustment path.
+ *  v48 (الجولة 56): 'online' — مرتجع ضد فاتورة طلب أونلاين (INV-O):
+ *  قبل التسليم ينقص الدين الأونلاين المؤقت، وبعدها استرداد نقدي
+ *  من الخزينة (المبلغ دخل أصلاً بسند COLL). */
+export type ReturnBook = 'cash' | 'sila' | 'local' | 'online';
 
 /** One return receipt (RET-… series) against an original invoice. */
 export interface SaleReturnRecord {
@@ -515,6 +518,8 @@ export type NotificationKind =
   | 'printer'
   | 'sale'
   | 'stocktake'
+  /** v48 (الجولة 56): طلبات البيع أونلاين — طلب جديد من متجر سيلا ماركت. */
+  | 'online_order'
   /** v47 (الجولة 55 #4): الاشتراك — اقترب الانتهاء أو انتهى. */
   | 'license'
   /** v11: a SILA debt record failed permanently and needs the
@@ -888,7 +893,16 @@ export function stockStateOf(
 // method used at entry time. Rows are IMMUTABLE (audit trail).
 // ────────────────────────────────────────────────────────────────
 
-export type CashMovementKind = 'expense' | 'withdrawal' | 'deposit';
+export type CashMovementKind =
+  | 'expense'
+  | 'withdrawal'
+  | 'deposit'
+  /** v48 (الجولة 56): تحصيل طلب أونلاين — المبلغ ينتقل من الدين
+   *  الأونلاين المؤقت إلى الخزينة نقداً عند تأكيد تسليم الطلب. */
+  | 'online_collection'
+  /** v48: استرداد نقدي لمرتجع بعد التسليم أو فرق
+   *  استبدال لصالح الزبون. */
+  | 'online_refund';
 
 /** How the (secured) action was authorized when it was recorded. */
 export type CashAuthMethod = 'fingerprint' | 'pin' | 'none';
@@ -913,10 +927,15 @@ export interface CashMovementTotals {
   expensesMinor: number;
   withdrawalsMinor: number;
   depositsMinor: number;
+  /** v48: تحصيلات الطلبات الأونلاين بالفترة (نقد دخل الخزينة). */
+  onlineCollectionsMinor: number;
+  /** v48: استردادات مرتجعات/فروق الطلبات الأونلاين بالفترة. */
+  onlineRefundsMinor: number;
   expensesCount: number;
   withdrawalsCount: number;
   depositsCount: number;
-  /** +deposits − expenses − withdrawals (minor). */
+  onlineCollectionsCount: number;
+  /** +deposits +onlineCollections − expenses − withdrawals − refunds (minor). */
   netMinor: number;
 }
 
@@ -925,4 +944,90 @@ export interface CashCategoryTotal {
   category: string;
   count: number;
   totalMinor: number;
+}
+
+// ────────────────────────────────────────────────────────────────
+// v48 (الجولة 56): البيع أونلاين — طلبات متجر سيلا ماركت.
+// الطلب يبدأ حياته على الخادم، وتتزامن حالته إلى هنا؛ «الإرسال»
+// يخلق فاتورة INV-O (بيع عادي بكل المزايا) مع دين أونلاين مؤقت،
+// و«تأكيد التسليم» يرحّل المبلغ من الدين إلى الخزينة بسند COLL.
+// ────────────────────────────────────────────────────────────────
+
+/** حالة الطلب كما يعرفها الخادم (مصدر الحقيقة الواحد). */
+export type OnlineOrderStatus =
+  | 'new'
+  | 'accepted'
+  | 'rejected'
+  | 'sent'
+  | 'delivered'
+  | 'cancelled'
+  | 'returned';
+
+/** بيانات الزبون (مستخدم تطبيق المتجر) كما تصل مع الطلب. */
+export interface OnlineOrderCustomer {
+  name: string;
+  phone: string;
+  idNumber: string;
+}
+
+/** صنف من أصناف الطلب. */
+export interface OnlineOrderItem {
+  id?: number;
+  order_id?: number;
+  product_id: number | null;
+  product_ref: string;
+  product_name: string;
+  unit_price_minor: number;
+  quantity: number;
+  line_total_minor: number;
+}
+
+/** المرآة المحلية للطلب — تتحدث بالاستطلاع وبأفعال التاجر. */
+export interface OnlineOrder {
+  server_id: number;
+  order_number: string;
+  status: OnlineOrderStatus;
+  customer_name: string;
+  customer_phone: string;
+  customer_id_number: string;
+  region_name: string | null;
+  address: string | null;
+  note: string | null;
+  delivery_fee_minor: number;
+  items_total_minor: number;
+  total_minor: number;
+  returned_minor: number;
+  invoice_ref: string | null;
+  sale_id: number | null;
+  reject_reason: string | null;
+  cancel_reason: string | null;
+  revision: number;
+  server_created_at: number;
+  server_updated_at: number;
+  /** الطوابع المحلية (متى رأينا الطلب/عالجناه هنا). */
+  created_at: string;
+  updated_at: string;
+  items?: OnlineOrderItem[];
+}
+
+/** إعداد مناطق التوصيل: اسم المنطقة + سعر التوصيل (قروش). */
+export interface OnlineDeliveryRegion {
+  name: string;
+  feeMinor: number;
+}
+
+/** إعدادات وحدة البيع أونلاين (MMKV — لا قاعدة بيانات). */
+export interface OnlineSellingSettings {
+  enabled: boolean;
+  storeName: string;
+  description: string;
+  category: string;
+  region: string;
+  phone: string;
+  whatsapp: string;
+  deliveryRegions: OnlineDeliveryRegion[];
+  /** آخر حالة مزامنة/استطلاع (للعرض في الإعدادات). */
+  lastProductsSyncAt: number | null;
+  lastPollAt: number | null;
+  storeNumber: string | null;
 }
