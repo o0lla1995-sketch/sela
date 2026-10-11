@@ -64,8 +64,11 @@ describe('v32 — الخزينة: النقد المتاح والرصيد بعد 
 
   test('v33 — ارتفاع النافذة مثبّت من لحظة الفتح فلا تقفز لوحة الأرقام', () => {
     const src = read(CASH);
-    expect(src).toContain('const [sheetHeight] = useState(windowH)');
-    expect(src).toContain('height: sheetHeight');
+    // v46: the height comes from the CONTAINER (correct by
+    // construction on any device/ROM) and freezes on first onLayout.
+    expect(src).toContain("height: frozenH ?? '100%'");
+    expect(src).toContain('onLayout={freezeLayout}');
+    expect(src).toContain('setFrozenH(prev =>');
     expect(src).toContain("justifyContent: 'flex-start'");
   });
 

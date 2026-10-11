@@ -271,7 +271,7 @@ describe('v39 #4 — حرّوس المصدر: الواجهات المتبقية'
     const screen = read(CASH_SCREEN);
     expect(screen).toContain('MovementDetailSheet');
     expect(screen).toContain('noteInputBig');
-    expect(screen).toContain("mode !== 'expense' ? sheetStyles(c).noteInputBig");
+    expect(screen).toContain('? [sheetStyles(c).noteInputBig, {height: dyn.noteBigH}]');
     expect(screen).toContain('categoryFilter');
     expect(screen).toContain('FILTER_CATEGORIES');
     expect(screen).toContain('searchInput');

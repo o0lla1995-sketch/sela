@@ -32,7 +32,7 @@ describe('v31 — نوافذ الخزينة: لوحة الأرقام دائمة'
     const src = read(CASH);
     // The keypad renders unconditionally (a plain <View>, never
     // wrapped in a ternary).
-    expect(src).toContain('<View style={sheetStyles(c).keypad}>');
+    expect(src).toContain('<View style={[sheetStyles(c).keypad, colMax]}>');
     expect(src).not.toMatch(/\{!\w+\s*\?\s*\(\s*<View style=\{sheetStyles\(c\)\.keypad\}/);
   });
 
@@ -47,10 +47,16 @@ describe('v31 — نوافذ الخزينة: لوحة الأرقام دائمة'
     // under the amount) so they stay visible above the system IME.
     // v39 (الجولة 47): style الملاحظة صار مصفوفة (النسخة الكبيرة
     // للسحب/الإيداع) — البحث عن مفتاح noteInput داخل المصفوفة.
+    // v46: the single scroll region is formScroll (was form) —
+    // the note sits above it and the keypad below it, outside it.
+    // v46: the single scroll region is formScroll (was form) —
+    // the note sits above it and the keypad below it, outside it.
+    const scrollPos = src.indexOf('contentContainerStyle={[sheetStyles(c).formScroll');
     const notePos = src.indexOf('sheetStyles(c).noteInput');
-    const scrollPos = src.indexOf('contentContainerStyle={sheetStyles(c).form}');
-    expect(notePos).toBeGreaterThan(-1);
-    expect(scrollPos).toBeGreaterThan(notePos);
+    const keypadPos = src.indexOf('<View style={[sheetStyles(c).keypad, colMax]}>');
+    expect(scrollPos).toBeGreaterThan(-1);
+    expect(notePos).toBeGreaterThan(scrollPos);
+    expect(keypadPos).toBeGreaterThan(notePos);
   });
 });
 
