@@ -909,108 +909,6 @@ export function CashMovementsScreen() {
 // السجل. السندات غير قابلة للتعديل بالتصميم (مسار تدقيق كامل) —
 // المراجعة عرض كامل التفاصيل + إعادة طباعة السند فقط.
 // ────────────────────────────────────────────────────────────────
-// v46: VoucherChooser — خيارا إرفاق صورة السند (كاميرا / معرض)
-// كتوسيع مضمن داخل بطاقة السند — بلا Modal وبلا قوائم عائمة، نفس
-// انضباط ROM (كل النوافذ INLINE داخل شجرة الشاشة).
-// ────────────────────────────────────────────────────────────────
-function VoucherChooser({
-  onCamera,
-  onGallery,
-  onCancel,
-}: {
-  onCamera: () => void;
-  onGallery: () => void;
-  onCancel: () => void;
-}) {
-  const c = useThemeColors();
-  return (
-    <View style={chooserStyles(c).wrap}>
-      <TouchableOpacity
-        style={chooserStyles(c).row}
-        onPress={onCamera}
-        activeOpacity={0.75}>
-        <View style={chooserStyles(c).icon}>
-          <Icon name="camera" size={17} color={c.accent} />
-        </View>
-        <View style={{flex: 1}}>
-          <Text style={chooserStyles(c).title}>تصوير السند بالكاميرا</Text>
-          <Text style={chooserStyles(c).sub}>
-            افتح الكاميرا وصوّر ورقة السند مباشرة
-          </Text>
-        </View>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={chooserStyles(c).row}
-        onPress={onGallery}
-        activeOpacity={0.75}>
-        <View style={chooserStyles(c).icon}>
-          <Icon name="image" size={17} color={c.accent} />
-        </View>
-        <View style={{flex: 1}}>
-          <Text style={chooserStyles(c).title}>اختيار من المعرض</Text>
-          <Text style={chooserStyles(c).sub}>
-            اختر صورة السند من هاتفك (لقطة موجودة)
-          </Text>
-        </View>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={chooserStyles(c).cancel}
-        onPress={onCancel}
-        activeOpacity={0.8}>
-        <Text style={chooserStyles(c).cancelText}>إلغاء</Text>
-      </TouchableOpacity>
-    </View>
-  );
-}
-
-function chooserStyles(c: ReturnType<typeof useThemeColors>) {
-  return StyleSheet.create({
-    wrap: {
-      gap: 6,
-    },
-    row: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      borderRadius: radius.sm,
-      padding: spacing.md,
-    },
-    icon: {
-      width: 38,
-      height: 38,
-      borderRadius: 12,
-      backgroundColor: c.accentSofter,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    title: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.body,
-    },
-    sub: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-      marginTop: 2,
-    },
-    cancel: {
-      alignSelf: 'center',
-      paddingVertical: 6,
-      paddingHorizontal: spacing.lg,
-    },
-    cancelText: {
-      color: c.textDim,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-    },
-  });
-}
-
-// ────────────────────────────────────────────────────────────────
 function MovementDetailSheet({
   movement,
   busy,
@@ -1368,9 +1266,15 @@ function VoucherPhotoViewer({
       <View
         style={viewerStyles(c).area}
         onLayout={e => {
+          // v47: نفس درس تدوير الأحداث — يُقرأ التخطيط تزامنياً في
+          // جسم المعالج (لا داخل أي دالة مؤجلة) مع حماية من حدث فارغ.
+          const box = e?.nativeEvent?.layout;
+          if (box == null) {
+            return;
+          }
           area.current = {
-            w: e.nativeEvent.layout.width,
-            h: e.nativeEvent.layout.height,
+            w: box.width,
+            h: box.height,
           };
         }}>
         <Animated.View
@@ -1576,11 +1480,23 @@ function MovementSheet({
   //      بلا أي Dimensions وبلا مستمعات Keyboard.
   const insets = useSafeAreaInsets();
   const [frozenH, setFrozenH] = useState<number | null>(null);
+  // v47 (الجولة 55 #1): جذر «Cannot read property 'layout' of null» —
+  // كان الارتفاع يُقرأ داخل دالة التحديث setFrozenH(prev => …
+  // e.nativeEvent.layout.height …)، وReact 18 يؤجّل استدعاء دوال
+  // التحديث ويعيد استدعاءها (إعادة العرض المتزامنة/المقاطعة —
+  // انتقال البوابة إلى النموذج بعد نجاح البصمة تحديداً)، وبين
+  // الاستدعاءات يعيد نظام أحداث RN تدوير كائن الحدث فيصبح
+  // nativeEvent بقيمة null. القاعدة: يُقرأ رقم التخطيط تزامنياً في
+  // جسم المعالج قبل أي حدود غير متزامنة، ثم تُستخدم القيمة
+  // الملتقطة داخل دالة التحديث.
   const freezeLayout = useCallback(
     (e: {nativeEvent: {layout: {height: number}}}) => {
-      setFrozenH(prev =>
-        prev == null ? Math.round(e.nativeEvent.layout.height) : prev,
-      );
+      const captured = e?.nativeEvent?.layout?.height;
+      if (typeof captured !== 'number' || !Number.isFinite(captured)) {
+        return; // حدث مُدوَّر أو فارغ — تجاهُل بهدوء (درس الحرّوس).
+      }
+      const h = Math.round(captured);
+      setFrozenH(prev => (prev == null ? h : prev));
     },
     [],
   );
@@ -1607,8 +1523,6 @@ function MovementSheet({
       balanceFont: clampNum(Math.round(availH * 0.03), 15, 22),
       // حقل الملاحظة الكبير (سحب/إيداع) — يتقلص على الشاشات القصيرة.
       noteBigH: clampNum(Math.round(availH * 0.12), 72, 110),
-      // عارض الصورة في البطاقة: مربع مضغوط داخل نموذج الإدخال.
-      thumb: clampNum(Math.round(availH * 0.1), 56, 84),
     }),
     [availH],
   );
@@ -1633,13 +1547,17 @@ function MovementSheet({
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [showCustom, setShowCustom] = useState(false);
-  /** v46: صورة السند المرفقة — مسار ملف محلي داخل filesDir/vouchers
+  /** v46→v47: صورة السند المرفقة — مسار ملف محلي داخل filesDir/vouchers
    *  (يُحفظ مع الحركة في عمود photo_path ويمكن مراجعته من السجل).
-   *  chooserOpen يعرض خياري الكاميرا/المعرض داخل البطاقة نفسها
-   *  (توسيع مضمن — بلا Modal وبلا نوافذ عائمة، نفس انضباط ROM). */
+   *  v47: الإرفاق صار من أيقونة المشبك داخل حقل الملاحظة نفسه —
+   *  شريط مصغر (كاميرا/معرض) ينطوي تحت الحقل بعد الاختيار. */
   const [photoPath, setPhotoPath] = useState<string | null>(null);
   const [chooserOpen, setChooserOpen] = useState(false);
   const [attachBusy, setAttachBusy] = useState(false);
+  /** v47: عارض ملء الشاشة لصورة السند المرفقة — يفتح من المصغرة
+   *  داخل حقل الملاحظة (مراجعة احترافية: تكبير بسحب إصبعين…) ثم
+   *  يعود للنموذج كما كان. */
+  const [previewOpen, setPreviewOpen] = useState(false);
   /** v46: مرآة مرجعية لقيمة الصورة الحالية — تُقرأ في تنظيف إلغاء
    *  التركيب بلا اعتماد على إعادة إنشاء الدالة. */
   const photoRef = useRef<string | null>(null);
@@ -2205,138 +2123,132 @@ function MovementSheet({
                     </View>
                   </View>
 
-                  {/* ③ الملاحظة — سطر واحد فوق منطقة الفئات.
-                      v39 (الجولة 47): في نافذتي السحب والإيداع فقط —
-                      حقل أكبر متعدد الأسطر لوصف العملية براحتها (طلب
-                      التاجر صريح بهاتين النافذتين فقط)؛ المصروف يبقى
-                      سطراً مضغوطاً فوق شبكة الفئات. ارتفاع الحقل الكبير
-                      متكيف من ارتفاع النافذة (v46). */}
-                  <TextInput
+                  {/* ③ الملاحظة + إرفاق صورة السند (v47) — طلب التاجر
+                      نصاً: «زر إرفاق صورة في حقل الملاحظة نفسه كأيقونة
+                      دبوس فقط وليس زر منفصل حتى لا تأخذ مساحة كبيرة
+                      في العرض». أيقونة المشبك تعيش بطرف الحقل نفسه:
+                      قبل الإرفاق دبوس هادئ يفتح شريطاً مصغراً (كاميرا/
+                      معرض) تحت الحقل مباشرة ثم ينطوي، وبعد الإرفاق
+                      تصير الأيقونة صورة مصغرة بعلامة X — لمسها يفتح
+                      العارض ملء الشاشة وX تحذفها. صفر بطاقات مستقلة
+                      وصفر أزرار عريضة — سطر واحد فقط.
+                      v39: نافذتا السحب والإيداع حقل أكبر متعدد الأسطر
+                      والمصروف سطر مضغوط؛ الارتفاع متكيف (v46). */}
+                  <View
                     style={[
-                      sheetStyles(c).noteInput,
+                      sheetStyles(c).noteWrap,
                       mode !== 'expense'
-                        ? [sheetStyles(c).noteInputBig, {height: dyn.noteBigH}]
+                        ? [sheetStyles(c).noteWrapBig, {height: dyn.noteBigH}]
                         : null,
-                    ]}
-                    value={note}
-                    onChangeText={setNote}
-                    placeholder={
-                      mode === 'expense'
-                        ? 'ملاحظة (اختياري) — مثال: فاتورة كهرباء شهر 10'
-                        : 'ملاحظة العملية (اختياري) — مثال: سحب لتسديد المورد أبو محمد، إيداع فائق يوم البيع'
-                    }
-                    placeholderTextColor={c.textFaint}
-                    maxLength={140}
-                    editable={!busy}
-                    multiline={mode !== 'expense'}
-                  />
-
-                  {/* ④ صورة السند (v46) — طلب التاجر: زر بأيقونة
-                      لإمكانية رفع صورة السند أو تصويره، تُرفق بالعملية
-                      ويمكن مراجعتها باحتراف من سجل الحركات. مساران بلا
-                      اعتماديات جديدة: الكاميرا (الماسح الأصلي) أو
-                      المعرض (منتقي النظام)، مع معاينة واستبدال وإزالة. */}
-                  <View style={sheetStyles(c).voucherCard}>
+                    ]}>
+                    <TextInput
+                      style={[
+                        sheetStyles(c).noteField,
+                        mode !== 'expense'
+                          ? sheetStyles(c).noteFieldBig
+                          : null,
+                      ]}
+                      value={note}
+                      onChangeText={setNote}
+                      placeholder={
+                        mode === 'expense'
+                          ? 'ملاحظة (اختياري) — مثال: فاتورة كهرباء شهر 10'
+                          : 'ملاحظة العملية (اختياري) — مثال: سحب لتسديد المورد أبو محمد، إيداع فائق يوم البيع'
+                      }
+                      placeholderTextColor={c.textFaint}
+                      maxLength={140}
+                      editable={!busy}
+                      multiline={mode !== 'expense'}
+                    />
+                    {/* أيقونة الدبوس — نهاية السطر داخل الحقل نفسه. */}
                     {attachBusy ? (
-                      <View style={sheetStyles(c).voucherBusy}>
+                      <View style={sheetStyles(c).attachSlot}>
                         <ActivityIndicator size="small" color={c.accent} />
-                        <Text style={sheetStyles(c).voucherBusyText}>
-                          جارٍ تجهيز الصورة…
-                        </Text>
                       </View>
                     ) : photoPath != null ? (
-                      <>
-                        <View style={sheetStyles(c).voucherRow}>
-                          <RNImage
-                            source={{uri: fileUri(photoPath)}}
-                            style={[
-                              sheetStyles(c).voucherThumb,
-                              {width: dyn.thumb, height: dyn.thumb},
-                            ]}
-                          />
-                          <View style={{flex: 1}}>
-                            <Text style={sheetStyles(c).voucherTitle}>
-                              صورة السند مرفقة
-                            </Text>
-                            <Text style={sheetStyles(c).voucherSub}>
-                              تُحفظ مع السند ويمكن مراجعتها من سجل الحركات
-                            </Text>
-                          </View>
-                        </View>
-                        {chooserOpen ? (
-                          <VoucherChooser
-                            onCamera={() => void attachFromCamera()}
-                            onGallery={() => void attachFromGallery()}
-                            onCancel={() => setChooserOpen(false)}
-                          />
-                        ) : (
-                          <View style={sheetStyles(c).voucherActions}>
-                            <TouchableOpacity
-                              style={sheetStyles(c).voucherActionBtn}
-                              onPress={() => setChooserOpen(true)}
-                              disabled={busy}
-                              activeOpacity={0.7}>
-                              <Icon name="camera" size={14} color={c.accent} />
-                              <Text
-                                style={[
-                                  sheetStyles(c).voucherActionText,
-                                  {color: c.accent},
-                                ]}>
-                                استبدال الصورة
-                              </Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              style={[
-                                sheetStyles(c).voucherActionBtn,
-                                sheetStyles(c).voucherRemoveBtn,
-                              ]}
-                              onPress={() => void removeVoucher()}
-                              disabled={busy}
-                              activeOpacity={0.7}>
-                              <Icon name="x" size={14} color={c.danger} />
-                              <Text
-                                style={[
-                                  sheetStyles(c).voucherActionText,
-                                  {color: c.danger},
-                                ]}>
-                                إزالة
-                              </Text>
-                            </TouchableOpacity>
-                          </View>
-                        )}
-                      </>
-                    ) : chooserOpen ? (
-                      <VoucherChooser
-                        onCamera={() => void attachFromCamera()}
-                        onGallery={() => void attachFromGallery()}
-                        onCancel={() => setChooserOpen(false)}
-                      />
+                      <TouchableOpacity
+                        style={sheetStyles(c).attachSlot}
+                        onPress={() => setPreviewOpen(true)}
+                        disabled={busy}
+                        activeOpacity={0.85}>
+                        <RNImage
+                          source={{uri: fileUri(photoPath)}}
+                          style={sheetStyles(c).attachThumb}
+                        />
+                        <TouchableOpacity
+                          style={sheetStyles(c).attachX}
+                          onPress={() => void removeVoucher()}
+                          disabled={busy}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                          activeOpacity={0.85}>
+                          <Icon name="x" size={9} color="#FFFFFF" />
+                        </TouchableOpacity>
+                      </TouchableOpacity>
                     ) : (
                       <TouchableOpacity
-                        style={sheetStyles(c).voucherAdd}
-                        onPress={() => setChooserOpen(true)}
+                        style={[
+                          sheetStyles(c).attachSlot,
+                          chooserOpen
+                            ? {borderColor: c.accent}
+                            : null,
+                        ]}
+                        onPress={() => setChooserOpen(o => !o)}
                         disabled={busy}
-                        activeOpacity={0.8}>
-                        <View style={sheetStyles(c).voucherAddIcon}>
-                          <Icon name="imagePlus" size={20} color={c.accent} />
-                        </View>
-                        <View style={{flex: 1}}>
-                          <Text style={sheetStyles(c).voucherAddText}>
-                            إرفاق صورة السند
-                          </Text>
-                          <Text style={sheetStyles(c).voucherAddHint}>
-                            تصوير بالكاميرا أو اختيار من المعرض — تُحفظ مع
-                            السند ويمكن مراجعتها من السجل
-                          </Text>
-                        </View>
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                        activeOpacity={0.7}>
                         <Icon
-                          name={I18nManager.isRTL ? 'chevronLeft' : 'chevronRight'}
-                          size={16}
-                          color={c.textFaint}
+                          name="paperclip"
+                          size={18}
+                          color={chooserOpen ? c.accent : c.textDim}
                         />
                       </TouchableOpacity>
                     )}
                   </View>
+                  {chooserOpen && photoPath == null && !attachBusy ? (
+                    <View style={sheetStyles(c).attachBar}>
+                      <TouchableOpacity
+                        style={[
+                          sheetStyles(c).attachChip,
+                          {borderColor: c.accent},
+                        ]}
+                        onPress={() => void attachFromCamera()}
+                        disabled={busy}
+                        activeOpacity={0.75}>
+                        <Icon name="camera" size={15} color={c.accent} />
+                        <Text
+                          style={[
+                            sheetStyles(c).attachChipText,
+                            {color: c.accent},
+                          ]}>
+                          كاميرا
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          sheetStyles(c).attachChip,
+                          {borderColor: c.accent},
+                        ]}
+                        onPress={() => void attachFromGallery()}
+                        disabled={busy}
+                        activeOpacity={0.75}>
+                        <Icon name="image" size={15} color={c.accent} />
+                        <Text
+                          style={[
+                            sheetStyles(c).attachChipText,
+                            {color: c.accent},
+                          ]}>
+                          من المعرض
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={sheetStyles(c).attachChip}
+                        onPress={() => setChooserOpen(false)}
+                        activeOpacity={0.75}>
+                        <Icon name="x" size={13} color={c.textDim} />
+                        <Text style={sheetStyles(c).attachChipText}>إلغاء</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
 
                   {/* ⑤ الفئات — فئات المصروف فقط والفئة المخصصة،
                       داخل التمرير نفسه (v46: كان له تمرير منفصل). */}
@@ -2461,6 +2373,16 @@ function MovementSheet({
           )}
         </Pressable>
       </View>
+
+      {/* v47: عارض صورة السند المرفقة — فوق النافذة كلها (نفس
+          عارض السجل) يفتح بلمس المصغرة داخل حقل الملاحظة. */}
+      {previewOpen && photoPath != null ? (
+        <VoucherPhotoViewer
+          path={photoPath}
+          label={SHEET_TITLES[mode]}
+          onClose={() => setPreviewOpen(false)}
+        />
+      ) : null}
     </View>
   );
 }
@@ -2617,96 +2539,94 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       gap: spacing.md,
       paddingBottom: spacing.sm,
     },
-    /** v46: بطاقة إرفاق صورة السند داخل نموذج الإدخال. */
-    voucherCard: {
-      borderWidth: 1.5,
-      borderStyle: 'dashed',
-      borderColor: c.border,
-      borderRadius: radius.md,
-      padding: spacing.md,
-      backgroundColor: c.surface,
-    },
-    voucherBusy: {
+    /** v47 (الجولة 55 #2): حقل الملاحظة + أيقونة الدبوس — الحاوية
+     *  تحمل الإطار والخلفية (كانت على الحقل نفسه) والحقل بلا إطار
+     *  يأخذ ما تبقى من السطر، والدبوس/المصغرة بطرفه. */
+    noteWrap: {
       flexDirection: 'row',
-      gap: spacing.sm,
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 6,
+      minHeight: 46,
+    },
+    /** v39: النسخة الكبيرة (سحب/إيداع) — الدبوس يثبت بأول سطر. */
+    noteWrapBig: {
+      alignItems: 'flex-start',
+      paddingVertical: 9,
+      minHeight: 84,
+    },
+    noteField: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.body,
+      padding: 0,
+      minHeight: 32,
+      textAlignVertical: 'center',
+    },
+    noteFieldBig: {
+      minHeight: 60,
+      textAlignVertical: 'top',
+    },
+    /** خانة الدبوس/المصغرة داخل الحقل — 34×34 كافية للمس دقيق. */
+    attachSlot: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingVertical: 10,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      alignSelf: 'center',
     },
-    voucherBusyText: {
+    attachThumb: {
+      width: 28,
+      height: 28,
+      borderRadius: 7,
+      backgroundColor: c.surfaceAlt,
+    },
+    /** علامة الحذف على زاوية المصغرة. */
+    attachX: {
+      position: 'absolute',
+      top: -6,
+      left: -6,
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      backgroundColor: c.danger,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: c.bg,
+    },
+    /** v47: شريط الاختيار المصغر تحت الحقل — ينطوي بعد الاختيار. */
+    attachBar: {
+      flexDirection: 'row',
+      gap: 8,
+      alignItems: 'center',
+      marginTop: -spacing.xs,
+    },
+    attachChip: {
+      flexDirection: 'row',
+      gap: 6,
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 7,
+      backgroundColor: c.surface,
+    },
+    attachChipText: {
       color: c.textDim,
       fontFamily: fonts.bold,
       fontSize: typography.small,
-    },
-    voucherRow: {
-      flexDirection: 'row',
-      gap: spacing.md,
-      alignItems: 'center',
-    },
-    voucherThumb: {
-      borderRadius: 10,
-      backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-    },
-    voucherTitle: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.body,
-    },
-    voucherSub: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-      marginTop: 2,
-    },
-    voucherActions: {
-      flexDirection: 'row',
-      gap: spacing.sm,
-    },
-    voucherActionBtn: {
-      flex: 1,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 6,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      borderRadius: radius.sm,
-      paddingVertical: 9,
-      backgroundColor: c.surfaceAlt,
-    },
-    voucherRemoveBtn: {
-      borderColor: c.danger,
-      backgroundColor: c.dangerSoft,
-    },
-    voucherActionText: {
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-    },
-    voucherAdd: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-    },
-    voucherAddIcon: {
-      width: 44,
-      height: 44,
-      borderRadius: 14,
-      backgroundColor: c.accentSofter,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    voucherAddText: {
-      color: c.accent,
-      fontFamily: fonts.bold,
-      fontSize: typography.body,
-    },
-    voucherAddHint: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-      marginTop: 2,
     },
     form: {
       gap: spacing.sm,
@@ -2864,32 +2784,8 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
       paddingHorizontal: spacing.md,
       paddingVertical: 9,
     },
-    /** v31 (round-39 #2): الملاحظة — سطر واحد مضغوط مثبّت تحت
-     *  المبلغ (بلا label — العنوان placeholder داخل الحقل)، يبقى
-     *  مرئياً ومكتوباً دائماً حتى مع لوحة النظام مفتوحة.
-     *  v39 (الجولة 47): نافذتا السحب والإيداع فقط — حقل ملاحظة
-     *  أكبر متعدد الأسطر (طلب التاجر: «قم في نافذتي السحب والايداع
-     *  فقط بتكبير حقل إدخال الملاحظات»)؛ نافذة المصروف تبقى سطراً
-     *  واحداً مضغوطاً كي لا تزاحم شبكة الفئات. */
-    noteInput: {
-      color: c.text,
-      fontFamily: fonts.regular,
-      fontSize: typography.body,
-      backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
-      borderColor: c.border,
-      borderRadius: radius.sm,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 9,
-      minHeight: 44,
-      textAlignVertical: 'center',
-    },
-    /** v39: النسخة الكبيرة — سحب/إيداع فقط. */
-    noteInputBig: {
-      minHeight: 84,
-      textAlignVertical: 'top',
-      paddingVertical: spacing.sm,
-    },
+    // (v31→v47) أنماط الملاحظة انتقلت لأعلى — noteWrap/noteField
+    // مع أيقونة المشبك داخل الحقل نفسه (الجولة 55 #2).
   });
 }
 

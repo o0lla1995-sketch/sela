@@ -270,8 +270,10 @@ describe('v39 #4 — حرّوس المصدر: الواجهات المتبقية'
   test('الخزينة: نافذة مراجعة + بحث + ملاحظة أكبر للسحب/الإيداع', () => {
     const screen = read(CASH_SCREEN);
     expect(screen).toContain('MovementDetailSheet');
-    expect(screen).toContain('noteInputBig');
-    expect(screen).toContain('? [sheetStyles(c).noteInputBig, {height: dyn.noteBigH}]');
+    // v47: noteInput/noteInputBig → noteWrap/noteWrapBig (الحاوية
+    // تحمل الإطار وأيقونة المشبك بطرف الحقل — الجولة 55 #2).
+    expect(screen).toContain('noteWrapBig');
+    expect(screen).toContain('? [sheetStyles(c).noteWrapBig, {height: dyn.noteBigH}]');
     expect(screen).toContain('categoryFilter');
     expect(screen).toContain('FILTER_CATEGORIES');
     expect(screen).toContain('searchInput');

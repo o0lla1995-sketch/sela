@@ -6,11 +6,20 @@
  * NaN-proof: empty data renders an empty state, all-zero data uses a
  * safe axis ceiling, and every division is guarded.
  *
- * RTL: series flow right→left (oldest on the right) matching Arabic
- * reading order (design.md §11).
+ * v47 (الجولة 55 #3) — الاتجاه النهائي بقرار التاجر بعد ثلاث شكاوى:
+ * محور الزمن يسار→يمين (الأقدم في أقصى اليسار والأحدث في أقصى
+ * اليمين) ككل لوحات نقاط البيع العالمية (Loyverse/Square/Google
+ * Analytics حتى بواجهاتها العربية) — وعين التاجر العربية تبدأ من
+ * اليمين فتلتقي أحدث عمود أولاً تماماً كقوائم السجل (الأحدث فوق).
+ * التسميات تحت أعمدتها بحكم البناء: الصف row-reverse في RTL يتدفق
+ * من اليسار مثل الأعمدة نفسها.
+ *
+ * v47 مؤشر احترافي: highlightIndex يضيء عمود الذروة بلون مميز
+ * ويعرض قيمته فوقه، وavgLine يرسم خط المتوسط المتقطع — «مؤشر صحيح»
+ * يقرأه التاجر بنظرة.
  */
 import React, {useMemo} from 'react';
-import {StyleSheet, Text, View} from 'react-native';
+import {I18nManager, StyleSheet, Text, View} from 'react-native';
 import Svg, {G, Line, Rect, Text as SvgText} from 'react-native-svg';
 import {
   fonts,
@@ -35,6 +44,14 @@ interface BarChartProps {
   data: BarDatum[];
   /** Bar fill color. */
   color?: string;
+  /** v47: لون عمود الذروة المضاء (highlightIndex). */
+  highlightColor?: string;
+  /** v47: فهرس عمود الذروة — يُضاء بلون مميز وتُكتب قيمته فوقه. */
+  highlightIndex?: number | null;
+  /** v47: قيمة المتوسط — خط متقطع عبر الرسم (null = بلا خط). */
+  avgLine?: number | null;
+  /** v47: تنسيق قيمة الذروة المكتوبة فوق العمود. */
+  formatValue?: (value: number) => string;
   /** Chart height excluding axis labels. */
   height?: number;
   /** Chart width; caller passes screen-derived width. */
@@ -76,9 +93,25 @@ function niceCeiling(max: number): number {
   return nice * magnitude;
 }
 
+/** v47: فهرس أكبر قيمة (أول عمود ذروة) — null عند لا بيانات. */
+export function peakIndex(values: number[]): number | null {
+  let best = -1;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (Number.isFinite(v) && (best < 0 || v > values[best])) {
+      best = i;
+    }
+  }
+  return best >= 0 && values[best] > 0 ? best : null;
+}
+
 export function BarChart({
   data,
   color: colorProp,
+  highlightColor,
+  highlightIndex,
+  avgLine,
+  formatValue,
   height = 170,
   width,
   formatTick,
@@ -87,6 +120,7 @@ export function BarChart({
   const c = useThemeColors();
   const styles = useStyles();
   const color = colorProp ?? c.accent;
+  const hot = highlightColor ?? c.success;
 
   const layout = useMemo(() => {
     const values = data.map(d => (Number.isFinite(d.value) ? d.value : 0));
@@ -107,27 +141,32 @@ export function BarChart({
   //  يحمل أي عمود تسمية فرعية (تاريخ اليوم/السنة).
   const hasSublabels = data.some(d => d.sublabel != null && d.sublabel !== '');
 
-  // v43 (الجولة 51 #1): محور القيم إلى اليمين — التطبيق كله RTL
-  //  فكان محور القيم في اليسار غريباً عن عين التاجر («عمود اتجاه
-  //  القيمة في اليسار وليس اليمين»). البادينغ العريض انتقل لليمين
-  //  حيث تُرسم تسميات القيم، والأعمدة وتسميات الأيام بقيت كما
-  //  هي تماماً (أول عنصر عن اليمين) — لا شيء آخر تغيّر في الرسم.
+  // v43 (الجولة 51 #1): محور القيم إلى اليمين (بادينغ عريض يميناً
+  //  حيث تُرسم تسميات القيم) — طلب التاجر وبقي كما هو.
   const paddingLeft = 6;
   const paddingRight = 42;
-  // v42 (الجولة 50 #3): مساحة التسميات — سطر واحد أو سطران.
+  // v42: مساحة التسميات — سطر واحد أو سطران.
   const labelArea = hasSublabels ? 34 : 22;
   const chartW = Math.max(40, width - paddingLeft - paddingRight);
   const chartH = height;
   const n = data.length;
   const slot = chartW / n;
   const barW = Math.max(4, Math.min(26, slot * 0.55));
+  // v47: مساحة صغيرة أعلى الرسم لقيمة الذروة المكتوبة فوق عمودها.
+  const headroom = 13;
+  const barBase = chartH - headroom;
+  // v47: خط المتوسط — يُرسم داخل منطقة الأعمدة فقط.
+  const avgY =
+    avgLine != null && Number.isFinite(avgLine) && avgLine > 0
+      ? barBase - Math.min((avgLine / layout.ceiling) * barBase, barBase - 2)
+      : null;
 
   return (
     <View>
       <Svg width={width} height={chartH + labelArea}>
         <G>
           {layout.gridLines.map((line, i) => {
-            const y = chartH - (i / 4) * chartH;
+            const y = barBase - (i / 4) * barBase;
             return (
               <G key={`g${i}`}>
                 <Line
@@ -139,8 +178,7 @@ export function BarChart({
                   strokeWidth={i === 0 ? 1.2 : 1}
                 />
                 {/* v43: التسمية على يمين الرسم — تبدأ من حافة منطقة
-                    المحور وتمتد يميناً (textAnchor=start) بدل
-                    المرساة اليسرى القديمة. */}
+                    المحور وتمتد يميناً (textAnchor=start). */}
                 <SvgText
                   x={width - paddingRight + 6}
                   y={y + 3.5}
@@ -153,44 +191,70 @@ export function BarChart({
               </G>
             );
           })}
-          {/* Bars — RTL: first datum on the RIGHT */}
+          {/* v47: خط المتوسط المتقطع — «مؤشر» مستوى الساعة/اليوم
+              المعتاد مقابل عمود الذروة المضاء. */}
+          {avgY != null ? (
+            <Line
+              x1={paddingLeft}
+              y1={avgY}
+              x2={width - paddingRight}
+              y2={avgY}
+              stroke={c.textFaint}
+              strokeWidth={1}
+              strokeDasharray="5 4"
+            />
+          ) : null}
+          {/* Bars — v47 (الجولة 55 #3): محور الزمن يسار→يمين — أول
+              عنصر (الأقدم) في أقصى اليسار والأحدث في أقصى اليمين
+              كلوحات POS العالمية؛ وعين التاجر RTL تبدأ من اليمين
+              فتقرأ الأحدث أولاً كقوائم السجل تماماً. */}
           {data.map((d, i) => {
             const raw = layout.values[i];
+            const isPeak = highlightIndex != null && i === highlightIndex;
             const h = Math.max(
               raw > 0 ? 3 : 0,
-              (raw / layout.ceiling) * chartH,
+              (raw / layout.ceiling) * barBase,
             );
-            const x = width - paddingRight - (i + 1) * slot + (slot - barW) / 2;
-            const y = chartH - h;
+            const x = paddingLeft + i * slot + (slot - barW) / 2;
+            const y = barBase - h;
             return (
-              <Rect
-                key={`b${i}`}
-                x={x}
-                y={y}
-                width={barW}
-                height={h}
-                rx={Math.min(4, barW / 2)}
-                fill={color}
-              />
+              <G key={`b${i}`}>
+                <Rect
+                  x={x}
+                  y={y}
+                  width={barW}
+                  height={h}
+                  rx={Math.min(4, barW / 2)}
+                  fill={isPeak ? hot : color}
+                  opacity={isPeak ? 1 : 0.92}
+                />
+                {/* v47: قيمة الذروة فوق عمودها — المؤشر الصحيح الذي
+                    يقرأه التاجر بنظرة واحدة بلا تخمين. */}
+                {isPeak && raw > 0 && formatValue ? (
+                  <SvgText
+                    x={x + barW / 2}
+                    y={y - 3}
+                    textAnchor="middle"
+                    fill={hot}
+                    fontSize={typography.micro}
+                    fontFamily={fonts.bold}>
+                    {formatValue(raw)}
+                  </SvgText>
+                ) : null}
+              </G>
             );
           })}
         </G>
       </Svg>
       {/* X labels as RN Text for proper Arabic shaping.
-          v42 (الجولة 50 #3): التسمية الفرعية (تاريخ اليوم/السنة)
-          تحت التسمية الرئيسية — كل عمود يعلن تاريخه بنفسه فلا
-          يضيع موضع اليوم كما كان بأسماء الأسابيع المكررة.
-          v44 (الجولة 52 #1): إصلاح انعكاس صف التسميات — كان
-          row-reverse، وفي تطبيق RTL يقلب الـ row-reverse اتجاه
-          الترتيب إلى يسار→يمين بينما الأعمدة (SVG بإحداثيات مطلقة)
-          ترسم أول عنصر على اليمين، فكانت كل تسمية تقع تحت عمود
-          يوم/ساعة آخر غير يومها (شكوى التاجر: «الصف السفلي
-          للأيام والساعات عكسي والمؤشر لا يطابق اليوم أو الساعة
-          بالضبط»). الصف الآن row: في RTL يتدفق أول تسمية من اليمين
-          تماماً كترتيب الأعمدة — التسمية تحت عمودها دائماً. */}
+          v47 (الجولة 55 #3): الصف row-reverse في RTL — يتدفق أول
+          تسمية من اليسار مثل الأعمدة نفسها (الأقدم يساراً) فتبقى كل
+          تسمية تحت عمودها بالضبط، مع paddingLeft مطابق لبداية
+          منطقة الأعمدة فلا انزياح بكسل. */}
       <View
         style={{
-          flexDirection: 'row',
+          flexDirection: I18nManager.isRTL ? 'row-reverse' : 'row',
+          paddingLeft: paddingLeft,
           paddingRight: paddingRight,
           marginTop: 2,
         }}>

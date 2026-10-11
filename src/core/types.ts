@@ -515,6 +515,8 @@ export type NotificationKind =
   | 'printer'
   | 'sale'
   | 'stocktake'
+  /** v47 (الجولة 55 #4): الاشتراك — اقترب الانتهاء أو انتهى. */
+  | 'license'
   /** v11: a SILA debt record failed permanently and needs the
    *  merchant's attention (expired code, duplicate invoice…). */
   | 'sila_debt'

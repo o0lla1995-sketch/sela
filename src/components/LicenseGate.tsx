@@ -26,6 +26,9 @@ import {Icon} from './Icon';
 import {fonts, makeStyles, useThemeColors} from '../core/theme';
 import {useLicenseStore} from '../stores/licenseStore';
 import {ActivationScreen} from '../screens/license/ActivationScreen';
+// v47 (الجولة 55 #4): تنبيهات الاشتراك — اقتراب الانتهاء/الانتهاء/
+// وضع السماح، مرة واحدة يومياً لكل حدث، إشعار نظام للمهم منها.
+import {LicenseAlertsService} from '../services/LicenseAlertsService';
 
 export function LicenseGate({children}: {children: React.ReactNode}) {
   const c = useThemeColors();
@@ -41,6 +44,13 @@ export function LicenseGate({children}: {children: React.ReactNode}) {
     void refresh();
     // 2. Then the throttled online heartbeat.
     void verifyOnline();
+
+    // v47 (الجولة 55 #4): كل تقييم جديد يمر على تنبيهات الاشتراك
+    //    (خصم يومي داخلياً — لا إزعاج). يشمل الإقلاع والعودة
+    //    للتطبيق والدورة الخمسية أدناه.
+    const unsubscribe = useLicenseStore.subscribe(state => {
+      LicenseAlertsService.evaluate(state.status);
+    });
 
     const subscription = AppState.addEventListener(
       'change',
@@ -75,6 +85,7 @@ export function LicenseGate({children}: {children: React.ReactNode}) {
 
     return () => {
       subscription.remove();
+      unsubscribe();
       clearInterval(offlineTimer);
       clearInterval(onlineTimer);
     };

@@ -50,6 +50,13 @@ function kindMeta(kind: NotificationKind, c: Palette) {
       label: 'صلاحية منتج',
     },
     info: {icon: 'info', bg: c.infoSoft, color: c.info, label: 'معلومة'},
+    // v47 (الجولة 55 #4): الاشتراك — اقترب انتهاؤه أو انتهى.
+    license: {
+      icon: 'shield',
+      bg: c.warningSoft,
+      color: c.warning,
+      label: 'الاشتراك',
+    },
     printer: {
       icon: 'printer',
       bg: c.accentSoft,

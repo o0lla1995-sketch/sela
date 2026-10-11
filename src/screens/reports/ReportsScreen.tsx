@@ -17,8 +17,15 @@
  * an asset swap (debt → cash), NEVER revenue — credit invoices are
  * inside revenue, and «النقد المحصّل» adds the collections back.
  */
-import React, {useCallback, useState} from 'react';
-import {Dimensions, ScrollView, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import React, {useCallback, useMemo, useState} from 'react';
+import {
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import {useFocusEffect} from '@react-navigation/native';
 import {
   AppButton,
@@ -30,7 +37,7 @@ import {
   StatCard,
 } from '../../components/ui';
 import {ErrorBoundary} from '../../components/ErrorBoundary';
-import {BarChart} from '../../components/charts/BarChart';
+import {BarChart, peakIndex} from '../../components/charts/BarChart';
 import {Icon} from '../../components/Icon';
 import {ReportService, type ReportBundle} from '../../services/ReportService';
 import {ExportService} from '../../services/ExportService';
@@ -47,9 +54,6 @@ import {formatMoney, dayMonthLabel, weekdayLabel} from '../../core/format';
 import type {ReportRangeKey} from '../../core/types';
 import type {BarDatum} from '../../components/charts/BarChart';
 
-const CHART_WIDTH =
-  Dimensions.get('window').width - spacing.lg * 2 - spacing.lg * 2;
-
 const RANGE_OPTIONS: {value: ReportRangeKey; label: string}[] = [
   {value: 'today', label: 'اليوم'},
   {value: 'yesterday', label: 'أمس'},
@@ -57,6 +61,13 @@ const RANGE_OPTIONS: {value: ReportRangeKey; label: string}[] = [
   {value: 'thisMonth', label: 'الشهر'},
   {value: 'all', label: 'الكل'},
 ];
+
+/** v47: ساعة بالعربية — «٨ صباحاً» / «٨ مساءً» لسطر الذروة. */
+function arabicHour(hour: number): string {
+  const safe = Math.min(23, Math.max(0, Math.round(hour)));
+  const h12 = safe % 12 === 0 ? 12 : safe % 12;
+  return `${h12} ${safe < 12 ? 'صباحاً' : 'مساءً'}`;
+}
 
 export function ReportsScreen() {
   const c = useThemeColors();
@@ -121,6 +132,13 @@ export function ReportsScreen() {
     [rangeKey, toast],
   );
 
+  // v47 (الجولة 55 #3): «متجاوب بالحجم» — عرض الرسم يتبع نافذة
+  // الجهاز لحظياً (دوران/تابلت/تقسيم شاشة). كان يُحسب مرة واحدة عند
+  // إقلاع الوحدة بـ Dimensions.get فبقي العرض القديم بعد الدوران
+  // واقتُطع الرسم على التابلت.
+  const {width: winW} = useWindowDimensions();
+  const chartWidth = Math.max(220, winW - spacing.lg * 4);
+
   // v42 (الجولة 50 #3): رسم المبيعات يتبع الفترة المحددة بدقة
   //  — لا اقتطاع لآخر عشرة أعمدة بعد اليوم ولا أسماء أسابيع
   //  مكررة تُضيّع موضع اليوم:
@@ -163,10 +181,89 @@ export function ReportsScreen() {
     };
   });
 
-  const hourlyData = (bundle?.hourly ?? []).map(point => ({
+  // v47 (الجولة 55 #3): «والمدي الزمني» — نافذتا اليوم وأمس لم
+  //  تعودا عموداً واحداً عاجزاً: السلسلة تصبح بالساعة (٢٤ عموداً
+  //  ٠..٢٣) فيرى التاجر إيقاع يومه الفعلي، وبقية الفترات تبقى
+  //  يومية/شهرية كما كانت.
+  const isHourlySales = rangeKey === 'today' || rangeKey === 'yesterday';
+  const hourlyPoints = bundle?.hourly ?? [];
+  const hourlyData: BarDatum[] = hourlyPoints.map(point => ({
     value: Math.round(point.revenue * 100) / 100,
-    label: point.hour % 6 === 0 ? String(point.hour) : '',
+    label: point.hour % 3 === 0 ? String(point.hour) : '',
+    sublabel: '',
   }));
+  const salesData = isHourlySales ? hourlyData : dailyData;
+
+  // v47 (الجولة 55 #3): «مؤشر صحيح» — عمود الذروة يُضاء ويحمل
+  //  قيمته فوقه، مع صف إحصاءات مصغر يقرأ التاجر منه الفترة كاملة
+  //  بنظرة واحدة (إجمالي/متوسط/أعلى قيمة — أو فواتير اليوم للسلاسل
+  //  الساعية).
+  const salesPeakIdx = peakIndex(salesData.map(d => d.value));
+  const salesValues = salesData.map(d => d.value);
+  const salesTotal = salesValues.reduce((a, v) => a + v, 0);
+  const salesCount = salesValues.filter(v => v > 0).length;
+  const salesBest =
+    salesPeakIdx != null && salesValues[salesPeakIdx] != null
+      ? salesValues[salesPeakIdx]
+      : 0;
+  const salesStats: {label: string; value: string}[] = isHourlySales
+    ? [
+        {label: 'إجمالي المبيعات', value: formatMoney(salesTotal)},
+        {label: 'أفضل ساعة', value: formatMoney(salesBest)},
+        {
+          label: 'فواتير الفترة',
+          value: String(
+            hourlyPoints.reduce((a, p) => a + (p.orders ?? 0), 0),
+          ),
+        },
+      ]
+    : [
+        {label: 'إجمالي الفترة', value: formatMoney(salesTotal)},
+        {
+          label: 'المتوسط لكل يوم',
+          value: formatMoney(salesCount > 0 ? salesTotal / salesCount : 0),
+        },
+        {label: 'أعلى يوم', value: formatMoney(salesBest)},
+      ];
+  /** تسمية عمود الذروة لسطر الشرح تحت الرسم. */
+  const salesPeakLabel = useMemo(() => {
+    if (salesPeakIdx == null) {
+      return null;
+    }
+    if (isHourlySales) {
+      return `ذروة ${rangeKey === 'today' ? 'اليوم' : 'أمس'} الساعة ${arabicHour(
+        hourlyPoints[salesPeakIdx]?.hour ?? salesPeakIdx,
+      )} — ${formatMoney(salesBest)}`;
+    }
+    const point = dailyPoints[salesPeakIdx];
+    if (point == null) {
+      return null;
+    }
+    const when = isMonthlySeries
+      ? `${point.label}${point.day.length === 7 ? ` ${point.day.slice(0, 4)}` : ''}`
+      : `${weekdayLabel(point.day)} ${dayMonthLabel(point.day)}`;
+    return `أعلى إيراد: ${when} — ${formatMoney(salesBest)}`;
+  }, [salesPeakIdx, isHourlySales, hourlyPoints, dailyPoints, isMonthlySeries, salesBest, rangeKey]);
+
+  // v47 (الجولة 55 #3): ساعات الذروة — عمود ذروة الفترة مضاء
+  //  وقيمته فوقه، وخط متقطع لمتوسط الساعة «النشطة» (الساعات التي
+  //  فيها بيع فعلي) فيقارن التاجر الذروة بالمعتاد بنظرة، وسطر
+  //  الشرح يحمل الرقمين نصاً صريحاً.
+  const hourValues = hourlyPoints.map(p => p.revenue);
+  const peakHourIdx = peakIndex(hourValues);
+  const activeHours = hourlyPoints.filter(p => p.revenue > 0);
+  const activeAvg =
+    activeHours.length > 0
+      ? activeHours.reduce((a, p) => a + p.revenue, 0) / activeHours.length
+      : 0;
+  const peakHourCaption =
+    peakHourIdx != null
+      ? `ذروة الإيراد: ${arabicHour(
+          hourlyPoints[peakHourIdx]?.hour ?? peakHourIdx,
+        )} — ${formatMoney(
+          hourValues[peakHourIdx] ?? 0,
+        )} · متوسط الساعة النشطة: ${formatMoney(activeAvg)}`
+      : null;
 
   const topProducts =
     topMode === 'revenue'
@@ -631,49 +728,84 @@ export function ReportsScreen() {
             {/* ── 3) Sales performance chart ─────────────────── */}
             <Card>
               {/* v42 (الجولة 50 #3): العنوان يتبع حبيبية السلسلة —
-                  يومية للفترات القصيرة وشهرية لما طال («الكل»). */}
+                  يومية للفترات القصيرة وشهرية لما طال («الكل»).
+                  v47 (الجولة 55 #3): اليوم/أمس بالساعة — «المدي
+                  الزمني» الحقيقي، وعمود الذروة مضاء بقيمته فوقه
+                  وصف الإحصاءات تحته («مؤشر صحيح»). */}
               <SectionTitle
                 title={
-                  isMonthlySeries
+                  isHourlySales
+                    ? rangeKey === 'today'
+                      ? 'أداء مبيعات اليوم (بالساعة)'
+                      : 'أداء مبيعات أمس (بالساعة)'
+                    : isMonthlySeries
                     ? 'أداء المبيعات الشهري'
                     : 'أداء المبيعات اليومي'
                 }
                 hint={
-                  isMonthlySeries
+                  isHourlySales
+                    ? 'الإيراد لكل ساعة بالشيكل ₪ — الساعة ٠ يساراً حتى ٢٣ يميناً'
+                    : isMonthlySeries
                     ? 'إجمالي كل شهر بالشيكل ₪'
                     : 'القيم بالشيكل ₪ — كل عمود يحمل تاريخه'
                 }
               />
               <ErrorBoundary inline label="رسم المبيعات">
                 <BarChart
-                  data={dailyData}
-                  width={CHART_WIDTH}
+                  data={salesData}
+                  width={chartWidth}
                   color={c.accent}
+                  highlightColor={c.success}
+                  highlightIndex={salesPeakIdx}
+                  formatValue={(value: number) => compactNumber(value)}
                   formatTick={(value: number) => compactNumber(value)}
                   emptyText="لا توجد مبيعات في هذه الفترة"
                 />
               </ErrorBoundary>
+              {/* v47: صف الإحصاءات المصغر — الفترة كاملة بنظرة. */}
+              <View style={styles.miniStats}>
+                {salesStats.map(stat => (
+                  <View key={stat.label} style={styles.miniStatCell}>
+                    <Text style={styles.miniStatValue} numberOfLines={1}>
+                      {stat.value}
+                    </Text>
+                    <Text style={styles.miniStatLabel} numberOfLines={1}>
+                      {stat.label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+              {salesPeakLabel != null ? (
+                <Text style={styles.peakCaption}>{salesPeakLabel}</Text>
+              ) : null}
             </Card>
 
             {/* ── 4) Peak hours chart ─────────────────────────── */}
             <Card>
               <SectionTitle
                 title="ساعات الذروة"
-                hint="الإيراد لكل ساعة خلال الفترة (0–24)"
+                hint="الإيراد لكل ساعة خلال الفترة (٠–٢٣)"
               />
               <ErrorBoundary inline label="رسم الذروة">
                 <BarChart
                   data={hourlyData}
-                  width={CHART_WIDTH}
-                  height={120}
+                  width={chartWidth}
+                  height={130}
                   color={c.info}
+                  highlightColor={c.accent}
+                  highlightIndex={peakHourIdx}
+                  avgLine={activeAvg}
+                  formatValue={(value: number) => compactNumber(value)}
                   formatTick={(value: number) => compactNumber(value)}
                   emptyText="لا توجد مبيعات في هذه الفترة"
                 />
               </ErrorBoundary>
+              {peakHourCaption != null ? (
+                <Text style={styles.peakCaption}>{peakHourCaption}</Text>
+              ) : null}
               <Text style={styles.chartHint}>
-                استخدم الرسم لتحديد أكثر ساعات تواجد الزبائن وجهّز المخزون
-                والطاقم لها
+                العمود المضيء هو ساعة الذروة والخط المتقطع متوسط الساعة
+                النشطة — جهّز المخزون والطاقم لأيام وساعات الذروة
               </Text>
             </Card>
 
@@ -936,6 +1068,43 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
       lineHeight: 17,
       marginTop: spacing.md,
+    },
+    // ── v47 (الجولة 55 #3): صف الإحصاءات المصغر تحت رسم المبيعات
+    //    وسطر الذروة الصريح — «مؤشر صحيح» يقرأ بنظرة واحدة. ──────
+    miniStats: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      marginTop: spacing.md,
+    },
+    miniStatCell: {
+      flex: 1,
+      alignItems: 'center',
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.xs,
+    },
+    miniStatValue: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      fontVariant: ['tabular-nums'],
+    },
+    miniStatLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      marginTop: 2,
+    },
+    peakCaption: {
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      lineHeight: 18,
+      marginTop: spacing.sm,
+      textAlign: 'center',
     },
     // ── v18 (round-24 #2): the النقد والديون card styles ────────
     subTitle: {

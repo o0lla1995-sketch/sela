@@ -43,6 +43,7 @@ export type IconName =
   | 'edit'
   | 'image'
   | 'imagePlus'
+  | 'paperclip'
   | 'scan'
   | 'barcode'
   | 'tag'
@@ -313,6 +314,13 @@ const P: Record<IconName, React.ReactNode> = {
       <Rect x={4} y={5} width={16} height={14} rx={1.6} />
       <Circle cx={9} cy={10} r={1.5} />
       <Path d="m5 17.5 4.4-4a1.5 1.5 0 0 1 2 0l5.8 5" />
+    </G>
+  ),
+  /** v47 (الجولة 55 #2): مشبك الورق — إرفاق صورة السند من داخل
+   *  حقل الملاحظة نفسه (أيقونة دبوس بلا زر مستقل). */
+  paperclip: (
+    <G>
+      <Path d="M20.5 11.3 12 19.8a4.9 4.9 0 0 1-6.9-6.9l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />
     </G>
   ),
   imagePlus: (

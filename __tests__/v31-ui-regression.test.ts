@@ -46,13 +46,13 @@ describe('v31 — نوافذ الخزينة: لوحة الأرقام دائمة'
     // Both inputs sit BEFORE the collapsible ScrollView (pinned
     // under the amount) so they stay visible above the system IME.
     // v39 (الجولة 47): style الملاحظة صار مصفوفة (النسخة الكبيرة
-    // للسحب/الإيداع) — البحث عن مفتاح noteInput داخل المصفوفة.
+    // للسحب/الإيداع) — البحث عن مفتاح الملاحظة داخل المصفوفة.
     // v46: the single scroll region is formScroll (was form) —
     // the note sits above it and the keypad below it, outside it.
-    // v46: the single scroll region is formScroll (was form) —
-    // the note sits above it and the keypad below it, outside it.
+    // v47: الملاحظة صارت noteWrap (حاوية بإطار) + noteField بداخلها
+    // وأيقونة المشبك بطرفها — الحاوية هي المرساة في الترتيب.
     const scrollPos = src.indexOf('contentContainerStyle={[sheetStyles(c).formScroll');
-    const notePos = src.indexOf('sheetStyles(c).noteInput');
+    const notePos = src.indexOf('sheetStyles(c).noteWrap');
     const keypadPos = src.indexOf('<View style={[sheetStyles(c).keypad, colMax]}>');
     expect(scrollPos).toBeGreaterThan(-1);
     expect(notePos).toBeGreaterThan(scrollPos);

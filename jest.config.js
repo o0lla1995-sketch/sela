@@ -2,6 +2,8 @@ module.exports = {
   preset: 'react-native',
   setupFiles: ['<rootDir>/__tests__/helpers/setup.js'],
   moduleNameMapper: {
+    '\\.(png|jpg|jpeg|gif|webp|tflite)$':
+      '<rootDir>/__tests__/helpers/file-mock.js',
     '^@op-engineering/op-sqlite$':
       '<rootDir>/__tests__/helpers/op-sqlite-mock.js',
     '^react-native-mmkv$': '<rootDir>/__tests__/helpers/mmkv-mock.js',

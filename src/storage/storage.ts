@@ -42,6 +42,9 @@ export const KEYS = {
   seededFlag: 'db_seeded_v1',
   notifications: 'notifications_v1',
   stockAlertLedger: 'stock_alert_ledger_v1',
+  /** v47 (الجولة 55 #4): دفتر مخصومات تنبيهات الاشتراك — مرة واحدة
+   *  في اليوم لكل حدث (اقتراب/انتهاء/وضع سماح). */
+  licenseAlertLedger: 'license_alert_ledger_v1',
   schemaVersion: 'db_schema_version',
   themeMode: 'theme_mode_v1',
   licensePayload: 'license_payload_b64_v1',

@@ -46,7 +46,9 @@ describe('v32 — الخزينة: النقد المتاح والرصيد بعد 
     const formWrap = src.indexOf('formWrap');
     const balance = src.indexOf('balanceStrip', formWrap);
     const amount = src.indexOf('amountRow', balance);
-    const note = src.indexOf('noteInput', amount);
+    // v47: noteInput → noteWrap (الحاوية التي تحمل الحقل وأيقونة
+    // المشبك معاً — الإرفاق من داخل الحقل نفسه بلا زر مستقل).
+    const note = src.indexOf('noteWrap', amount);
     const cats = src.indexOf('catGrid', note);
     const keypad = src.indexOf('keypad', cats);
     const confirm = src.indexOf('تأكيد ${KIND_META[mode].label}', keypad);

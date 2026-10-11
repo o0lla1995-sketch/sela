@@ -14,7 +14,7 @@
  * ③ تغيير اسم حزمة تطبيق المتجر com.sela → com.sela.pal دون أي
  *    تغيير وظيفي آخر (اسم الحزمة السابق غير متاح للنشر على
  *    Google Play) — الحزمة الجديدة محروس هنا.
- * ④ الإصدار 46.0.0 (54) (محدّث لـ v46) والمفتاح الثابت: كل بناء CI يوقّع من
+ * ④ الإصدار 47.0.0 (55) (محدّث لـ v47) والمفتاح الثابت: كل بناء CI يوقّع من
  *    GitHub Secrets بالمفتاح نفسه (abdala hanouna) فلا يتغير
  *    التوقيع مهما تطور التطبيق وتحدّث.
  */
@@ -22,13 +22,26 @@ const read = (path: string) =>
   require('fs').readFileSync(path, 'utf8') as string;
 
 describe('v44 — حرّوس المصدر: الجولة 52', () => {
-  test('① صف تسميات الرسم البياني: row لا row-reverse — التسمية تحت عمودها', () => {
+  // v47 (الجولة 55 #3) حدّث عقد الاتجاه ①: قرار التاجر النهائي بعد
+  // ثلاث شكاوى («باتجاهات صحيحة») هو محور زمن يسار→يمين كلوحات POS
+  // العالمية: الأقدم في أقصى اليسار والأحدث في أقصى اليمين، وعينه
+  // العربية تبدأ من اليمين فتقرأ الأحدث أولاً كقوائم السجل تماماً.
+  // الأعمدة ترسم أول عنصر يساراً (x = paddingLeft + i*slot) وصف
+  // التسميات row-reverse في RTL ليتدفق من اليسار مثل الأعمدة —
+  // فتبقى كل تسمية تحت عمودها (الغاية نفسها التي حققها v44 سابقاً
+  // بالاتجاه المعاكس).
+  test('① صف تسميات الرسم البياني: row-reverse في RTL — التسمية تحت عمودها (محور زمن يسار→يمين)', () => {
     const chart = read('src/components/charts/BarChart.tsx');
-    // الصف نفسه: في RTL يتدفق أول تسمية من اليمين كترتيب الأعمدة.
-    expect(chart).toContain("flexDirection: 'row',");
-    expect(chart).not.toContain("flexDirection: 'row-reverse'");
-    // الأعمدة ما زالت ترسم أول عنصر على اليمين (SVG مطلق).
-    expect(chart).toContain('Bars — RTL: first datum on the RIGHT');
+    // الصف: في RTL يتدفق أول تسمية من اليسار كترتيب الأعمدة الجديد.
+    expect(chart).toContain(
+      "flexDirection: I18nManager.isRTL ? 'row-reverse' : 'row',",
+    );
+    // الأعمدة ترسم أول عنصر (الأقدم) في أقصى اليسار.
+    expect(chart).toContain(
+      'const x = paddingLeft + i * slot + (slot - barW) / 2;',
+    );
+    // والصف يبدأ من paddingLeft نفسه فلا انزياح بكسل عن الأعمدة.
+    expect(chart).toContain('paddingLeft: paddingLeft');
     // والأعمدة والتسميات يتشاركان نفس padding الأيمن محور القيم.
     expect(chart).toContain('paddingRight: paddingRight');
   });
@@ -44,8 +57,8 @@ describe('v44 — حرّوس المصدر: الجولة 52', () => {
     expect(pos).not.toContain('styles.viewShapeBtnText');
     // المبدّل في نقطة البيع هجر dense (الحجم الطبيعي الواسع).
     expect(pos.match(/<Segmented[\s\S]*?\sdense[\s\S]*?\/>/)).toBeNull();
-    expect(gradle).toContain('versionName "46.0.0"');
-    expect(gradle).toContain('versionCode 54');
+    expect(gradle).toContain('versionName "47.0.0"');
+    expect(gradle).toContain('versionCode 55');
   });
 
   test('③ اسم الحزمة الجديد com.sela.pal في كل مكان (التطبيق والترويسة)', () => {
@@ -76,7 +89,7 @@ describe('v44 — حرّوس المصدر: الجولة 52', () => {
     expect(wf).toContain('keystore.properties');
     // الإصدار الحزمة يحمل الحزمة الجديدة داخل config أيضًا.
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '46.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 54');
+    expect(config).toContain("APP_VERSION = '47.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 55');
   });
 });
