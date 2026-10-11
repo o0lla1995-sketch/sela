@@ -156,12 +156,14 @@ export const CashService = {
   },
 
   /** Records a business EXPENSE paid from the drawer. v27: the
-   *  caller's passed security gate lands in the audit trail. */
+   *  caller's passed security gate lands in the audit trail.
+   *  v46: photoPath (اختياري) — مسار صورة السند المرفقة. */
   async recordExpense(input: {
     category: string;
     note?: string | null;
     amountMinor: number;
     authMethod?: CashAuthMethod;
+    photoPath?: string | null;
   }): Promise<CashMovementRecord> {
     const treasury = await ReportService.treasurySnapshot();
     if (input.amountMinor > Math.round(treasury.cashTotal * 100)) {
@@ -177,6 +179,7 @@ export const CashService = {
       note: input.note,
       amountMinor: input.amountMinor,
       authMethod: input.authMethod ?? 'none',
+      photoPath: input.photoPath ?? null,
     });
     await printMovementSlip(movement);
     return movement;
@@ -184,11 +187,13 @@ export const CashService = {
 
   /** Records the OWNER's cash WITHDRAWAL — only after the caller
    *  passed the security gate (the auth method is written into the
-   *  row so the audit trail matches the prompt that approved it). */
+   *  row so the audit trail matches the prompt that approved it).
+   *  v46: photoPath (اختياري) — مسار صورة السند المرفقة. */
   async recordWithdrawal(input: {
     note?: string | null;
     amountMinor: number;
     authMethod: CashAuthMethod;
+    photoPath?: string | null;
   }): Promise<CashMovementRecord> {
     const treasury = await ReportService.treasurySnapshot();
     const drawerMinor = Math.round(treasury.cashTotal * 100);
@@ -205,17 +210,20 @@ export const CashService = {
       note: input.note,
       amountMinor: input.amountMinor,
       authMethod: input.authMethod,
+      photoPath: input.photoPath ?? null,
     });
     await printMovementSlip(movement);
     return movement;
   },
 
   /** Records cash put BACK into the drawer (تغذية خزينة). v27: the
-   *  caller's passed security gate lands in the audit trail. */
+   *  caller's passed security gate lands in the audit trail.
+   *  v46: photoPath (اختياري) — مسار صورة السند المرفقة. */
   async recordDeposit(input: {
     note?: string | null;
     amountMinor: number;
     authMethod?: CashAuthMethod;
+    photoPath?: string | null;
   }): Promise<CashMovementRecord> {
     const movement = await CashRepo.add({
       kind: 'deposit',
@@ -223,6 +231,7 @@ export const CashService = {
       note: input.note,
       amountMinor: input.amountMinor,
       authMethod: input.authMethod ?? 'none',
+      photoPath: input.photoPath ?? null,
     });
     await printMovementSlip(movement);
     return movement;

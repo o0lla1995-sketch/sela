@@ -227,6 +227,16 @@ interface SelaNotificationsNative {
 interface SelaImagePickerNative {
   /** Opens the system image picker; resolves the saved local path. */
   pickStoreLogo(maxDim: number): Promise<string>;
+  /** v46: يفتح منتقي صور النظام لصورة السند — نفس مسار الشعار
+   *  (SAF بلا أذونات تخزين) لكن النسخة تُحفظ JPEG في filesDir/vouchers
+   *  ولا يُفرَّغ المجلد أبداً (كل سند يملك ملفه). يرفض عند إلغاء
+   *  المنتقي («لم يتم اختيار صورة»). */
+  pickVoucherImage(maxDim: number): Promise<string>;
+  /** v46: يقرأ صورة موجودة على الجهاز (لقطة كاميرا الماسح في
+   *  scans/)، يصغّرها إلى maxDim ويحفظها JPEG في filesDir/vouchers،
+   *  ثم يحذف الملف الأصلي إن كان داخل scans/ — فيُعاد مسار النسخة
+   *  الجديدة. مسار الكاميرا الوحيد لإرفاق السند. */
+  saveVoucherFromPath(path: string, maxDim: number): Promise<string>;
 }
 
 /**

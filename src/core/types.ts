@@ -900,6 +900,9 @@ export interface CashMovementRecord {
   note: string | null;
   amount_minor: number;
   auth_method: CashAuthMethod;
+  /** v46: مسار صورة السند المرفقة (ملف محلي داخل filesDir/vouchers)
+   *  أو null — تُلتقط بالكاميرا أو تُختار من المعرض عند التسجيل. */
+  photo_path?: string | null;
   created_at: string;
 }
 

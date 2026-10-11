@@ -1554,6 +1554,28 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 22;
   }
 
+  if (version < 23) {
+    // ── v46 (الجولة الحالية): صورة السند المرفقة بحركة الخزينة ────
+    // عمود واحد قابل للـNULL على cash_movements: مسار ملف محلي داخل
+    // filesDir/vouchers (صورة السند الورقي — تصويراً أو من المعرض).
+    // الإدخال/المراجعة من نافذتي التسجيل والسجل، والملف يُحذف مع
+    // أي تنظيف يدوي فقط (الصفوف غير قابلة للتعديل — مسار تدقيق).
+    // تحقق idempotent بـ pragma: الترقيات المتكررة والتركيبات
+    // الطازجة (CREATE في v16 ثم ALTER هنا) كلها تمر بلا خطأ.
+    const hasPhotoCol = await database.execute(
+      `SELECT COUNT(*) AS cnt FROM pragma_table_info('cash_movements') WHERE name = 'photo_path'`,
+    );
+    const photoCols = (hasPhotoCol.rows ?? []) as unknown as {
+      cnt?: number;
+    }[];
+    const photoColExists = Number(photoCols[0]?.cnt ?? 0);
+    if (!photoColExists) {
+      await database.execute('ALTER TABLE cash_movements ADD COLUMN photo_path TEXT');
+    }
+    logDiag('db', 'ترحيل v23: صورة السند المرفقة بحركات الخزينة (photo_path)');
+    version = 23;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }

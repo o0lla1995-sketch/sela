@@ -1,6 +1,6 @@
 {
   "name": "sela",
-  "version": "45.0.0",
+  "version": "46.0.0",
   "private": true,
   "scripts": {
     "android": "react-native run-android",

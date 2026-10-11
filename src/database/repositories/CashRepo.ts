@@ -47,6 +47,7 @@ const PREFIX: Record<CashMovementKind, string> = {
 };
 
 function rowToRecord(row: Record<string, unknown>): CashMovementRecord {
+  const photoRaw = row.photo_path;
   return {
     local_id: Number(row.local_id ?? 0),
     ref: String(row.ref ?? ''),
@@ -55,6 +56,10 @@ function rowToRecord(row: Record<string, unknown>): CashMovementRecord {
     note: (row.note as string | null) ?? null,
     amount_minor: Number(row.amount_minor ?? 0),
     auth_method: (row.auth_method as CashAuthMethod) ?? 'none',
+    photo_path:
+      typeof photoRaw === 'string' && photoRaw.length > 0
+        ? photoRaw
+        : null,
     created_at: String(row.created_at ?? ''),
   };
 }
@@ -94,13 +99,16 @@ async function reserveRef(kind: CashMovementKind): Promise<string> {
 export const CashRepo = {
   /** Appends ONE immutable movement. Unique-ref retry is the
    *  caller's discipline (CashService) — a UNIQUE clash here
-   *  rejects the insert and the transaction stays atomic. */
+   *  rejects the insert and the transaction stays atomic.
+   *  v46: photoPath (اختياري) — مسار صورة السند المرفقة داخل
+   *  filesDir/vouchers؛ يُخزن كما هو (null عند غيابه). */
   async add(input: {
     kind: CashMovementKind;
     category?: string;
     note?: string | null;
     amountMinor: number;
     authMethod?: CashAuthMethod;
+    photoPath?: string | null;
   }): Promise<CashMovementRecord> {
     if (!Number.isFinite(input.amountMinor) || input.amountMinor <= 0) {
       throw new Error('المبلغ غير صالح — يجب أن يكون أكبر من صفر');
@@ -113,10 +121,14 @@ export const CashRepo = {
         : 'متفرقات';
     const db = getDb();
     const ref = await reserveRef(input.kind);
+    const photoPath =
+      typeof input.photoPath === 'string' && input.photoPath.length > 0
+        ? input.photoPath
+        : null;
     const insert = await db.execute(
       `INSERT INTO cash_movements
-        (ref, kind, category, note, amount_minor, auth_method, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (ref, kind, category, note, amount_minor, auth_method, photo_path, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         ref,
         input.kind,
@@ -124,6 +136,7 @@ export const CashRepo = {
         input.note?.trim() ? input.note.trim() : null,
         Math.round(input.amountMinor),
         input.authMethod ?? 'none',
+        photoPath,
         localNow(),
       ],
     );
