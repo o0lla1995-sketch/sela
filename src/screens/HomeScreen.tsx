@@ -541,9 +541,12 @@ export function HomeScreen() {
               onPress={() => navigation.navigate('Sila' as never)}
               activeOpacity={0.8}>
               <Icon name="qrFrame" size={14} color={c.textDim} />
-              <Text style={styles.silaLinkText}>
-                مربوط بالتطبيق؟ اربط صِلة لمزامنة الديون والتحصيلات
-                سحابياً
+              {/* v52 (طلب الجولة): النص الطويل المزدوج الأسطر قُصِّر
+                  لسطر واحد مضغوط — «مربوط بالتطبيق؟ اربط صِلة لمزامنة
+                  الديون والتحصيلات سحابياً» كان يستهلك مساحة كبيرة من
+                  الرئيسية بلا فائدة تُذكر. */}
+              <Text style={styles.silaLinkText} numberOfLines={1}>
+                اربط صِلة لمزامنة الديون سحابياً
               </Text>
               <Icon name="chevronLeft" size={13} color={c.textFaint} />
             </TouchableOpacity>
