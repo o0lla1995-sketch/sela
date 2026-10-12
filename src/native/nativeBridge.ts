@@ -78,6 +78,8 @@ interface PlatformUtilsNative {
   getFilesDir(): Promise<string>;
   makeDir(path: string): Promise<boolean>;
   fileExists(path: string): Promise<boolean>;
+  /** v49: بصمة ملف (طول:تعديل) — كاش اكتشاف التغيّر لمزامنة صور المتجر. */
+  fileSignature(path: string): Promise<string>;
   copyFile(sourcePath: string, destinationPath: string): Promise<string>;
   deleteFile(path: string): Promise<boolean>;
   /** v8.3: app-internal file → base64 (backup image embedding).
@@ -215,6 +217,21 @@ interface ImageDecoderNative {
   releaseDecodeCache(): Promise<void>;
   /** Downscaled JPEG copy for thumbnails → new absolute path. */
   saveScaled(path: string, maxDim: number, quality: number): Promise<string>;
+  /** v49 (سيلا ماركت): يضغط صورة محلية إلى WebP خفيف (~maxDim، جودة
+   *  72) ويعيدها base64 + sha256 + أبعاداً — لرفعها موجّهةً بالمحتوى
+   *  إلى خادم المتجر (JPEG على أجهزة أقدم من API 30). */
+  compressToWebP(
+    path: string,
+    maxDim: number,
+    quality: number,
+  ): Promise<{
+    base64: string;
+    hash: string;
+    ext: 'webp' | 'jpg';
+    width: number;
+    height: number;
+    bytes: number;
+  }>;
 }
 
 interface SelaNotificationsNative {

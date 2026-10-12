@@ -21,6 +21,9 @@ import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
 import {CashRepo, reserveRef as reserveCashRef} from '../../database/repositories/CashRepo';
 import {OnlineApi, OnlineApiError} from './OnlineApi';
+import {syncProductImages, getImageSyncProgress} from './OnlineImageSync';
+
+export {getImageSyncProgress};
 import {getJson, setJson, getNumber, setNumber, getString, setString, KEYS} from '../../storage/storage';
 import {logDiag} from '../../core/diagnostics';
 import {localToday} from '../../core/format';
@@ -218,6 +221,9 @@ export async function syncProducts(): Promise<number> {
     }));
     const result = await OnlineApi.syncProducts(payload);
     saveOnlineSettings({...loadOnlineSettings(), lastProductsSyncAt: Date.now()});
+    // v49: بعد كل مزامنة كتالوج ناجحة — دفع صور المتجر في الخلفية
+    // (داخلية التزامن تحمي من التكرار، والبصمات تجعلها شبه مجانية).
+    void syncProductImages().catch(() => undefined);
     return result.saved;
   } finally {
     state.syncingProducts = false;

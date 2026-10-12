@@ -520,6 +520,22 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     }
   }
 
+  /** v49: بصمة ملف (طول:تعديل) — كاش اكتشاف التغيّر لمزامنة صور
+   *  المتجر بلا إعادة ضغط كل مرة. يرفض إذا الملف غير موجود. */
+  @ReactMethod
+  fun fileSignature(path: String, promise: Promise) {
+    try {
+      val f = File(path)
+      if (!f.exists() || !f.isFile) {
+        promise.reject("NOT_FOUND", "الملف غير موجود: $path")
+        return
+      }
+      promise.resolve("${f.length()}:${f.lastModified()}")
+    } catch (t: Throwable) {
+      promise.reject("FILE_ERROR", "تعذّر فحص الملف: ${t.message}")
+    }
+  }
+
   @ReactMethod
   fun copyFile(sourcePath: String, destinationPath: String, promise: Promise) {
     try {

@@ -162,6 +162,34 @@ export const OnlineApi = {
     return data;
   },
 
+  /** v49: مزامنة صور المنتجات — دفعات موجّهة بالمحتوى (sha256).
+   *  uploads تُرسل مرة واحدة لكل هاش جديد فقط، وimages تعيد ربط
+   *  روابط كل منتج بالكامل (idempotent). */
+  async syncImages(
+    images: {ref: string; items: {hash: string; slot: number}[]}[],
+    uploads: {
+      hash: string;
+      ext: 'webp' | 'jpg';
+      data: string;
+      width?: number;
+      height?: number;
+    }[],
+  ): Promise<{
+    stored: number;
+    linked: number;
+    missing: number;
+    cleaned: number;
+    serverTime: number;
+  }> {
+    return storePost<{
+      stored: number;
+      linked: number;
+      missing: number;
+      cleaned: number;
+      serverTime: number;
+    }>('/api/v1/store/images/sync', {images, uploads}, 60000);
+  },
+
   /** استطلاع الطلبات المحدثة منذ مؤشر. */
   async poll(
     since: number,

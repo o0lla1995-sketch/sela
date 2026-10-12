@@ -29,6 +29,7 @@ import {
   syncProducts,
   ensureEngineStarted,
   stopEngine,
+  getImageSyncProgress,
 } from '../../services/online/OnlineStoreService';
 import {onlineErrorText} from '../../services/online/OnlineStoreService';
 import {relativeTime} from '../../core/format';
@@ -131,6 +132,15 @@ export function OnlineSellingScreen() {
 
   useEffect(() => {
     ensureEngineStarted();
+  }, []);
+
+  // v49: تقدم مزامنة صور المتجر (استطلاع كل ثانيتين أثناء التشغيل)
+  const [imageSync, setImageSync] = useState(getImageSyncProgress);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setImageSync(getImageSyncProgress());
+    }, 2000);
+    return () => clearInterval(timer);
   }, []);
 
   const addRegion = useCallback(() => {
@@ -347,6 +357,26 @@ export function OnlineSellingScreen() {
                 : 'لم يتم بعد'}
             </Text>
           </View>
+          {imageSync.running ? (
+            <View style={styles.syncInfoRow}>
+              <ActivityIndicator size="small" color={c.accent} />
+              <Text style={styles.dim}>
+                رفع صور المنتجات: {imageSync.done}/{imageSync.total} ·
+                {' ' + imageSync.uploaded} صورة مرفوعة
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.syncInfoRow}>
+              <Icon name="image" size={13} color={c.textDim} />
+              <Text style={styles.dim}>
+                صور المنتجات:{' '}
+                {imageSync.lastRunAt != null
+                  ? `آخر رفع ${relativeTime(new Date(imageSync.lastRunAt).toISOString())}` +
+                    (imageSync.lastError != null ? ' — آخر خطأ محفوظ في التشخيص' : '')
+                  : 'تُرفع تلقائياً بعد مزامنة المنتجات'}
+              </Text>
+            </View>
+          )}
           <TouchableOpacity
             style={[styles.saveBtn, {backgroundColor: c.accent}]}
             onPress={() => void syncNow()}

@@ -7,6 +7,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -385,5 +386,78 @@ class ImageDecoderModule(reactContext: ReactApplicationContext) :
     val distinct = bitmaps.filterNotNull().distinct()
     // If the same instance was aliased (crop == src), recycle only once.
     distinct.forEach { it.recycle() }
+  }
+
+  // ── compressToWebP (v49: سيلا ماركت) ─────────────────────────
+  // Compresses a local photo to a market-ready lightweight image:
+  // WebP lossy q~72 on API 30+ (JPEG fallback below 30), longest
+  // edge capped at maxDim, returned as base64 + sha256 + dimensions
+  // so JS can upload it to the store server content-addressed.
+  @ReactMethod
+  fun compressToWebP(path: String, maxDim: Int, quality: Int, promise: Promise) {
+    if (maxDim <= 0 || maxDim > 2048) {
+      promise.reject("E_ARGS", "أبعاد التصغير غير صالحة", null)
+      return
+    }
+    var bitmap: Bitmap? = null
+    var out: Bitmap? = null
+    try {
+      val src = File(path)
+      if (!src.exists()) {
+        promise.reject("E_NOFILE", "ملف الصورة غير موجود", null)
+        return
+      }
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeFile(path, bounds)
+      if (bounds.outWidth <= 0) {
+        promise.reject("E_DECODE", "تعذر قراءة أبعاد الصورة", null)
+        return
+      }
+      var sample = 1
+      val longest = max(bounds.outWidth, bounds.outHeight)
+      while (longest / (sample * 2) >= maxDim) {
+        sample *= 2
+      }
+      bitmap = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+      if (bitmap == null) {
+        promise.reject("E_DECODE", "تعذر فك ترميز الصورة", null)
+        return
+      }
+      val scale = min(1f, maxDim.toFloat() / max(bitmap.width, bitmap.height))
+      out = if (scale < 1f) {
+        Bitmap.createScaledBitmap(
+          bitmap,
+          max(1, (bitmap.width * scale).toInt()),
+          max(1, (bitmap.height * scale).toInt()),
+          true
+        )
+      } else {
+        bitmap
+      }
+
+      val isWebp = android.os.Build.VERSION.SDK_INT >= 30
+      val format = if (isWebp) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.JPEG
+      val bytes = ByteArrayOutputStream().use { bos ->
+        out.compress(format, quality.coerceIn(30, 100), bos)
+        bos.toByteArray()
+      }
+      val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+      val hash = digest.joinToString("") { "%02x".format(it) }
+      val result = com.facebook.react.bridge.Arguments.createMap().apply {
+        putString("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+        putString("hash", hash)
+        putString("ext", if (isWebp) "webp" else "jpg")
+        putInt("width", out.width)
+        putInt("height", out.height)
+        putInt("bytes", bytes.size)
+      }
+      promise.resolve(result)
+    } catch (oom: OutOfMemoryError) {
+      promise.reject("E_OOM", "نفدت الذاكرة أثناء ضغط الصورة", null)
+    } catch (e: Exception) {
+      promise.reject("E_COMPRESS", "فشل ضغط الصورة: ${e.message}", e)
+    } finally {
+      recycleIfNot(bitmap, out)
+    }
   }
 }

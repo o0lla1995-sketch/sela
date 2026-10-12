@@ -104,6 +104,13 @@ export const KEYS = {
   onlineInvoiceCounter: 'online_invoice_counter_v1',
   onlineInvoiceDay: 'online_invoice_day_v1',
   onlineSeenOrders: 'online_seen_orders_v1',
+  /** v49: صور المتجر المرفوعة — بية الكتالوج:
+   *  online_synced_images: Record<ref, {sig, hashes}> — بصمة ملفات
+   *  كل منتج آخر مزامنة ناجحة (اكتشاف التغيّر بلا إعادة ضغط)؛
+   *  online_uploaded_hashes: هاشات الصور المرفوعة بنجاح يوماً (لا
+   *  تُعاد أبداً إلا بعد إعادة تثبيت التطبيق). */
+  onlineSyncedImages: 'online_synced_images_v1',
+  onlineUploadedHashes: 'online_uploaded_hashes_v1',
 } as const;
 
 export function getJson<T>(key: string, fallback: T): T {
