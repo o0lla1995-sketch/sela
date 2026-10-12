@@ -262,6 +262,10 @@ export async function syncProducts(): Promise<number> {
       name: product.name,
       category: categoryNames.get(product.category_id ?? -1) ?? '',
       priceMinor: Math.round(product.retail_price * 100),
+      // v51: خصم المنتج — الخادم (4.5+) يخزنه ويعرضه للمشترين
+      // كسعر مخفّض وشارة «خصم X%» في سيلا ماركت.
+      discountPct:
+        Math.max(0, Math.min(95, product.discount_pct ?? 0)) || undefined,
       stock: Math.max(0, product.stock_quantity),
       barcode: product.barcode ?? undefined,
       soldByWeight: product.sold_by_weight === 1,

@@ -58,6 +58,10 @@ export interface Product {
   category_id: number | null;
   image_uri: string | null;
   created_at: string;
+  /** v51: نسبة خصم المنتج (0–95%) — تُطبّق على سعر البيع في نقطة
+   *  البيع وتُزامَن إلى سيلا ماركت حيث تظهر كعرض مخفّض. 0 = بلا
+   *  خصم. التكلفة لا تتغير فتنعكس الخصومة في هامش الربح طبيعياً. */
+  discount_pct: number;
   /** Per-product low-stock alert override (NULL → global default). */
   low_stock_threshold: number | null;
   /** Product (base-unit) barcode, scanned at the POS. */

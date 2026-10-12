@@ -202,6 +202,8 @@ export function ProductFormScreen() {
   const [costPrice, setCostPrice] = useState('');
   const [retailPrice, setRetailPrice] = useState('');
   const [wholesalePrice, setWholesalePrice] = useState('');
+  /** v51: نسبة خصم المنتج (0–95%) — سلسلة الخصومات الكاملة. */
+  const [discountPct, setDiscountPct] = useState('');
   const [stock, setStock] = useState('');
   const [threshold, setThreshold] = useState('');
   /** Which unit the merchant is entering stock in (null = base قطعة). */
@@ -331,6 +333,11 @@ export function ProductFormScreen() {
             setCostPrice(String(product.cost_price));
             setRetailPrice(String(product.retail_price));
             setWholesalePrice(String(product.wholesale_price));
+            setDiscountPct(
+              (product.discount_pct ?? 0) > 0
+                ? String(product.discount_pct)
+                : '',
+            );
             setStock(String(product.stock_quantity));
             // v37 (الجولة 45 #1أ+1ب): القيم الحية كما حُفظت في
             //  القاعدة — مرجع الحفظ الأمين للمنتجات بلا تتبع ومرجع
@@ -1510,6 +1517,15 @@ export function ProductFormScreen() {
       return;
     }
 
+    // v51: خصم الموديل — نفس قواعد المنتج العادي (0–95).
+    const discountValue = (() => {
+      const parsed = parseNumber(discountPct);
+      if (Number.isNaN(parsed) || parsed <= 0) {
+        return 0;
+      }
+      return Math.round(Math.min(95, parsed) * 10) / 10;
+    })();
+
     setBusy(true);
     try {
       // الموديل منتج واحد — مخزونه مجموع متغيراته.
@@ -1519,6 +1535,7 @@ export function ProductFormScreen() {
         cost_price: cost,
         retail_price: retail,
         wholesale_price: wholesale,
+        discount_pct: discountValue,
         stock_quantity: totalPieces,
         category_id: categoryId === 'none' ? null : categoryId,
         image_uri: imageUri,
@@ -1756,6 +1773,15 @@ export function ProductFormScreen() {
       });
     }
 
+    // v51: خصم المنتج — 0–95 (فارغ أو غير صالح = بلا خصم).
+    const discountValue = (() => {
+      const parsed = parseNumber(discountPct);
+      if (Number.isNaN(parsed) || parsed <= 0) {
+        return 0;
+      }
+      return Math.round(Math.min(95, parsed) * 10) / 10;
+    })();
+
     setBusy(true);
     try {
       const input = {
@@ -1763,6 +1789,7 @@ export function ProductFormScreen() {
         cost_price: cost,
         retail_price: retail,
         wholesale_price: wholesale,
+        discount_pct: discountValue,
         stock_quantity: stockValue,
         category_id: categoryId === 'none' ? null : categoryId,
         image_uri: imageUri,
@@ -3444,6 +3471,35 @@ export function ProductFormScreen() {
             </View>
           </View>
           )}
+          {/* v51: خصم المنتج — نسبة 0–95% تُطبق على سعر البيع في
+              نقطة البيع وتُزامن للمول كعرض مخفّض. معاينة حية تحت
+              الحقل: السعر النهائي بعد الخصم حتى لا يفاجأ التاجر. */}
+          <View style={styles.priceRow}>
+            <View style={{flex: 1}}>
+              <Field
+                label="خصم المنتج (%)"
+                value={discountPct}
+                onChangeText={setDiscountPct}
+                keyboardType="numeric"
+                placeholder="0 — بلا خصم"
+                returnKeyType="done"
+              />
+            </View>
+            <View style={{flex: 1, justifyContent: 'center'}}>
+              <Text style={styles.stockHintText}>
+                {((): string => {
+                  const pct = parseNumber(discountPct);
+                  const base = parseNumber(retailPrice);
+                  if (Number.isNaN(pct) || pct <= 0 || Number.isNaN(base)) {
+                    return 'خصم على سعر المفرق — يظهر للمشترين في المول';
+                  }
+                  const clamped = Math.min(95, Math.max(0, pct));
+                  const final = Math.round(base * (1 - clamped / 100) * 100) / 100;
+                  return `بعد الخصم: ${final.toFixed(2)}₪ بدلاً من ${base.toFixed(2)}₪`;
+                })()}
+              </Text>
+            </View>
+          </View>
           {/* v35: ملابس — سعر ربطة الجملة يُحتسب تلقائياً من سعر
               القطعة × عدد مقاسات الربطة (طلب التاجر). */}
           {modeConfig.lotEntry === true &&

@@ -38,7 +38,12 @@ import {
   Stepper,
 } from '../components/ui';
 import {Icon} from '../components/Icon';
-import {useCartStore, cartTotals, unitPriceFor} from '../stores/cartStore';
+import {
+  useCartStore,
+  cartTotals,
+  unitPriceFor,
+  applyProductDiscount,
+} from '../stores/cartStore';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore, type PosProductView} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
@@ -710,15 +715,18 @@ export function PosScreen({
       );
       if (result.added) {
         beep();
+        const effectiveMode = useCartStore.getState().pricingMode;
+        // v51: سعر الكيلو بعد خصم المنتج — متسق مع ما دخل السلة.
         const unitPrice =
           unit != null
-            ? unitPriceFor(product, unit, useCartStore.getState().pricingMode)
-            : product.retail_price;
-        const effectiveMode = useCartStore.getState().pricingMode;
-        const basePrice =
-          effectiveMode === 'WHOLESALE'
-            ? product.wholesale_price
-            : product.retail_price;
+            ? unitPriceFor(product, unit, effectiveMode)
+            : applyProductDiscount(
+                effectiveMode === 'WHOLESALE'
+                  ? product.wholesale_price
+                  : product.retail_price,
+                product,
+              );
+        const basePrice = unitPrice;
         toast(
           unit != null
             ? `أُضيفت وحدة ${unit.unitName} من ${product.name} — ${formatQty(
@@ -907,10 +915,13 @@ export function PosScreen({
               (session.counts.get(product.id) ?? 0) + added,
             );
           }
-          const price =
+          // v51: السعر المعروض بعد خصم المنتج (مثل السلة تماماً).
+          const price = applyProductDiscount(
             mode === 'WHOLESALE'
               ? product.wholesale_price
-              : product.retail_price;
+              : product.retail_price,
+            product,
+          );
           const part =
             added > 0
               ? `${product.name}${added > 1 ? ` ×${added}` : ''}${
@@ -1606,9 +1617,14 @@ export function PosScreen({
 
   const priceOf = useCallback(
     (product: Product) =>
-      pricingMode === 'WHOLESALE'
-        ? product.wholesale_price
-        : product.retail_price,
+      // v51: سعر البيع المعروض بعد خصم المنتج — نفس سعر السلة
+      // والفاتورة، لا انفصال بين ما يراه التاجر وما يُحسب.
+      applyProductDiscount(
+        pricingMode === 'WHOLESALE'
+          ? product.wholesale_price
+          : product.retail_price,
+        product,
+      ),
     [pricingMode],
   );
 
@@ -2538,17 +2554,60 @@ export function PosScreen({
                     v => v.kind === 'size',
                   );
                   const variantCount = clothingVariants.length;
+                  const hasDiscount = (product.discount_pct ?? 0) > 0;
                   const priceLabel = `${
                     sizeVariants.length > 0
                       ? `${formatMoney(
                           Math.min(
-                            ...sizeVariants.map(
-                              v => v.retail_price ?? product.retail_price,
-                            ),
+                            ...sizeVariants.map(v => {
+                              const vPrice =
+                                v.retail_price ?? product.retail_price;
+                              return hasDiscount
+                                ? applyProductDiscount(vPrice, product)
+                                : vPrice;
+                            }),
                           ),
                         )}+`
                       : formatMoney(priceOf(product))
                   }${weighted ? '/كغ' : ''}`;
+                  /* v51: السعر قبل الخصم مشطوباً + شارة النسبة —
+                   * يُبنى مرة واحدة لكل منتج ويُستعمل في كل الأشكال
+                   * (قائمة/بطاقات/شبكة). */
+                  const oldPriceLabel = hasDiscount
+                    ? `${
+                        sizeVariants.length > 0
+                          ? `${formatMoney(
+                              Math.min(
+                                ...sizeVariants.map(
+                                  v => v.retail_price ?? product.retail_price,
+                                ),
+                              ),
+                            )}+`
+                          : formatMoney(
+                              pricingMode === 'WHOLESALE'
+                                ? product.wholesale_price
+                                : product.retail_price,
+                            )
+                      }${weighted ? '/كغ' : ''}`
+                    : null;
+                  const priceTextNode = hasDiscount ? (
+                    <Text>
+                      <Text
+                        style={{
+                          textDecorationLine: 'line-through',
+                          color: c.textFaint,
+                          fontSize: 11,
+                        }}>
+                        {oldPriceLabel}
+                      </Text>
+                      {'  '}
+                      {priceLabel}
+                      <Text style={{color: c.danger, fontWeight: '900'}}>
+                        {'  -'}
+                        {Math.round(product.discount_pct)}%
+                      </Text>
+                    </Text>
+                  ) : null;
                   const stockLabel = untracked
                     ? 'يُباع دائماً'
                     : stockState === 'out'
@@ -2608,7 +2667,7 @@ export function PosScreen({
                               : ''}
                           </Text>
                           <View style={styles.listMetaRow}>
-                            <Text style={styles.listPrice}>{priceLabel}</Text>
+                            <Text style={styles.listPrice}>{priceTextNode ?? priceLabel}</Text>
                             {untracked ? (
                               <Text style={styles.tileStock}>{stockLabel}</Text>
                             ) : (
@@ -2689,7 +2748,7 @@ export function PosScreen({
                         <Text style={styles.cardName} numberOfLines={1}>
                           {product.name}
                         </Text>
-                        <Text style={styles.cardPrice}>{priceLabel}</Text>
+                        <Text style={styles.cardPrice}>{priceTextNode ?? priceLabel}</Text>
                         <View style={styles.tileStockRow}>
                           {untracked ? (
                             <Text style={styles.tileStock}>{stockLabel}</Text>
@@ -2761,7 +2820,7 @@ export function PosScreen({
                       <Text style={styles.tileName} numberOfLines={1}>
                         {product.name}
                       </Text>
-                      <Text style={styles.tilePrice}>{priceLabel}</Text>
+                      <Text style={styles.tilePrice}>{priceTextNode ?? priceLabel}</Text>
                       <View style={styles.tileStockRow}>
                         {untracked ? (
                           <Text style={styles.tileStock}>{stockLabel}</Text>

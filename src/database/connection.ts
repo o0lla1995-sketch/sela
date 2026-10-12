@@ -1755,6 +1755,25 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 25;
   }
 
+  if (version < 26) {
+    // ── v51 (جولة الخصومات): نسبة خصم المنتج (0–95%) — سلسلة كاملة:
+    // POS يحدد الخصم من ملف المنتج → شبكة البيع تعرض السعر القديم
+    // مشطوباً والجديد ببادئة «خصم» → السلة والفاتورة تحسبان بالسعر
+    // المخفض (التكلفة كما هي فالربح صادق) → مزامنة المول ترسل
+    // discountPct فيظهر المنتج عرضاً مخفضاً لدى المشترين (خادم 4.5+).
+    const dcols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'discount_pct'",
+    );
+    const dcolsRows = (dcols.rows ?? []) as unknown as {cnt?: number}[];
+    const hasDiscount = Number(dcolsRows[0]?.cnt ?? 0) > 0;
+    if (!hasDiscount) {
+      await database.execute(
+        'ALTER TABLE products ADD COLUMN discount_pct REAL NOT NULL DEFAULT 0',
+      );
+    }
+    version = 26;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }

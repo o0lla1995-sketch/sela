@@ -12,6 +12,8 @@ function rowToProduct(row: Record<string, unknown>): Product {
     cost_price: Number(row.cost_price ?? 0),
     retail_price: Number(row.retail_price ?? 0),
     wholesale_price: Number(row.wholesale_price ?? 0),
+    // v51: خصم المنتج — مقيد 0–95 (نفس قيد الخادم).
+    discount_pct: Math.max(0, Math.min(95, Number(row.discount_pct ?? 0))),
     stock_quantity: Number(row.stock_quantity ?? 0),
     category_id: row.category_id == null ? null : Number(row.category_id),
     image_uri: row.image_uri == null ? null : String(row.image_uri),
@@ -57,6 +59,8 @@ export interface ProductInput {
   cost_price: number;
   retail_price: number;
   wholesale_price: number;
+  /** v51: نسبة خصم المنتج 0–95 (اختياري — 0 = بلا خصم). */
+  discount_pct?: number;
   stock_quantity: number;
   category_id: number | null;
   image_uri: string | null;
@@ -148,15 +152,21 @@ export const ProductRepo = {
     if (input.stock_quantity < 0) {
       throw new Error('الكمية لا يمكن أن تكون سالبة');
     }
+    // v51: خصم المنتج — مقيد 0–95.
+    const discountPct = Math.max(
+      0,
+      Math.min(95, Number(input.discount_pct ?? 0) || 0),
+    );
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, discount_pct, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
         input.retail_price,
         input.wholesale_price,
+        discountPct,
         input.stock_quantity,
         input.category_id,
         input.image_uri,
@@ -190,9 +200,15 @@ export const ProductRepo = {
     if (input.stock_quantity < 0) {
       throw new Error('الكمية لا يمكن أن تكون سالبة');
     }
+    // v51: خصم المنتج — مقيد 0–95.
+    const discountPct = Math.max(
+      0,
+      Math.min(95, Number(input.discount_pct ?? 0) || 0),
+    );
     await getDb().execute(
       `UPDATE products SET
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
+        discount_pct = ?,
         stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?,
         barcode = ?, sold_by_weight = ?, expiry_date = ?,
         style_group = ?, variant_size = ?, variant_color = ?,
@@ -203,6 +219,7 @@ export const ProductRepo = {
         input.cost_price,
         input.retail_price,
         input.wholesale_price,
+        discountPct,
         input.stock_quantity,
         input.category_id,
         input.image_uri,

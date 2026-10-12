@@ -36,25 +36,39 @@ function formatQtyForMessage(value: number): string {
   return String(rounded);
 }
 
-/** Price of one chosen unit under a pricing mode. */
+/** v51: تطبيق خصم المنتج على أي سعر وحدة — 0–95% (نفس قيد
+ *  الخادم). السلة والفاتورة والتقارير كلها تمر من هنا فتتسق
+ *  السلسلة كاملة: الخصم يُحدَّد من ملف المنتج ويُرى فوراً في
+ *  شبكة البيع والفاتورة والمول (عبر المزامنة). */
+export function applyProductDiscount(price: number, product: Product): number {
+  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  if (pct <= 0) {
+    return price;
+  }
+  return Math.round(price * (1 - pct / 100) * 100) / 100;
+}
+
+/** Price of one chosen unit under a pricing mode (v51: بعد خصم
+ *  المنتج — السعر المخفّض هو سعر البيع الفعلي في كل مكان). */
 export function unitPriceFor(
   product: Product,
   unit: ProductUnit | null,
   mode: PricingMode,
 ): number {
   if (unit == null) {
-    return mode === 'WHOLESALE'
-      ? product.wholesale_price
-      : product.retail_price;
+    return applyProductDiscount(
+      mode === 'WHOLESALE' ? product.wholesale_price : product.retail_price,
+      product,
+    );
   }
   const override =
     mode === 'WHOLESALE' ? unit.wholesale_price : unit.retail_price;
   if (override != null && override > 0) {
-    return override;
+    return applyProductDiscount(override, product);
   }
   const base =
     mode === 'WHOLESALE' ? product.wholesale_price : product.retail_price;
-  return base * unit.conversion;
+  return applyProductDiscount(base * unit.conversion, product);
 }
 
 function lineKey(
@@ -74,7 +88,8 @@ function baseUnitLabelOfProduct(product: Product): string {
   return product.base_unit_name ?? BASE_UNIT_NAME;
 }
 
-function toLine(
+/** v51: مُصدَّرة لحرّوس الاختبار — بناء سطر سلة بأسعار بعد الخصم. */
+export function toLine(
   product: Product,
   mode: PricingMode,
   unit: ProductUnit | null,
