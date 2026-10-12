@@ -355,8 +355,15 @@ export function OnlineOrdersScreen() {
               {/* الأصناف */}
               <SectionTitle title="الأصناف" />
               {detailItems.map(item => (
-                <View key={item.product_ref} style={styles.itemRow}>
-                  <Text style={styles.itemName}>{item.product_name}</Text>
+                <View
+                  key={`${item.product_ref}:${item.variant ?? ''}`}
+                  style={styles.itemRow}>
+                  <View style={{flex: 1, gap: 2}}>
+                    <Text style={styles.itemName}>{item.product_name}</Text>
+                    {item.variant ? (
+                      <Text style={styles.itemVariant}>{item.variant}</Text>
+                    ) : null}
+                  </View>
                   <Text style={styles.dim}>
                     ×{item.quantity} · {formatMoney(item.unit_price_minor / 100)}
                   </Text>
@@ -661,6 +668,12 @@ const useStyles = makeStyles(c =>
       borderBottomColor: c.borderSoft,
     },
     itemName: {fontFamily: fonts.bold, fontSize: 13, color: c.text, flex: 1},
+    itemVariant: {
+      fontFamily: fonts.medium,
+      fontSize: 11.5,
+      color: c.accent,
+      writingDirection: 'rtl',
+    },
     itemTotal: {fontFamily: fonts.bold, fontSize: 13, color: c.text},
     sumRow: {
       flexDirection: 'row',

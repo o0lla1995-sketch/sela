@@ -48,6 +48,7 @@ function rowToItem(row: Record<string, unknown>): OnlineOrderItem {
     product_id: row.product_id == null ? null : Number(row.product_id),
     product_ref: String(row.product_ref ?? ''),
     product_name: String(row.product_name ?? ''),
+    variant: (row.variant as string) ?? null,
     unit_price_minor: Number(row.unit_price_minor ?? 0),
     quantity: Number(row.quantity ?? 0),
     line_total_minor: Number(row.line_total_minor ?? 0),
@@ -76,6 +77,7 @@ export interface ServerOrderPayload {
     product_id?: number | null;
     product_ref?: string;
     product_name?: string;
+    variant?: string | null;
     unit_price_minor?: number;
     quantity?: number;
     line_total_minor?: number;
@@ -157,14 +159,15 @@ export const OnlineRepo = {
       for (const item of payload.items) {
         await db.execute(
           `INSERT OR IGNORE INTO online_order_items
-             (server_order_id, product_id, product_ref, product_name,
+             (server_order_id, product_id, product_ref, product_name, variant,
               unit_price_minor, quantity, line_total_minor)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             payload.id,
             item.product_id ?? null,
             String(item.product_ref ?? ''),
             String(item.product_name ?? ''),
+            item.variant ?? null,
             Math.round(item.unit_price_minor ?? 0),
             Number(item.quantity ?? 0),
             Math.round(item.line_total_minor ?? 0),

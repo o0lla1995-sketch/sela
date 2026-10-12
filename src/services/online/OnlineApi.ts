@@ -152,6 +152,8 @@ export const OnlineApi = {
       barcode?: string;
       soldByWeight?: boolean;
       unitLabel?: string;
+      /** v50 (خادم 4.3): خيارات الشراء — [{name, values}] */
+      options?: {name: string; values: string[]}[];
     }[],
   ): Promise<{saved: number; serverTime: number}> {
     const data = await storePost<{saved: number; serverTime: number}>(

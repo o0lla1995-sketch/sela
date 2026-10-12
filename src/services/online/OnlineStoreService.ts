@@ -19,6 +19,7 @@ import {OnlineRepo, type ServerOrderPayload} from '../../database/repositories/O
 import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {CategoryRepo} from '../../database/repositories/CategoryRepo';
+import {VariantRepo} from '../../database/repositories/VariantRepo';
 import {CashRepo, reserveRef as reserveCashRef} from '../../database/repositories/CashRepo';
 import {OnlineApi, OnlineApiError} from './OnlineApi';
 import {syncProductImages, getImageSyncProgress} from './OnlineImageSync';
@@ -32,11 +33,54 @@ import type {
   OnlineOrder,
   OnlineOrderStatus,
   OnlineSellingSettings,
+  Product,
+  ProductVariant,
 } from '../../core/types';
 import {notificationsStore} from '../../stores/notificationsStore';
 
 const POLL_INTERVAL_MS = 60 * 1000;
 const PRODUCTS_SYNC_INTERVAL_MS = 15 * 60 * 1000;
+
+/* ── v50: خيارات الشراء للمتجر من متغيرات المنتج ────────────────
+ * ملابس فقط (kind='variant'): لون × مقاس بسعر موحّد على مستوى
+ * المنتج — تُجمع القيم الفريدة المتوفرة (مخزون > 0) في مجموعات
+ * يعرضها تطبيق المتجر كرقائق اختيار عند الشراء. الأحجام المطعمية
+ * (kind='size') لكل منها سعر مختلف فتُستثنى عمداً. */
+function marketOptionsOf(
+  product: Product,
+  variantsByProduct: Map<number, ProductVariant[]>,
+): {name: string; values: string[]}[] | undefined {
+  const variants =
+    product.variants ??
+    variantsByProduct.get(product.id)?.filter(v => v.kind === 'variant') ??
+    [];
+  if (variants.length === 0) {
+    return undefined;
+  }
+  const colors: string[] = [];
+  const sizes: string[] = [];
+  for (const v of variants) {
+    if (v.stock_quantity <= 0) {
+      continue;
+    }
+    const color = v.color.trim();
+    const size = v.size.trim();
+    if (color.length > 0 && !colors.includes(color)) {
+      colors.push(color);
+    }
+    if (size.length > 0 && !sizes.includes(size)) {
+      sizes.push(size);
+    }
+  }
+  const groups: {name: string; values: string[]}[] = [];
+  if (colors.length > 0) {
+    groups.push({name: 'اللون', values: colors.slice(0, 12)});
+  }
+  if (sizes.length > 0) {
+    groups.push({name: 'المقاس', values: sizes.slice(0, 12)});
+  }
+  return groups.length > 0 ? groups : undefined;
+}
 
 /* ── الإعدادات ─────────────────────────────────────────────────── */
 
@@ -210,6 +254,9 @@ export async function syncProducts(): Promise<number> {
     const categoryNames = new Map(
       categories.map(c => [c.id, c.name] as const),
     );
+    // v50: متغيرات الملابس (لون × مقاس) تُجمع مرة واحدة لبناء
+    // خيارات الشراء في المتجر.
+    const variantsByProduct = await VariantRepo.listAll();
     const payload = products.map(product => ({
       ref: String(product.id),
       name: product.name,
@@ -218,6 +265,14 @@ export async function syncProducts(): Promise<number> {
       stock: Math.max(0, product.stock_quantity),
       barcode: product.barcode ?? undefined,
       soldByWeight: product.sold_by_weight === 1,
+      // v50: وحدة البيع المعروضة للمشتري (شريط/علبة/كوب…) — كانت
+      // تُترك فارغة رغم وجودها في ملف المنتج.
+      unitLabel: product.base_unit_name ?? undefined,
+      // v50 (خادم 4.3): خيارات الشراء من متغيرات الملابس فقط
+      // (لون × مقاس بسعر موحّد). أحجام المطعم/الكافي (kind='size')
+      // لكل حجم سعره الخاص فلا تُزامَن كخيارات — يبقى سعرها موحداً
+      // في المتجر ويُتفق على الحجم عبر ملاحظة الطلب.
+      options: marketOptionsOf(product, variantsByProduct),
     }));
     const result = await OnlineApi.syncProducts(payload);
     saveOnlineSettings({...loadOnlineSettings(), lastProductsSyncAt: Date.now()});
@@ -330,10 +385,15 @@ export async function sendOrder(order: OnlineOrder): Promise<string> {
         `المنتج «${item.product_name}» غير موجود بالمخزون — لا يمكن إرسال الطلب`,
       );
     }
+    // v50: مفتاح السطر يشمل الخيار المختار — المنتج نفسه بخيارين
+    // (أسود/L وأسود/XL مثلاً) سطران مستقلان لا يطمس أحدهما الآخر.
+    const variantTag = item.variant ?? '';
     lines.push({
-      key: `online-${item.product_ref}`,
+      key: `online-${item.product_ref}-${variantTag}`,
       productId: product.id,
-      name: product.name,
+      name: variantTag
+        ? `${product.name} — ${variantTag}`
+        : product.name,
       unitPrice: item.unit_price_minor / 100,
       costPrice: product.cost_price,
       retailPrice: product.retail_price,

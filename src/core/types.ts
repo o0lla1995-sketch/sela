@@ -977,6 +977,9 @@ export interface OnlineOrderItem {
   product_id: number | null;
   product_ref: string;
   product_name: string;
+  /** v50 (خادم 4.3): لقطة الخيار المختار لدى الشراء
+   *  (مثال: «المقاس: L · اللون: كحلي») — عرض فقط. */
+  variant?: string | null;
   unit_price_minor: number;
   quantity: number;
   line_total_minor: number;

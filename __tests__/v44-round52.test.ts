@@ -57,8 +57,8 @@ describe('v44 — حرّوس المصدر: الجولة 52', () => {
     expect(pos).not.toContain('styles.viewShapeBtnText');
     // المبدّل في نقطة البيع هجر dense (الحجم الطبيعي الواسع).
     expect(pos.match(/<Segmented[\s\S]*?\sdense[\s\S]*?\/>/)).toBeNull();
-    expect(gradle).toContain('versionName "49.0.0"');
-    expect(gradle).toContain('versionCode 57');
+    expect(gradle).toContain('versionName "50.0.0"');
+    expect(gradle).toContain('versionCode 58');
   });
 
   test('③ اسم الحزمة الجديد com.sela.pal في كل مكان (التطبيق والترويسة)', () => {
@@ -89,7 +89,7 @@ describe('v44 — حرّوس المصدر: الجولة 52', () => {
     expect(wf).toContain('keystore.properties');
     // الإصدار الحزمة يحمل الحزمة الجديدة داخل config أيضًا.
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '49.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 57');
+    expect(config).toContain("APP_VERSION = '50.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 58');
   });
 });

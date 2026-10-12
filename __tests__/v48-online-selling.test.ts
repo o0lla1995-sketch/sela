@@ -176,11 +176,11 @@ describe('v48 — البيع أونلاين: الترحيل والقاعدة', (
 
   test('⑥ الإصدار: 49.0.0 (57) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '49.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 57');
+    expect(config).toContain("APP_VERSION = '50.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 58');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 57');
-    expect(gradle).toContain('versionName "49.0.0"');
+    expect(gradle).toContain('versionCode 58');
+    expect(gradle).toContain('versionName "50.0.0"');
   });
 });
 

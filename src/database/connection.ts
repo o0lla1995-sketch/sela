@@ -1616,11 +1616,15 @@ async function applyMigrations(database: DB): Promise<void> {
       product_id INTEGER,
       product_ref TEXT,
       product_name TEXT NOT NULL,
+      variant TEXT,
       unit_price_minor INTEGER NOT NULL DEFAULT 0,
       quantity REAL NOT NULL DEFAULT 0,
-      line_total_minor INTEGER NOT NULL DEFAULT 0,
-      UNIQUE(server_order_id, product_ref)
+      line_total_minor INTEGER NOT NULL DEFAULT 0
     )`);
+    // v50: فهرس التفريد التعبيري (طلب، منتج، خيار مختار) يُنشأ في
+    // ترحيل v25 لا هنا — إنشاؤه قبل الترحيلات ينهار على قواعد
+    // v48/v49 القديمة التي لا تحوي عمود variant بعد (نفس صنف خطأ
+    // idx_cdebts_active التاريخي).
     // (2) توسيع قيود CHECK بإعادة بناء الجداول الثلاثة (مسار SQLite
     //     الرسمي: بناء بديل ← نسخ ← حذف ← rename؛ الأبناء يربطون
     //     بالاسم فلا ينكسر شيء) — 'online' في دفاتر المرتجعات،
@@ -1706,6 +1710,49 @@ async function applyMigrations(database: DB): Promise<void> {
     }
     logDiag('db', 'ترحيل v24: البيع أونلاين — طلبات سيلا ماركت + دفتر مرتجع أونلاين + سندات الخزينة الأونلاين');
     version = 24;
+  }
+
+  if (version < 25) {
+    // v50 (خادم 4.3): لقطة الخيار المختار على سطر طلب المتجر
+    // (مقاس/لون/حجم) + تفرد لكل خيار — الجدول القديم يحمل
+    // UNIQUE(طلب، منتج) فيمنع المنتج نفسه بخيارين، فيُعاد بناؤه
+    // بمسار SQLite الرسمي (بناء بديل ← نسخ ← حذف ← rename).
+    const cols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('online_order_items') WHERE name = 'variant'",
+    );
+    const hasVariant =
+      (cols.rows?.[0] as {cnt?: number})?.cnt ?? 0;
+    if (!hasVariant) {
+      await database.execute(`CREATE TABLE online_order_items_v50 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_order_id INTEGER NOT NULL REFERENCES online_orders(server_id) ON DELETE CASCADE,
+        product_id INTEGER,
+        product_ref TEXT,
+        product_name TEXT NOT NULL,
+        variant TEXT,
+        unit_price_minor INTEGER NOT NULL DEFAULT 0,
+        quantity REAL NOT NULL DEFAULT 0,
+        line_total_minor INTEGER NOT NULL DEFAULT 0
+      )`);
+      await database.execute(
+        `INSERT INTO online_order_items_v50
+           (id, server_order_id, product_id, product_ref, product_name,
+            variant, unit_price_minor, quantity, line_total_minor)
+         SELECT id, server_order_id, product_id, product_ref, product_name,
+            NULL, unit_price_minor, quantity, line_total_minor
+         FROM online_order_items`,
+      );
+      await database.execute('DROP TABLE online_order_items');
+      await database.execute(
+        'ALTER TABLE online_order_items_v50 RENAME TO online_order_items',
+      );
+      logDiag('db', 'ترحيل v25: جدول أسطر الطلبات الأونلاين بُعيد بناؤه بعمود الخيار المختار');
+    }
+    await database.execute(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_online_items_variant_unique
+       ON online_order_items(server_order_id, product_ref, COALESCE(variant, ''))`,
+    );
+    version = 25;
   }
 
   if (version !== storedVersion) {
