@@ -14,6 +14,8 @@ function rowToProduct(row: Record<string, unknown>): Product {
     wholesale_price: Number(row.wholesale_price ?? 0),
     // v51: خصم المنتج — مقيد 0–95 (نفس قيد الخادم).
     discount_pct: Math.max(0, Math.min(95, Number(row.discount_pct ?? 0))),
+    // v55 (الجولة 58): الإدراج للبيع أونلاين — 1 = يُزامن إلى سيلا ماركت.
+    online_listed: Number(row.online_listed ?? 0) === 1 ? 1 : 0,
     stock_quantity: Number(row.stock_quantity ?? 0),
     category_id: row.category_id == null ? null : Number(row.category_id),
     image_uri: row.image_uri == null ? null : String(row.image_uri),
@@ -61,6 +63,9 @@ export interface ProductInput {
   wholesale_price: number;
   /** v51: نسبة خصم المنتج 0–95 (اختياري — 0 = بلا خصم). */
   discount_pct?: number;
+  /** v55 (الجولة 58): 1 = مدرج للبيع أونلاين في سيلا ماركت (اختياري).
+   *  المزامنة ترسل المنتجات المدرجة فقط — انتقائية التاجر. */
+  online_listed?: number;
   stock_quantity: number;
   category_id: number | null;
   image_uri: string | null;
@@ -93,6 +98,9 @@ export const ProductRepo = {
      *  from POS/inventory/alerts; 'archived' shows ONLY the archived
      *  ones (the «المؤرشفة» view); 'all' returns everything. */
     archival?: 'active' | 'archived' | 'all';
+    /** v55 (الجولة 58): true = المنتجات المدرجة للبيع أونلاين فقط
+     *  (ما يراه متجر سيلا ماركت). غير المدرجة لا تغادر الجهاز. */
+    onlineListed?: boolean;
   }): Promise<Product[]> {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
@@ -112,6 +120,9 @@ export const ProductRepo = {
       } else {
         conditions.push('p.is_archived = 0');
       }
+    }
+    if (options?.onlineListed === true) {
+      conditions.push('p.online_listed = 1');
     }
 
     const where =
@@ -157,16 +168,19 @@ export const ProductRepo = {
       0,
       Math.min(95, Number(input.discount_pct ?? 0) || 0),
     );
+    // v55: الإدراج أونلاين — يُحفظ مع المنتج من أول إنشاء.
+    const onlineListed = input.online_listed === 1 ? 1 : 0;
     const result = await getDb().execute(
       `INSERT INTO products
-        (name, cost_price, retail_price, wholesale_price, discount_pct, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, cost_price, retail_price, wholesale_price, discount_pct, online_listed, stock_quantity, category_id, image_uri, low_stock_threshold, barcode, sold_by_weight, expiry_date, style_group, variant_size, variant_color, has_variants, base_unit_name, stock_untracked, sizes_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         input.cost_price,
         input.retail_price,
         input.wholesale_price,
         discountPct,
+        onlineListed,
         input.stock_quantity,
         input.category_id,
         input.image_uri,
@@ -205,10 +219,12 @@ export const ProductRepo = {
       0,
       Math.min(95, Number(input.discount_pct ?? 0) || 0),
     );
+    // v55: الإدراج أونلاين — محفوظ مع المنتج عبر كل تعديل.
+    const onlineListed = input.online_listed === 1 ? 1 : 0;
     await getDb().execute(
       `UPDATE products SET
         name = ?, cost_price = ?, retail_price = ?, wholesale_price = ?,
-        discount_pct = ?,
+        discount_pct = ?, online_listed = ?,
         stock_quantity = ?, category_id = ?, image_uri = ?, low_stock_threshold = ?,
         barcode = ?, sold_by_weight = ?, expiry_date = ?,
         style_group = ?, variant_size = ?, variant_color = ?,
@@ -220,6 +236,7 @@ export const ProductRepo = {
         input.retail_price,
         input.wholesale_price,
         discountPct,
+        onlineListed,
         input.stock_quantity,
         input.category_id,
         input.image_uri,
@@ -251,6 +268,27 @@ export const ProductRepo = {
     );
     const row = result.rows?.[0];
     return row ? rowToProduct(row) : null;
+  },
+
+  /** v55 (الجولة 58): تبديل الإدراج للبيع أونلاين من شاشة «منتجات
+   *  متجري أونلاين» — لمسة واحدة بلا فتح ملف المنتج. يرفض المؤرشف
+   *  (المؤرشف لا يظهر في المزامنة أصلاً فيلتبس معنى الإدراج). */
+  async setOnlineListed(id: number, listed: boolean): Promise<boolean> {
+    const result = await getDb().execute(
+      'UPDATE products SET online_listed = ? WHERE id = ? AND is_archived = 0',
+      [listed ? 1 : 0, id],
+    );
+    return (result.rowsAffected ?? 0) > 0;
+  },
+
+  /** v55: عدد المنتجات المدرجة أونلاين (نشطة) — لشارة شاشة البيع
+   *  أونلاين «X منتجاً معروضاً في متجرك». */
+  async countOnlineListed(): Promise<number> {
+    const result = await getDb().execute(
+      'SELECT COUNT(*) AS cnt FROM products WHERE online_listed = 1 AND is_archived = 0',
+    );
+    const row = result.rows?.[0] as {cnt?: number} | undefined;
+    return Number(row?.cnt ?? 0);
   },
 
   /** v23 (round-29 #1): has this product left history behind

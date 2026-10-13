@@ -167,9 +167,11 @@ export async function syncProductImages(): Promise<void> {
       thumbs.set(pid, arr);
     }
 
-    // كل المنتجات النشطة (بلا حد الـ500 — صورة السوق لكل الكتالوج)
+    // v55 (الجولة 58): المنتجات المدرجة أونلاين فقط — الصور تخدم
+    // عرض المتجر حصراً؛ رفع صور منتجات غير معروضة كان ضغطاً خالصاً
+    // على الخادم وذاكرته (طلب التاجر: تنظيف ما لا يلزم).
     const productRows = ((await db.execute(
-      'SELECT id, image_uri FROM products WHERE is_archived = 0',
+      'SELECT id, image_uri FROM products WHERE is_archived = 0 AND online_listed = 1',
     )).rows ?? []) as unknown as ProductRow[];
     const products = productRows;
 

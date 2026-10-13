@@ -201,6 +201,7 @@ export function stopEngine(): void {
   state.pollTimer = null;
   state.productsTimer = null;
   state.started = false;
+  cancelPendingCatalogSync();
 }
 
 /* ── التسجيل ───────────────────────────────────────────────────── */
@@ -249,7 +250,15 @@ export async function syncProducts(): Promise<number> {
   }
   state.syncingProducts = true;
   try {
-    const products = await ProductRepo.list({archival: 'active'});
+    /* v55 (الجولة 58): المدرجة للبيع أونلاين حصراً — طلب التاجر
+     * بالنص: تحديد المنتجات المعروضة على المتجر دون باقي المنتجات،
+     * والتركيز على تحديثها ومزامنتها. غير المدرج لا يُرسل أصلاً؛
+     * والخادم يعلّم الغائب عن المزامنة «غير متاح» فيختفي من
+     * المتجر — تعطيل الإدراج = إزالة فورية من العرض. */
+    const products = await ProductRepo.list({
+      archival: 'active',
+      onlineListed: true,
+    });
     const categories = await CategoryRepo.list();
     const categoryNames = new Map(
       categories.map(c => [c.id, c.name] as const),
@@ -290,6 +299,43 @@ export async function syncProducts(): Promise<number> {
 }
 
 /* ── استطلاع الطلبات ───────────────────────────────────────────── */
+
+/* v55 (الجولة 58): إشعار تغيّر الكتالوج بعد كل عملية بيع — طلب
+ * التاجر بالنص: «مزامنتها مع المتجر في كل عملية بيع عبر نقطة
+ * البيع أو عبر المتجر». Debounce ٥ ثوانٍ يجمع العمليات المتلاحقة
+ * (بيع سريع متتالٍ / إرجاع بعد بيع) في مزامنة واحدة، والدورة
+ * الـ ١٥ دقيقة تبقى شبكة الأمان. تُنادى من InvoiceService بعد
+ * كل بيع/إرجاع مكتمل، ومن هنا بعد فاتورة طلب أونلاين. */
+const CATALOG_SYNC_DEBOUNCE_MS = 5000;
+let catalogSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function notifyCatalogChanged(): void {
+  const settings = loadOnlineSettings();
+  if (!settings.enabled) {
+    return; // المتجر معطّل — لا مزامنة حتى يعيد التفعيل.
+  }
+  if (catalogSyncTimer != null) {
+    clearTimeout(catalogSyncTimer);
+  }
+  catalogSyncTimer = setTimeout(() => {
+    catalogSyncTimer = null;
+    void syncProducts()
+      .then(saved => {
+        if (saved > 0) {
+          logDiag('online', `مزامنة بعد بيع: ${saved} منتجاً أونلاين محدّث على المتجر`);
+        }
+      })
+      .catch(() => undefined);
+  }, CATALOG_SYNC_DEBOUNCE_MS);
+}
+
+/** لإلغاء أي مزامنة مؤجلة عند إيقاف المحرك (تعطيل المتجر). */
+function cancelPendingCatalogSync(): void {
+  if (catalogSyncTimer != null) {
+    clearTimeout(catalogSyncTimer);
+    catalogSyncTimer = null;
+  }
+}
 
 /** إشعار مرة واحدة لكل طلب جديد (دفتر MMKV للأرقام المنبَّه عنها). */
 function isNewToMerchant(orderNumber: string): boolean {
@@ -474,6 +520,9 @@ export async function sendOrder(order: OnlineOrder): Promise<string> {
     'online',
     `أُرسل الطلب ${order.order_number} بفاتورة ${invoiceNumber} — دين أونلاين مؤقت حتى تأكيد التسليم`,
   );
+  // v55: فاتورة الطلب خصمت مخزون المنتجات — حدّث المتجر فوراً
+  // (هذا هو «بيع عبر المتجر» في طلب التاجر: المزامنة بعد كل عملية).
+  notifyCatalogChanged();
   return invoiceNumber;
 }
 

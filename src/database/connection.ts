@@ -1774,6 +1774,25 @@ async function applyMigrations(database: DB): Promise<void> {
     version = 26;
   }
 
+  if (version < 27) {
+    // ── v55 (الجولة 58): الإدراج الانتقائي للبيع أونلاين — التاجر
+    // يحدد المنتجات المعروضة في سيلا ماركت فقط (online_listed=1)؛
+    // مزامنة المتجر ترسل المدرجة حصراً فتتركز عناية التاجر عليها،
+    // وباقي المنتجات محلية لا تغادر الجهاز. المؤرشف مستثنى تلقائياً
+    // من المزامنة أصلاً (list({archival:'active'})).
+    const ocols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'online_listed'",
+    );
+    const ocolsRows = (ocols.rows ?? []) as unknown as {cnt?: number}[];
+    const hasOnlineListed = Number(ocolsRows[0]?.cnt ?? 0) > 0;
+    if (!hasOnlineListed) {
+      await database.execute(
+        'ALTER TABLE products ADD COLUMN online_listed INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    version = 27;
+  }
+
   if (version !== storedVersion) {
     storage.set(KEYS.schemaVersion, version as number);
   }

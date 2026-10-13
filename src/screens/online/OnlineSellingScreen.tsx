@@ -10,6 +10,7 @@
  * المنتجات فور انتهاء الاشتراك — حماية مدمجة لا تُكسر).
  */
 import React, {useCallback, useEffect, useState} from 'react';
+import {useNavigation} from '@react-navigation/native';
 import {
   ActivityIndicator,
   Alert,
@@ -38,6 +39,7 @@ import {useToastStore} from '../../stores/toastStore';
 import type {OnlineDeliveryRegion} from '../../core/types';
 
 export function OnlineSellingScreen() {
+  const navigation = useNavigation();
   const c = useThemeColors();
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
@@ -333,6 +335,31 @@ export function OnlineSellingScreen() {
           </TouchableOpacity>
         </Card>
 
+        {/* v55: بوابة إدارة المنتجات المدرجة — تركيز التاجر على
+            معروضاته أونلاين فقط (إدراج/إلغاء/تحديث/مزامنة). */}
+        <Card>
+          <SectionTitle
+            title="منتجات متجري أونلاين"
+            hint="حدد ما يُعرض على المتجر فقط — وحدّثه وزامنه من شاشة واحدة"
+          />
+          <TouchableOpacity
+            style={styles.productsEntry}
+            onPress={() => navigation.navigate('OnlineProducts' as never)}>
+            <View style={styles.productsEntryIcon}>
+              <Icon name="store" size={22} color={c.accent} />
+            </View>
+            <View style={{flex: 1, gap: 2, alignItems: 'flex-start'}}>
+              <Text style={styles.productsEntryTitle}>
+                إدارة المعروض في المتجر
+              </Text>
+              <Text style={styles.productsEntryHint}>
+                إدراج وإلغاء وعرض المخزون والخصم — وكل عملية بيع تُزامن فوراً
+              </Text>
+            </View>
+            <Icon name="chevronLeft" size={18} color={c.textDim} />
+          </TouchableOpacity>
+        </Card>
+
         {/* المزامنة */}
         <Card>
           <SectionTitle
@@ -497,6 +524,39 @@ const useStyles = makeStyles(c =>
       alignItems: 'center',
       gap: 8,
       paddingVertical: 3,
+    },
+    /* v55: بطاقة الدخول لشاشة منتجات المتجر أونلاين. */
+    productsEntry: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      backgroundColor: c.accentSoft,
+      padding: 10,
+      marginTop: 4,
+    },
+    productsEntryIcon: {
+      width: 46,
+      height: 46,
+      borderRadius: 14,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    productsEntryTitle: {
+      fontFamily: fonts.bold,
+      fontSize: 14,
+      color: c.text,
+    },
+    productsEntryHint: {
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      color: c.textDim,
+      lineHeight: 17,
     },
     dim: {fontFamily: fonts.regular, fontSize: 12.5, color: c.textDim},
     saveBtn: {

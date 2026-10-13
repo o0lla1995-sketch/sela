@@ -37,6 +37,7 @@ import {
   Card,
   Field,
   SectionTitle,
+  SwitchRow,
   type FieldHandle,
 } from '../../components/ui';
 import {Icon, type IconName} from '../../components/Icon';
@@ -204,6 +205,9 @@ export function ProductFormScreen() {
   const [wholesalePrice, setWholesalePrice] = useState('');
   /** v51: نسبة خصم المنتج (0–95%) — سلسلة الخصومات الكاملة. */
   const [discountPct, setDiscountPct] = useState('');
+  /* v55 (الجولة 58): الإدراج في متجر سيلا ماركت — من هنا أو من
+   * شاشة «منتجات متجري أونلاين». المزامنة ترسل المدرج فقط. */
+  const [onlineListed, setOnlineListed] = useState(false);
   const [stock, setStock] = useState('');
   const [threshold, setThreshold] = useState('');
   /** Which unit the merchant is entering stock in (null = base قطعة). */
@@ -339,6 +343,7 @@ export function ProductFormScreen() {
                 : '',
             );
             setStock(String(product.stock_quantity));
+            setOnlineListed(product.online_listed === 1);
             // v37 (الجولة 45 #1أ+1ب): القيم الحية كما حُفظت في
             //  القاعدة — مرجع الحفظ الأمين للمنتجات بلا تتبع ومرجع
             //  التحقق القارئ بعد الحفظ.
@@ -1536,6 +1541,7 @@ export function ProductFormScreen() {
         retail_price: retail,
         wholesale_price: wholesale,
         discount_pct: discountValue,
+        online_listed: onlineListed ? 1 : 0,
         stock_quantity: totalPieces,
         category_id: categoryId === 'none' ? null : categoryId,
         image_uri: imageUri,
@@ -1591,6 +1597,10 @@ export function ProductFormScreen() {
     costPrice,
     retailPrice,
     wholesalePrice,
+    /* v55: كان discountPct مفقوداً من التبعيات — stale closure
+     * يهدر تعديل الخصم عند حفظ الموديل. أُضيف مع online_listed. */
+    discountPct,
+    onlineListed,
     threshold,
     categoryId,
     imageUri,
@@ -1790,6 +1800,7 @@ export function ProductFormScreen() {
         retail_price: retail,
         wholesale_price: wholesale,
         discount_pct: discountValue,
+        online_listed: onlineListed ? 1 : 0,
         stock_quantity: stockValue,
         category_id: categoryId === 'none' ? null : categoryId,
         image_uri: imageUri,
@@ -1931,6 +1942,18 @@ export function ProductFormScreen() {
         productId != null ? 'تم تحديث المنتج' : 'تمت إضافة المنتج',
         'success',
       );
+      /* v55: تحديث/إنشاء منتج مدرج أونلاين — مزامنة فورية كي يرى
+       * المتجر السعر/الخصم/المخزون الجديد فوراً (طلب التاجر: التركيز
+       * على تحديثها ومزامنتها). Lazy require كنمط الملف. */
+      if (onlineListed) {
+        try {
+          const {notifyCatalogChanged} = require('../../services/online/OnlineStoreService') as
+            typeof import('../../services/online/OnlineStoreService');
+          notifyCatalogChanged();
+        } catch {
+          // Best effort — الدورة الـ ١٥ دقيقة شبكة الأمان.
+        }
+      }
       navigation.goBack();
     } catch (error) {
       toast(error instanceof Error ? error.message : 'فشل حفظ المنتج', 'error');
@@ -1943,6 +1966,13 @@ export function ProductFormScreen() {
     costPrice,
     retailPrice,
     wholesalePrice,
+    /* v55 (الجولة 58): كان discountPct مفقوداً من تبعيات الحفظ —
+     * جذر شكوى «الخصم لا يحُفظ في المنتج» في الإصدار الأخير:
+     * عدّل الخصم وحده ثم احفظ ← الكلوجر القديم يرى القيمة من وقت
+     * التحميل لا من وقت الضغط ← يكتب القيمة القديمة فوق الجديدة.
+     * أُضيف هنا مع online_listed الجديد فصار أي تعديل منهما يُحفظ. */
+    discountPct,
+    onlineListed,
     stock,
     threshold,
     categoryId,
@@ -3500,6 +3530,22 @@ export function ProductFormScreen() {
               </Text>
             </View>
           </View>
+          {/* v55 (الجولة 58): الإدراج في متجر سيلا ماركت — التاجر
+              يحدد المنتجات المعروضة أونلاين فقط (طلبه بالنص)؛
+              غير المدرج لا يغادر الجهاز أبداً. */}
+          <View style={styles.onlineRow}>
+            <SwitchRow
+              label="عرض في متجر سيلا"
+              hint={
+                onlineListed
+                  ? 'سيُعرض لمشتري المتجر ويُزامن مع كل عملية بيع'
+                  : 'محلي فقط — لا يُرسل إلى المتجر'
+              }
+              value={onlineListed}
+              onValueChange={setOnlineListed}
+              icon="store"
+            />
+          </View>
           {/* v35: ملابس — سعر ربطة الجملة يُحتسب تلقائياً من سعر
               القطعة × عدد مقاسات الربطة (طلب التاجر). */}
           {modeConfig.lotEntry === true &&
@@ -4393,6 +4439,17 @@ const useStyles = makeStyles(c =>
     priceRow: {
       flexDirection: 'row',
       gap: spacing.md,
+    },
+    /* v55 (الجولة 58): حاوية مفتاح «عرض في متجر سيلا» — بطاقة داخلية
+     * محايدة كي يتميز المفتاح عن حقول الأسعار فوقه. */
+    onlineRow: {
+      marginTop: spacing.xs,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+      paddingHorizontal: spacing.xs,
+      paddingVertical: 2,
     },
     fieldLabelOuter: {
       color: c.textDim,

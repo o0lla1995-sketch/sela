@@ -62,6 +62,11 @@ export interface Product {
    *  البيع وتُزامَن إلى سيلا ماركت حيث تظهر كعرض مخفّض. 0 = بلا
    *  خصم. التكلفة لا تتغير فتنعكس الخصومة في هامش الربح طبيعياً. */
   discount_pct: number;
+  /** v55 (الجولة 58): 1 = مدرج للبيع أونلاين في سيلا ماركت —
+   *  مزامنة المتجر ترسل هذا المنتج فقط (وباقي المنتجات المدرجة).
+   *  0 = محلي فقط لا يغادر الجهاز. التاجر يختار منتجه المعروض
+   *  أونلاين من ملف المنتج أو شاشة «منتجات متجري أونلاين». */
+  online_listed: number;
   /** Per-product low-stock alert override (NULL → global default). */
   low_stock_threshold: number | null;
   /** Product (base-unit) barcode, scanned at the POS. */

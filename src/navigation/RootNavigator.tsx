@@ -44,6 +44,7 @@ import {CashMovementsScreen} from '../screens/cash/CashMovementsScreen';
 import {DriveBackupScreen} from '../screens/settings/DriveBackupScreen';
 import {OnlineOrdersScreen} from '../screens/online/OnlineOrdersScreen';
 import {OnlineSellingScreen} from '../screens/online/OnlineSellingScreen';
+import {OnlineProductsScreen} from '../screens/online/OnlineProductsScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -83,6 +84,9 @@ export type RootStackParamList = {
   OnlineOrders: undefined;
   /** v48: إعدادات البيع أونلاين (تفعيل/ملف المتجر/توصيل). */
   OnlineSelling: undefined;
+  /** v55 (الجولة 58): منتجات متجري أونلاين — إدارة المنتجات
+   *  المدرجة للعرض في سيلا ماركت حصراً (إدراج/إلغاء/تعديل). */
+  OnlineProducts: undefined;
 };
 
 export type MainTabParamList = {
@@ -218,6 +222,7 @@ export function RootNavigator() {
         <Stack.Screen name="DriveBackup" component={DriveBackupScreen} />
       <Stack.Screen name="OnlineOrders" component={OnlineOrdersScreen} />
       <Stack.Screen name="OnlineSelling" component={OnlineSellingScreen} />
+      <Stack.Screen name="OnlineProducts" component={OnlineProductsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

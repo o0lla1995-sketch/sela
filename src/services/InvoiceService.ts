@@ -499,6 +499,19 @@ export const InvoiceService = {
       }
     }
 
+    // v55 (الجولة 58): كل عملية بيع عبر نقطة البيع تُزامن فوراً —
+    // طلب التاجر بالنص. Lazy require كما في SilaSync أعلاه؛
+    // notifyCatalogChanged يتحقق داخلياً من تفعيل البيع أونلاين
+    // ويرفض بصمت إن كان معطلاً، وdebounce يجمع الطلبات المتلاحقة.
+    try {
+      const {notifyCatalogChanged} = require('./online/OnlineStoreService') as
+        typeof import('./online/OnlineStoreService');
+      notifyCatalogChanged();
+    } catch {
+      // The sync engine is unavailable mid-test — the 15-min cycle
+      // inside OnlineStoreService covers stock when it's enabled.
+    }
+
     return result;
   },
 
@@ -1389,6 +1402,16 @@ export const InvoiceService = {
         logDiag('sale', `المرتجع سُجّل لكن الطباعة فشلت: ${message}`, 'warn');
         input.onPrintError?.(message);
       }
+    }
+
+    // v55 (الجولة 58): الإرجاع/الاستبدال يعيد مخزوناً أو يخصمه —
+    // المتجر أونلاين يتحدث فوراً كأي عملية بيع (طلب التاجر بالنص).
+    try {
+      const {notifyCatalogChanged} = require('./online/OnlineStoreService') as
+        typeof import('./online/OnlineStoreService');
+      notifyCatalogChanged();
+    } catch {
+      // Best effort — الدورة الـ ١٥ دقيقة شبكة الأمان.
     }
 
     return result;
