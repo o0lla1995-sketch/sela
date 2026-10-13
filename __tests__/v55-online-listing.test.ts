@@ -18,7 +18,7 @@
  *    سبب شكوى «الخصم لا يحفظ بالمنتج»؛ أُضيف مع online_listed.
  * ⑥ الواجهات: شاشة منتجات متجري أونلاين + تسجيلها في التنقل +
  *    بوابة الدخول من شاشة البيع أونلاين + مفتاح النموذج.
- * ⑦ الإصدار: 55.0.0 (63).
+ * ⑦ الإصدار: 56.0.0 (64).
  */
 import {freshApp} from './helpers/app';
 
@@ -176,8 +176,11 @@ describe('v55 — الإدراج الانتقائي للبيع أونلاين', 
     expect(inputs.length).toBe(2);
     // تحميل القيمة القائمة عند فتح المنتج للتعديل.
     expect(form).toContain('setOnlineListed(product.online_listed === 1)');
-    // المفتاح في الواجهة برسالة تشرح معناه.
-    expect(form).toContain('label="عرض في متجر سيلا"');
+    /* v56 (الجولة 59): المفتاح حُذف من نموذج المنتج بطلب التاجر —
+     * القيمة تُمرّر كما هي (لا فقدان إدراج عند تعديل أي حقل)،
+     * والتفعيل أصبح من قسم «منتجات النقطة» في شاشة الطلبات أونلاين. */
+    expect(form).not.toContain('label="عرض في متجر سيلا"');
+    expect(form).toContain('منتجات النقطة');
   });
 
   test('⑥ الواجهات: شاشة المنتجات المدرجة + التنقل + البوابة', () => {
@@ -200,14 +203,22 @@ describe('v55 — الإدراج الانتقائي للبيع أونلاين', 
     expect(selling).toContain('إدارة المعروض في المتجر');
     // مفتاح النموذج يعمل حتى مع تعطيل البيع (يُحفظ وينتظر التفعيل).
     expect(selling).toContain('productsEntry');
+    /* v56 (الجولة 59): قسم «منتجات النقطة» في صفحة الطلبات أونلاين —
+     * طلب التاجر بالنص: قسم خاص + مفتاح تفعيل بجانب كل منتج. */
+    const ordersScreen = read('src/screens/online/OnlineOrdersScreen.tsx');
+    expect(ordersScreen).toContain('منتجات النقطة');
+    expect(ordersScreen).toContain('toggleOnlineListing');
+    expect(ordersScreen).toContain('ProductRepo.setOnlineListed');
+    expect(ordersScreen).toContain('notifyCatalogChanged');
+    expect(ordersScreen).toContain('معروض في متجر سيلا:');
   });
 
-  test('⑦ الإصدار: 55.0.0 (63) في config والبناء', () => {
+  test('⑦ الإصدار: 56.0.0 (64) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '55.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 63');
+    expect(config).toContain("APP_VERSION = '56.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 64');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 63');
-    expect(gradle).toContain('versionName "55.0.0"');
+    expect(gradle).toContain('versionCode 64');
+    expect(gradle).toContain('versionName "56.0.0"');
   });
 });

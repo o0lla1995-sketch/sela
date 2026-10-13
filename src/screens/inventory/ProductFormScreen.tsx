@@ -37,7 +37,6 @@ import {
   Card,
   Field,
   SectionTitle,
-  SwitchRow,
   type FieldHandle,
 } from '../../components/ui';
 import {Icon, type IconName} from '../../components/Icon';
@@ -207,6 +206,9 @@ export function ProductFormScreen() {
   const [discountPct, setDiscountPct] = useState('');
   /* v55 (الجولة 58): الإدراج في متجر سيلا ماركت — من هنا أو من
    * شاشة «منتجات متجري أونلاين». المزامنة ترسل المدرج فقط. */
+  /* v56: القيمة تُحمّل من المنتج وتُمرّر عند الحفظ دون واجهة هنا —
+   * التفعيل/الإيقاف من قسم «منتجات النقطة» في صفحة الطلبات أونلاين
+   * (طلب التاجر: حذف المفتاح من نموذج المنتج نهائياً). */
   const [onlineListed, setOnlineListed] = useState(false);
   const [stock, setStock] = useState('');
   const [threshold, setThreshold] = useState('');
@@ -3530,22 +3532,11 @@ export function ProductFormScreen() {
               </Text>
             </View>
           </View>
-          {/* v55 (الجولة 58): الإدراج في متجر سيلا ماركت — التاجر
-              يحدد المنتجات المعروضة أونلاين فقط (طلبه بالنص)؛
-              غير المدرج لا يغادر الجهاز أبداً. */}
-          <View style={styles.onlineRow}>
-            <SwitchRow
-              label="عرض في متجر سيلا"
-              hint={
-                onlineListed
-                  ? 'سيُعرض لمشتري المتجر ويُزامن مع كل عملية بيع'
-                  : 'محلي فقط — لا يُرسل إلى المتجر'
-              }
-              value={onlineListed}
-              onValueChange={setOnlineListed}
-              icon="store"
-            />
-          </View>
+          {/* v56 (الجولة 59): مفتاح «عرض في متجر سيلا» حُذف من هنا
+              بطلب التاجر بالنص — الإدراج أصبح من قسم «منتجات النقطة»
+              في صفحة الطلبات أونلاين (مفتاح تفعيل بجانب كل منتج).
+              قيمة المنتج تُمرّر كما هي عند الحفظ فلا يفقد إدراجه
+              أحد بتعديل أي حقل آخر. */}
           {/* v35: ملابس — سعر ربطة الجملة يُحتسب تلقائياً من سعر
               القطعة × عدد مقاسات الربطة (طلب التاجر). */}
           {modeConfig.lotEntry === true &&
@@ -4439,17 +4430,6 @@ const useStyles = makeStyles(c =>
     priceRow: {
       flexDirection: 'row',
       gap: spacing.md,
-    },
-    /* v55 (الجولة 58): حاوية مفتاح «عرض في متجر سيلا» — بطاقة داخلية
-     * محايدة كي يتميز المفتاح عن حقول الأسعار فوقه. */
-    onlineRow: {
-      marginTop: spacing.xs,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: c.border,
-      backgroundColor: c.surfaceAlt,
-      paddingHorizontal: spacing.xs,
-      paddingVertical: 2,
     },
     fieldLabelOuter: {
       color: c.textDim,

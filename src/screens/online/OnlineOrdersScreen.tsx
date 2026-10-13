@@ -1,5 +1,5 @@
 /**
- * OnlineOrdersScreen — طلبات البيع أونلاين (الجولة 56).
+ * OnlineOrdersScreen — طلبات البيع أونلاين + منتجات النقطة (الجولة 59).
  * ─────────────────────────────────────────────────────────────────
  * مركز متابعة طلبات متجر سيلا ماركت: قائمة بفلاتر واضحة (جديد/
  * مقبول/ مرسل/ مسلّم/ ملغي-مرفوض/ الكل)، وكل طلب يفتح بطاقة تفاصيل
@@ -7,6 +7,12 @@
  * (الاتصال بلمسة على رقمه)، الأصناف، التوصيل، المجموع، والأفعال:
  * قبول / رفض / إرسال (فاتورة INV-O + خصم مخزون + مبيعات اليوم) /
  * تأكيد التسليم (الدين → الخزينة بسند COLL) / إلغاء / مزامنة الآن.
+ *
+ * v56 (الجولة 59): قسم «منتجات النقطة» بتبويب مخصّص — طلب التاجر
+ * بالنص: «أريده في صفحة الطلبات أونلاين في قسم خاص بمنتجات النقطة
+ * وخيار تفعيل بجانب كل منتج يريد عرضه في متجر سيلا». كل منتج نشط
+ * يظهر بمفتاح تشغيل/إيقاف؛ التفعيل يدرجه فوراً (مزامنة لحظية)،
+ * والإيقاف يسحبه من المتجر خلال ثوانٍ — بلا وسائط بينية.
  */
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
@@ -15,6 +21,7 @@ import {
   Linking,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
@@ -23,12 +30,14 @@ import {
 import {AppHeader, EmptyState, SectionTitle} from '../../components/ui';
 import {Icon} from '../../components/Icon';
 import {OnlineRepo} from '../../database/repositories/OnlineRepo';
+import {ProductRepo} from '../../database/repositories/ProductRepo';
+import {useCatalogStore} from '../../stores/catalogStore';
 import * as OnlineStore from '../../services/online/OnlineStoreService';
 import {onlineErrorText} from '../../services/online/OnlineStoreService';
 import {formatDateTime, formatMoney} from '../../core/format';
 import {fonts, makeStyles, spacing, useThemeColors} from '../../core/theme';
 import {useToastStore} from '../../stores/toastStore';
-import type {OnlineOrder, OnlineOrderItem, OnlineOrderStatus} from '../../core/types';
+import type {OnlineOrder, OnlineOrderItem, OnlineOrderStatus, Product} from '../../core/types';
 
 type FilterKey = OnlineOrderStatus | 'all';
 
@@ -107,6 +116,92 @@ export function OnlineOrdersScreen() {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectText, setRejectText] = useState('');
 
+  /* v56: قسم «منتجات النقطة» — الإدراج في متجر سيلا من هنا. */
+  const refreshCatalog = useCatalogStore(state => state.refresh);
+  const [tab, setTab] = useState<'orders' | 'products'>('orders');
+  const [products, setProducts] = useState<Product[]>([]);
+  const [productsLoading, setProductsLoading] = useState(false);
+  const [productQuery, setProductQuery] = useState('');
+  const [togglingId, setTogglingId] = useState<number | null>(null);
+
+  const reloadProducts = useCallback(async () => {
+    setProductsLoading(true);
+    try {
+      setProducts(await ProductRepo.list({archival: 'active'}));
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'تعذر تحميل منتجات النقطة',
+        'error',
+      );
+    } finally {
+      setProductsLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (tab === 'products' && products.length === 0 && !productsLoading) {
+      void reloadProducts();
+    }
+  }, [tab, products.length, productsLoading, reloadProducts]);
+
+  /** تفعيل/إيقاف عرض منتج في متجر سيلا — مزامنة لحظية. */
+  const toggleOnlineListing = useCallback(
+    async (product: Product) => {
+      if (togglingId != null) {
+        return;
+      }
+      setTogglingId(product.id);
+      const target = product.online_listed !== 1;
+      try {
+        const done = await ProductRepo.setOnlineListed(product.id, target);
+        if (!done) {
+          toast('لا يمكن إدراج منتج مؤرشف', 'error');
+          return;
+        }
+        setProducts(prev =>
+          prev.map(p =>
+            p.id === product.id ? {...p, online_listed: target ? 1 : 0} : p,
+          ),
+        );
+        await refreshCatalog();
+        try {
+          const {notifyCatalogChanged} = require('../../services/online/OnlineStoreService') as
+            typeof import('../../services/online/OnlineStoreService');
+          notifyCatalogChanged();
+        } catch {
+          // الدورة الـ ١٥ دقيقة شبكة الأمان.
+        }
+        toast(
+          target
+            ? `«${product.name}» معروض الآن في متجر سيلا`
+            : `أُوقف عرض «${product.name}» — يختفي من المتجر خلال ثوانٍ`,
+          'success',
+        );
+      } catch (error) {
+        toast(
+          error instanceof Error ? error.message : 'تعذر تغيير الإدراج',
+          'error',
+        );
+      } finally {
+        setTogglingId(null);
+      }
+    },
+    [refreshCatalog, togglingId, toast],
+  );
+
+  const listedCount = useMemo(
+    () => products.filter(p => p.online_listed === 1).length,
+    [products],
+  );
+
+  const filteredProducts = useMemo(() => {
+    const q = productQuery.trim();
+    if (q.length === 0) {
+      return products;
+    }
+    return products.filter(p => p.name.includes(q));
+  }, [products, productQuery]);
+
   const reload = useCallback(async () => {
     setLoading(true);
     try {
@@ -183,6 +278,61 @@ export function OnlineOrdersScreen() {
         onClose={() => setDetail(null)}
       />
       <View style={styles.content}>
+        {/* v56: تبويب الصفحة — الطلبات / منتجات النقطة (طلب التاجر:
+            قسم خاص بمنتجات النقطة وخيار تفعيل بجانب كل منتج). */}
+        <View style={styles.tabRow}>
+          <TouchableOpacity
+            style={[styles.tab, tab === 'orders' ? styles.tabActive : null]}
+            onPress={() => setTab('orders')}
+            activeOpacity={0.8}>
+            <Icon
+              name="cart"
+              size={15}
+              color={tab === 'orders' ? '#FFFFFF' : c.textDim}
+            />
+            <Text
+              style={[
+                styles.tabText,
+                tab === 'orders' ? {color: '#FFFFFF'} : null,
+              ]}>
+              الطلبات
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, tab === 'products' ? styles.tabActive : null]}
+            onPress={() => setTab('products')}
+            activeOpacity={0.8}>
+            <Icon
+              name="store"
+              size={15}
+              color={tab === 'products' ? '#FFFFFF' : c.textDim}
+            />
+            <Text
+              style={[
+                styles.tabText,
+                tab === 'products' ? {color: '#FFFFFF'} : null,
+              ]}>
+              منتجات النقطة
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {tab === 'products' ? (
+          <ProductsSection
+            products={filteredProducts}
+            totalCount={products.length}
+            listedCount={listedCount}
+            loading={productsLoading}
+            query={productQuery}
+            onQuery={text => {
+              setProductQuery(text);
+            }}
+            togglingId={togglingId}
+            onToggle={toggleOnlineListing}
+            onReload={() => void reloadProducts()}
+          />
+        ) : (
+        <>
         {/* فلاتر واضحة + مزامنة يدوية */}
         <View style={styles.filterRow}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -285,6 +435,8 @@ export function OnlineOrdersScreen() {
               );
             })}
           </ScrollView>
+        )}
+        </>
         )}
       </View>
 
@@ -515,6 +667,132 @@ export function OnlineOrdersScreen() {
 }
 
 
+/* ═══ v56 (الجولة 59): قسم «منتجات النقطة» ═══════════════════════
+ * طلب التاجر بالنص: قسم خاص بمنتجات النقطة في صفحة الطلبات أونلاين
+ * وخيار تفعيل بجانب كل منتج يريد عرضه في متجر سيلا. كل تبديل مفتاح
+ * يُدرج/يسحب المنتج فوراً مع مزامنة لحظية — التاجر يرى متجره يتحدث
+ * خلال ثوانٍ بلا خطوات إضافية. */
+function ProductsSection({
+  products,
+  totalCount,
+  listedCount,
+  loading,
+  query,
+  onQuery,
+  togglingId,
+  onToggle,
+  onReload,
+}: {
+  products: Product[];
+  totalCount: number;
+  listedCount: number;
+  loading: boolean;
+  query: string;
+  onQuery: (text: string) => void;
+  togglingId: number | null;
+  onToggle: (product: Product) => void;
+  onReload: () => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+
+  return (
+    <View style={{flex: 1}}>
+      {/* إحصاءة الإدراج — الصورة الكاملة بلمحة */}
+      <View style={styles.prodStatsRow}>
+        <Icon name="store" size={16} color={c.accent} />
+        <Text style={styles.prodStatsText}>
+          معروض في متجر سيلا:{' '}
+          <Text style={{fontFamily: fonts.black, color: c.accent}}>
+            {listedCount}
+          </Text>{' '}
+          من {totalCount} منتجاً
+        </Text>
+      </View>
+
+      {/* بحث فوري — الوصول لمنتج بعينه بين مئات المنتجات */}
+      <View style={styles.prodSearchWrap}>
+        <Icon name="search" size={15} color={c.textDim} />
+        <TextInput
+          style={styles.prodSearchInput}
+          placeholder="ابحث في منتجات النقطة…"
+          placeholderTextColor={c.textDim}
+          value={query}
+          onChangeText={onQuery}
+        />
+        {query.length > 0 ? (
+          <TouchableOpacity onPress={() => onQuery('')} hitSlop={8}>
+            <Icon name="x" size={15} color={c.textDim} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
+      {loading ? (
+        <View style={styles.centerWrap}>
+          <ActivityIndicator size="large" color={c.accent} />
+        </View>
+      ) : products.length === 0 ? (
+        <EmptyState
+          icon="box"
+          title={query.length > 0 ? 'لا نتائج مطابقة' : 'لا منتجات نشطة'}
+          subtitle={
+            query.length > 0
+              ? 'جرّب كلمة أخرى'
+              : 'أضف منتجات من المخزون أولاً ثم فعّل عرضها هنا'
+          }
+        />
+      ) : (
+        <ScrollView contentContainerStyle={styles.listWrap}>
+          {products.map(product => {
+            const listed = product.online_listed === 1;
+            const busy = togglingId === product.id;
+            const outOfStock = product.stock_quantity <= 0;
+            return (
+              <View key={product.id} style={styles.prodRow}>
+                <View style={{flex: 1, gap: 3}}>
+                  <Text style={styles.prodName} numberOfLines={1}>
+                    {product.name}
+                  </Text>
+                  <View style={{flexDirection: 'row', alignItems: 'center', gap: 6}}>
+                    <Text style={styles.prodMeta}>
+                      {formatMoney(product.retail_price)}
+                    </Text>
+                    <Text style={styles.prodDim}>·</Text>
+                    <Text
+                      style={[
+                        styles.prodDim,
+                        outOfStock ? {color: c.danger} : null,
+                      ]}>
+                      {outOfStock
+                        ? 'نفد المخزون'
+                        : `المخزون ${product.stock_quantity}`}
+                    </Text>
+                  </View>
+                </View>
+                <Switch
+                  value={listed}
+                  disabled={busy}
+                  onValueChange={() => onToggle(product)}
+                  trackColor={{false: c.surfaceHi, true: c.accent}}
+                  thumbColor="#FFFFFF"
+                />
+              </View>
+            );
+          })}
+        </ScrollView>
+      )}
+
+      <TouchableOpacity
+        style={styles.prodReloadBtn}
+        onPress={onReload}
+        activeOpacity={0.8}>
+        <Icon name="refresh" size={15} color={c.accent} />
+        <Text style={styles.prodReloadText}>تحديث قائمة المنتجات</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 const useStyles = makeStyles(c =>
   StyleSheet.create({
     root: {flex: 1, backgroundColor: c.bg},
@@ -558,6 +836,79 @@ const useStyles = makeStyles(c =>
       padding: spacing.md,
       gap: 8,
     },
+    /* v56: قسم منتجات النقطة. */
+    tabRow: {
+      flexDirection: 'row',
+      gap: 8,
+      marginBottom: 10,
+    },
+    tab: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      backgroundColor: c.surface,
+      paddingVertical: 9,
+    },
+    tabActive: {backgroundColor: c.accent, borderColor: c.accent},
+    tabText: {fontFamily: fonts.bold, fontSize: 12.5, color: c.textDim},
+    prodStatsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      marginBottom: 8,
+    },
+    prodStatsText: {fontFamily: fonts.medium, fontSize: 12.5, color: c.text},
+    prodSearchWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 4,
+      marginBottom: 8,
+    },
+    prodSearchInput: {
+      flex: 1,
+      fontFamily: fonts.regular,
+      fontSize: 13,
+      color: c.text,
+      paddingVertical: 8,
+      textAlign: 'right',
+    },
+    prodRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: 12,
+      padding: spacing.md,
+      marginBottom: 8,
+    },
+    prodName: {fontFamily: fonts.bold, fontSize: 13.5, color: c.text},
+    prodMeta: {fontFamily: fonts.bold, fontSize: 12, color: c.accent},
+    prodDim: {fontFamily: fonts.regular, fontSize: 11.5, color: c.textDim},
+    prodReloadBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: 10,
+    },
+    prodReloadText: {fontFamily: fonts.bold, fontSize: 12, color: c.accent},
     cardTop: {
       flexDirection: 'row',
       justifyContent: 'space-between',

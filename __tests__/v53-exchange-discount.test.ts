@@ -10,7 +10,7 @@
  *    محرك Hermes بـ RN 0.74 — كانت تكسر ربط درايف بصمت).
  * ④ LicenseService لا يستعمل مُنشِئ URL (غير موجود في Hermes —
  *    كان يرفض كل روابط التفعيل على الجهاز).
- * ⑤ الإصدار 55.0.0 (63).
+ * ⑤ الإصدار 56.0.0 (64).
  */
 import {applyProductDiscount} from '../src/stores/cartStore';
 
@@ -86,12 +86,12 @@ describe('v53 — خصم الاستبدال + إصلاحات Hermes', () => {
     expect(fnBody).not.toContain('new URL');
   });
 
-  test('⑥ الإصدار: 55.0.0 (63)', () => {
+  test('⑥ الإصدار: 56.0.0 (64)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '55.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 63');
+    expect(config).toContain("APP_VERSION = '56.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 64');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "55.0.0"');
-    expect(gradle).toContain('versionCode 63');
+    expect(gradle).toContain('versionName "56.0.0"');
+    expect(gradle).toContain('versionCode 64');
   });
 });
