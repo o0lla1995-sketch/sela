@@ -420,6 +420,41 @@ export async function cancelOrder(
  * أونلاين مؤقتاً» حتى تأكيد التسليم أو الإرجاع.
  */
 export async function sendOrder(order: OnlineOrder): Promise<string> {
+  const fresh = (await OnlineRepo.byNumber(order.order_number)) ?? order;
+
+  /* v57 (الجولة 61): إعادة محاولة آمنة — فاتورة سُجلت محلياً سابقاً
+   * لكن إبلاغ الخادم فشل (شبكة/BAD_STATUS قديم): نعيد إبلاغ الخادم
+   * بالفاتورة نفسها (idempotent على الخادم) ولا نخلق فاتورة ثانية
+   * أبداً. هذا كان يترك الطلب «مُرسلاً» محلياً بينما مستخدم المتجر
+   * يرى «بانتظار قبول المتجر» إلى الأبد. */
+  if (fresh.invoice_ref != null && fresh.status === 'sent') {
+    await OnlineApi.action({
+      orderNumber: fresh.order_number,
+      action: 'send',
+      invoiceRef: fresh.invoice_ref,
+    });
+    return fresh.invoice_ref;
+  }
+  if (fresh.status === 'sent' || fresh.status === 'delivered') {
+    throw new Error(
+      `هذا الطلب مُرسل مسبقاً${fresh.invoice_ref ? ` بفاتورة ${fresh.invoice_ref}` : ''}`,
+    );
+  }
+
+  /* v57 (الجولة 61): القبول الضمني — البائع يضغط «تجهيز وفاتورة»
+   * مباشرة على طلب «جديد» بلا «قبول» صريح: نرقّي الطلب إلى مقبول
+   * أولاً (المستخدم في المتجر يرى «قَبِل المتجر طلبك» فوراً) ثم
+   * نُرسل. الخوادم المحدثة (5.6+) تقبل الإرسال من «جديد» مباشرة،
+   * وهذا السلسلة تغطي الخوادم الأقدم أيضاً. */
+  if (fresh.status === 'new') {
+    try {
+      await OnlineApi.action({orderNumber: fresh.order_number, action: 'accept'});
+    } catch {
+      /* الخادم الجديد يقبل الإرسال من «جديد» — نكمل وسيُثبت
+       * accepted_at هناك ضمنياً. */
+    }
+  }
+
   const items = await OnlineRepo.itemsFor(order.server_id);
   if (items.length === 0) {
     throw new Error('لا أصناف في هذا الطلب');
@@ -501,20 +536,43 @@ export async function sendOrder(order: OnlineOrder): Promise<string> {
     throw new Error('تعذر حجز رقم فاتورة الطلب — حاول مرة أخرى');
   }
   // الخادم يعلم بالفاتورة (idempotent — آمن مع إعادة المحاولة).
-  try {
-    await OnlineApi.action({
+  /* v57 (الجولة 61): لا ابتلاع صامت بعد اليوم — الابتلاع كان يترك
+   * الحالة محلية «مُرسلة» وخادمية «جديدة» فيبقى مستخدم المتجر
+   * بانتظار القبول للأبد بلا أي أثر للخلل. الآن: محاولة ثانية بعد
+   * ثانيتين، وإن فشلتا يُرمى خطأ صريح يطلب من البائع إعادة الضغط —
+   * ومسار إعادة المحاولة أعلاه يعيد إبلاغ الخادم بالفاتورة نفسها
+   * (لا فاتورة مزدوجة أبداً). */
+  const informServer = () =>
+    OnlineApi.action({
       orderNumber: order.order_number,
       action: 'send',
       invoiceRef: invoiceNumber,
     });
-  } catch (error) {
+  try {
+    await informServer();
+  } catch (firstError) {
     logDiag(
       'online',
-      `الفاتورة ${invoiceNumber} سُجلت محلياً لكن تعذر إبلاغ الخادم: ${
-        error instanceof Error ? error.message : String(error)
-      } — ستُعاد المحاولة مع الإجراء التالي`,
+      `الفاتورة ${invoiceNumber} سُجلت محلياً لكن تعذر إبلاغ الخادم (محاولة أولى): ${
+        firstError instanceof Error ? firstError.message : String(firstError)
+      } — إعادة المحاولة بعد ثانيتين`,
       'warn',
     );
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      await informServer();
+    } catch (secondError) {
+      logDiag(
+        'online',
+        `الفاتورة ${invoiceNumber} سُجلت محلياً وإبلاغ الخادم فشل مرتين: ${
+          secondError instanceof Error ? secondError.message : String(secondError)
+        } — يُعاد الإبلاغ عند إعادة الضغط على التجهيز`,
+        'warn',
+      );
+      throw new Error(
+        `سُجلت الفاتورة ${invoiceNumber} محلياً لكن تعذر إبلاغ المتجر بالخادم — اضغط «تجهيز وإرسال» مجدداً لإعادة الإبلاغ (لن تتكرر الفاتورة)`,
+      );
+    }
   }
   logDiag(
     'online',

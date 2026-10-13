@@ -205,11 +205,15 @@ export function OnlineOrdersScreen() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      setOrders(await OnlineRepo.list(filter === 'all' ? 'all' : filter));
+      /* v57 (الجولة 61): نحمّل كل الطلبات دفعة واحدة — شارات العدد
+       * على كل فلتر تحتاج عدّ الحالات كلها (طلب التاجر: «عدد
+       * العمليات الحالية والتي لم تتم معالجتها كرقم تنبيه»)،
+       * والتصفية تجري محلياً فوراً بلا نداء جديد عند كل تبديل. */
+      setOrders(await OnlineRepo.list('all'));
     } finally {
       setLoading(false);
     }
-  }, [filter]);
+  }, []);
 
   useEffect(() => {
     void reload();
@@ -267,8 +271,15 @@ export function OnlineOrdersScreen() {
     for (const o of orders) {
       map.set(o.status, (map.get(o.status) ?? 0) + 1);
     }
+    map.set('all', orders.length);
     return map;
   }, [orders]);
+
+  /* v57: القائمة المعروضة — تصفية محلية فورية فوق القائمة الكاملة. */
+  const visible = useMemo(
+    () => (filter === 'all' ? orders : orders.filter(o => o.status === filter)),
+    [orders, filter],
+  );
 
   return (
     <View style={styles.root}>
@@ -337,29 +348,62 @@ export function OnlineOrdersScreen() {
         <View style={styles.filterRow}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             <View style={styles.chips}>
-              {FILTERS.map(f => (
-                <TouchableOpacity
-                  key={f.key}
-                  style={[
-                    styles.chip,
-                    filter === f.key
-                      ? {backgroundColor: c.accent, borderColor: c.accent}
-                      : null,
-                  ]}
-                  onPress={() => setFilter(f.key)}
-                  activeOpacity={0.8}>
-                  <Text
+              {FILTERS.map(f => {
+                const n = counts.get(f.key) ?? 0;
+                const active = filter === f.key;
+                /* v57: شارة رقم على كل فلتر — الحالات التي تنتظر
+                 * عملاً من التاجر (جديد/مقبول/مُرسل) تُبرز بلون العلامة
+                 * كرقم تنبيه (طلب التاجر بالنص)، والمكتملة بلون هادئ. */
+                const actionable =
+                  f.key === 'new' || f.key === 'accepted' || f.key === 'sent';
+                return (
+                  <TouchableOpacity
+                    key={f.key}
                     style={[
-                      styles.chipText,
-                      filter === f.key ? {color: '#FFFFFF'} : null,
-                    ]}>
-                    {f.label}
-                    {counts.get(f.key) != null && filter === f.key
-                      ? ` (${counts.get(f.key)})`
-                      : ''}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                      styles.chip,
+                      active
+                        ? {backgroundColor: c.accent, borderColor: c.accent}
+                        : null,
+                    ]}
+                    onPress={() => setFilter(f.key)}
+                    activeOpacity={0.8}>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        active ? {color: '#FFFFFF'} : null,
+                      ]}>
+                      {f.label}
+                    </Text>
+                    {n > 0 ? (
+                      <View
+                        style={[
+                          styles.chipBadge,
+                          {
+                            backgroundColor: active
+                              ? '#FFFFFF'
+                              : actionable
+                                ? c.accent
+                                : c.accentSoft,
+                          },
+                        ]}>
+                        <Text
+                          style={[
+                            styles.chipBadgeText,
+                            {
+                              color: active
+                                ? c.accent
+                                : actionable
+                                  ? '#FFFFFF'
+                                  : c.textDim,
+                            },
+                          ]}>
+                          {n}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           </ScrollView>
           <TouchableOpacity
@@ -379,15 +423,19 @@ export function OnlineOrdersScreen() {
           <View style={styles.centerWrap}>
             <ActivityIndicator size="large" color={c.accent} />
           </View>
-        ) : orders.length === 0 ? (
+        ) : visible.length === 0 ? (
           <EmptyState
             icon="cart"
             title="لا طلبات في هذه الحالة"
-            subtitle="الطلبات الجديدة من تطبيق المتجر تصل هنا فوراً مع إشعار"
+            subtitle={
+              orders.length > 0
+                ? `لديك ${orders.length} طلباً في حالات أخرى — بدّل الفلتر أعلاه`
+                : 'الطلبات الجديدة من تطبيق المتجر تصل هنا فوراً مع إشعار'
+            }
           />
         ) : (
           <ScrollView contentContainerStyle={styles.listWrap}>
-            {orders.map(order => {
+            {visible.map(order => {
               const meta = STATUS_META[order.status];
               return (
                 <TouchableOpacity
@@ -810,11 +858,27 @@ const useStyles = makeStyles(c =>
       borderRadius: 16,
       paddingHorizontal: 14,
       paddingVertical: 7,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
     },
     chipText: {
       fontFamily: fonts.bold,
       fontSize: 12.5,
       color: c.textDim,
+    },
+    /* v57: شارة العدد داخل رقاقة الفلتر — رقم تنبيه واضح. */
+    chipBadge: {
+      minWidth: 20,
+      height: 20,
+      borderRadius: 10,
+      paddingHorizontal: 5,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    chipBadgeText: {
+      fontFamily: fonts.black,
+      fontSize: 10.5,
     },
     syncBtn: {
       width: 38,
