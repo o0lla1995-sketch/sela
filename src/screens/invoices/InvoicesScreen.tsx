@@ -53,6 +53,10 @@ import {LocalDebtsRepo} from '../../database/repositories/LocalDebtsRepo';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {usePrinterStore} from '../../stores/printerStore';
 import {useToastStore} from '../../stores/toastStore';
+/* v53: خصم المنتج يُطبَّق في الاستبدال أيضاً — نفس دالة السلة
+ * (applyProductDiscount من cartStore) كي يتسق سعر البديل مع سعر
+ * البيع الفعلي في كل مكان. */
+import {applyProductDiscount} from '../../stores/cartStore';
 import {
   fonts,
   makeStyles,
@@ -2110,7 +2114,26 @@ const ExchangeProductRow = React.memo(function ExchangeProductRow({
           {product.name}
         </Text>
         <Text style={styles.productMeta}>
-          {formatMoney(product.retail_price)}
+          {/* v53: السعر المخفّض مع الأصلي مشطوباً إن كان للمنتج خصم */}
+          {(product.discount_pct ?? 0) > 0 ? (
+            <Text>
+              <Text
+                style={{
+                  textDecorationLine: 'line-through',
+                  color: c.textFaint,
+                  fontSize: 10.5,
+                }}>
+                {formatMoney(product.retail_price)}
+              </Text>
+              {'  '}
+              <Text style={{color: c.danger, fontWeight: '700'}}>
+                {formatMoney(applyProductDiscount(product.retail_price, product))}
+              </Text>
+              {` -${Math.round(product.discount_pct ?? 0)}%`}
+            </Text>
+          ) : (
+            formatMoney(product.retail_price)
+          )}
           {Number(product.stock_untracked) === 1
             ? ' · بلا تتبع مخزون'
             : ` · متوفر ${formatQty(product.stock_quantity)}`}
@@ -2282,7 +2305,34 @@ function ExchangeSheet({
 
   // السعر الحي: متغير الحجم (مطعم) له سعره؛ وإلا سعر الوحدة
   // (بما يعادلها من سعر الأساس) أو سعر الأساس نفسه.
+  /* v53 (الجولة 58): خصم المنتج يُطبَّق على سعر الاستبدال — كان
+   * البديل يُسعَّر بالسعر الكامل بينما البيع الفعلي مخفّض، فيدفع
+   * الزبون فرقاً أعلى من حقه. الآن كل مسارات السعر (متغير/وحدة/
+   * أساس) تمر بـ applyProductDiscount مثل السلة تماماً. */
   const liveUnitPrice: number = (() => {
+    if (openProductRow == null) {
+      return 0;
+    }
+    if (openVariant != null && openVariant.retail_price != null) {
+      return applyProductDiscount(openVariant.retail_price, openProductRow);
+    }
+    if (openUnit != null) {
+      const override = openUnit.retail_price;
+      if (override != null && override > 0) {
+        return applyProductDiscount(override, openProductRow);
+      }
+      return applyProductDiscount(
+        openProductRow.retail_price * openUnit.conversion,
+        openProductRow,
+      );
+    }
+    return applyProductDiscount(
+      openProductRow.retail_price,
+      openProductRow,
+    );
+  })();
+  /* السعر قبل الخصم — للعرض المشطوب في بطاقة الصنف. */
+  const liveUnitPriceBeforeDiscount: number = (() => {
     if (openProductRow == null) {
       return 0;
     }
@@ -2298,6 +2348,10 @@ function ExchangeSheet({
     }
     return openProductRow.retail_price;
   })();
+  const liveDiscounted =
+    openProductRow != null &&
+    (openProductRow.discount_pct ?? 0) > 0 &&
+    liveUnitPrice < liveUnitPriceBeforeDiscount - 0.0001;
   const liveBasePerUnit = openUnit != null ? openUnit.conversion : 1;
   const liveCost: number = (() => {
     if (openProductRow == null) {
@@ -2551,15 +2605,24 @@ function ExchangeSheet({
                       chosenUnitId == null ? {color: c.onAccent} : null,
                     ]}>
                     {openProductRow.base_unit_name ?? 'قطعة'} (الأساس) —{' '}
-                    {formatMoney(openProductRow.retail_price)}
+                    {/* v53: سعر الوحدة الأساس بعد خصم المنتج */}
+                    {formatMoney(
+                      applyProductDiscount(
+                        openProductRow.retail_price,
+                        openProductRow,
+                      ),
+                    )}
                   </Text>
                 </TouchableOpacity>
                 {openUnits.map(u => {
                   const active = u.id === chosenUnitId;
-                  const price =
+                  /* v53: سعر الوحدة بعد خصم المنتج — مثل السلة */
+                  const price = applyProductDiscount(
                     u.retail_price != null && u.retail_price > 0
                       ? u.retail_price
-                      : openProductRow.retail_price * u.conversion;
+                      : openProductRow.retail_price * u.conversion,
+                    openProductRow,
+                  );
                   return (
                     <TouchableOpacity
                       key={u.id}
@@ -2600,11 +2663,29 @@ function ExchangeSheet({
                 autoCorrect={false}
               />
               <Text style={styles.qtyTotal}>
-                {qtyValid
-                  ? `${formatQty(qtyNum)} × ${formatMoney(liveUnitPrice)} = ${formatMoney(
+                {qtyValid ? (
+                  /* v53: السعر المشطوب قبل الخصم بجانب الفعلي */
+                  <Text>
+                    {liveDiscounted ? (
+                      <Text
+                        style={{
+                          textDecorationLine: 'line-through',
+                          color: c.textFaint,
+                          fontSize: 10.5,
+                        }}>
+                        {formatMoney(liveUnitPriceBeforeDiscount)}{'  '}
+                      </Text>
+                    ) : null}
+                    {`${formatQty(qtyNum)} × ${formatMoney(liveUnitPrice)} = ${formatMoney(
                       liveUnitPrice * qtyNum,
-                    )}`
-                  : '—'}
+                    )}`}
+                    {liveDiscounted
+                      ? ` (-${Math.round(openProductRow?.discount_pct ?? 0)}%)`
+                      : ''}
+                  </Text>
+                ) : (
+                  '—'
+                )}
               </Text>
             </View>
             <AppButton

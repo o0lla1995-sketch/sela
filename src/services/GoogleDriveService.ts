@@ -123,7 +123,11 @@ export function buildAuthUrl(
   port: number,
   state: string,
 ): string {
-  const params = new URLSearchParams({
+  /* v53: بناء الاستعلام يدوياً — URLSearchParams غير موجودة في محرك
+   * Hermes (RN 0.74) فكان ربط جوجل درايف يفشل بـ ReferenceError صامت
+   * قبل فتح نافذة الموافقة أصلاً. encodeURIComponent مضمون في كل
+   * المحركات. */
+  const params: Record<string, string> = {
     client_id: clientId,
     redirect_uri: `http://127.0.0.1:${port}/callback`,
     response_type: 'code',
@@ -132,8 +136,11 @@ export function buildAuthUrl(
     include_granted_scopes: 'true',
     prompt: 'consent',
     state,
-  });
-  return `${AUTH_URL}?${params.toString()}`;
+  };
+  const qs = Object.keys(params)
+    .map(k => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`)
+    .join('&');
+  return `${AUTH_URL}?${qs}`;
 }
 
 /** Parses the loopback redirect query (?code=…&state=… / ?error=…). */

@@ -328,15 +328,17 @@ export function isValidServerUrl(url: string): boolean {
   if (trimmed.length < 8 || trimmed.length > 200) {
     return false;
   }
-  try {
-    const parsed = new URL(trimmed);
-    return (
-      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-      parsed.hostname.length > 3
-    );
-  } catch {
+  /* v53: تحقق بتعابير نمطية — مُنشِئ URL غير موجود في محرك Hermes
+   * (RN 0.74) فكانت الدالة ترجع false دائماً على الجهاز ويرفض
+   * التطبيق كل روابط التفعيل القادمة من لوحة التحكم. */
+  const m = /^(https?):\/\/([^\/?#\s]+)/i.exec(trimmed);
+  if (m == null) {
     return false;
   }
+  const host = m[2];
+  // اسم مضيف صالح: النمط أعلاه يستبعد المسافات والمسارات أصلاً —
+  // يكفي الطول ووجود حرف/رقم واحد على الأقل.
+  return host.length > 3 && /[a-z0-9]/i.test(host);
 }
 
 /** v48 (الجولة 56): رابط التفعيل يُدار من لوحة التحكم الآن — كل
