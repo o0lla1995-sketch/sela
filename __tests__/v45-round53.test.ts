@@ -114,18 +114,18 @@ describe('v45 — حرّوس المصدر: الجولة 53 (API 36 + 16 KB)', ()
     expect(styles).toContain('android:navigationBarColor');
   });
 
-  test('④ SoLoader بالخريطة المدمجة (شرط RN 0.76+) والإصدار 53.0.0 (61)', () => {
+  test('④ SoLoader بالخريطة المدمجة (شرط RN 0.76+) والإصدار 54.0.0 (62)', () => {
     const app = read(
       'android/app/src/main/java/com/sela/pal/MainApplication.kt',
     );
     expect(app).toContain('SoLoader.init(this, OpenSourceMergedSoMapping)');
     expect(app).not.toContain('SoLoader.init(this, false)');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "53.0.0"');
-    expect(gradle).toContain('versionCode 61');
+    expect(gradle).toContain('versionName "54.0.0"');
+    expect(gradle).toContain('versionCode 62');
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '53.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 61');
+    expect(config).toContain("APP_VERSION = '54.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 62');
   });
 
   test('④ autolinking الجديد داخل Gradle Plugin (صيغة RN 0.77)', () => {

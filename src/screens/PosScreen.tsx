@@ -43,6 +43,7 @@ import {
   cartTotals,
   unitPriceFor,
   applyProductDiscount,
+  applyPctDiscount,
 } from '../stores/cartStore';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore, type PosProductView} from '../stores/settingsStore';
@@ -2990,9 +2991,33 @@ export function PosScreen({
                             (لون · مقاس / حجم / ربطة) بدل مبدّل الوحدة. */}
                           <View style={styles.cartLineMetaRow}>
                             <Text style={styles.cartLineMeta} numberOfLines={1}>
+                              {/* v54 (جولة 59): السعر الأصلي مشطوباً
+                                  أمام المخفّض في سطر السلة — يرى
+                                  التاجر أثر خصم المنتج فوراً. */}
+                              {(line.discountPct ?? 0) > 0 ? (
+                                <Text
+                                  style={{
+                                    textDecorationLine: 'line-through',
+                                    color: c.textFaint,
+                                    fontSize: 11,
+                                  }}>
+                                  {formatMoney(
+                                    pricingMode === 'WHOLESALE'
+                                      ? line.wholesalePrice
+                                      : line.retailPrice,
+                                  )}
+                                  {'  '}
+                                </Text>
+                              ) : null}
                               {formatMoney(line.unitPrice)} ×{' '}
                               {formatQty(line.quantity)} ={' '}
                               {formatMoney(line.unitPrice * line.quantity)}
+                              {(line.discountPct ?? 0) > 0 ? (
+                                <Text style={{color: c.danger, fontWeight: '900'}}>
+                                  {'  -'}
+                                  {Math.round(line.discountPct ?? 0)}%
+                                </Text>
+                              ) : null}
                             </Text>
                             {line.variantLabel != null ? (
                               <View style={styles.variantLabelChip}>
@@ -3963,10 +3988,15 @@ function WeightSheet({
   if (product == null) {
     return null;
   }
-  const kiloPrice =
+  // v54 (جولة 59): سعر الكيلو بعد خصم المنتج — كانت الورقة تعرض
+  //  السعر الكامل بينما السلة تُحسب بالمخفّض (فرق مربك للتاجر).
+  //  السعر الأصلي يبقى للعرض المشطوب عند وجود خصم.
+  const sheetPct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  const kiloPriceRaw =
     pricingMode === 'WHOLESALE'
       ? product.wholesale_price
       : product.retail_price;
+  const kiloPrice = applyPctDiscount(kiloPriceRaw, sheetPct);
   const weight = parseNumber(weightText);
   const validWeight =
     !Number.isNaN(weight) && weight > 0 ? Math.round(weight * 1000) / 1000 : 0;
@@ -4027,8 +4057,13 @@ function WeightSheet({
             </Text>
             <Text style={styles.weightKiloPrice} numberOfLines={1}>
               سعر الكيلو ({pricingMode === 'WHOLESALE' ? 'جملة' : 'مفرق'}):{' '}
-              {formatMoney(kiloPrice)} · المتاح{' '}
-              {formatQty(product.stock_quantity)} {WEIGHT_UNIT_NAME}
+              {formatMoney(kiloPrice)}
+              {sheetPct > 0
+                ? ` (خصم ${Math.round(sheetPct)}% بدلاً من ${formatMoney(
+                    kiloPriceRaw,
+                  )})`
+                : ''}{' '}
+              · المتاح {formatQty(product.stock_quantity)} {WEIGHT_UNIT_NAME}
             </Text>
           </View>
           <TouchableOpacity
@@ -4280,12 +4315,18 @@ function SaleSheetView({
   // v37 (الجولة 45 #2أ+2ج): القيم الحية للتذييل المثبّت — كانت
   //  داخل IIFE في نهاية كل فرع داخل التمرير؛ الآن محسوبة مرة
   //  واحدة في نطاق المكون لأن التذييل يحتاجها خارج ScrollView.
+  // v54 (جولة 59): كل الأسعار هنا تُعرض بعد خصم المنتج — كانت
+  //  النافذة تعرض السعر الكامل بينما الشبكة تعرض المخفّض، فيظن
+  //  التاجر أن الخصم لم يُحفظ. القيم الخام تبقى للعرض المشطوب.
+  const sheetPct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  const sheetHasDiscount = sheetPct > 0;
   const pickedSizeVariant =
     sizeVariants.find(v => v.id === pickedSizeId) ?? null;
   const pickedUnitRow =
     (unitRows ?? []).find(row => row.unit_id === pickedUnitId) ?? null;
-  const pickedSizePrice =
+  const pickedSizePriceRaw =
     pickedSizeVariant?.retail_price ?? product.retail_price;
+  const pickedSizePrice = applyPctDiscount(pickedSizePriceRaw, sheetPct);
   const pickedUnitPrice = unitPriceFor(product, pickedUnitRow, pricingMode);
 
   // ── أسعار الملابس ──
@@ -4294,7 +4335,9 @@ function SaleSheetView({
     product.wholesale_price > 0 ? product.wholesale_price : product.retail_price;
   const sizesCount =
     product.sizes_count ?? (new Set(colorVariants.map(v => v.size)).size || 1);
-  const bundlePrice = Math.round(perPieceWholesale * sizesCount * 100) / 100;
+  const rawBundlePrice = Math.round(perPieceWholesale * sizesCount * 100) / 100;
+  const bundlePrice = applyPctDiscount(rawBundlePrice, sheetPct);
+  const perPieceRetailFinal = applyPctDiscount(perPieceRetail, sheetPct);
   const minStockOfColor =
     colorVariants.length > 0
       ? Math.min(...colorVariants.map(v => v.stock_quantity))
@@ -4318,16 +4361,21 @@ function SaleSheetView({
             <Text style={styles.variantSheetMeta} numberOfLines={1}>
               {sheet.kind === 'clothing'
                 ? `${colors.length} لون · ${sizesOfColor.length} مقاس · القطعة ${formatMoney(
-                    perPieceRetail,
-                  )} مفرق`
+                    perPieceRetailFinal,
+                  )} مفرق${sheetHasDiscount ? ` (خصم ${Math.round(sheetPct)}%)` : ''}`
                 : sheet.kind === 'sizes'
-                ? `${sizeVariants.length} أحجام — اختر الحجم وسعره`
+                ? `${sizeVariants.length} أحجام — اختر الحجم وسعره${
+                    sheetHasDiscount ? ` (خصم ${Math.round(sheetPct)}%)` : ''
+                  }`
                 : `يُباع افتراضياً بال${
                     product.base_unit_name ?? 'قطعة'
                   } · ${formatMoney(
-                    pricingMode === 'WHOLESALE'
-                      ? product.wholesale_price
-                      : product.retail_price,
+                    applyPctDiscount(
+                      pricingMode === 'WHOLESALE'
+                        ? product.wholesale_price
+                        : product.retail_price,
+                      sheetPct,
+                    ),
                   )}`}
             </Text>
           </View>
@@ -4472,10 +4520,13 @@ function SaleSheetView({
                         ربطة واحدة = {sizesCount} مقاسات × قطعة
                       </Text>
                       <Text style={styles.bundleInfoMeta}>
-                        سعر الربطة {formatMoney(bundlePrice)} ({formatMoney(
-                          perPieceWholesale,
-                        )} × {sizesCount}) · المتاح{' '}
-                        {formatQty(minStockOfColor)} ربطة من هذا اللون
+                        سعر الربطة {formatMoney(bundlePrice)}{' '}
+                        {sheetHasDiscount
+                          ? `(بدلاً من ${formatMoney(rawBundlePrice)} — خصم ${Math.round(
+                              sheetPct,
+                            )}%)`
+                          : `(${formatMoney(perPieceWholesale)} × ${sizesCount})`}{' '}
+                        · المتاح {formatQty(minStockOfColor)} ربطة من هذا اللون
                       </Text>
                     </View>
                   </View>
@@ -4506,7 +4557,8 @@ function SaleSheetView({
               <Text style={styles.sheetPickLabel}>اختر الحجم</Text>
               <View style={styles.sheetChipsColumn}>
                 {sizeVariants.map(variant => {
-                  const price = variant.retail_price ?? product.retail_price;
+                  const rawPrice = variant.retail_price ?? product.retail_price;
+                  const price = applyPctDiscount(rawPrice, sheetPct);
                   const active = pickedSizeId === variant.id;
                   return (
                     <TouchableOpacity
@@ -4521,9 +4573,26 @@ function SaleSheetView({
                         <Text style={styles.sizeOptionName}>{variant.size}</Text>
                       </View>
                       <View style={{flex: 1}} />
-                      <Text style={styles.sizeOptionPrice}>
-                        {formatMoney(price)}
-                      </Text>
+                      {sheetHasDiscount ? (
+                        <Text>
+                          <Text
+                            style={{
+                              textDecorationLine: 'line-through',
+                              color: c.textFaint,
+                              fontSize: 12,
+                            }}>
+                            {formatMoney(rawPrice)}
+                          </Text>
+                          {'  '}
+                          <Text style={styles.sizeOptionPrice}>
+                            {formatMoney(price)}
+                          </Text>
+                        </Text>
+                      ) : (
+                        <Text style={styles.sizeOptionPrice}>
+                          {formatMoney(price)}
+                        </Text>
+                      )}
                       <Icon
                         name={active ? 'check' : 'chevronLeft'}
                         size={16}
@@ -4564,13 +4633,44 @@ function SaleSheetView({
                     </Text>
                   </View>
                   <View style={{flex: 1}} />
-                  <Text style={styles.sizeOptionPrice}>
-                    {formatMoney(
-                      pricingMode === 'WHOLESALE'
-                        ? product.wholesale_price
-                        : product.retail_price,
-                    )}
-                  </Text>
+                  {sheetHasDiscount ? (
+                    <Text>
+                      <Text
+                        style={{
+                          textDecorationLine: 'line-through',
+                          color: c.textFaint,
+                          fontSize: 12,
+                        }}>
+                        {formatMoney(
+                          pricingMode === 'WHOLESALE'
+                            ? product.wholesale_price
+                            : product.retail_price,
+                        )}
+                      </Text>
+                      {'  '}
+                      <Text style={styles.sizeOptionPrice}>
+                        {formatMoney(
+                          applyPctDiscount(
+                            pricingMode === 'WHOLESALE'
+                              ? product.wholesale_price
+                              : product.retail_price,
+                            sheetPct,
+                          ),
+                        )}
+                      </Text>
+                    </Text>
+                  ) : (
+                    <Text style={styles.sizeOptionPrice}>
+                      {formatMoney(
+                        applyPctDiscount(
+                          pricingMode === 'WHOLESALE'
+                            ? product.wholesale_price
+                            : product.retail_price,
+                          sheetPct,
+                        ),
+                      )}
+                    </Text>
+                  )}
                   <Icon
                     name={pickedUnitId == null ? 'check' : 'chevronLeft'}
                     size={16}
@@ -4646,17 +4746,19 @@ function SaleSheetView({
             <>
               <Text style={styles.sheetTotalText}>
                 {activeVariant != null
-                  ? `${qty} × ${formatMoney(perPieceRetail)} = ${formatMoney(
-                      qty * perPieceRetail,
-                    )}`
+                  ? `${qty} × ${formatMoney(perPieceRetailFinal)} = ${formatMoney(
+                      qty * perPieceRetailFinal,
+                    )}${
+                      sheetHasDiscount
+                        ? ` (بدلاً من ${formatMoney(qty * perPieceRetail)})`
+                        : ''
+                    }`
                   : 'اختر المقاس'}
               </Text>
               <AppButton
-                title={`إضافة للسلة${
-                  activeVariant != null
-                    ? ` · ${formatMoney(qty * perPieceRetail)}`
-                    : ''
-                }`}
+                title={`إضافة للسلة · ${formatMoney(
+                  qty * perPieceRetailFinal,
+                )}`}
                 icon="plus"
                 disabled={activeVariant == null}
                 onPress={() => {

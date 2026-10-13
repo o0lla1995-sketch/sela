@@ -618,8 +618,32 @@ function InventoryLayout({
                     </Text>
                     <Text style={styles.meta} numberOfLines={1}>
                       {weighted ? 'كيلو' : 'مفرق'}{' '}
-                      {formatMoney(product.retail_price)} · جملة{' '}
-                      {formatMoney(product.wholesale_price)}
+                      {(product.discount_pct ?? 0) > 0 ? (
+                        <Text
+                          style={{
+                            textDecorationLine: 'line-through',
+                            color: c.textFaint,
+                            fontSize: 11,
+                          }}>
+                          {formatMoney(product.retail_price)}
+                        </Text>
+                      ) : (
+                        formatMoney(product.retail_price)
+                      )}
+                      {(product.discount_pct ?? 0) > 0 ? (
+                        <Text style={{color: c.danger, fontWeight: '900'}}>
+                          {' '}
+                          {formatMoney(
+                            Math.round(
+                              product.retail_price *
+                                (1 - (product.discount_pct ?? 0) / 100) *
+                                100,
+                            ) / 100,
+                          )}{' '}
+                          (−{Math.round(product.discount_pct ?? 0)}%)
+                        </Text>
+                      ) : null}{' '}
+                      · جملة {formatMoney(product.wholesale_price)}
                     </Text>
                     <View style={styles.tagRow}>
                       {weighted ? (

@@ -39,13 +39,26 @@ function formatQtyForMessage(value: number): string {
 /** v51: تطبيق خصم المنتج على أي سعر وحدة — 0–95% (نفس قيد
  *  الخادم). السلة والفاتورة والتقارير كلها تمر من هنا فتتسق
  *  السلسلة كاملة: الخصم يُحدَّد من ملف المنتج ويُرى فوراً في
- *  شبكة البيع والفاتورة والمول (عبر المزامنة). */
-export function applyProductDiscount(price: number, product: Product): number {
-  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
-  if (pct <= 0) {
+ *  شبكة البيع والفاتورة والمول (عبر المزامنة).
+ *  v54 (جولة 59): النسبة تُمرَّر مباشرة كي تعمل على أسعار الربطة
+ *  والمتغيرات (سعر مركّب لا يمر من unitPriceFor).
+ *  لاحظ: retailPrice/wholesalePrice في السطر تبقيان السعر الأصلي
+ *  (قبل الخصم) كمرجع للعرض المشطوب ولإعادة التسعير — الخصم
+ *  يُطبَّق عند الاستخدام لا عند التخزين. */
+export function applyProductDiscount(
+  price: number,
+  product: Product,
+): number {
+  return applyPctDiscount(price, product.discount_pct ?? 0);
+}
+
+/** v54: التطبيق المباشر للنسبة — نفس معادلة الخصم بلا منتج. */
+export function applyPctDiscount(price: number, pct: number): number {
+  const safePct = Math.max(0, Math.min(95, Number(pct) || 0));
+  if (safePct <= 0) {
     return price;
   }
-  return Math.round(price * (1 - pct / 100) * 100) / 100;
+  return Math.round(price * (1 - safePct / 100) * 100) / 100;
 }
 
 /** Price of one chosen unit under a pricing mode (v51: بعد خصم
@@ -117,6 +130,8 @@ export function toLine(
     conversion: unit?.conversion ?? 1,
     /** v8.3: weight-sold lines accept fractional quantities (kg). */
     byWeight: weighted,
+    /** v54: نسبة الخصم لحظة الإضافة — تُعاد عند تبديل مفرق/جملة. */
+    discountPct: Math.max(0, Math.min(95, product.discount_pct ?? 0)),
   };
 }
 
@@ -150,13 +165,18 @@ function toVariantLine(
   const label = variant.color
     ? `${variant.color} · ${variant.size}`
     : variant.size;
+  // v54 (جولة 59): خصم المنتج يُطبَّق على بيع المتغيرات أيضاً —
+  //  كانت تُسعَّر بالسعر الكامل بينما الشبكة تعرض المخفّض.
+  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  const discounted = applyPctDiscount(price, pct);
   return {
     key: lineKey(product.id, null, variant.id),
     productId: product.id,
     name: product.name,
-    unitPrice: price,
+    unitPrice: discounted,
     costPrice: variant.cost_price ?? product.cost_price,
-    // سعر المتغير ثابت — لا يُعاد تسعيره بتبديل وضع الجملة.
+    // السعر قبل الخصم — يُعاد التسعير منه بتبديل الوضع (الخصم
+    // يُطبَّق في setPricingMode من discountPct).
     retailPrice: price,
     wholesalePrice: price,
     quantity,
@@ -169,6 +189,7 @@ function toVariantLine(
     conversion: 1,
     variantId: variant.id,
     variantLabel: label,
+    discountPct: pct,
   };
 }
 
@@ -191,15 +212,20 @@ function toBundleLine(
     product.wholesale_price > 0
       ? product.wholesale_price
       : product.retail_price;
-  const bundlePrice = Math.round(perPiece * sizesCount * 100) / 100;
+  // v54 (جولة 59): خصم المنتج على ربطة الجملة — نفس نسبة القطعة.
+  //  المرجع (retail/wholesale) يبقى سعر الربطة قبل الخصم كي لا
+  //  يُخصم مرتين عند إعادة التسعير بتبديل الوضع.
+  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  const rawBundle = Math.round(perPiece * sizesCount * 100) / 100;
+  const bundlePrice = applyPctDiscount(rawBundle, pct);
   return {
     key: lineKey(product.id, -1),
     productId: product.id,
     name: product.name,
     unitPrice: bundlePrice,
     costPrice: product.cost_price * sizesCount,
-    retailPrice: bundlePrice,
-    wholesalePrice: bundlePrice,
+    retailPrice: rawBundle,
+    wholesalePrice: rawBundle,
     quantity: bundles,
     availableStock: UNTRACKED_STOCK, // يُضبط أدناه من مقاسات اللون
     unitId: null,
@@ -208,6 +234,7 @@ function toBundleLine(
     variantId: null,
     variantLabel: `${color} (ربطة ${sizesCount} مقاسات)`,
     bundleColor: color,
+    discountPct: pct,
   };
 }
 
@@ -219,11 +246,15 @@ function toSizedLine(
   quantity: number,
 ): CartLine {
   const price = sizeVariant.retail_price ?? product.retail_price;
+  // v54 (جولة 59): خصم المنتج على أحجام المطعم/الكافيتريا — كانت
+  //  تُباع بسعر الحجم الكامل بلا خصم بينما الشبكة تعرض المخفّض.
+  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  const discounted = applyPctDiscount(price, pct);
   return {
     key: lineKey(product.id, null, sizeVariant.id),
     productId: product.id,
     name: product.name,
-    unitPrice: price,
+    unitPrice: discounted,
     costPrice: sizeVariant.cost_price ?? product.cost_price,
     retailPrice: price,
     wholesalePrice: price,
@@ -237,6 +268,7 @@ function toSizedLine(
     conversion: 1,
     variantId: sizeVariant.id,
     variantLabel: sizeVariant.size,
+    discountPct: pct,
   };
 }
 
@@ -785,9 +817,17 @@ export const useCartStore = create<CartState>((set, get) => ({
   setPricingMode: mode => {
     const state = get();
     // Re-price every line from its stored unit snapshots.
+    // v54 (جولة 59): الخصم كان يسقط كلياً هنا — الأسعار المرجعية
+    //  (retailPrice/wholesalePrice) تُخزَّن قبل الخصم، فكان تبديل
+    //  مفرق/جملة يعيد التسعير بالسعر الكامل. الآن تُعاد نسبة خصم
+    //  السطر (discountPct) مع كل تبديل — السطر يظل مخفّضاً في
+    //  الوضعين كما يعرضها التاجر في الشبكة.
     const lines = state.lines.map(line => ({
       ...line,
-      unitPrice: mode === 'WHOLESALE' ? line.wholesalePrice : line.retailPrice,
+      unitPrice: applyPctDiscount(
+        mode === 'WHOLESALE' ? line.wholesalePrice : line.retailPrice,
+        line.discountPct ?? 0,
+      ),
     }));
     set({pricingMode: mode, lines});
     saveDraft(lines, mode, state.discount);

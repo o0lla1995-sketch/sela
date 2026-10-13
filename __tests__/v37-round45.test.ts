@@ -183,7 +183,11 @@ describe('v37 #2أ+2ج — نافذة البيع الموحدة: نمط مُثب
     expect(src).toContain('borderTopWidth: 1');
     // زر التأكيد موجود في التذييل لكل مود (ملابس مفرق/جملة،
     // أحجام، وحدات) — لا يمكن أن يختفي أسفل الشاشة.
-    expect(src).toContain(`title={\`إضافة للسلة\${\n                  activeVariant != null`);
+    // v54: زر ملابس مفرق صار دائم العنوان بإجمالي ما بعد الخصم
+    // (perPieceRetailFinal) — نفس مكانه في التذييل المثبّت.
+    expect(src).toContain(
+      `title={\`إضافة للسلة · \${formatMoney(\n                  qty * perPieceRetailFinal,\n                )}\`}`,
+    );
   });
 });
 
