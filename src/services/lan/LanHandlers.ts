@@ -1,5 +1,5 @@
 /**
- * LanHandlers — v58 (الجولة 62): بروتوكول «سيلّا كاشير» على الشبكة
+ * LanHandlers — v59 (الجولة 63): بروتوكول «سيلّا كاشير» على الشبكة
  * المحلية.
  * ─────────────────────────────────────────────────────────────────
  * طبقة نقية (بلا أي اعتماد منصة) تخدم طلبات تطبيق الكاشير:
@@ -7,15 +7,24 @@
  *   GET  /api/ping                        نبض الخادم + اسم المتجر
  *   POST /api/auth/login                  دخول (اسم مستخدم + كلمة مرور)
  *                                        → ok/pending/denied/inactive
+ *                                        v59: + صلاحيات الكاشير
  *   POST /api/auth/logout                 خروج (إبطال رمز الجلسة)
  *   GET  /api/catalog                     منتجات المخزون بالوحدات والأسعار
+ *                                        v59: + المتغيرات (لون×مقاس/حجم)
+ *                                            + علم وجود صورة المنتج
  *   GET  /api/products?barcode=           بحث بالباركود (منتج واحد)
+ *   GET  /api/product-image?id=           v59: صورة المنتج base64
  *   GET  /api/customers                   زبائن دفتر المتجر (للدين)
  *   POST /api/sale                        بيع نقدي أو دين دفتر باسم الكاشير
- *   GET  /api/invoices                    فواتير الكاشير نفسه
+ *                                        v59: + متغيرات الأسطر، + clientRef
+ *                                            (ميزة الخدمة للعمل دون اتصال)
+ *   GET  /api/invoices?since=             فواتير الكاشير نفسه (+ زيادة cursor)
  *   GET  /api/invoice?id=                 تفاصيل فاتورة + القابل للإرجاع
  *   POST /api/return                      إرجاع/استبدال من فواتير الكاشير
+ *                                        v59: + clientRef + متغيرات البدائل
  *   GET  /api/stats                       إحصاءات الكاشير (اليوم/الإجمالي)
+ *   POST /api/sync/push                   v59: دفعة عمليات أُجريت دون اتصال —
+ *                                        تُعالج بالتسلسل مع استجابة لكل عملية
  *
  * قواعد الأمان:
  *  ① الأسعار تُحسم من قاعدة نقطة البيع دائماً — تطبيق الكاشير يرسل
@@ -26,6 +35,22 @@
  *     المشتقة، نفس الدفاتر؛ فالتزامن كامل وتفصيلي وبلا مسار موازٍ.
  *  ④ الإرجاع من فواتير الكاشير نفسه فقط (cashier_id = حسابه).
  *  ⑤ خمس محاولات دخول فاشلة تُقفل المحاولة دقيقة كاملة.
+ *  ⑥ v59 صلاحيات المدير: بيع الدين مقفول (can_debt=0)؟ الخادم يرفض
+ *     عملية الدين؛ المرتجعات مقفولة (can_return=0)؟ يرفض الإرجاع
+ *     والاستبدال كليهما — لا اعتماد على إخفاء الزر في التطبيق وحده.
+ *
+ * v59 — مزامنة العمل دون اتصال (أهم طلبات التاجر):
+ *  • كل عملية من الكاشير تحمل clientRef فريداً يولّده جهازه
+ *    (deviceId + وقت + عشوائية) — البادرة الحقيقية للفهارس الفريدة
+ *    الجزئية على sales.client_ref / sale_returns.client_ref.
+ *  • عند المزامنة يفحص الخادم clientRef أولاً: موجود = العملية سبق
+ *    أن سُجلت (شبكة انقطعت بعد التسجيل) فيعيد نتيجتها الأصلية كما
+ *    هي — لا ازدواج مهما تكررت المحاولة.
+ *  • أرقام الفواتير الحقيقية تُمنح من نقطة البيع وحدها (INV-/INV-L/
+ *    RET-) — الكاشير لا يختار رقماً قطعاً؛ فلا تعارض بين حسابات
+ *    الكاشيرين إطلاقاً لأن كل رقم يصدر من متسلسلة نقطة البيع نفسها
+ *    لحظة القبول، وتاريخ العملية الفعلي (created_at العميل) يُحفظ
+ *    لتصح التقارير على زمن البيع لا زمن المزامنة.
  */
 import {CashiersRepo} from '../../database/repositories/CashiersRepo';
 import {LocalDebtsRepo} from '../../database/repositories/LocalDebtsRepo';
@@ -33,6 +58,7 @@ import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {InvoiceService} from '../InvoiceService';
 import {getSettings} from '../../stores/settingsStore';
 import {getDb} from '../../database/connection';
+import {PlatformUtilsNative} from '../../native/nativeBridge';
 import {APP_VERSION} from '../../core/config';
 import {localNow} from '../../core/format';
 import type {
@@ -63,7 +89,61 @@ interface Authed {
   cashierId: number;
   cashierName: string;
   maxDiscountPct: number;
+  /** v59: صلاحية البيع بالدين. */
+  canDebt: boolean;
+  /** v59: صلاحية المرتجعات والاستبدال. */
+  canReturn: boolean;
   deviceId: number;
+}
+
+// ── v59: أحداث الخادم الحية (إشعارات المدير) ──────────────────────
+export type LanEvent =
+  | {
+      kind: 'device_pending';
+      cashierName: string;
+      deviceLabel: string;
+      ip: string | null;
+    }
+  | {
+      kind: 'login';
+      cashierName: string;
+      deviceLabel: string;
+    }
+  | {
+      kind: 'sale';
+      cashierName: string;
+      invoiceNumber: string;
+      total: number;
+      itemCount: number;
+      debt: boolean;
+      /** العملية وصلت من طابور المزامنة (أُجريت دون اتصال). */
+      offline: boolean;
+    }
+  | {
+      kind: 'return';
+      cashierName: string;
+      returnNumber: string;
+      refundMinor: number;
+      exchangeMinor: number;
+      isExchange: boolean;
+    };
+
+let eventSink: ((event: LanEvent) => void) | null = null;
+
+/** تسجيل مستقبل الأحداث — تستدعيه LanServerService في كل منصة
+ *  (إشعار نظام أندرويد / نافذة عائمة على سطح المكتب). */
+export function setLanEventSink(
+  sink: ((event: LanEvent) => void) | null,
+): void {
+  eventSink = sink;
+}
+
+function emitLanEvent(event: LanEvent): void {
+  try {
+    eventSink?.(event);
+  } catch {
+    // حدث فاشل لا يوقف الطلب أبداً.
+  }
 }
 
 // ── دفتر محاولات الدخول الفاشلة (خمس ثم قفل دقيقة) ────────────────
@@ -144,6 +224,8 @@ async function authenticate(req: LanRequestShape): Promise<Authed | null> {
     cashierId: session.cashier.id,
     cashierName: session.cashier.display_name,
     maxDiscountPct: session.cashier.max_discount_pct,
+    canDebt: session.cashier.can_debt === 1,
+    canReturn: session.cashier.can_return === 1,
     deviceId: session.device.id,
   };
 }
@@ -156,6 +238,17 @@ export interface CashierCatalogUnit {
   conversion: number;
   retailPrice: number | null;
   barcode: string | null;
+}
+
+/** v59: متغيرات المنتج (ملابس لون×مقاس / أحجام بسعر). */
+export interface CashierCatalogVariant {
+  id: number;
+  kind: 'variant' | 'size';
+  color: string;
+  size: string;
+  retailPrice: number | null;
+  costPrice: number | null;
+  stockQty: number;
 }
 
 export interface CashierCatalogProduct {
@@ -172,14 +265,18 @@ export interface CashierCatalogProduct {
   byWeight: boolean;
   barcode: string | null;
   hasVariants: boolean;
+  /** v59: هل للمنتج صورة قابلة للجلب عبر /api/product-image. */
+  hasImage: boolean;
   units: CashierCatalogUnit[];
+  /** v59: متغيراته (فارغة إن لم يكن منتج متغيرات). */
+  variants: CashierCatalogVariant[];
 }
 
 const CATALOG_LIMIT = 2000;
 
 async function loadCatalog(
   where: string,
-  params: unknown[],
+  params: (string | number | null)[],
 ): Promise<CashierCatalogProduct[]> {
   const db = getDb();
   const products = await db.execute(
@@ -223,11 +320,46 @@ async function loadCatalog(
       unitsByProduct.set(pid, [entry]);
     }
   }
+  // v59: متغيرات المنتجات (لون×مقاس للملابس، أحجام بسعر للمطاعم).
+  const variants = await db.execute(
+    `SELECT id, product_id, kind, color, size, stock_quantity,
+            retail_price, cost_price
+     FROM product_variants
+     ORDER BY product_id, id`,
+  );
+  const variantRows = (variants.rows ?? []) as unknown as Record<
+    string,
+    unknown
+  >[];
+  const variantsByProduct = new Map<number, CashierCatalogVariant[]>();
+  for (const row of variantRows) {
+    const pid = Number(row.product_id);
+    const entry: CashierCatalogVariant = {
+      id: Number(row.id),
+      kind: String(row.kind ?? 'variant') === 'size' ? 'size' : 'variant',
+      color: String(row.color ?? ''),
+      size: String(row.size ?? ''),
+      retailPrice:
+        row.retail_price != null && Number(row.retail_price) > 0
+          ? Number(row.retail_price)
+          : null,
+      costPrice:
+        row.cost_price != null && Number(row.cost_price) > 0
+          ? Number(row.cost_price)
+          : null,
+      stockQty: Number(row.stock_quantity ?? 0),
+    };
+    const list = variantsByProduct.get(pid);
+    if (list) {
+      list.push(entry);
+    } else {
+      variantsByProduct.set(pid, [entry]);
+    }
+  }
   return rows.map(row => ({
     id: Number(row.id),
     name: String(row.name ?? ''),
-    categoryId:
-      row.category_id == null ? null : Number(row.category_id),
+    categoryId: row.category_id == null ? null : Number(row.category_id),
     categoryName: row.category_name
       ? String(row.category_name)
       : 'بدون تصنيف',
@@ -240,7 +372,9 @@ async function loadCatalog(
     byWeight: Number(row.sold_by_weight ?? 0) === 1,
     barcode: row.barcode ? String(row.barcode) : null,
     hasVariants: Number(row.has_variants ?? 0) === 1,
+    hasImage: Boolean(row.image_uri && String(row.image_uri).length > 0),
     units: unitsByProduct.get(Number(row.id)) ?? [],
+    variants: variantsByProduct.get(Number(row.id)) ?? [],
   }));
 }
 
@@ -248,7 +382,52 @@ function catalogToCartLine(
   product: CashierCatalogProduct,
   unitId: number | null,
   quantity: number,
+  variantId?: number | null,
 ): CartLine {
+  // ── v59: سطر متغير (ملابس لون×مقاس أو حجم بسعر) — نفس معادلة
+  //    toVariantLine/toSizedLine في نقطة البيع حرفياً (خصم المنتج
+  //    مطبق، مخزون المتغير للملابس، سعر الحجم لأحجام المطاعم).
+  if (variantId != null) {
+    const variant = product.variants.find(v => v.id === variantId);
+    if (variant == null) {
+      throw new Error('متغير غير متاح لهذا المنتج');
+    }
+    const isSize = variant.kind === 'size';
+    const rawPrice = isSize
+      ? variant.retailPrice ?? product.retailPrice
+      : product.retailPrice;
+    const pct = Math.max(0, Math.min(95, product.discountPct || 0));
+    const unitPrice =
+      pct > 0
+        ? Math.round(rawPrice * (1 - pct / 100) * 100) / 100
+        : rawPrice;
+    const label = isSize
+      ? variant.size
+      : variant.color
+      ? `${variant.color} · ${variant.size}`
+      : variant.size;
+    return {
+      key: `${product.id}--v${variant.id}`,
+      productId: product.id,
+      name: product.name,
+      unitPrice,
+      costPrice: variant.costPrice ?? product.costPrice,
+      retailPrice: rawPrice,
+      wholesalePrice: rawPrice,
+      quantity,
+      availableStock: product.stockUntracked
+        ? 999999
+        : isSize
+        ? product.stockQty
+        : variant.stockQty,
+      unitId: null,
+      unitName: 'قطعة',
+      conversion: 1,
+      variantId: variant.id,
+      variantLabel: label,
+      discountPct: product.discountPct,
+    };
+  }
   const unit =
     unitId != null ? product.units.find(u => u.id === unitId) : undefined;
   const conversion = unit ? unit.conversion : 1;
@@ -302,6 +481,152 @@ function todayKey(): string {
   return localNow().slice(0, 10);
 }
 
+// ── v59: فحص/ختم مرجع العميل (ميزة العمل دون اتصال) ───────────────
+interface ClientRefHit {
+  saleId: number;
+  number: string;
+  total: number;
+  discount: number;
+  itemCount: number;
+  createdAt: string;
+}
+
+/** سبق أن سُجلت هذه العملية؟ أعِد نتيجتها الأصلية — لا ازدواج
+ *  مهما أعاد الكاشير المحاولة (شبكة انقطعت بعد التسجيل). */
+async function saleByClientRef(
+  clientRef: string,
+): Promise<ClientRefHit | null> {
+  if (!clientRef) {
+    return null;
+  }
+  const db = getDb();
+  const result = await db.execute(
+    `SELECT s.id, s.invoice_number, s.total_amount, s.discount, s.created_at,
+            (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
+     FROM sales s WHERE s.client_ref = ?`,
+    [clientRef],
+  );
+  const rows = (result.rows ?? []) as unknown as Record<string, unknown>[];
+  if (rows.length === 0) {
+    return null;
+  }
+  const row = rows[0];
+  return {
+    saleId: Number(row.id),
+    number: String(row.invoice_number ?? ''),
+    total: Number(row.total_amount ?? 0),
+    discount: Number(row.discount ?? 0),
+    itemCount: Number(row.item_count ?? 0),
+    createdAt: String(row.created_at ?? ''),
+  };
+}
+
+async function returnByClientRef(
+  clientRef: string,
+): Promise<{
+  id: number;
+  number: string;
+  refundMinor: number;
+  exchangeMinor: number;
+  isExchange: number;
+} | null> {
+  if (!clientRef) {
+    return null;
+  }
+  const db = getDb();
+  const result = await db.execute(
+    'SELECT id, return_number, refund_minor, exchange_minor, is_exchange FROM sale_returns WHERE client_ref = ?',
+    [clientRef],
+  );
+  const rows = (result.rows ?? []) as unknown as Record<string, unknown>[];
+  if (rows.length === 0) {
+    return null;
+  }
+  const row = rows[0];
+  return {
+    id: Number(row.id),
+    number: String(row.return_number ?? ''),
+    refundMinor: Number(row.refund_minor ?? 0),
+    exchangeMinor: Number(row.exchange_minor ?? 0),
+    isExchange: Number(row.is_exchange ?? 0),
+  };
+}
+
+/** ختم الفاتورة بمرجع العميل وزمن البيع الفعلي (فور نجاح المعاملة)
+ *  — التقرير يبقى على زمن البيع لا زمن المزامنة. */
+async function stampSale(
+  saleId: number,
+  clientRef: string | null,
+  createdAt: string | null,
+): Promise<void> {
+  if (!clientRef && !createdAt) {
+    return;
+  }
+  const db = getDb();
+  if (clientRef && createdAt) {
+    await db.execute(
+      'UPDATE sales SET client_ref = ?, created_at = ? WHERE id = ?',
+      [clientRef, createdAt, saleId],
+    );
+  } else if (clientRef) {
+    await db.execute(
+      'UPDATE sales SET client_ref = ? WHERE id = ?',
+      [clientRef, saleId],
+    );
+  } else if (createdAt) {
+    await db.execute(
+      'UPDATE sales SET created_at = ? WHERE id = ?',
+      [createdAt, saleId],
+    );
+  }
+}
+
+async function stampReturn(
+  returnNumber: string,
+  clientRef: string | null,
+  createdAt: string | null,
+): Promise<void> {
+  if (!clientRef && !createdAt) {
+    return;
+  }
+  const db = getDb();
+  if (clientRef) {
+    await db.execute(
+      'UPDATE sale_returns SET client_ref = ? WHERE return_number = ?',
+      [clientRef, returnNumber],
+    );
+  }
+  if (createdAt) {
+    await db.execute(
+      'UPDATE sales SET created_at = ? WHERE invoice_number = ?',
+      [createdAt, returnNumber],
+    );
+    await db.execute(
+      'UPDATE sale_returns SET created_at = ? WHERE return_number = ?',
+      [createdAt, returnNumber],
+    );
+  }
+}
+
+/** شكل الفاتورة كما يعيده الخادم لتطبيق الكاشير. */
+function invoicePayload(hit: {
+  saleId: number;
+  number: string;
+  total: number;
+  discount: number;
+  itemCount: number;
+  createdAt: string;
+}) {
+  return {
+    id: hit.saleId,
+    number: hit.number,
+    total: hit.total,
+    discount: hit.discount,
+    itemCount: hit.itemCount,
+    createdAt: hit.createdAt,
+  };
+}
+
 // ── المُوجِّه الرئيسي ──────────────────────────────────────────────
 export async function handleLanRequest(
   req: LanRequestShape,
@@ -314,7 +639,7 @@ export async function handleLanRequest(
       return ok({
         ok: true,
         app: 'sela-pos',
-        proto: 1,
+        proto: 2,
         version: APP_VERSION,
         store: getSettings().storeName,
       });
@@ -367,6 +692,30 @@ export async function handleLanRequest(
       return ok({ok: true, product: products[0]});
     }
 
+    // v59: صورة المنتج (JPEG مصغّرة base64) — يطلبها تطبيق الكاشير
+    // بسلاسة للبطاقات المرئية فقط ويخزنها مؤقتاً على جهازه.
+    if (path === '/api/product-image' && method === 'GET') {
+      const id = Number(req.query.id ?? 0);
+      if (!id) {
+        return fail(400, 'رقم المنتج مطلوب');
+      }
+      const result = await getDb().execute(
+        'SELECT image_uri FROM products WHERE id = ?',
+        [id],
+      );
+      const rows = (result.rows ?? []) as unknown as Record<string, unknown>[];
+      const uri = rows.length > 0 ? String(rows[0].image_uri ?? '') : '';
+      if (!uri || PlatformUtilsNative == null) {
+        return fail(404, 'لا صورة لهذا المنتج');
+      }
+      try {
+        const base64 = await PlatformUtilsNative.readFileBase64(uri);
+        return json(200, {ok: true, id, image: base64});
+      } catch {
+        return fail(404, 'تعذر تحميل صورة المنتج');
+      }
+    }
+
     if (path === '/api/customers' && method === 'GET') {
       const balances = await LocalDebtsRepo.listWithBalances();
       return ok({
@@ -382,7 +731,7 @@ export async function handleLanRequest(
     }
 
     if (path === '/api/sale' && method === 'POST') {
-      return await handleSale(req, authed);
+      return await handleSale(req, authed, false);
     }
 
     if (path === '/api/invoices' && method === 'GET') {
@@ -394,11 +743,15 @@ export async function handleLanRequest(
     }
 
     if (path === '/api/return' && method === 'POST') {
-      return await handleReturn(req, authed);
+      return await handleReturn(req, authed, false);
     }
 
     if (path === '/api/stats' && method === 'GET') {
       return await handleStats(authed);
+    }
+
+    if (path === '/api/sync/push' && method === 'POST') {
+      return await handleSyncPush(req, authed);
     }
 
     return fail(404, 'مسار غير معروف');
@@ -409,7 +762,7 @@ export async function handleLanRequest(
   }
 }
 
-// ── الدخول وموافقة المدير على الجهاز ─────────────────────────────
+// ── الدخول وموافقة المدير على الجهاز ──────────────────────���────
 async function handleLogin(req: LanRequestShape): Promise<LanResponseShape> {
   const body = parseBody(req.body);
   const username = String(body.username ?? '').trim();
@@ -445,6 +798,12 @@ async function handleLogin(req: LanRequestShape): Promise<LanResponseShape> {
   }
   if (device.status === 'pending') {
     // بانتظار المدير — تطبيق الكاشير يستقصي الدخول كل بضع ثوانٍ.
+    emitLanEvent({
+      kind: 'device_pending',
+      cashierName: cashier.display_name,
+      deviceLabel: device.device_label || deviceLabel,
+      ip: req.ip,
+    });
     return json(200, {ok: true, status: 'pending'});
   }
   // معتمد — رمز جديد إن كان القديم أُبطل (خروج/تغيير كلمة مرور).
@@ -456,22 +815,42 @@ async function handleLogin(req: LanRequestShape): Promise<LanResponseShape> {
       deviceLabel,
       req.ip,
     );
+    emitLanEvent({
+      kind: 'login',
+      cashierName: cashier.display_name,
+      deviceLabel: device.device_label || deviceLabel,
+    });
     return json(200, {
       ok: true,
       status: 'ok',
       token: refreshed.token,
       cashier: {id: cashier.id, name: cashier.display_name},
       store: {name: getSettings().storeName},
+      perms: {
+        maxDiscountPct: cashier.max_discount_pct,
+        canDebt: cashier.can_debt === 1,
+        canReturn: cashier.can_return === 1,
+      },
     });
   }
   await CashiersRepo.touchDevice(device.id);
   await CashiersRepo.touchCashier(cashier.id);
+  emitLanEvent({
+    kind: 'login',
+    cashierName: cashier.display_name,
+    deviceLabel: device.device_label || deviceLabel,
+  });
   return json(200, {
     ok: true,
     status: 'ok',
     token: device.token,
     cashier: {id: cashier.id, name: cashier.display_name},
     store: {name: getSettings().storeName},
+    perms: {
+      maxDiscountPct: cashier.max_discount_pct,
+      canDebt: cashier.can_debt === 1,
+      canReturn: cashier.can_return === 1,
+    },
   });
 }
 
@@ -479,6 +858,7 @@ async function handleLogin(req: LanRequestShape): Promise<LanResponseShape> {
 async function handleSale(
   req: LanRequestShape,
   authed: Authed,
+  fromSync: boolean,
 ): Promise<LanResponseShape> {
   const body = parseBody(req.body);
   const rawLines = Array.isArray(body.lines) ? body.lines : [];
@@ -486,6 +866,22 @@ async function handleSale(
     return fail(400, 'السلة فارغة');
   }
   const paymentType = body.paymentType === 'debt' ? 'debt' : 'cash';
+  const clientRef = body.clientRef ? String(body.clientRef).slice(0, 80) : '';
+  const clientCreatedAt = body.createdAt
+    ? String(body.createdAt).slice(0, 19)
+    : '';
+
+  // ميزة الخدمة: العملية سُجلت سابقاً (إعادة محاولة مزامنة)؟
+  if (clientRef) {
+    const hit = await saleByClientRef(clientRef);
+    if (hit) {
+      return ok({ok: true, duplicate: true, invoice: invoicePayload(hit)});
+    }
+  }
+
+  if (paymentType === 'debt' && !authed.canDebt) {
+    return fail(403, 'بيع الدين مقفول لحسابك — راجع المسؤول');
+  }
 
   const catalog = await loadCatalog('', []);
   const byId = new Map(catalog.map(p => [p.id, p]));
@@ -497,6 +893,10 @@ async function handleSale(
     const quantity = Number(line.quantity ?? 0);
     const unitId =
       line.unitId == null || line.unitId === '' ? null : Number(line.unitId);
+    const variantId =
+      line.variantId == null || line.variantId === ''
+        ? null
+        : Number(line.variantId);
     const product = byId.get(productId);
     if (!product) {
       return fail(400, 'منتج غير موجود في المخزون');
@@ -504,16 +904,22 @@ async function handleSale(
     if (!Number.isFinite(quantity) || quantity <= 0) {
       return fail(400, `كمية غير صالحة لـ «${product.name}»`);
     }
-    if (product.hasVariants) {
+    if (product.hasVariants && variantId == null) {
       return fail(
         400,
-        `«${product.name}» منتج متغيرات (مقاسات/ألوان) — يُباع من نقطة البيع فقط`,
+        `«${product.name}» يحتاج اختيار اللون/المقاس (أو الحجم) أولاً`,
       );
+    }
+    if (!product.hasVariants && variantId != null) {
+      return fail(400, `«${product.name}» ليس منتج متغيرات`);
+    }
+    if (variantId != null && !product.variants.some(v => v.id === variantId)) {
+      return fail(400, `متغير غير متاح لـ «${product.name}»`);
     }
     if (unitId != null && !product.units.some(u => u.id === unitId)) {
       return fail(400, `وحدة غير متاحة لـ «${product.name}»`);
     }
-    lines.push(catalogToCartLine(product, unitId, quantity));
+    lines.push(catalogToCartLine(product, unitId, quantity, variantId));
   }
 
   const subtotal = lines.reduce(
@@ -556,6 +962,17 @@ async function handleSale(
           }
         : undefined,
     });
+    // ختم مرجع العميل وزمن البيع الفعلي (للتقارير والميزة).
+    await stampSale(sale.sale.id, clientRef || null, clientCreatedAt || null);
+    emitLanEvent({
+      kind: 'sale',
+      cashierName: authed.cashierName,
+      invoiceNumber: sale.sale.invoice_number,
+      total: sale.sale.total_amount,
+      itemCount: lines.length,
+      debt: paymentType === 'debt',
+      offline: fromSync,
+    });
     return ok({
       ok: true,
       invoice: {
@@ -568,6 +985,18 @@ async function handleSale(
       },
     });
   } catch (error) {
+    // فهرس client_ref الفريد قد يضرب لو سبقت عملية مطابقة في سباق
+    // نظري — استرجع الأصلية وأعدها كأي إعادة محاولة ناجحة.
+    if (clientRef) {
+      const hit = await saleByClientRef(clientRef);
+      if (hit) {
+        return ok({
+          ok: true,
+          duplicate: true,
+          invoice: invoicePayload(hit),
+        });
+      }
+    }
     const message =
       error instanceof Error ? error.message : 'فشل إتمام البيع';
     return fail(400, message);
@@ -579,15 +1008,16 @@ async function handleInvoiceList(
   req: LanRequestShape,
   authed: Authed,
 ): Promise<LanResponseShape> {
-  const limit = Math.min(100, Math.max(5, Number(req.query.limit ?? 30) || 30));
+  const limit = Math.min(200, Math.max(5, Number(req.query.limit ?? 30) || 30));
+  const since = Number(req.query.since ?? 0) || 0;
   const db = getDb();
   const result = await db.execute(
     `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
      FROM sales s
-     WHERE s.cashier_id = ?
+     WHERE s.cashier_id = ? ${since > 0 ? 'AND s.id > ?' : ''}
      ORDER BY s.id DESC
      LIMIT ?`,
-    [authed.cashierId, limit],
+    since > 0 ? [authed.cashierId, since, limit] : [authed.cashierId, limit],
   );
   const rows = (result.rows ?? []) as unknown as Record<string, unknown>[];
   const invoices = rows.map(row => ({
@@ -600,6 +1030,7 @@ async function handleInvoiceList(
     paymentType: String(row.payment_type ?? 'RETAIL'),
     itemCount: Number(row.item_count ?? 0),
     createdAt: String(row.created_at ?? ''),
+    clientRef: row.client_ref ? String(row.client_ref) : null,
   }));
   return ok({ok: true, invoices});
 }
@@ -645,6 +1076,11 @@ async function handleInvoiceDetail(
         unitPrice: l.item.unit_price,
         total: l.item.total_line_price,
         remaining: l.remaining,
+        variantId: l.item.variant_id ?? null,
+        variantLabel:
+          l.item.variant_label != null && String(l.item.variant_label).length > 0
+            ? String(l.item.variant_label)
+            : null,
       })),
     });
   } catch (error) {
@@ -671,11 +1107,25 @@ async function dbCashierIdForSale(saleId: number): Promise<number | null> {
 async function handleReturn(
   req: LanRequestShape,
   authed: Authed,
+  fromSync: boolean,
 ): Promise<LanResponseShape> {
   const body = parseBody(req.body);
   const saleId = Number(body.saleId ?? 0);
   if (!saleId) {
     return fail(400, 'رقم الفاتورة مطلوب');
+  }
+  if (!authed.canReturn) {
+    return fail(403, 'المرتجعات والاستبدال مقفولة لحسابك — راجع المسؤول');
+  }
+  const clientRef = body.clientRef ? String(body.clientRef).slice(0, 80) : '';
+  const clientCreatedAt = body.createdAt
+    ? String(body.createdAt).slice(0, 19)
+    : '';
+  if (clientRef) {
+    const hit = await returnByClientRef(clientRef);
+    if (hit) {
+      return ok({ok: true, duplicate: true, return: hit});
+    }
   }
   const owner = await dbCashierIdForSale(saleId);
   if (owner !== authed.cashierId) {
@@ -728,7 +1178,8 @@ async function handleReturn(
     });
   }
 
-  // بدائل الاستبدال — تُسعَّر من قاعدة نقطة البيع مثل البيع تماماً.
+  // بدائل الاستبدال — تُسعَّر من قاعدة نقطة البيع مثل البيع تماماً
+  // (v59: تشمل منتجات المتغيرات — يستبدل الكاشير ملابس بمقاس آخر).
   const exchange: ExchangeLineInput[] = [];
   if (rawExchange.length > 0) {
     const catalog = await loadCatalog('', []);
@@ -739,20 +1190,30 @@ async function handleReturn(
       const quantity = Number(line.quantity ?? 0);
       const unitId =
         line.unitId == null || line.unitId === '' ? null : Number(line.unitId);
+      const variantId =
+        line.variantId == null || line.variantId === ''
+          ? null
+          : Number(line.variantId);
       const product = byId.get(productId);
       if (!product) {
         return fail(400, 'منتج الاستبدال غير موجود');
       }
-      if (product.hasVariants) {
-        return fail(
-          400,
-          `«${product.name}» منتج متغيرات — يُستبدل من نقطة البيع فقط`,
-        );
-      }
       if (!Number.isFinite(quantity) || quantity <= 0) {
         return fail(400, `كمية استبدال غير صالحة لـ «${product.name}»`);
       }
-      const cartLine = catalogToCartLine(product, unitId, quantity);
+      if (product.hasVariants && variantId == null) {
+        return fail(
+          400,
+          `«${product.name}» يحتاج اختيار اللون/المقاس أولاً`,
+        );
+      }
+      if (!product.hasVariants && variantId != null) {
+        return fail(400, `«${product.name}» ليس منتج متغيرات`);
+      }
+      if (variantId != null && !product.variants.some(v => v.id === variantId)) {
+        return fail(400, `متغير غير متاح لـ «${product.name}»`);
+      }
+      const cartLine = catalogToCartLine(product, unitId, quantity, variantId);
       exchange.push({
         productId,
         productName: product.name,
@@ -761,9 +1222,9 @@ async function handleReturn(
         basePerUnit: cartLine.conversion,
         unitPrice: cartLine.unitPrice,
         costPrice: cartLine.costPrice,
-        variantId: null,
+        variantId: cartLine.variantId ?? null,
         variantColor: null,
-        variantLabel: null,
+        variantLabel: cartLine.variantLabel ?? null,
       });
     }
   }
@@ -781,6 +1242,19 @@ async function handleReturn(
       cashierId: authed.cashierId,
       exchange: exchange.length > 0 ? exchange : undefined,
     });
+    await stampReturn(
+      record.return_number,
+      clientRef || null,
+      clientCreatedAt || null,
+    );
+    emitLanEvent({
+      kind: 'return',
+      cashierName: authed.cashierName,
+      returnNumber: record.return_number,
+      refundMinor: record.refund_minor,
+      exchangeMinor: record.exchange_minor,
+      isExchange: record.is_exchange === 1,
+    });
     return ok({
       ok: true,
       return: {
@@ -792,6 +1266,12 @@ async function handleReturn(
       },
     });
   } catch (error) {
+    if (clientRef) {
+      const hit = await returnByClientRef(clientRef);
+      if (hit) {
+        return ok({ok: true, duplicate: true, return: hit});
+      }
+    }
     const message =
       error instanceof Error ? error.message : 'فشل تسجيل الإرجاع';
     return fail(400, message);
@@ -850,6 +1330,11 @@ async function handleStats(authed: Authed): Promise<LanResponseShape> {
   return ok({
     ok: true,
     cashier: {id: authed.cashierId, name: authed.cashierName},
+    perms: {
+      maxDiscountPct: authed.maxDiscountPct,
+      canDebt: authed.canDebt,
+      canReturn: authed.canReturn,
+    },
     today: {
       salesCount: Number(t.cnt ?? 0),
       salesTotal: Number(t.total ?? 0),
@@ -881,4 +1366,63 @@ async function handleStats(authed: Authed): Promise<LanResponseShape> {
       }),
     ),
   });
+}
+
+// ── v59: مزامنة العمليات التي أُجريت دون اتصال ────────────────────
+/** دفعة عمليات: كل عنصر {opId, kind: 'sale'|'return', ref, payload}.
+ *  تُعالج بالتسلسل؛ استجابة مستقلة لكل عملية (نجاح برقم الفاتورة
+ *  الحقيقي / خطأ بسبب واضح) — فلا تفقد الدفعة كلها بسبب عملية
+ *  واحدة مرفوضة، والتطبيق يعلّم كل عملية بحالتها.
+ *
+ *  clientRef يمنع الازدواج: إعادة إرسال دفعة انقطعت في منتصفها
+ *  تعيد نتائج العمليات الناجحة السابقة كما هي (duplicate=true).
+ */
+async function handleSyncPush(
+  req: LanRequestShape,
+  authed: Authed,
+): Promise<LanResponseShape> {
+  const body = parseBody(req.body);
+  const rawOps = Array.isArray(body.ops) ? body.ops : [];
+  if (rawOps.length === 0) {
+    return fail(400, 'لا عمليات للمزامنة');
+  }
+  if (rawOps.length > 50) {
+    return fail(400, 'الحد الأقصى 50 عملية في الدفعة');
+  }
+  const results: unknown[] = [];
+  for (const raw of rawOps) {
+    const op = raw as Record<string, unknown>;
+    const opId = String(op.opId ?? '');
+    const kind = String(op.kind ?? '');
+    if (!opId || (kind !== 'sale' && kind !== 'return')) {
+      results.push({opId, ok: false, error: 'عملية غير معروفة'});
+      continue;
+    }
+    const opReq: LanRequestShape = {
+      ...req,
+      body: JSON.stringify(op.payload ?? {}),
+    };
+    const response =
+      kind === 'sale'
+        ? await handleSale(opReq, authed, true)
+        : await handleReturn(opReq, authed, true);
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(response.body) as Record<string, unknown>;
+    } catch {
+      parsed = {};
+    }
+    results.push({
+      opId,
+      ok: response.status === 200,
+      status: response.status,
+      ...(parsed.invoice != null ? {invoice: parsed.invoice} : {}),
+      ...(parsed.return != null ? {return: parsed.return} : {}),
+      ...(parsed.duplicate != null ? {duplicate: parsed.duplicate} : {}),
+      ...(response.status !== 200
+        ? {error: String(parsed.error ?? 'فشلت العملية')}
+        : {}),
+    });
+  }
+  return ok({ok: true, results});
 }

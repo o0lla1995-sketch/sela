@@ -138,7 +138,11 @@ const DDL_STATEMENTS: string[] = [
     -- return reverses ('cash' | 'sila' | 'local'). Lets the report
     -- queries net the debt buckets by the return's OWN period.
     return_kind TEXT
-      CHECK (return_kind IS NULL OR return_kind IN ('cash','sila','local'))
+      CHECK (return_kind IS NULL OR return_kind IN ('cash','sila','local')),
+    -- v59 (الجولة 63): مرجع عملية الكاشير الفريد (ميزة العمل دون
+    -- اتصال) — NULL لكل فواتير نقطة البيع؛ فهرس فريد جزئي في
+    -- الترحيل v29 يمنع ازدواج أي عملية مزامنة مهما تكرر إرسالها.
+    client_ref TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS sale_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -454,6 +458,8 @@ const DDL_STATEMENTS: string[] = [
     display_name TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 1,
     max_discount_pct REAL NOT NULL DEFAULT 10,
+    can_debt INTEGER NOT NULL DEFAULT 1,
+    can_return INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     last_seen_at TEXT
   )`,
@@ -1888,6 +1894,56 @@ async function applyMigrations(database: DB): Promise<void> {
       'CREATE INDEX IF NOT EXISTS idx_landev_status ON lan_devices(status, cashier_id)',
     );
     version = 28;
+  }
+
+  if (version < 29) {
+    // ── v59 (الجولة 63): مزامنة العمل دون اتصال + صلاحيات الكاشير ──
+    // ① sales.client_ref: مرجع فريد من جهاز الكاشير لكل عملية —
+    //    إعادة إرسال دفعة المزامنة لا تُسجّل الفاتورة مرتين أبداً.
+    //    فهرس فريد جزئي (NULL للفواتير العادية — مليون صف بلا تعارض).
+    // ② sale_returns.client_ref: نفس الميزة للمرتجعات والاستبدال.
+    // ③ lan_cashiers.can_debt / can_return: صلاحيات المدير لكل كاشير
+    //    (السماح/إغلاق البيع بالدين والمرتجعات) — تُفرض في LanHandlers.
+    const salesRef = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sales') WHERE name = 'client_ref'",
+    );
+    const salesRefRows = (salesRef.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(salesRefRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE sales ADD COLUMN client_ref TEXT',
+      );
+    }
+    await database.execute(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_ref
+         ON sales(client_ref) WHERE client_ref IS NOT NULL`,
+    );
+    const retRef = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sale_returns') WHERE name = 'client_ref'",
+    );
+    const retRefRows = (retRef.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(retRefRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE sale_returns ADD COLUMN client_ref TEXT',
+      );
+    }
+    await database.execute(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_returns_client_ref
+         ON sale_returns(client_ref) WHERE client_ref IS NOT NULL`,
+    );
+    const cashCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('lan_cashiers') WHERE name = 'can_debt'",
+    );
+    const cashRows = (cashCols.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(cashRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE lan_cashiers ADD COLUMN can_debt INTEGER NOT NULL DEFAULT 1',
+      );
+      await database.execute(
+        'ALTER TABLE lan_cashiers ADD COLUMN can_return INTEGER NOT NULL DEFAULT 1',
+      );
+    }
+    logDiag('db', 'ترحيل v29: مرجع العميل للفواتير + صلاحيات الكاشير');
+    version = 29;
   }
 
   if (version !== storedVersion) {

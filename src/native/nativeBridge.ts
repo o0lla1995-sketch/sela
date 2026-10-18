@@ -302,6 +302,8 @@ interface LanServerNativeModule {
   isRunning(): Promise<boolean>;
   setStoreName(name: string): void;
   respond(id: string, status: number, body: string): void;
+  /** v59: عنوان IP المحلي (لعرض رمز QR للاتصال السريع). */
+  localIp(): Promise<string | null>;
 }
 
 export const LanServerNative: MaybeModule<LanServerNativeModule> =

@@ -1,9 +1,15 @@
 /**
- * CashiersRepo — v58 (الجولة 62): حسابات الكاشيرين على الشبكة المحلية.
+ * CashiersRepo — v59 (الجولة 63): حسابات الكاشيرين على الشبكة المحلية.
  * ─────────────────────────────────────────────────────────────────
  * المدير في نقطة البيع ينشئ حساباً (اسم مستخدم + كلمة مرور + اسم
  * معروض) لكل كاشير، ويقرر السماح له أو لا (is_active)، ويربط بكل
  * حساب سقف خصم خاصاً به (max_discount_pct).
+ *
+ * v59 (الجولة 63) — صلاحيات دقيقة لكل كاشير (طلب التاجر حرفياً):
+ *  • can_debt: السماح له بالبيع بالدين من دفتر المتجر أو إغلاقه.
+ *  • can_return: السماح له بالمرتجعات والاستبدال أو إغلاقها.
+ * تُفرض داخل LanHandlers (الخادم يرفض العملية إن كانت مغلقة) وتُرسل
+ * لتطبيق الكاشير عند الدخول فيخفي أزرارها أصلاً.
  *
  * كل جهاز كاشير يتصل أول مرة يُسجَّل pending بانتظار موافقة المدير
  * («اسمح أو لا تسمح») — بعد الموافقة يُصدر له رمز جلسة (token)
@@ -24,6 +30,10 @@ export interface CashierRecord {
   display_name: string;
   is_active: number;
   max_discount_pct: number;
+  /** v59: هل يُسمح له بالبيع بالدين (دفتر المتجر). */
+  can_debt: number;
+  /** v59: هل يُسمح له بالمرتجعات والاستبدال. */
+  can_return: number;
   created_at: string;
   last_seen_at: string | null;
 }
@@ -48,6 +58,46 @@ export interface CashierStats {
   returnsCount: number;
   returnsTotal: number;
   netTotal: number;
+}
+
+/** v59 (الجولة 63): التقرير التفصيلي الكامل لكاشير واحد — يُفلتر
+ *  زمنياً (from/to) ويُطبع حرارياً من شاشة تقرير الكاشير. */
+export interface CashierDetailedReport {
+  cashierId: number;
+  from: string | null;
+  to: string | null;
+  salesCount: number;
+  salesTotal: number;
+  debtCount: number;
+  debtTotal: number;
+  cashCount: number;
+  cashTotal: number;
+  discountTotal: number;
+  profitTotal: number;
+  returnsCount: number;
+  returnsTotal: number;
+  netTotal: number;
+  daily: {
+    day: string;
+    count: number;
+    salesTotal: number;
+    returnsTotal: number;
+  }[];
+  topProducts: {
+    productId: number;
+    name: string;
+    qty: number;
+    total: number;
+  }[];
+  invoices: {
+    id: number;
+    number: string;
+    total: number;
+    discount: number;
+    createdAt: string;
+    kind: 'cash' | 'debt' | 'return';
+    itemCount: number;
+  }[];
 }
 
 /** عشوائية آمنة داخل RN: إنتروبيا الوقت + Math.random تُمرَّر عبر
@@ -92,6 +142,8 @@ function rowToCashier(row: Record<string, unknown>): CashierRecord {
     display_name: String(row.display_name ?? ''),
     is_active: Number(row.is_active ?? 1),
     max_discount_pct: Number(row.max_discount_pct ?? 10),
+    can_debt: row.can_debt == null ? 1 : Number(row.can_debt),
+    can_return: row.can_return == null ? 1 : Number(row.can_return),
     created_at: String(row.created_at ?? ''),
     last_seen_at: row.last_seen_at ? String(row.last_seen_at) : null,
   };
@@ -118,6 +170,8 @@ export const CashiersRepo = {
     password: string;
     displayName: string;
     maxDiscountPct?: number;
+    canDebt?: boolean;
+    canReturn?: boolean;
   }): Promise<number> {
     const username = input.username.trim().toLowerCase();
     if (!username) {
@@ -129,14 +183,17 @@ export const CashiersRepo = {
     const salt = shaHex(`${username}:${Date.now()}:${Math.random()}`);
     const result = await getDb().execute(
       `INSERT INTO lan_cashiers
-        (username, password_hash, salt, display_name, is_active, max_discount_pct, created_at)
-       VALUES (?, ?, ?, ?, 1, ?, ?)`,
+        (username, password_hash, salt, display_name, is_active, max_discount_pct,
+         can_debt, can_return, created_at)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`,
       [
         username,
         hashPin(input.password, salt),
         salt,
         input.displayName.trim() || username,
         Math.max(0, Math.min(95, Number(input.maxDiscountPct ?? 10))),
+        input.canDebt === false ? 0 : 1,
+        input.canReturn === false ? 0 : 1,
         localNow(),
       ],
     );
@@ -151,10 +208,24 @@ export const CashiersRepo = {
       displayName?: string;
       isActive?: number;
       maxDiscountPct?: number;
+      canDebt?: boolean;
+      canReturn?: boolean;
       password?: string;
     },
   ): Promise<void> {
     const db = getDb();
+    if (patch.canDebt != null) {
+      await db.execute(
+        'UPDATE lan_cashiers SET can_debt = ? WHERE id = ?',
+        [patch.canDebt ? 1 : 0, id],
+      );
+    }
+    if (patch.canReturn != null) {
+      await db.execute(
+        'UPDATE lan_cashiers SET can_return = ? WHERE id = ?',
+        [patch.canReturn ? 1 : 0, id],
+      );
+    }
     if (patch.displayName != null) {
       await db.execute(
         'UPDATE lan_cashiers SET display_name = ? WHERE id = ?',
@@ -393,6 +464,144 @@ export const CashiersRepo = {
     return ((result.rows ?? []) as Record<string, unknown>[]).map(
       rowToDevice,
     );
+  },
+
+  /** v59 (الجولة 63): التقرير التفصيلي لكل كاشير — فلترة زمنية
+   *  (from/to بتاريخ YYYY-MM-DD أو null للكل)، يغذّي شاشة تقرير
+   *  الكاشير وطباعتها الحرارية في نقطة البيع (أندرويد وسطح المكتب).
+   *
+   *  الدين يُعرف بسلسلة INV-L (بيع دفتر المتجر) — نفس تمييز
+   *  التقارير الرئيسية؛ المرتجعات صفوف RET- السالبة كالمعتاد.
+   */
+  async detailedReport(
+    cashierId: number,
+    from: string | null,
+    to: string | null,
+  ): Promise<CashierDetailedReport> {
+    const db = getDb();
+    const range: string[] = [String(cashierId)];
+    let where = 's.cashier_id = ?';
+    if (from) {
+      where += ' AND substr(s.created_at, 1, 10) >= ?';
+      range.push(from);
+    }
+    if (to) {
+      where += ' AND substr(s.created_at, 1, 10) <= ?';
+      range.push(to);
+    }
+
+    const totals = await db.execute(
+      `SELECT
+         COUNT(*) AS cnt,
+         COALESCE(SUM(total_amount), 0) AS total,
+         SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN 1 ELSE 0 END) AS debt_cnt,
+         SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN total_amount ELSE 0 END) AS debt_total,
+         SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN 0 ELSE 1 END) AS cash_cnt,
+         SUM(CASE WHEN invoice_number LIKE 'INV-L-%' THEN 0 ELSE total_amount END) AS cash_total,
+         COALESCE(SUM(discount), 0) AS discount_total,
+         COALESCE(SUM(total_profit), 0) AS profit_total
+       FROM sales s
+       WHERE ${where} AND invoice_number NOT LIKE 'RET-%'`,
+      range,
+    );
+    const returns = await db.execute(
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(total_amount), 0) AS total
+       FROM sales s
+       WHERE ${where} AND invoice_number LIKE 'RET-%'`,
+      range,
+    );
+    const t =
+      ((totals.rows ?? []) as Record<string, unknown>[])[0] ?? {};
+    const r =
+      ((returns.rows ?? []) as Record<string, unknown>[])[0] ?? {};
+
+    const daily = await db.execute(
+      `SELECT substr(s.created_at, 1, 10) AS day,
+              COUNT(*) AS cnt,
+              SUM(CASE WHEN s.invoice_number NOT LIKE 'RET-%' THEN s.total_amount ELSE 0 END) AS sales_total,
+              SUM(CASE WHEN s.invoice_number LIKE 'RET-%' THEN s.total_amount ELSE 0 END) AS returns_total
+       FROM sales s
+       WHERE ${where}
+       GROUP BY day
+       ORDER BY day DESC
+       LIMIT 62`,
+      range,
+    );
+    const top = await db.execute(
+      `SELECT si.product_id,
+              MAX(COALESCE(p.name, si.unit_name, '#')) AS name,
+              SUM(si.quantity) AS qty,
+              SUM(si.total_line_price) AS total
+       FROM sale_items si
+       JOIN sales s ON s.id = si.sale_id
+       LEFT JOIN products p ON p.id = si.product_id
+       WHERE ${where} AND s.invoice_number NOT LIKE 'RET-%'
+       GROUP BY si.product_id
+       ORDER BY total DESC
+       LIMIT 10`,
+      range,
+    );
+    const invoices = await db.execute(
+      `SELECT s.id, s.invoice_number, s.total_amount, s.discount,
+              s.created_at,
+              CASE
+                WHEN s.invoice_number LIKE 'RET-%' THEN 'return'
+                WHEN s.invoice_number LIKE 'INV-L-%' THEN 'debt'
+                ELSE 'cash'
+              END AS kind,
+              (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
+       FROM sales s
+       WHERE ${where}
+       ORDER BY s.id DESC
+       LIMIT 400`,
+      range,
+    );
+
+    const salesTotal = Number(t.total ?? 0);
+    const returnsTotal = Number(r.total ?? 0);
+    return {
+      cashierId,
+      from,
+      to,
+      salesCount: Number(t.cnt ?? 0),
+      salesTotal,
+      debtCount: Number(t.debt_cnt ?? 0),
+      debtTotal: Number(t.debt_total ?? 0),
+      cashCount: Number(t.cash_cnt ?? 0),
+      cashTotal: Number(t.cash_total ?? 0),
+      discountTotal: Number(t.discount_total ?? 0),
+      profitTotal: Number(t.profit_total ?? 0),
+      returnsCount: Number(r.cnt ?? 0),
+      returnsTotal,
+      netTotal: salesTotal + returnsTotal,
+      daily: ((daily.rows ?? []) as Record<string, unknown>[]).map(
+        row => ({
+          day: String(row.day ?? ''),
+          count: Number(row.cnt ?? 0),
+          salesTotal: Number(row.sales_total ?? 0),
+          returnsTotal: Number(row.returns_total ?? 0),
+        }),
+      ),
+      topProducts: ((top.rows ?? []) as Record<string, unknown>[]).map(
+        row => ({
+          productId: Number(row.product_id ?? 0),
+          name: String(row.name ?? ''),
+          qty: Number(row.qty ?? 0),
+          total: Number(row.total ?? 0),
+        }),
+      ),
+      invoices: ((invoices.rows ?? []) as Record<string, unknown>[]).map(
+        row => ({
+          id: Number(row.id),
+          number: String(row.invoice_number ?? ''),
+          total: Number(row.total_amount ?? 0),
+          discount: Number(row.discount ?? 0),
+          createdAt: String(row.created_at ?? ''),
+          kind: String(row.kind ?? 'cash') as 'cash' | 'debt' | 'return',
+          itemCount: Number(row.item_count ?? 0),
+        }),
+      ),
+    };
   },
 
   /** إحصاءات كاشير: مبيعاته ومرتجعاته (صفوف RET السالبة) —

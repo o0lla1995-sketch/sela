@@ -20,10 +20,16 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import QRCode from 'react-native-qrcode-svg';
+import {useNavigation} from '@react-navigation/native';
+import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
+import type {RootStackParamList} from '../../navigation/RootNavigator';
+import {Icon} from '../../components/Icon';
 import {
   AppButton,
   AppHeader,
@@ -41,6 +47,7 @@ import {
   type CashierStats,
 } from '../../database/repositories/CashiersRepo';
 import {LanServerService} from '../../services/lan/LanServerService';
+import {LanServerNative} from '../../native/nativeBridge';
 import {useLanStore} from '../../stores/lanStore';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {useToastStore} from '../../stores/toastStore';
@@ -64,6 +71,8 @@ function deviceOnline(device: CashierDeviceRecord): boolean {
 export function CashiersScreen() {
   const c = useThemeColors();
   const styles = useStyles();
+  const navigation =
+    useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const toast = useToastStore(state => state.show);
   const settings = useSettingsStore(state => state.settings);
   const updateSettings = useSettingsStore(state => state.update);
@@ -79,6 +88,32 @@ export function CashiersScreen() {
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [editing, setEditing] = useState<CashierRecord | null>(null);
+  const [localIp, setLocalIp] = useState<string | null>(null);
+  const [qrOpen, setQrOpen] = useState(false);
+
+  // v59: عنوان IP المحلي لعرضه مع رمز QR للاتصال السريع.
+  useEffect(() => {
+    if (!lanRunning) {
+      setLocalIp(null);
+      return;
+    }
+    let alive = true;
+    const fetchIp = () => {
+      LanServerNative?.localIp()
+        .then(ip => {
+          if (alive) {
+            setLocalIp(ip);
+          }
+        })
+        .catch(() => undefined);
+    };
+    fetchIp();
+    const timer = setInterval(fetchIp, 10000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [lanRunning]);
 
   const refresh = useCallback(async () => {
     try {
@@ -199,6 +234,29 @@ export function CashiersScreen() {
     [refresh, toast],
   );
 
+  // v59: تبديل صلاحيات الكاشير (الدين / المرتجعات) من بطاقته مباشرة.
+  const togglePerm = useCallback(
+    async (cashier: CashierRecord, perm: 'debt' | 'returns') => {
+      const patch =
+        perm === 'debt'
+          ? {canDebt: cashier.can_debt !== 1}
+          : {canReturn: cashier.can_return !== 1};
+      await CashiersRepo.updateCashier(cashier.id, patch);
+      toast(
+        perm === 'debt'
+          ? patch.canDebt
+            ? `فُتح البيع بالدين لـ ${cashier.display_name}`
+            : `أُغلق البيع بالدين لـ ${cashier.display_name}`
+          : patch.canReturn
+          ? `فُتحت المرتجعات لـ ${cashier.display_name}`
+          : `أُغلقت المرتجعات لـ ${cashier.display_name}`,
+        'info',
+      );
+      void refresh();
+    },
+    [refresh, toast],
+  );
+
   return (
     <Screen>
       <AppHeader
@@ -248,6 +306,28 @@ export function CashiersScreen() {
             إرجاع من الكاشير تُسجَّل هنا لحظياً في الفواتير والخزينة
             والديون باسمه.
           </Text>
+          {lanRunning ? (
+            <Pressable
+              style={styles.qrTile}
+              onPress={() => setQrOpen(true)}>
+              <View style={styles.qrIconChip}>
+                <Icon name="qr" size={26} color={c.accent} />
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={styles.qrTileTitle}>اتصال سريع بباركود</Text>
+                <Text style={styles.qrTileSub}>
+                  {localIp
+                    ? `${localIp}:${settings.lanPort ?? 8950} — امسح الرمز من تطبيق الكاشير للاتصال فوراً`
+                    : 'اعرض رمز QR ليتصل تطبيق الكاشير بلا إدخال يدوي'}
+                </Text>
+              </View>
+              <Icon
+                name="chevronLeft"
+                size={18}
+                color={c.textFaint}
+              />
+            </Pressable>
+          ) : null}
         </Card>
 
         {/* ② طلبات اتصال معلقة */}
@@ -324,6 +404,50 @@ export function CashiersScreen() {
                   label={cashier.is_active === 1 ? 'مسموح' : 'ممنوع'}
                   tone={cashier.is_active === 1 ? 'success' : 'danger'}
                 />
+              </View>
+
+              {/* v59: صلاحيات الكاشير — دين ومرتجعات (طلب التاجر) */}
+              <View style={styles.permRow}>
+                <Pressable
+                  style={[
+                    styles.permChip,
+                    cashier.can_debt === 1 ? styles.permChipOn : null,
+                  ]}
+                  onPress={() => void togglePerm(cashier, 'debt')}>
+                  <Icon
+                    name="tag"
+                    size={15}
+                    color={cashier.can_debt === 1 ? c.success : c.textFaint}
+                  />
+                  <Text
+                    style={[
+                      styles.permText,
+                      cashier.can_debt === 1 ? {color: c.success} : null,
+                    ]}>
+                    {cashier.can_debt === 1 ? 'الدين مفتوح' : 'الدين مغلق'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.permChip,
+                    cashier.can_return === 1 ? styles.permChipOn : null,
+                  ]}
+                  onPress={() => void togglePerm(cashier, 'returns')}>
+                  <Icon
+                    name="undo"
+                    size={15}
+                    color={cashier.can_return === 1 ? c.success : c.textFaint}
+                  />
+                  <Text
+                    style={[
+                      styles.permText,
+                      cashier.can_return === 1 ? {color: c.success} : null,
+                    ]}>
+                    {cashier.can_return === 1
+                      ? 'المرتجعات مفتوحة'
+                      : 'المرتجعات مغلقة'}
+                  </Text>
+                </Pressable>
               </View>
 
               <View style={styles.statsRow}>
@@ -430,6 +554,17 @@ export function CashiersScreen() {
                   onPress={() => removeCashier(cashier)}
                 />
               </View>
+              <AppButton
+                title="التقرير التفصيلي للكاشير"
+                icon="chart"
+                variant="ghost"
+                small
+                onPress={() =>
+                  navigation.navigate('CashierReport', {
+                    cashierId: cashier.id,
+                  })
+                }
+              />
             </Card>
           ))
         )}
@@ -453,6 +588,45 @@ export function CashiersScreen() {
             void refresh();
           }}
         />
+      ) : null}
+      {qrOpen && localIp ? (
+        <Modal
+          transparent
+          visible
+          animationType="fade"
+          onRequestClose={() => setQrOpen(false)}>
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => setQrOpen(false)}>
+            <Pressable style={styles.qrCard} onPress={() => undefined}>
+              <Text style={styles.modalTitle}>اتصال سريع بباركود</Text>
+              <Text style={styles.qrHint}>
+                من تطبيق «سيلّا كاشير» اختر «مسح باركود الاتصال» ووجّه
+                الكاميرا إلى هذا الرمز — يتصل بالمتجر فوراً بلا إدخال يدوي.
+              </Text>
+              <View style={styles.qrWrap}>
+                <QRCode
+                  value={`sela-cashier://${localIp}:${settings.lanPort ?? 8950}`}
+                  size={210}
+                  backgroundColor="#FFFFFF"
+                  color="#17171D"
+                />
+              </View>
+              <Text style={styles.qrAddress}>
+                {localIp}:{settings.lanPort ?? 8950}
+              </Text>
+              <Text style={styles.dim}>
+                كذلك يظهر متجرك تلقائياً في بحث الشبكة داخل تطبيق الكاشير
+              </Text>
+              <AppButton
+                title="إغلاق"
+                variant="ghost"
+                small
+                onPress={() => setQrOpen(false)}
+              />
+            </Pressable>
+          </Pressable>
+        </Modal>
       ) : null}
     </Screen>
   );
@@ -552,6 +726,12 @@ function CashierFormModal({
   const [maxDiscount, setMaxDiscount] = useState(
     String(cashier?.max_discount_pct ?? 10),
   );
+  const [canDebt, setCanDebt] = useState(
+    cashier ? cashier.can_debt === 1 : true,
+  );
+  const [canReturn, setCanReturn] = useState(
+    cashier ? cashier.can_return === 1 : true,
+  );
   const [busy, setBusy] = useState(false);
 
   const isEdit = cashier != null;
@@ -567,6 +747,8 @@ function CashierFormModal({
         await CashiersRepo.updateCashier(cashier.id, {
           displayName: displayName.trim() || cashier.display_name,
           maxDiscountPct: Number(maxDiscount) || 0,
+          canDebt,
+          canReturn,
           ...(password.length >= 4 ? {password} : {}),
         });
         toast('حُدِّث حساب الكاشير', 'success');
@@ -604,6 +786,8 @@ function CashierFormModal({
         password,
         displayName,
         maxDiscountPct: Number(maxDiscount) || 0,
+        canDebt,
+        canReturn,
       });
       toast(
         'أُنشئ حساب الكاشير — أعطه الاسم وكلمة المرور لتسجيل الدخول',
@@ -670,6 +854,34 @@ function CashierFormModal({
             numeric
             suffix="%"
           />
+          <View style={{gap: 8, marginTop: 4}}>
+            <View style={styles.permSwitchRow}>
+              <Text
+                style={{
+                  color: c.text,
+                  fontFamily: fonts.medium,
+                  fontSize: typography.small + 1,
+                  textAlign: 'right',
+                  flex: 1,
+                }}>
+                السماح بالبيع بالدين (دفتر المتجر)
+              </Text>
+              <Switch value={canDebt} onValueChange={setCanDebt} />
+            </View>
+            <View style={styles.permSwitchRow}>
+              <Text
+                style={{
+                  color: c.text,
+                  fontFamily: fonts.medium,
+                  fontSize: typography.small + 1,
+                  textAlign: 'right',
+                  flex: 1,
+                }}>
+                السماح بالمرتجعات والاستبدال
+              </Text>
+              <Switch value={canReturn} onValueChange={setCanReturn} />
+            </View>
+          </View>
           <View style={styles.actionRow}>
             <AppButton
               title="إلغاء"
@@ -782,6 +994,98 @@ const useStyles = makeStyles(c =>
       marginTop: spacing.xs,
     },
     actionRowTiny: {flexDirection: 'row-reverse', gap: spacing.xs},
+    permSwitchRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surfaceHi,
+      borderRadius: 10,
+      padding: spacing.sm + 2,
+    },
+    qrTile: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.accentSofter,
+      borderWidth: 1,
+      borderColor: c.accentSoft,
+      borderRadius: 12,
+      padding: spacing.md,
+      marginTop: spacing.xs,
+    },
+    qrIconChip: {
+      width: 46,
+      height: 46,
+      borderRadius: 12,
+      backgroundColor: c.surfaceHi,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    qrTileTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small + 1,
+      textAlign: 'right',
+    },
+    qrTileSub: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 2,
+      textAlign: 'right',
+      lineHeight: 17,
+      marginTop: 1,
+    },
+    permRow: {
+      flexDirection: 'row-reverse',
+      gap: spacing.sm,
+    },
+    permChip: {
+      flex: 1,
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 10,
+      paddingVertical: 8,
+      backgroundColor: c.surfaceHi,
+    },
+    permChipOn: {
+      borderColor: c.successSoft,
+      backgroundColor: c.successSoft,
+    },
+    permText: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: typography.micro + 2,
+    },
+    qrWrap: {
+      backgroundColor: '#FFFFFF',
+      borderRadius: 14,
+      padding: spacing.md,
+      alignSelf: 'center',
+    },
+    qrCard: {
+      backgroundColor: c.surface,
+      borderRadius: 16,
+      padding: spacing.lg,
+      gap: spacing.md,
+      maxHeight: '88%',
+    },
+    qrHint: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'right',
+      lineHeight: 19,
+    },
+    qrAddress: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+      textAlign: 'center',
+    },
     modalBackdrop: {
       flex: 1,
       backgroundColor: 'rgba(0,0,0,0.55)',

@@ -100,7 +100,10 @@ export type IconName =
   /** v40 (الجولة 48 #5): أشكال عرض المنتجات في نقطة البيع. */
   | 'layoutGrid'
   | 'layoutList'
-  | 'layoutCards';
+  | 'layoutCards'
+  /** v59 (الجولة 63): فاتورة للقراءة + رمز QR للاتصال السريع. */
+  | 'receipt'
+  | 'qr';
 
 interface IconProps {
   name: IconName;
@@ -578,6 +581,23 @@ const P: Record<IconName, React.ReactNode> = {
       <Path d="M3.5 7.5h17" />
       <Path d="M5 7.5v11a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5v-11" />
       <Path d="M9.5 11.5h5" />
+    </G>
+  ),
+  receipt: (
+    <G>
+      <Path d="M6 3.5h12v17l-2.4-1.6-2.4 1.6-2.4-1.6L8.4 20.5 6 19z" />
+      <Path d="M9 8h6" />
+      <Path d="M9 11.5h6" />
+      <Path d="M9 15h3.5" />
+    </G>
+  ),
+  qr: (
+    <G>
+      <Path d="M4 4h6v6H4z" />
+      <Path d="M14 4h6v6h-6z" />
+      <Path d="M4 14h6v6H4z" />
+      <Path d="M14 14h2.5v2.5H14z" />
+      <Path d="M19.5 14H22M14 19.5V22M18 18h4v4h-4z" />
     </G>
   ),
   undo: (

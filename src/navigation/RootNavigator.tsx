@@ -26,6 +26,7 @@ import {InventoryScreen} from '../screens/inventory/InventoryScreen';
 import {ReportsScreen} from '../screens/reports/ReportsScreen';
 import {SettingsScreen} from '../screens/settings/SettingsScreen';
 import {CashiersScreen} from '../screens/settings/CashiersScreen';
+import {CashierReportScreen} from '../screens/reports/CashierReportScreen';
 import {ProductFormScreen} from '../screens/inventory/ProductFormScreen';
 import {StocktakeScreen} from '../screens/inventory/StocktakeScreen';
 import {StockAlertsScreen} from '../screens/inventory/StockAlertsScreen';
@@ -88,6 +89,13 @@ export type RootStackParamList = {
   /** v55 (الجولة 58): منتجات متجري أونلاين — إدارة المنتجات
    *  المدرجة للعرض في سيلا ماركت حصراً (إدراج/إلغاء/تعديل). */
   OnlineProducts: undefined;
+  /** v58 (الجولة 62): شاشة إدارة الكاشيرين على الشبكة المحلية —
+   *  كانت مسجلة في الـ Stack بلا مدخل في قائمة الأنواع (خطأ
+   *  ترويسة قديم عالٍ منذ v58). */
+  Cashiers: undefined;
+  /** v59 (الجولة 63): التقرير التفصيلي لحساب كاشير واحد —
+   *  فلترة زمنية وطباعة حرارية. */
+  CashierReport: {cashierId: number} | undefined;
 };
 
 export type MainTabParamList = {
@@ -219,6 +227,11 @@ export function RootNavigator() {
         <Stack.Screen name="LocalDebts" component={LocalDebtsScreen} />
         <Stack.Screen name="Security" component={SecuritySettingsScreen} />
         <Stack.Screen name="Cashiers" component={CashiersScreen} />
+        <Stack.Screen
+          name="CashierReport"
+          component={CashierReportScreen}
+          options={{animation: 'slide_from_bottom'}}
+        />
         {/* v25 (round-32 #3): الخزينة والمصروفات — from Reports. */}
         <Stack.Screen name="CashMovements" component={CashMovementsScreen} />
         <Stack.Screen name="DriveBackup" component={DriveBackupScreen} />

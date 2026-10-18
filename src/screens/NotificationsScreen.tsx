@@ -108,6 +108,12 @@ function kindMeta(kind: NotificationKind, c: Palette) {
       color: c.accent,
       label: 'طلب أونلاين',
     },
+  cashier: {
+    icon: 'user',
+    bg: 'infoSoftBg',
+    color: 'infoFg',
+    label: 'عمليات الكاشيرين',
+  },
   };
   return map[kind] ?? map.info;
 }

@@ -154,6 +154,39 @@ class LanServerModule(reactContext: ReactApplicationContext) :
     promise.resolve(running.get())
   }
 
+  /** v59 (الجولة 63): عنوان IP المحلي للجهاز على شبكة Wi-Fi —
+   *  يُعرض مع رمز QR للاتصال السريع في شاشة الكاشير. خدعة connect
+   *  على عنوان خارجي (بلا إرسال فعلي) تكشف واجهة المسار الافتراضي
+   *  بلا أي صلاحية إضافية؛ إن لم توجد شبكة نحاول تعداد الواجهات. */
+  @ReactMethod
+  fun localIp(promise: com.facebook.react.bridge.Promise) {
+    try {
+      java.net.DatagramSocket().use { socket ->
+        socket.connect(java.net.InetSocketAddress("8.8.8.8", 53))
+        val addr = socket.localAddress
+        if (addr != null && !addr.isAnyLocalAddress && !addr.isLoopbackAddress) {
+          promise.resolve(addr.hostAddress)
+          return
+        }
+      }
+    } catch (_: Exception) {
+    }
+    try {
+      val interfaces = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+      for (iface in interfaces) {
+        if (!iface.isUp || iface.isLoopback) continue
+        for (addr in java.util.Collections.list(iface.inetAddresses)) {
+          if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
+            promise.resolve(addr.hostAddress)
+            return
+          }
+        }
+      }
+    } catch (_: Exception) {
+    }
+    promise.resolve(null)
+  }
+
   @ReactMethod
   fun setStoreName(name: String) {
     storeName = name
