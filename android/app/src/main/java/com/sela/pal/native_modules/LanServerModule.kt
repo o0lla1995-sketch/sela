@@ -11,7 +11,7 @@ import java.io.BufferedWriter
 import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -95,7 +95,7 @@ class LanServerModule(reactContext: ReactApplicationContext) :
     try {
       val server = ServerSocket()
       server.reuseAddress = true
-      server.bind(InetAddress.getByName("0.0.0.0"), port)
+      server.bind(InetSocketAddress("0.0.0.0", port), port)
       serverSocket = server
       running.set(true)
 
