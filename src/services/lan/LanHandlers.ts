@@ -981,7 +981,8 @@ async function handleSale(
         total: sale.sale.total_amount,
         discount: sale.sale.discount,
         itemCount: lines.length,
-        createdAt: sale.sale.created_at,
+        // زمن البيع الفعلي (وقت العملية عند الكاشير إن وصل).
+        createdAt: clientCreatedAt || sale.sale.created_at,
       },
     });
   } catch (error) {
@@ -1110,7 +1111,20 @@ async function handleReturn(
   fromSync: boolean,
 ): Promise<LanResponseShape> {
   const body = parseBody(req.body);
-  const saleId = Number(body.saleId ?? 0);
+  // v59: مرتجع فاتورة أُجريت دون اتصال ولم تُزامَن بعد — يصل بمرجعها
+  // (clientRef) بدل رقمها؛ الخادم يحلها إلى فاتورتها الحقيقية (سبق
+  // أن زامنها نفس الدفعة بالتسلسل) أو يرفضها إن رُفض أصلها.
+  let saleId = Number(body.saleId ?? 0);
+  const saleClientRef = body.saleClientRef
+    ? String(body.saleClientRef).slice(0, 80)
+    : '';
+  if (!saleId && saleClientRef) {
+    const original = await saleByClientRef(saleClientRef);
+    if (!original) {
+      return fail(404, 'الفاتورة الأصلية غير مسجلة بعد — أعد المزامنة أولاً');
+    }
+    saleId = original.saleId;
+  }
   if (!saleId) {
     return fail(400, 'رقم الفاتورة مطلوب');
   }
