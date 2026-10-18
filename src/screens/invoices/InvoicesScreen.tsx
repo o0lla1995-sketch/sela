@@ -424,6 +424,16 @@ export function InvoicesScreen() {
                     <View style={styles.rowBadges}>
                       {/* v23 (round-29 #2): a return receipt — its badge
                           says which book it reversed. */}
+                      {/* v58 (الجولة 62): نسبة الفاتورة للكاشير — بيع
+                          من تطبيق سيلّا كاشير على الشبكة المحلية. */}
+                      {row.cashier_name ? (
+                        <View style={[styles.debtChip, styles.cashierChip]}>
+                          <Icon name="user" size={10} color={c.info} />
+                          <Text style={[styles.debtChipText, {color: c.info}]}>
+                            {row.cashier_name}
+                          </Text>
+                        </View>
+                      ) : null}
                       {isReturn ? (
                         <View style={[styles.debtChip, styles.returnChip]}>
                           <Icon name="undo" size={10} color={c.warning} />
@@ -3371,6 +3381,10 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.warningSoft,
     },
     returnChip: {backgroundColor: c.warningSoft},
+    cashierChip: {
+      borderColor: c.info,
+      backgroundColor: c.infoSoft,
+    },
     retDebtNote: {
       flexDirection: 'row',
       alignItems: 'flex-start',

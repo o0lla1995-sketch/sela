@@ -79,10 +79,10 @@ describe('v33 #4 — أنماط المتجر', () => {
 
   test('لكل نمط: أصناف ووحدات وطريقة بيع وسلوك أقسام', () => {
     const src = read(MODES);
-    expect(src.match(/categorySeeds: \[/g)?.length).toBe(6);
-    expect(src.match(/unitSeeds: \[/g)?.length).toBe(6);
-    expect(src.match(/    defaultSaleMode: '/g)?.length).toBe(6);
-    expect(src.match(/    saleModeSelector: /g)?.length).toBe(6);
+    expect(src.match(/categorySeeds: \[/g)?.length).toBe(7); // v58: نمط نقطة البيع السابع
+    expect(src.match(/unitSeeds: \[/g)?.length).toBe(7);
+    expect(src.match(/    defaultSaleMode: '/g)?.length).toBe(7);
+    expect(src.match(/    saleModeSelector: /g)?.length).toBe(7);
     // فواكه = وزن افتراضياً؛ مطعم/ملابس بلا مبدّل وزن.
     expect(src).toContain("defaultSaleMode: 'weight'");
   });

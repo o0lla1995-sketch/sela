@@ -13,7 +13,7 @@
  * ④ الاستطلاع: variant يُخزَّن مع كل سطر ويُعرض للتاجر.
  * ⑤ الإرسال: سطران للمنتج نفسه بخيارين مختلفين لا يطمس أحدهما
  *    الآخر (مفتاح يشمل الخيار + الاسم يحمله).
- * ⑥ الإصدار: 57.0.0 (65).
+ * ⑥ الإصدار: 58.0.0 (66).
  */
 import {freshApp, tempDb} from './helpers/app';
 import fs from 'fs';
@@ -163,12 +163,12 @@ describe('v50 — خيارات الشراء في سيلا ماركت', () => {
     expect(service).toContain('`${product.name} — ${variantTag}`');
   });
 
-  test('⑥ الإصدار: 57.0.0 (65) في config والبناء', () => {
+  test('⑥ الإصدار: 58.0.0 (66) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '57.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 65');
+    expect(config).toContain("APP_VERSION = '58.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 66');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "57.0.0"');
-    expect(gradle).toContain('versionCode 65');
+    expect(gradle).toContain('versionName "58.0.0"');
+    expect(gradle).toContain('versionCode 66');
   });
 });

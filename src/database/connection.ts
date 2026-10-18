@@ -439,6 +439,43 @@ const DDL_STATEMENTS: string[] = [
   )`,
   'CREATE INDEX IF NOT EXISTS idx_csettle_campaign ON campaign_settlements(campaign_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_csettle_status ON campaign_settlements(status, created_at)',
+  // ── v58 (الجولة 62): الكاشير على الشبكة المحلية ──────────────────
+  // حسابات الكاشيرين التي ينشئها المدير في نقطة البيع — كل كاشير
+  // يدخل باسم مستخدم وكلمة مرور من تطبيق سيلّا كاشير عبر الشبكة
+  // المحلية. كلمة المرور تُخزَّن SHA-512 مملّحة فقط (نفس أسلوب
+  // قفل التطبيق) — لا نص صريح أبداً. is_active = مفتاح السماح
+  // العام للمدير (يسمح/لا يسمح بالاتصال)، و max_discount_pct
+  // سقف الخصم الذي يجوز للكاشير منحه في فاتورته.
+  `CREATE TABLE IF NOT EXISTS lan_cashiers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    max_discount_pct REAL NOT NULL DEFAULT 10,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT
+  )`,
+  // أجهزة الكاشيرين: أول اتصال من جهاز جديد يُعلَّق بانتظار موافقة
+  // المدير (pending) — المدير يوافق أو يرفض من شاشة الكاشير في
+  // نقطة البيع؛ الجهاز الموافق عليه يظل موثوقاً برمز (token)
+  // حتى يُلغيه المدير. UNIQUE(cashier_id, device_id) يمنع تكرار
+  // سجل الجهاز نفسه لنفس الكاشير.
+  `CREATE TABLE IF NOT EXISTS lan_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cashier_id INTEGER NOT NULL REFERENCES lan_cashiers(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL,
+    device_label TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending','approved','denied')),
+    token TEXT,
+    ip TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    UNIQUE (cashier_id, device_id)
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_landev_status ON lan_devices(status, cashier_id)',
 ];
 
 const DEFAULT_CATEGORIES: string[] = [
@@ -1791,6 +1828,66 @@ async function applyMigrations(database: DB): Promise<void> {
       );
     }
     version = 27;
+  }
+
+  if (version < 28) {
+    // ── v58 (الجولة 62): الكاشير على الشبكة المحلية ──────────────
+    // ① نسب الفواتير لأصحابها: sales.cashier_id و sale_returns.cashier_id
+    //    (NULL = بيع نقطة البيع نفسها كما كان دائماً) — تُقرأ مع اسم
+    //    الكاشير في شاشات الفواتير والتقارير.
+    // ② جدولا حسابات الكاشيرين وأجهزتهم (أُنشئا في DDL للقواعد
+    //    الجديدة؛ يُنشآن هنا للقواعد القديمة).
+    const salesCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sales') WHERE name = 'cashier_id'",
+    );
+    const salesRows = (salesCols.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(salesRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE sales ADD COLUMN cashier_id INTEGER',
+      );
+      logDiag('db', 'ترحيل v28: أُضيف عمود كاشير الفاتورة');
+    }
+    const retCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sale_returns') WHERE name = 'cashier_id'",
+    );
+    const retRows = (retCols.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(retRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE sale_returns ADD COLUMN cashier_id INTEGER',
+      );
+    }
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS lan_cashiers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        max_discount_pct REAL NOT NULL DEFAULT 10,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT
+      )`,
+    );
+    await database.execute(
+      `CREATE TABLE IF NOT EXISTS lan_devices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cashier_id INTEGER NOT NULL REFERENCES lan_cashiers(id) ON DELETE CASCADE,
+        device_id TEXT NOT NULL,
+        device_label TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending','approved','denied')),
+        token TEXT,
+        ip TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT,
+        UNIQUE (cashier_id, device_id)
+      )`,
+    );
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_landev_status ON lan_devices(status, cashier_id)',
+    );
+    version = 28;
   }
 
   if (version !== storedVersion) {

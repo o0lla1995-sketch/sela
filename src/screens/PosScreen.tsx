@@ -38,6 +38,7 @@ import {
   Stepper,
 } from '../components/ui';
 import {Icon} from '../components/Icon';
+import {QuickProductSheet} from '../components/QuickProductSheet';
 import {
   useCartStore,
   cartTotals,
@@ -200,6 +201,8 @@ export function PosScreen({
   const embeddingsCount = useCatalogStore(state => state.embeddingsCount);
 
   const settings = useSettingsStore(state => state.settings);
+  // v58 (الجولة 62): الإضافة السريعة لمود «نقطة البيع».
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
   const updateSettings = useSettingsStore(state => state.update);
   const printerStatus = usePrinterStore(state => state.status);
   const toast = useToastStore(state => state.show);
@@ -2359,6 +2362,17 @@ export function PosScreen({
               />
               <Text style={styles.scanButtonText}>{scannerLabel}</Text>
             </TouchableOpacity>
+            {/* v58 (الجولة 62): مود نقطة البيع — زر إضافة سريعة
+                (سجائر بالحبة/العلبة/الغرام) بجانب زر المسح. */}
+            {settings.storeMode === 'pos' ? (
+              <TouchableOpacity
+                style={styles.quickAddBtn}
+                onPress={() => setQuickAddOpen(true)}
+                activeOpacity={0.8}
+                accessibilityLabel="إضافة منتج سريع">
+                <Icon name="plus" size={19} color={c.onAccent} />
+              </TouchableOpacity>
+            ) : null}
             <View style={{flex: 1}}>
               <SearchInput
                 value={search}
@@ -3942,6 +3956,12 @@ export function PosScreen({
           </View>
         </View>
       ) : null}
+
+      {/* v58 (الجولة 62): نافذة الإضافة السريعة لمود نقطة البيع. */}
+      <QuickProductSheet
+        visible={quickAddOpen}
+        onClose={() => setQuickAddOpen(false)}
+      />
     </View>
   );
 }
@@ -5055,6 +5075,16 @@ const useStyles = makeStyles(c =>
       color: c.onAccent,
       fontFamily: fonts.bold,
       fontSize: typography.caption,
+    },
+    quickAddBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      backgroundColor: c.success,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      height: 40,
     },
 
     // Full-screen scanner overlay (v7 — three-zone layout)

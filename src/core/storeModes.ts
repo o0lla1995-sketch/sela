@@ -74,7 +74,8 @@ export type StoreMode =
   | 'clothing'
   | 'pharmacy'
   | 'fruits'
-  | 'restaurant';
+  | 'restaurant'
+  | 'pos';
 
 export type UnitSeed = {name: string; short: string; kind: 'piece' | 'weight'};
 
@@ -475,6 +476,47 @@ export const STORE_MODES: StoreModeConfig[] = [
         'الطبق يُسعّر بالحصة (صحن/كوب) — وإن كان بأحجام (صغير/وسط/كبير) فعّل الأحجام وأدخل سعر كل حجم',
       baseUnitChoices: ['حصة', 'طبق', 'صحن', 'كوب'],
       sizeSeeds: ['صغير', 'وسط', 'كبير'],
+      untrackedStockDefault: true,
+    },
+  },
+  {
+    // v58 (الجولة 62): مود نقطة البيع — إضافة منتج عادي بلا أي
+    // تفاصيل ولا صلاحيات: اسم وسعر ووحدة بيع (حبة/علبة/كرتونة أو
+    // غرام). حالة الاستخدام الأولى: السجائر — أغلب البائعين
+    // يبيعونها بالحبة المفردة أو بالعلبة (فيها عدد من السجائر)
+    // أو بالوزن غرامات. نموذج الإضافة السريعة (QuickProductSheet)
+    // يبني المنتج ووحداته في ثوانٍ: حبة=1، علبة=عدد الحبات،
+    // كرتونة=عدد العلب × الحبات، والغرام وحدة وزنية 0.001.
+    key: 'pos',
+    label: 'نقطة البيع (سريع)',
+    icon: 'tag',
+    blurb: 'إضافة سريعة بلا تفاصيل — سجائر بالحبة والعلبة والكرتونة أو بالغرام',
+    categorySeeds: ['سجائر وتبغ', 'بيع سريع', 'متفرقات'],
+    unitSeeds: [
+      {name: 'حبة', short: 'حبة', kind: 'piece'},
+      {name: 'علبة', short: 'علبة', kind: 'piece'},
+      {name: 'كرتونة', short: 'كرتونة', kind: 'piece'},
+      {name: 'غرام', short: 'غ', kind: 'weight'},
+    ],
+    defaultSaleMode: 'piece',
+    saleModeSelector: false,
+    expiry: 'hidden',
+    receiving: false,
+    receivingByContainer: false,
+    receivingByBag: false,
+    barcode: false,
+    vision: false,
+    productCopy: {
+      nameLabel: 'اسم المنتج',
+      nameHint: 'مثال: مارلبورو، كنت، تبغ شبه',
+      visualLabel: 'صورة المنتج',
+      visualHint: 'اختياري تماماً — هذا المود للسرعة',
+      costLabel: 'سعر التكلفة (₪)',
+      retailLabel: 'سعر البيع (₪)',
+      wholesaleLabel: null,
+      priceHint:
+        'أدخل سعر الحبة وعدد الحبات بالعلبة — أسعار العلبة والكرتونة تُشتق تلقائياً',
+      baseUnitChoices: ['حبة', 'علبة'],
       untrackedStockDefault: true,
     },
   },

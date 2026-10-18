@@ -761,6 +761,14 @@ export function SettingsScreen() {
             hint="فتح سيلا بالبصمة أو برمز من 4 أرقام عند التشغيل"
             onPress={() => navigation.navigate('Security' as never)}
           />
+          {/* v58 (الجولة 62): كاشير الشبكة المحلية — الحسابات
+              والأجهزة والموافقات. */}
+          <SettingRow
+            icon="user"
+            label="الكاشير على الشبكة المحلية"
+            hint="حسابات الكاشيرين وأجهزتهم والموافقة على اتصالها"
+            onPress={() => navigation.navigate('Cashiers' as never)}
+          />
         </Card>
 
         {/* ── v11 (SILA): merchant account linking + debts ────── */}

@@ -217,11 +217,28 @@ export const APP_NAME_AR = 'سيلا';
  * and in the release APK file name. Keep in sync with
  * android/app/build.gradle versionName/versionCode.
  */
-export const APP_VERSION = '57.0.0';
+export const APP_VERSION = '58.0.0';
 /** Android versionCode (build number) — bump on EVERY release. */
-export const APP_BUILD_CODE = 65;
+export const APP_BUILD_CODE = 66;
 /** Human-readable version with build number, e.g. "6.0.0 (7)". */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
+
+// ─────────────────────────────────────────────────────────────
+// v58 (الجولة 62): الكاشير على الشبكة المحلية (سيلّا كاشير)
+// ─────────────────────────────────────────────────────────────
+
+/** منفذ خادم HTTP الافتراضي لتطبيق الكاشير. */
+export const LAN_DEFAULT_PORT = 8950;
+/** منفذ بث الاستكشاف (UDP) — تطبيق الكاشير يبث عليه طلباً وترد
+ *  نقطة البيع ببطاقة تعريفها (الاسم/المنفذ). */
+export const LAN_DISCOVERY_PORT = 8951;
+/** نص طلب الاستكشاف — أي حزمة UDP بهذا النص على منفذ الاستكشاف
+ *  تُقابل ببطاقة JSON. */
+export const LAN_DISCOVERY_MAGIC = 'SELA_POS_DISCOVER_v1';
+/** مهلة انتظار رد JS على طلب HTTP واحد قبل الرد 503. */
+export const LAN_REQUEST_TIMEOUT_MS = 30000;
+/** عمر «متصل الآن» — آخر ظهور للجهاز خلال هذه المهلة يُعد متصلاً. */
+export const LAN_ONLINE_WINDOW_MS = 30000;
 
 // ─────────────────────────────────────────────────────────────
 // Subscription / licensing

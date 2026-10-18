@@ -66,6 +66,12 @@ export interface AppSettings {
   /** v40 (الجولة 48 #5): شكل عرض المنتجات في نقطة البيع — الشبكة
    *  الحالية هي الافتراض. */
   posProductView: PosProductView;
+  /** v58 (الجولة 62): تشغيل خادم الشبكة المحلية لتطبيق سيلّا
+   *  كاشير — يسمح لأجهزة الكاشيرين المعتمدين بالاتصال والبيع
+   *  باسمهم من نفس الشبكة. مطفأ افتراضياً. */
+  lanServerEnabled: boolean;
+  /** v58: منفذ خادم الكاشير (HTTP) — 8950 افتراضياً. */
+  lanPort: number;
 }
 
 const DEFAULTS: AppSettings = {
@@ -94,6 +100,8 @@ const DEFAULTS: AppSettings = {
   expiryAlertDays: DEFAULT_EXPIRY_ALERT_DAYS,
   systemNotificationsEnabled: true,
   posProductView: 'grid',
+  lanServerEnabled: false,
+  lanPort: 8950,
 };
 
 interface SettingsState {

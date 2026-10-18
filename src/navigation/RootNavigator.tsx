@@ -25,6 +25,7 @@ import {PosScreen} from '../screens/PosScreen';
 import {InventoryScreen} from '../screens/inventory/InventoryScreen';
 import {ReportsScreen} from '../screens/reports/ReportsScreen';
 import {SettingsScreen} from '../screens/settings/SettingsScreen';
+import {CashiersScreen} from '../screens/settings/CashiersScreen';
 import {ProductFormScreen} from '../screens/inventory/ProductFormScreen';
 import {StocktakeScreen} from '../screens/inventory/StocktakeScreen';
 import {StockAlertsScreen} from '../screens/inventory/StockAlertsScreen';
@@ -217,6 +218,7 @@ export function RootNavigator() {
         <Stack.Screen name="Sila" component={SilaScreen} />
         <Stack.Screen name="LocalDebts" component={LocalDebtsScreen} />
         <Stack.Screen name="Security" component={SecuritySettingsScreen} />
+        <Stack.Screen name="Cashiers" component={CashiersScreen} />
         {/* v25 (round-32 #3): الخزينة والمصروفات — from Reports. */}
         <Stack.Screen name="CashMovements" component={CashMovementsScreen} />
         <Stack.Screen name="DriveBackup" component={DriveBackupScreen} />

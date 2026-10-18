@@ -28,6 +28,9 @@ export interface CreateSaleInput {
   /** Absolute discount in ₪ applied to the whole invoice. */
   discount: number;
   paymentType: PricingMode;
+  /** v58 (الجولة 62): الكاشير صاحب الفاتورة عبر الشبكة المحلية
+   *  (سيلّا كاشير) — null = بيع نقطة البيع نفسها (كما كان دائماً). */
+  cashierId?: number | null;
   /** v14 (round-20 #1/#2): when present the sale is a صِلة credit
    *  sale — the debt-queue row is inserted INSIDE the very same
    *  SQLite transaction as the invoice, its items and the stock
@@ -84,6 +87,12 @@ function rowToSale(row: Record<string, unknown>): SaleRecord {
     created_at: String(row.created_at ?? ''),
     returned_minor: Number(row.returned_minor ?? 0),
     return_kind: (row.return_kind as SaleRecord['return_kind']) ?? null,
+    // v58 (الجولة 62): نسبة الفاتورة للكاشير (بيع تطبيق سيلّا كاشير).
+    cashier_id: row.cashier_id == null ? null : Number(row.cashier_id),
+    cashier_name:
+      row.cashier_name == null || row.cashier_name === undefined
+        ? null
+        : String(row.cashier_name),
   };
 }
 
@@ -197,8 +206,8 @@ export const SaleRepo = {
     await db.transaction(async tx => {
       const insertSale = await tx.execute(
         `INSERT INTO sales
-          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, cashier_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.invoiceNumber,
           totalAmount,
@@ -207,6 +216,7 @@ export const SaleRepo = {
           discount,
           input.paymentType,
           createdAt,
+          input.cashierId ?? null,
         ],
       );
       saleId = insertSale.insertId ?? -1;
@@ -553,6 +563,9 @@ export const SaleRepo = {
       collectCash?: {ref: string; amountMinor: number; note: string} | null;
     };
     note?: string | null;
+    /** v58 (الجولة 62): الكاشير الذي نفّذ المرتجع من تطبيق سيلّا
+     *  كاشير — null = من نقطة البيع نفسها. */
+    cashierId?: number | null;
   }): Promise<SaleReturnRecord> {
     if (input.lines.length === 0) {
       throw new Error('لم يتم اختيار أي صنف للإرجاع');
@@ -616,8 +629,8 @@ export const SaleRepo = {
       //    which side to net.
       const insertRet = await tx.execute(
         `INSERT INTO sales
-          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, return_kind)
-         VALUES (?, ?, ?, ?, 0, 'RETAIL', ?, ?)`,
+          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, return_kind, cashier_id)
+         VALUES (?, ?, ?, ?, 0, 'RETAIL', ?, ?, ?)`,
         [
           input.returnNumber,
           // v40 (الجولة 48 #2): وضع الاستبدال يحمل الصافي —
@@ -633,6 +646,7 @@ export const SaleRepo = {
             : -(refundValue - totalCost),
           createdAt,
           input.book,
+          input.cashierId ?? null,
         ],
       );
       const retSaleId = insertRet.insertId ?? -1;
@@ -712,8 +726,8 @@ export const SaleRepo = {
       //    + is_exchange=1 + exchange_minor؛ الدين لا يُمس إطلاقاً.
       const insertReturn = await tx.execute(
         `INSERT INTO sale_returns
-          (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, is_exchange, exchange_minor, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+          (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, is_exchange, exchange_minor, note, created_at, cashier_id)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
         [
           input.returnNumber,
           input.saleId,
@@ -725,6 +739,7 @@ export const SaleRepo = {
           exchangeMode ? exchangeMinor : 0,
           input.note?.trim() || null,
           createdAt,
+          input.cashierId ?? null,
         ],
       );
       returnId = insertReturn.insertId ?? -1;
@@ -1190,8 +1205,11 @@ export const SaleRepo = {
     const where =
       conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const result = await getDb().execute(
-      `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS items_count
-       FROM sales s ${where}
+      `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS items_count,
+              lc.display_name AS cashier_name
+       FROM sales s
+       LEFT JOIN lan_cashiers lc ON lc.id = s.cashier_id
+       ${where}
        ORDER BY s.id DESC
        LIMIT ? OFFSET ?`,
       [...params, options.limit, options.offset],
@@ -1205,9 +1223,13 @@ export const SaleRepo = {
 
   /** v9.1: one invoice by id (the detail screen). */
   async getById(saleId: number): Promise<SaleRecord | null> {
-    const result = await getDb().execute('SELECT * FROM sales WHERE id = ?', [
-      saleId,
-    ]);
+    const result = await getDb().execute(
+      `SELECT s.*, lc.display_name AS cashier_name
+       FROM sales s
+       LEFT JOIN lan_cashiers lc ON lc.id = s.cashier_id
+       WHERE s.id = ?`,
+      [saleId],
+    );
     const row = result.rows?.[0];
     return row ? rowToSale(row) : null;
   },

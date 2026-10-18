@@ -22,6 +22,7 @@ import {useFocusEffect, useNavigation} from '@react-navigation/native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {AppButton, AppHeader, EmptyState, SearchBar} from '../../components/ui';
 import {Icon} from '../../components/Icon';
+import {QuickProductSheet} from '../../components/QuickProductSheet';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {useToastStore} from '../../stores/toastStore';
@@ -58,6 +59,8 @@ export function InventoryScreen() {
   const loading = useCatalogStore(state => state.loading);
   const refresh = useCatalogStore(state => state.refresh);
   const settings = useSettingsStore(state => state.settings);
+  // v58 (الجولة 62): الإضافة السريعة لمود «نقطة البيع».
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
 
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<CategoryFilter>('all');
@@ -138,9 +141,12 @@ export function InventoryScreen() {
   );
 
   return (
+    <>
     <InventoryLayout
       products={filtered}
       allProducts={products}
+      quickAddVisible={settings.storeMode === 'pos'}
+      onQuickAdd={() => setQuickAddOpen(true)}
       categories={categories}
       loading={loading}
       search={search}
@@ -162,6 +168,14 @@ export function InventoryScreen() {
       setShowArchived={setShowArchived}
       archivedProducts={archivedProducts}
     />
+
+    {/* v58 (الجولة 62): نافذة الإضافة السريعة لمود نقطة البيع —
+        تُعرض من المكوّن الأصلي فتصلها حالة الفتح مباشرة. */}
+    <QuickProductSheet
+      visible={quickAddOpen}
+      onClose={() => setQuickAddOpen(false)}
+    />
+    </>
   );
 }
 
@@ -188,6 +202,8 @@ function InventoryLayout({
   setShowExpiring,
   expiringProducts,
   expiryAlertDays,
+  quickAddVisible,
+  onQuickAdd,
 }: {
   products: Product[];
   allProducts: Product[];
@@ -208,6 +224,9 @@ function InventoryLayout({
   archivedProducts: Product[];
   /** v32 (round-40 #3): شريحة الصلاحية وقائمتها. */
   expiringCount: number;
+  /** v58 (الجولة 62): مود نقطة البيع — إظهار زر الإضافة السريعة. */
+  quickAddVisible: boolean;
+  onQuickAdd: () => void;
   showExpiring: boolean;
   setShowExpiring: (value: boolean) => void;
   expiringProducts: Product[];
@@ -286,6 +305,17 @@ function InventoryLayout({
         showBack={false}
         right={
           <View style={styles.headerActions}>
+            {/* v58 (الجولة 62): مود نقطة البيع — إضافة سريعة
+                (اسم + سعر + حبة/علبة/غرام) بلا أي تفاصيل. */}
+            {quickAddVisible ? (
+              <AppButton
+                small
+                title="سريع"
+                icon="plus"
+                variant="success"
+                onPress={onQuickAdd}
+              />
+            ) : null}
             <AppButton
               small
               title="منتج"

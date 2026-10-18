@@ -296,6 +296,17 @@ export const SelaScannerNative: MaybeModule<SelaScannerNativeModule> =
 export const SelaBiometricNative: MaybeModule<SelaBiometricNativeModule> =
   NativeModules.SelaBiometric as MaybeModule<SelaBiometricNativeModule>;
 
+interface LanServerNativeModule {
+  start(port: number, storeName: string): Promise<boolean>;
+  stop(): Promise<boolean>;
+  isRunning(): Promise<boolean>;
+  setStoreName(name: string): void;
+  respond(id: string, status: number, body: string): void;
+}
+
+export const LanServerNative: MaybeModule<LanServerNativeModule> =
+  NativeModules.LanServer as MaybeModule<LanServerNativeModule>;
+
 /** v13 (round-19 #2): biometric availability that never throws —
  *  missing module / native error both mean "unavailable". */
 export async function biometricAvailability(): Promise<

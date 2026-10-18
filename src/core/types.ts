@@ -265,6 +265,11 @@ export interface SaleRecord {
   /** v23 (round-29 #2): set only on RET-… rows — which book the
    *  return reverses ('cash' | 'sila' | 'local'). */
   return_kind?: 'cash' | 'sila' | 'local' | null;
+  /** v58 (الجولة 62): الكاشير الذي أنجز الفاتورة من تطبيق سيلّا
+   *  كاشير عبر الشبكة المحلية — null = بيع نقطة البيع نفسها. */
+  cashier_id?: number | null;
+  /** v58: اسم الكاشير (JOIN من lan_cashiers حيث يُطلب). */
+  cashier_name?: string | null;
 }
 
 export interface SaleItemRecord {

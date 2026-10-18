@@ -316,6 +316,11 @@ export interface CompleteSaleOptions {
     customerName: string;
     customerPhoneLast4: string | null;
   };
+  /** v58 (الجولة 62): حساب الكاشير الذي أنجز البيع من تطبيق سيلّا
+   *  كاشير عبر الشبكة المحلية — null/undefined = بيع نقطة البيع
+   *  نفسها كما كان دائماً. يُنسخ إلى sales.cashier_id داخل نفس
+   *  المعاملة، فتنسب الفاتورة والتقارير للكاشير صاحبها. */
+  cashierId?: number | null;
 }
 
 export const InvoiceService = {
@@ -347,6 +352,7 @@ export const InvoiceService = {
           lines: options.lines,
           discount: options.discount,
           paymentType: options.paymentType,
+          cashierId: options.cashierId ?? null,
           debtRow:
             options.debt == null
               ? undefined
@@ -1058,6 +1064,10 @@ export const InvoiceService = {
      *  صلة) يزيد أو ينقص دينه بالفرق؛ زبون نقدي يستلم الفرق من
      *  الخزينة أو يدفعه إليها (عبر صف RET الصافي). */
     exchange?: ExchangeLineInput[];
+    /** v58 (الجولة 62): الكاشير الذي نفّذ المرتجع من تطبيق سيلّا
+     *  كاشير عبر الشبكة المحلية — يُنسب له في sale_returns
+     *  وصف RET. null = من نقطة البيع نفسها. */
+    cashierId?: number | null;
   }): Promise<SaleReturnRecord> {
     const prep = await this.prepareReturn(input.saleId);
 
@@ -1290,6 +1300,7 @@ export const InvoiceService = {
           exchange: input.exchange,
           silaDebtIncrease: debtIncreasePayload,
           onlineReturn: onlineReturn ?? undefined,
+          cashierId: input.cashierId ?? null,
         });
       } catch (error) {
         lastError = error;

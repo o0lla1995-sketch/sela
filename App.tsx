@@ -110,6 +110,15 @@ export default function App(): React.JSX.Element {
           // Best effort — never blocks boot.
         }
 
+        // 10. v58 (الجولة 62): خادم الكاشير على الشبكة المحلية —
+        //     يبدأ تلقائياً فقط إن فعّله المدير من شاشة الكاشير.
+        try {
+          const {LanServerService} = require('./src/services/lan/LanServerService') as typeof import('./src/services/lan/LanServerService');
+          void LanServerService.ensureStarted();
+        } catch {
+          // Best effort — never blocks boot.
+        }
+
         if (mounted) {
           setBoot('ready');
         }

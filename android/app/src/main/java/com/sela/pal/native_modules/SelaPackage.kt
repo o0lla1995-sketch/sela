@@ -20,6 +20,8 @@ import com.facebook.react.uimanager.ViewManager
  *                     capture) + headless camera diagnostics.
  *  - SelaBiometric  : v13 app-lock fingerprint prompt
  *                     (androidx.biometric BiometricPrompt).
+ *  - LanServer      : v58 HTTP server for the سيلّا كاشير LAN app
+ *                     (+ UDP discovery responder).
  *
  * NOTE v8: the old SelaCameraView in-RN camera component is GONE —
  * the preview now lives in its own native Activity window, which is
@@ -36,7 +38,8 @@ class SelaPackage : ReactPackage {
     NotificationsModule(reactContext),
     ImagePickerModule(reactContext),
     SelaScannerModule(reactContext),
-    BiometricModule(reactContext)
+    BiometricModule(reactContext),
+    LanServerModule(reactContext)
   )
 
   override fun createViewManagers(
