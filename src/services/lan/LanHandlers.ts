@@ -18,10 +18,17 @@
  *   POST /api/sale                        بيع نقدي أو دين دفتر باسم الكاشير
  *                                        v59: + متغيرات الأسطر، + clientRef
  *                                            (ميزة الخدمة للعمل دون اتصال)
+ *                                        v60: + print (طباعة الفاتورة من
+ *                                            طابعة نقطة البيع إن طلبه الكاشير)
  *   GET  /api/invoices?since=             فواتير الكاشير نفسه (+ زيادة cursor)
  *   GET  /api/invoice?id=                 تفاصيل فاتورة + القابل للإرجاع
+ *   GET  /api/invoice-by-number?number=   v60: فاتورة الكاشير برقمها
+ *                                        (باركود الإيصال CODE128 يفتحها)
+ *   GET  /api/printer-status              v60: حالة طابعة نقطة البيع
+ *                                        (متصل/غير متصل + اسم الجهاز)
  *   POST /api/return                      إرجاع/استبدال من فواتير الكاشير
  *                                        v59: + clientRef + متغيرات البدائل
+ *                                        v60: + print (طباعة من طابعة POS)
  *   GET  /api/stats                       إحصاءات الكاشير (اليوم/الإجمالي)
  *   POST /api/sync/push                   v59: دفعة عمليات أُجريت دون اتصال —
  *                                        تُعالج بالتسلسل مع استجابة لكل عملية
@@ -136,6 +143,30 @@ export function setLanEventSink(
   sink: ((event: LanEvent) => void) | null,
 ): void {
   eventSink = sink;
+}
+
+/** v60: مزوّد حالة الطابعة — تستدعيه LanServerService في كل منصة
+ *  (متجر الطابعة على أندرويد / خدمة الطابعة على سطح المكتب).
+ *  يغذي /api/printer-status وقرار الطباعة عند البيع/الإرجاع. */
+let printerStatusProvider:
+  | (() => Promise<{connected: boolean; name: string | null}>)
+  | null = null;
+
+export function setPrinterStatusProvider(
+  provider: (() => Promise<{connected: boolean; name: string | null}>) | null,
+): void {
+  printerStatusProvider = provider;
+}
+
+/** هل الطابعة متصلة الآن؟ — أفضل جهد؛ الفشل = غير متصلة. */
+async function printerConnected(): Promise<boolean> {
+  try {
+    const status =
+      printerStatusProvider != null ? await printerStatusProvider() : null;
+    return status?.connected === true;
+  } catch {
+    return false;
+  }
 }
 
 function emitLanEvent(event: LanEvent): void {
@@ -742,6 +773,69 @@ export async function handleLanRequest(
       return await handleInvoiceDetail(req, authed);
     }
 
+    // v60: البحث عن فاتورة الكاشير برقمها (باركود الإيصال CODE128
+    // يحمل الرقم) — على فواتير حسابه هو فقط (نفس قاعدة الإرجاع).
+    if (path === '/api/invoice-by-number' && method === 'GET') {
+      const number = (req.query.number ?? '').trim();
+      if (!number) {
+        return fail(400, 'رقم الفاتورة مطلوب');
+      }
+      const db = getDb();
+      let result = await db.execute(
+        `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
+         FROM sales s
+         WHERE s.cashier_id = ? AND s.invoice_number = ?
+         LIMIT 1`,
+        [authed.cashierId, number],
+      );
+      let rows = (result.rows ?? []) as unknown as Record<string, unknown>[];
+      if (rows.length === 0) {
+        // تطابق لاحقة الرقم — بعض الباركودات تُقرأ بجزء من الرقم.
+        result = await db.execute(
+          `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
+           FROM sales s
+           WHERE s.cashier_id = ? AND s.invoice_number LIKE ?
+           ORDER BY s.id DESC LIMIT 1`,
+          [authed.cashierId, `%${number}`],
+        );
+        rows = (result.rows ?? []) as unknown as Record<string, unknown>[];
+      }
+      if (rows.length === 0) {
+        // 200 مع null — الكاشير يميّز «ليست لي» عن خطأ الشبكة.
+        return ok({ok: true, invoice: null});
+      }
+      const row = rows[0];
+      return ok({
+        ok: true,
+        invoice: {
+          id: Number(row.id),
+          number: String(row.invoice_number ?? ''),
+          total: Number(row.total_amount ?? 0),
+          discount: Number(row.discount ?? 0),
+          isReturn: String(row.invoice_number ?? '').startsWith('RET-'),
+          returnedMinor: Number(row.returned_minor ?? 0),
+          paymentType: String(row.payment_type ?? 'RETAIL'),
+          itemCount: Number(row.item_count ?? 0),
+          createdAt: String(row.created_at ?? ''),
+          clientRef: row.client_ref ? String(row.client_ref) : null,
+        },
+      });
+    }
+
+    // v60: حالة طابعة نقطة البيع — يعرضها تطبيق الكاشير في إعدادات
+    // الطباعة ويفعّل طباعة فواتيره منها.
+    if (path === '/api/printer-status' && method === 'GET') {
+      try {
+        const status =
+          printerStatusProvider != null
+            ? await printerStatusProvider()
+            : {connected: false, name: null};
+        return ok({ok: true, ...status});
+      } catch {
+        return ok({ok: true, connected: false, name: null});
+      }
+    }
+
     if (path === '/api/return' && method === 'POST') {
       return await handleReturn(req, authed, false);
     }
@@ -947,11 +1041,15 @@ async function handleSale(
         customerName: found.customer.name,
       };
     }
+    // v60: طباعة الفاتورة من طابعة نقطة البيع إن طلبها الكاشير
+    // وكانت الطابعة متصلة فعلاً (خيار «الطباعة» في إعدادات كاشيره).
+    const wantPrint = body.print === true;
+    const print = wantPrint && (await printerConnected());
     const sale = await InvoiceService.completeSale({
       lines,
       discount,
       paymentType: 'RETAIL',
-      print: false,
+      print,
       receiptSettings: receiptSettings(),
       cashierId: authed.cashierId,
       localDebt: localDebt
@@ -975,6 +1073,7 @@ async function handleSale(
     });
     return ok({
       ok: true,
+      printed: print,
       invoice: {
         id: sale.sale.id,
         number: sale.sale.invoice_number,
@@ -1244,6 +1343,8 @@ async function handleReturn(
   }
 
   const refundMethod = body.refundMethod === 'none' ? 'none' : 'cash';
+  // v60: طباعة إيصال المرتجع من طابعة نقطة البيع إن طُلبت ومتصلة.
+  const print = body.print === true && (await printerConnected());
   try {
     const record = await InvoiceService.createReturn({
       saleId,
@@ -1251,7 +1352,7 @@ async function handleReturn(
       // الاستبدال يسوّى بالفرق — نفس قاعدة نقطة البيع (none).
       refundMethod: exchange.length > 0 ? 'none' : refundMethod,
       note: body.note ? String(body.note).slice(0, 200) : null,
-      print: false,
+      print,
       receiptSettings: receiptSettings(),
       cashierId: authed.cashierId,
       exchange: exchange.length > 0 ? exchange : undefined,
@@ -1271,6 +1372,7 @@ async function handleReturn(
     });
     return ok({
       ok: true,
+      printed: print,
       return: {
         id: record.id,
         number: record.return_number,

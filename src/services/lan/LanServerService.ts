@@ -17,10 +17,12 @@ import {LanServerNative} from '../../native/nativeBridge';
 import {
   handleLanRequest,
   setLanEventSink,
+  setPrinterStatusProvider,
   type LanEvent,
 } from './LanHandlers';
 import {useLanStore} from '../../stores/lanStore';
 import {useSettingsStore} from '../../stores/settingsStore';
+import {usePrinterStore} from '../../stores/printerStore';
 import {notificationsStore} from '../../stores/notificationsStore';
 import {formatMoney} from '../../core/format';
 import {LAN_DEFAULT_PORT} from '../../core/config';
@@ -70,6 +72,17 @@ function lanEventToNotification(event: LanEvent): void {
   }
 }
 setLanEventSink(lanEventToNotification);
+
+// v60: مزوّد حالة الطابعة — من متجر الطابعة مباشرة (متصل/غير متصل
+// + اسم الجهاز)؛ يغذي /api/printer-status وقرار طباعة فواتير
+// الكاشير من طابعة نقطة البيع عند البيع/الإرجاع.
+setPrinterStatusProvider(async () => {
+  const state = usePrinterStore.getState();
+  return {
+    connected: state.status === 'connected',
+    name: state.deviceName ?? null,
+  };
+});
 
 // v58: اسم المتجر في ردود بث الاستكشاف يبقى محدّثاً مع الإعدادات —
 // اشتراك وحيد على مستوى الوحدة، بلا أي اشتراكات متكررة.
