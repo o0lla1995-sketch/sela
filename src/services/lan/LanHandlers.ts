@@ -1263,7 +1263,58 @@ async function handleReturn(
     const line = raw as Record<string, unknown>;
     const saleItemId = Number(line.saleItemId ?? 0);
     const quantity = Number(line.quantity ?? 0);
-    const known = prep.lines.find(l => l.item.id === saleItemId);
+    // v61 (الجولة 65) — جذر «لا يسمح بالإرجاع»: تطبيق الكاشير كان
+    // يرسل معرّف صنف أرشيفه المحلي (فضاء معرّفات مختلف كلياً عن
+    // sale_items عندنا) فكان الرفض شبه دائم «صنف غير موجود في
+    // الفاتورة». الحل المزدوج:
+    //  ① saleItemId الصحيح (من لقطة تفاصيل الفاتورة) يُستخدم إن
+    //     وصل وتطابق منتجُه — وإلا نتجاهله (حماية من تصادم معرّف
+    //     محلي مع معرّف خادم لمنتج آخر).
+    //  ② مطابقة احتياطية بالتوقيع الكامل: productId + variantLabel
+    //     + unitName (مع تطبيع وحدة القاعدة: حبة/قطعة/فارغ واحد).
+    //     بها تعمل المرتجعات دون اتصال (فواتير معلّقة تُحل عبر
+    //     saleClientRef) وفواتير أجهزة أخرى لنفس حساب الكاشير.
+    const lineProductId = Number(line.productId ?? 0);
+    const rawVariantLabel = line.variantLabel;
+    const lineVariantLabel =
+      rawVariantLabel == null || rawVariantLabel === ''
+        ? null
+        : String(rawVariantLabel);
+    const rawUnitName = line.unitName;
+    const lineUnitName =
+      rawUnitName == null || rawUnitName === '' ? null : String(rawUnitName);
+
+    let known =
+      saleItemId > 0
+        ? prep.lines.find(l => l.item.id === saleItemId) ?? null
+        : null;
+    if (known != null && lineProductId > 0 && known.item.product_id !== lineProductId) {
+      known = null; // معرّف متصادم من أرشيف محلي — نكمل بالتوقيع.
+    }
+    if (known == null) {
+      const normUnit = (v: string | null) =>
+        v == null || v === '' || v === 'حبة' || v === 'قطعة' ? '' : v;
+      const candidates = prep.lines.filter(l => {
+        if (l.item.product_id !== lineProductId) {
+          return false;
+        }
+        const serverLabel =
+          l.item.variant_label == null ||
+          String(l.item.variant_label).length === 0
+            ? null
+            : String(l.item.variant_label);
+        if (serverLabel !== lineVariantLabel) {
+          return false;
+        }
+        return normUnit(l.item.unit_name ?? null) === normUnit(lineUnitName);
+      });
+      // الأفضل سطرٌ ما زال له متبقٍ؛ وإلا الأول (فحص الكمية أسفل
+      // يرد الخطأ الأدق للمُرجَع كاملاً).
+      known =
+        candidates.find(l => l.remaining > 0.0001) ??
+        candidates[0] ??
+        null;
+    }
     if (!known) {
       return fail(400, 'صنف غير موجود في الفاتورة');
     }
@@ -1274,7 +1325,9 @@ async function handleReturn(
       );
     }
     lines.push({
-      saleItemId,
+      // v61: المعرّف المحسوم بعد المطابقة (قد يختلف عن المعيّد من
+      // العميل حين كان معرّفاً محلياً متصادماً أو صفراً).
+      saleItemId: known.item.id,
       productId: known.item.product_id,
       productName: known.productName,
       quantity,
