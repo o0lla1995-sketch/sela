@@ -72,6 +72,13 @@ export interface AppSettings {
   lanServerEnabled: boolean;
   /** v58: منفذ خادم الكاشير (HTTP) — 8950 افتراضياً. */
   lanPort: number;
+  /** v62 (الجولة 66 #2): النسخ الاحتياطي التلقائي إلى ذاكرة
+   *  الهاتف — مفعّل افتراضياً؛ نسخة JSON مضغوطة في
+   *  Downloads/SmartVisionPOS كل autoBackupEveryDays أيام
+   *  (يُحتفظ بآخر 7 نسخ). */
+  autoBackupEnabled: boolean;
+  /** v62: تواتر النسخ التلقائي بالأيام (1 / 3 / 7). */
+  autoBackupEveryDays: number;
 }
 
 const DEFAULTS: AppSettings = {
@@ -102,6 +109,8 @@ const DEFAULTS: AppSettings = {
   posProductView: 'grid',
   lanServerEnabled: false,
   lanPort: 8950,
+  autoBackupEnabled: true,
+  autoBackupEveryDays: 1,
 };
 
 interface SettingsState {

@@ -9,7 +9,7 @@
  * The screen never crashes on network errors — every failure maps
  * to a readable Arabic message from LicenseService.
  */
-import React, {useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {
   ActivityIndicator,
   Linking,
@@ -37,9 +37,11 @@ import {
 } from '../../core/config';
 import {
   activateLicense,
+  fetchServerConfig,
   getDeviceId,
   LicenseError,
   getCachedContact,
+  type LicenseContact,
   type LicenseStatus,
 } from '../../services/license/LicenseService';
 import {useLicenseStore} from '../../stores/licenseStore';
@@ -94,15 +96,44 @@ export function ActivationScreen({status}: {status: LicenseStatus}) {
   const [error, setError] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState('');
 
-  useMemo(() => {
+  // v62 (الجولة 66 #1): بيانات التواصل الحية من الخادم — كانت
+  // الشاشة تعرض الرقم/البريد الاحتياطيين المدمجين على أي جهاز
+  // لم يسبق تفعيله (لا كاش بعد). الآن تُجلب من /api/v1/config عند
+  // فتح الشاشة وتُحدّث العرض لحظة وصولها؛ الكاش يبقى مصدراً عند
+  // انقطاع الإنترنت وزر تحديث يعيد المحاولة.
+  const [contact, setContact] = useState<LicenseContact>(() => ({
+    ...LICENSE_CONTACT_FALLBACK,
+    ...(getCachedContact() ?? {}),
+  }));
+  const [contactLoading, setContactLoading] = useState(true);
+
+  const loadContact = useCallback(async () => {
+    setContactLoading(true);
+    try {
+      const fresh = await fetchServerConfig();
+      if (fresh != null) {
+        setContact({...LICENSE_CONTACT_FALLBACK, ...fresh});
+      } else {
+        setContact({
+          ...LICENSE_CONTACT_FALLBACK,
+          ...(getCachedContact() ?? {}),
+        });
+      }
+    } finally {
+      setContactLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadContact();
+  }, [loadContact]);
+
+  useEffect(() => {
     void getDeviceId().then(id => setDeviceId(id));
   }, []);
 
   const locked = status.state === 'locked';
   const reason = locked ? LOCK_REASONS[status.lockReason ?? 'expired'] : null;
-
-  // Server-provided contact (cached) with baked-in fallbacks.
-  const contact = {...LICENSE_CONTACT_FALLBACK, ...getCachedContact()};
 
   const runActivate = async () => {
     if (busy) return;
@@ -277,10 +308,28 @@ export function ActivationScreen({status}: {status: LicenseStatus}) {
         </View>
 
         {/* Contact card — subscriptions are sold by the management.
-            Channels configured by the owner appear as tappable icons
-            (phone / WhatsApp / Telegram / email deep links). */}
+            v62 (الجولة 66 #1): القنوات تُجلب حية من الخادم عند فتح
+            الشاشة — لا أرقام افتراضية بعد الآن. Channels configured
+            by the owner appear as tappable icons. */}
         <View style={styles.card}>
-          <Text style={styles.contactTitle}>لشراء الاشتراك أو تجديده</Text>
+          <View style={styles.contactHead}>
+            <Text style={styles.contactTitle}>لشراء الاشتراك أو تجديده</Text>
+            {contactLoading ? (
+              <ActivityIndicator size="small" color={c.textDim} />
+            ) : (
+              <TouchableOpacity
+                onPress={() => void loadContact()}
+                hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                accessibilityLabel="تحديث بيانات التواصل">
+                <Icon name="refresh" size={15} color={c.textDim} />
+              </TouchableOpacity>
+            )}
+          </View>
+          {contactLoading && !contact.phone ? (
+            <Text style={styles.contactNote}>
+              جارٍ جلب بيانات التواصل من الإدارة…
+            </Text>
+          ) : null}
           {contact.note ? (
             <Text style={styles.contactNote}>{contact.note}</Text>
           ) : null}
@@ -452,6 +501,13 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: 15,
       color: c.text,
+      flex: 1,
+    },
+    /** v62: رأس بطاقة التواصل — العنوان + مؤشر/زر التحديث. */
+    contactHead: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 10,
     },
     contactNote: {
       fontFamily: fonts.regular,

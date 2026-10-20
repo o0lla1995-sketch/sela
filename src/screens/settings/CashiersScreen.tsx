@@ -11,7 +11,7 @@
  *  ④ أجهزة كل كاشير — موافق عليها/معلقة/مرفوضة + قطع الثقة +
  *     آخر ظهور («متصل الآن» خلال ٣٠ ثانية) وإحصاءاته.
  */
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -632,7 +632,10 @@ export function CashiersScreen() {
   );
 }
 
-/** حقل إدخال داخل النافذة — بسيط بستايل التطبيق (يدعم الإخفاء). */
+/** v62 (الجولة 66 #5): حقل إدخال داخل النافذة — مطوّر بالكامل:
+ *  انتقال «التالي» بين الحقول (refs + onSubmitEditing)، إظهار
+ *  كلمة المرور بعين قابلة للتبديل، أخطاء داخلية تحت الحقل نفسه
+ *  (حدّ أحمر + نص)، حد أقصى للطول، وأنواع لوحة مفاتيح صحيحة. */
 function ModalField({
   label,
   value,
@@ -641,6 +644,12 @@ function ModalField({
   secure = false,
   numeric = false,
   suffix,
+  inputRef,
+  onSubmitEditing,
+  returnKeyType,
+  error,
+  maxLength,
+  autoFocus = false,
 }: {
   label: string;
   value: string;
@@ -649,13 +658,20 @@ function ModalField({
   secure?: boolean;
   numeric?: boolean;
   suffix?: string;
+  inputRef?: React.RefObject<TextInput>;
+  onSubmitEditing?: () => void;
+  returnKeyType?: 'next' | 'done';
+  error?: string | null;
+  maxLength?: number;
+  autoFocus?: boolean;
 }) {
   const c = useThemeColors();
+  const [revealed, setRevealed] = useState(false);
   return (
     <View>
       <Text
         style={{
-          color: c.textDim,
+          color: error != null ? c.danger : c.textDim,
           fontFamily: fonts.medium,
           fontSize: typography.small,
           textAlign: 'right',
@@ -670,10 +686,11 @@ function ModalField({
           backgroundColor: c.surfaceHi,
           borderRadius: 10,
           borderWidth: 1,
-          borderColor: c.borderSoft,
+          borderColor: error != null ? c.danger : c.borderSoft,
           paddingHorizontal: 12,
         }}>
         <TextInput
+          ref={inputRef}
           style={{
             flex: 1,
             color: c.text,
@@ -686,10 +703,15 @@ function ModalField({
           onChangeText={onChangeText}
           placeholder={placeholder}
           placeholderTextColor={c.textFaint}
-          secureTextEntry={secure}
+          secureTextEntry={secure && !revealed}
           autoCapitalize="none"
           autoCorrect={false}
+          maxLength={maxLength}
+          autoFocus={autoFocus}
           keyboardType={numeric ? 'number-pad' : 'default'}
+          returnKeyType={returnKeyType ?? (onSubmitEditing ? 'next' : 'done')}
+          onSubmitEditing={onSubmitEditing}
+          blurOnSubmit={returnKeyType !== 'next' || onSubmitEditing == null}
         />
         {suffix ? (
           <Text
@@ -701,12 +723,43 @@ function ModalField({
             {suffix}
           </Text>
         ) : null}
+        {secure ? (
+          <Pressable
+            onPress={() => setRevealed(shown => !shown)}
+            hitSlop={{top: 10, bottom: 10, left: 6, right: 6}}
+            accessibilityLabel={
+              revealed ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'
+            }
+            style={{marginRight: 4}}>
+            <Icon
+              name={revealed ? 'eyeOff' : 'eye'}
+              size={17}
+              color={c.textDim}
+            />
+          </Pressable>
+        ) : null}
       </View>
+      {error != null ? (
+        <Text
+          style={{
+            color: c.danger,
+            fontFamily: fonts.regular,
+            fontSize: typography.micro + 1,
+            textAlign: 'right',
+            marginTop: 3,
+          }}>
+          {error}
+        </Text>
+      ) : null}
     </View>
   );
 }
 
-/** نموذج إنشاء/تعديل حساب كاشير. */
+/** نموذج إنشاء/تعديل حساب كاشير — v62 (الجولة 66 #5) مطوّر:
+ *  تمرير داخلي (ScrollView) فلا يقصّ المحتوى على الشاشات الصغيرة
+ *  أو مع لوحة المفاتيح المفتوحة، انتقال «التالي» بين الحقول،
+ *  أخطاء داخلية لكل حقل، وزر «إنشاء وإضافة التالي» يُبقي النافذة
+ *  مفتوحة لإدخال كاشير آخر متتابعين. */
 function CashierFormModal({
   cashier,
   onClose,
@@ -733,17 +786,74 @@ function CashierFormModal({
     cashier ? cashier.can_return === 1 : true,
   );
   const [busy, setBusy] = useState(false);
+  // v62: أخطاء داخلية لكل حقل — تُمسح فور تصحيح القيمة.
+  const [errors, setErrors] = useState<{
+    username?: string;
+    displayName?: string;
+    password?: string;
+    password2?: string;
+    maxDiscount?: string;
+  }>({});
 
   const isEdit = cashier != null;
 
-  const save = async () => {
-    if (isEdit) {
-      if (password.length > 0 && password !== password2) {
-        toast('كلمتا المرور غير متطابقتين', 'error');
-        return;
+  const usernameRef = useRef<TextInput>(null);
+  const displayNameRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
+  const password2Ref = useRef<TextInput>(null);
+  const maxDiscountRef = useRef<TextInput>(null);
+
+  const validate = useCallback((): boolean => {
+    const next: typeof errors = {};
+    if (!isEdit) {
+      const name = username.trim();
+      if (name.length === 0) {
+        next.username = 'اسم المستخدم مطلوب للدخول';
+      } else if (name.length < 3) {
+        next.username = 'ثلاثة أحرف على الأقل';
+      } else if (/\s/.test(name)) {
+        next.username = 'بلا مسافات — أحرف وأرقام فقط';
       }
-      setBusy(true);
-      try {
+    }
+    if (displayName.trim().length === 0) {
+      next.displayName = 'اسم الكاشير مطلوب (يظهر على فواتيره)';
+    }
+    if (isEdit) {
+      if (password.length > 0 && password.length < 4) {
+        next.password = 'كلمة المرور 4 أحرف على الأقل (أو اتركها فارغة)';
+      }
+    } else if (password.length < 4) {
+      next.password = 'كلمة المرور 4 أحرف على الأقل';
+    }
+    if (password2 !== password) {
+      next.password2 = 'كلمتا المرور غير متطابقتين';
+    }
+    const discount = Number(maxDiscount);
+    if (
+      maxDiscount.trim().length === 0 ||
+      !Number.isFinite(discount) ||
+      discount < 0 ||
+      discount > 100
+    ) {
+      next.maxDiscount = 'نسبة صحيحة بين 0 و 100';
+    }
+    setErrors(next);
+    return Object.keys(next).length === 0;
+  }, [displayName, isEdit, maxDiscount, password, password2, username]);
+
+  /** ينشئ الحساب — `next` يبقي النافذة مفتوحة ويصفّر الحقول لإدخال
+   *  كاشير آخر فوراً («الانتقال للتالي» بطلب التاجر). */
+  const save = async (mode: 'close' | 'next') => {
+    if (busy) {
+      return;
+    }
+    if (!validate()) {
+      toast('راجع الحقول المعلّمة بالأحمر', 'error');
+      return;
+    }
+    setBusy(true);
+    try {
+      if (isEdit) {
         await CashiersRepo.updateCashier(cashier.id, {
           displayName: displayName.trim() || cashier.display_name,
           maxDiscountPct: Number(maxDiscount) || 0,
@@ -753,52 +863,43 @@ function CashierFormModal({
         });
         toast('حُدِّث حساب الكاشير', 'success');
         onSaved();
-      } catch (error) {
-        toast(
-          error instanceof Error ? error.message : 'تعذر تحديث الحساب',
-          'error',
-        );
-      } finally {
-        setBusy(false);
+        return;
       }
-      return;
-    }
-    if (!username.trim()) {
-      toast('اسم المستخدم مطلوب', 'error');
-      return;
-    }
-    if (!displayName.trim()) {
-      toast('اسم الكاشير مطلوب', 'error');
-      return;
-    }
-    if (password.length < 4) {
-      toast('كلمة المرور 4 أحرف على الأقل', 'error');
-      return;
-    }
-    if (password !== password2) {
-      toast('كلمتا المرور غير متطابقتين', 'error');
-      return;
-    }
-    setBusy(true);
-    try {
       await CashiersRepo.createCashier({
-        username,
+        username: username.trim(),
         password,
-        displayName,
+        displayName: displayName.trim(),
         maxDiscountPct: Number(maxDiscount) || 0,
         canDebt,
         canReturn,
       });
-      toast(
-        'أُنشئ حساب الكاشير — أعطه الاسم وكلمة المرور لتسجيل الدخول',
-        'success',
-      );
-      onSaved();
+      if (mode === 'next') {
+        toast(
+          `أُنشئ حساب ${displayName.trim()} — أدخل بيانات الكاشير التالي`,
+          'success',
+        );
+        setUsername('');
+        setDisplayName('');
+        setPassword('');
+        setPassword2('');
+        setErrors({});
+        // نبدأ من أول حقل مباشرة — إدخال متتابع بلا لمس إضافي.
+        requestAnimationFrame(() => usernameRef.current?.focus());
+      } else {
+        toast(
+          'أُنشئ حساب الكاشير — أعطه الاسم وكلمة المرور لتسجيل الدخول',
+          'success',
+        );
+        onSaved();
+      }
     } catch (error) {
-      toast(
-        error instanceof Error ? error.message : 'تعذر إنشاء الحساب',
-        'error',
-      );
+      const message =
+        error instanceof Error ? error.message : 'تعذر إنشاء الحساب';
+      toast(message, 'error');
+      // اسم مستخدم مكرر؟ علّم حقه مباشرة.
+      if (message.includes('مستخدم') || message.includes('username')) {
+        setErrors(prev => ({...prev, username: message}));
+      }
     } finally {
       setBusy(false);
     }
@@ -809,97 +910,186 @@ function CashierFormModal({
       transparent
       visible
       animationType="fade"
-      onRequestClose={onClose}>
+      onRequestClose={onClose}
+      statusBarTranslucent>
       <Pressable style={styles.modalBackdrop} onPress={onClose}>
         <Pressable style={styles.modalCard} onPress={() => undefined}>
-          <Text style={styles.modalTitle}>
-            {isEdit ? 'تعديل حساب الكاشير' : 'كاشير جديد'}
-          </Text>
-          {!isEdit ? (
+          <ScrollView
+            style={styles.modalScroll}
+            contentContainerStyle={styles.modalScrollContent}
+            keyboardShouldPersistTaps="handled">
+            <Text style={styles.modalTitle}>
+              {isEdit ? 'تعديل حساب الكاشير' : 'كاشير جديد'}
+            </Text>
+            {!isEdit ? (
+              <ModalField
+                label="اسم المستخدم (للدخول)"
+                value={username}
+                onChangeText={text => {
+                  setUsername(text);
+                  if (errors.username) {
+                    setErrors(prev => ({...prev, username: undefined}));
+                  }
+                }}
+                placeholder="مثال: ahmad"
+                maxLength={30}
+                autoFocus
+                inputRef={usernameRef}
+                returnKeyType="next"
+                onSubmitEditing={() => displayNameRef.current?.focus()}
+                error={errors.username}
+              />
+            ) : null}
             <ModalField
-              label="اسم المستخدم (للدخول)"
-              value={username}
-              onChangeText={setUsername}
-              placeholder="مثال: ahmad"
+              label="اسم الكاشير (يظهر في الفواتير)"
+              value={displayName}
+              onChangeText={text => {
+                setDisplayName(text);
+                if (errors.displayName) {
+                  setErrors(prev => ({...prev, displayName: undefined}));
+                }
+              }}
+              placeholder="مثال: أحمد"
+              maxLength={40}
+              inputRef={displayNameRef}
+              returnKeyType="next"
+              onSubmitEditing={() => passwordRef.current?.focus()}
+              error={errors.displayName}
             />
-          ) : null}
-          <ModalField
-            label="اسم الكاشير (يظهر في الفواتير)"
-            value={displayName}
-            onChangeText={setDisplayName}
-            placeholder="مثال: أحمد"
-          />
-          <ModalField
-            label={
-              isEdit
-                ? 'كلمة مرور جديدة (اتركها فارغة للإبقاء)'
-                : 'كلمة المرور'
-            }
-            value={password}
-            onChangeText={setPassword}
-            placeholder="4 أحرف على الأقل"
-            secure
-          />
-          <ModalField
-            label="تأكيد كلمة المرور"
-            value={password2}
-            onChangeText={setPassword2}
-            placeholder="أعد كتابة كلمة المرور"
-            secure
-          />
-          <ModalField
-            label="أقصى خصم يسمح به للكاشير"
-            value={maxDiscount}
-            onChangeText={setMaxDiscount}
-            numeric
-            suffix="%"
-          />
-          <View style={{gap: 8, marginTop: 4}}>
-            <View style={styles.permSwitchRow}>
-              <Text
-                style={{
-                  color: c.text,
-                  fontFamily: fonts.medium,
-                  fontSize: typography.small + 1,
-                  textAlign: 'right',
-                  flex: 1,
-                }}>
-                السماح بالبيع بالدين (دفتر المتجر)
-              </Text>
-              <Switch value={canDebt} onValueChange={setCanDebt} />
+            <ModalField
+              label={
+                isEdit
+                  ? 'كلمة مرور جديدة (اتركها فارغة للإبقاء)'
+                  : 'كلمة المرور'
+              }
+              value={password}
+              onChangeText={text => {
+                setPassword(text);
+                if (errors.password) {
+                  setErrors(prev => ({...prev, password: undefined}));
+                }
+              }}
+              placeholder="4 أحرف على الأقل"
+              secure
+              maxLength={40}
+              inputRef={passwordRef}
+              returnKeyType="next"
+              onSubmitEditing={() => password2Ref.current?.focus()}
+              error={errors.password}
+            />
+            <ModalField
+              label="تأكيد كلمة المرور"
+              value={password2}
+              onChangeText={text => {
+                setPassword2(text);
+                if (errors.password2) {
+                  setErrors(prev => ({...prev, password2: undefined}));
+                }
+              }}
+              placeholder="أعد كتابة كلمة المرور"
+              secure
+              maxLength={40}
+              inputRef={password2Ref}
+              returnKeyType="next"
+              onSubmitEditing={() => maxDiscountRef.current?.focus()}
+              error={errors.password2}
+            />
+            <ModalField
+              label="أقصى خصم يسمح به للكاشير"
+              value={maxDiscount}
+              onChangeText={text => {
+                setMaxDiscount(text);
+                if (errors.maxDiscount) {
+                  setErrors(prev => ({...prev, maxDiscount: undefined}));
+                }
+              }}
+              numeric
+              maxLength={3}
+              suffix="%"
+              inputRef={maxDiscountRef}
+              returnKeyType="done"
+              onSubmitEditing={() => void save(isEdit ? 'close' : 'next')}
+              error={errors.maxDiscount}
+            />
+            <View style={{gap: 8, marginTop: 4}}>
+              <View style={styles.permSwitchRow}>
+                <Text
+                  style={{
+                    color: c.text,
+                    fontFamily: fonts.medium,
+                    fontSize: typography.small + 1,
+                    textAlign: 'right',
+                    flex: 1,
+                  }}>
+                  السماح بالبيع بالدين (دفتر المتجر)
+                </Text>
+                <Switch value={canDebt} onValueChange={setCanDebt} />
+              </View>
+              <View style={styles.permSwitchRow}>
+                <Text
+                  style={{
+                    color: c.text,
+                    fontFamily: fonts.medium,
+                    fontSize: typography.small + 1,
+                    textAlign: 'right',
+                    flex: 1,
+                  }}>
+                  السماح بالمرتجعات والاستبدال
+                </Text>
+                <Switch value={canReturn} onValueChange={setCanReturn} />
+              </View>
             </View>
-            <View style={styles.permSwitchRow}>
-              <Text
-                style={{
-                  color: c.text,
-                  fontFamily: fonts.medium,
-                  fontSize: typography.small + 1,
-                  textAlign: 'right',
-                  flex: 1,
-                }}>
-                السماح بالمرتجعات والاستبدال
-              </Text>
-              <Switch value={canReturn} onValueChange={setCanReturn} />
-            </View>
-          </View>
-          <View style={styles.actionRow}>
-            <AppButton
-              title="إلغاء"
-              variant="ghost"
-              small
-              style={{flex: 1}}
-              onPress={onClose}
-            />
-            <AppButton
-              title={isEdit ? 'حفظ التعديلات' : 'إنشاء الحساب'}
-              variant="primary"
-              small
-              style={{flex: 1}}
-              loading={busy}
-              disabled={busy}
-              onPress={() => void save()}
-            />
-          </View>
+            {isEdit ? (
+              <View style={styles.actionRow}>
+                <AppButton
+                  title="إلغاء"
+                  variant="ghost"
+                  small
+                  style={{flex: 1}}
+                  onPress={onClose}
+                />
+                <AppButton
+                  title="حفظ التعديلات"
+                  variant="primary"
+                  small
+                  style={{flex: 1}}
+                  loading={busy}
+                  disabled={busy}
+                  onPress={() => void save('close')}
+                />
+              </View>
+            ) : (
+              <View style={{gap: 8, marginTop: 2}}>
+                <AppButton
+                  title="إنشاء وإضافة التالي"
+                  icon="plus"
+                  variant="primary"
+                  small
+                  loading={busy}
+                  disabled={busy}
+                  onPress={() => void save('next')}
+                />
+                <View style={styles.actionRow}>
+                  <AppButton
+                    title="إلغاء"
+                    variant="ghost"
+                    small
+                    style={{flex: 1}}
+                    onPress={onClose}
+                  />
+                  <AppButton
+                    title="إنشاء وإغلاق"
+                    variant="secondary"
+                    small
+                    style={{flex: 1}}
+                    loading={busy}
+                    disabled={busy}
+                    onPress={() => void save('close')}
+                  />
+                </View>
+              </View>
+            )}
+          </ScrollView>
         </Pressable>
       </Pressable>
     </Modal>
@@ -1096,6 +1286,15 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.surface,
       borderRadius: 16,
       padding: spacing.lg,
+      gap: spacing.md,
+      maxHeight: '88%',
+    },
+    /** v62 (الجولة 66 #5): تمرير داخلي للنموذج — الشاشات الصغيرة
+     *  ولوحة المفاتيح المفتوحة لم تقص الحقول بعد الآن. */
+    modalScroll: {
+      flexGrow: 0,
+    },
+    modalScrollContent: {
       gap: spacing.md,
     },
     modalTitle: {

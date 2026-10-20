@@ -100,6 +100,17 @@ export default function App(): React.JSX.Element {
         //    not due / offline.
         startAutoScheduler();
 
+        // 8b. v62 (الجولة 66 #2): النسخ الاحتياطي التلقائي إلى ذاكرة
+        //     الهاتف — نفس نمط جدولة درايف: فحص بعد 25 ثانية ثم كل
+        //     30 دقيقة. صامت تماماً ما دام مطفأً/غير مستحق، ويكتب
+        //     نسخة مضغوطة في Downloads/SmartVisionPOS (آخر 7 نسخ).
+        try {
+          const {startAutoBackupScheduler} = require('./src/services/AutoBackupService') as typeof import('./src/services/AutoBackupService');
+          startAutoBackupScheduler();
+        } catch {
+          // Best effort — never blocks boot.
+        }
+
         // 9. v48 (الجولة 56): محرك البيع أونلاين — استطلاع الطلبات كل
         //    60 ثانية ومزامنة المنتجات كل 15 دقيقة ما دام
         //    التفعيل مشغّلاً — لا يعمل شيئاً عند التعطيل.

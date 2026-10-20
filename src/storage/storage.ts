@@ -55,6 +55,15 @@ export const KEYS = {
   licenseServerUrl: 'license_server_url_v1',
   licenseDeviceId: 'license_device_id_v1',
   licenseContact: 'license_contact_v1',
+  /** v62 (الجولة 66 #4): آخر توجيه تحديث استلمه الجهاز من الخادم
+   *  (minAppVersion + updateUrl) — يُقيَّم محلياً عند كل إقلاع
+   *  وبعد كل نبضة/تفعيل؛ الجهاز الأقدم من الحد يُقفل على شاشة
+   *  «تحديث مطلوب» حتى يحدّث. */
+  updateRequirement: 'update_requirement_v1',
+  /** v62 (الجولة 66 #2): دفتر النسخ الاحتياطي التلقائي — آخر
+   *  تشغيل (وقته، مساره، نتيجته، حجم البيانات) لعرضه في
+   *  الإعدادات ولحساب الاستحقاق التالي. */
+  autoBackupLedger: 'auto_backup_ledger_v1',
   /** v10 (round-16 #4): generation of the embeddings currently in
    *  the database — wiped once when the bundled model changes. */
   embeddingModelVersion: 'embedding_model_version_v1',

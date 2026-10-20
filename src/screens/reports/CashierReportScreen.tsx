@@ -11,6 +11,7 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -50,6 +51,11 @@ import {
 } from '../../core/theme';
 
 type Period = 'today' | 'week' | 'month' | 'all';
+/** v62 (الجولة 66 #3): فلتر نوع العملية في سجل الفواتير. */
+type InvoiceKind = 'all' | 'cash' | 'debt' | 'return';
+/** v62: كم فاتورة تُعرض قبل زر «عرض المزيد» — السجل الكامل قد يكون
+ *  بمئات الفواتير فيصبح التمرير لا نهائياً. */
+const INVOICE_PAGE_SIZE = 20;
 
 function periodRange(period: Period): {from: string | null; to: string | null} {
   if (period === 'all') {
@@ -83,8 +89,17 @@ export function CashierReportScreen() {
   const [report, setReport] = useState<CashierDetailedReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [printing, setPrinting] = useState(false);
+  // v62 (الجولة 66 #3): فلتر النوع + عدد الفواتير المعروضة.
+  const [kindFilter, setKindFilter] = useState<InvoiceKind>('all');
+  const [visibleCount, setVisibleCount] = useState(INVOICE_PAGE_SIZE);
   const {width: winW} = useWindowDimensions();
   const chartWidth = Math.max(220, winW - spacing.lg * 4 - 2);
+
+  // أي تغيير للفترة يعيد التصفح من البداية.
+  useEffect(() => {
+    setVisibleCount(INVOICE_PAGE_SIZE);
+    setKindFilter('all');
+  }, [period]);
 
   useEffect(() => {
     void (async () => {
@@ -149,6 +164,29 @@ export function CashierReportScreen() {
       }));
   }, [report]);
 
+  // v62 (الجولة 66 #3): السجل المصفّى + عدادات الأنواع للفلاتر.
+  const kindCounts = useMemo(() => {
+    const counts = {all: 0, cash: 0, debt: 0, return: 0};
+    if (report) {
+      for (const invoice of report.invoices) {
+        counts.all++;
+        counts[invoice.kind as 'cash' | 'debt' | 'return'] =
+          (counts[invoice.kind as 'cash' | 'debt' | 'return'] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [report]);
+
+  const filteredInvoices = useMemo(() => {
+    if (!report) {
+      return [];
+    }
+    if (kindFilter === 'all') {
+      return report.invoices;
+    }
+    return report.invoices.filter(invoice => invoice.kind === kindFilter);
+  }, [report, kindFilter]);
+
   return (
     <Screen>
       <AppHeader
@@ -181,43 +219,58 @@ export function CashierReportScreen() {
           />
         ) : (
           <>
-            {/* المؤشرات */}
+            {/* المؤشرات — v62 (الجولة 66 #3): كان ستّ بطاقات flex:1
+                (flexBasis صفر) تتزاحم كلها في صف واحد متلاصق؛ الآن
+                شبكة حتمية بطاقتين في الصف (٣ صفوف) والأهم أولاً:
+                الصافي ثم عدد الفواتير ثم التفصيل. */}
             <View style={styles.grid}>
-              <StatCard
-                label="فواتير البيع"
-                value={String(report.salesCount)}
-                tone="accent"
-                icon="receipt"
-              />
-              <StatCard
-                label="مبيعات نقدي"
-                value={formatMoney(report.cashTotal)}
-                tone="success"
-                icon="wallet"
-              />
-              <StatCard
-                label="بيع بالدين"
-                value={formatMoney(report.debtTotal)}
-                tone="info"
-                icon="tag"
-              />
-              <StatCard
-                label="مرتجعات"
-                value={formatMoney(Math.abs(report.returnsTotal))}
-                tone="danger"
-                icon="refresh"
-              />
-              <StatCard
-                label="الصافي"
-                value={formatMoney(report.netTotal)}
-                tone="accent"
-                icon="chart"
-              />
-              <StatCard
-                label="خصومات"
-                value={formatMoney(report.discountTotal)}
-                icon="percent"
-              />
+              <View style={styles.gridCell}>
+                <StatCard
+                  label="الصافي"
+                  value={formatMoney(report.netTotal)}
+                  tone="accent"
+                  icon="chart"
+                />
+              </View>
+              <View style={styles.gridCell}>
+                <StatCard
+                  label="فواتير البيع"
+                  value={String(report.salesCount)}
+                  tone="accent"
+                  icon="receipt"
+                />
+              </View>
+              <View style={styles.gridCell}>
+                <StatCard
+                  label="مبيعات نقدي"
+                  value={formatMoney(report.cashTotal)}
+                  tone="success"
+                  icon="wallet"
+                />
+              </View>
+              <View style={styles.gridCell}>
+                <StatCard
+                  label="بيع بالدين"
+                  value={formatMoney(report.debtTotal)}
+                  tone="info"
+                  icon="tag"
+                />
+              </View>
+              <View style={styles.gridCell}>
+                <StatCard
+                  label="مرتجعات"
+                  value={formatMoney(Math.abs(report.returnsTotal))}
+                  tone="danger"
+                  icon="refresh"
+                />
+              </View>
+              <View style={styles.gridCell}>
+                <StatCard
+                  label="خصومات"
+                  value={formatMoney(report.discountTotal)}
+                  icon="percent"
+                />
+              </View>
             </View>
 
             {/* الرسم اليومي */}
@@ -251,51 +304,99 @@ export function CashierReportScreen() {
               </>
             ) : null}
 
-            {/* سجل الفواتير */}
+            {/* سجل الفواتير — v62 (الجولة 66 #3): فلتر النوع بعدادات
+                + تصفح تدريجي (٢٠ كل مرة) بدلاً من قائمة لا نهائية. */}
             <SectionTitle
               title="سجل الفواتير"
-              hint={`${report.invoices.length} عملية في الفترة`}
+              hint={`${kindCounts.all} عملية في الفترة`}
             />
             {report.invoices.length === 0 ? (
               <EmptyState icon="receipt" title="لا فواتير في الفترة" />
             ) : (
-              <Card style={styles.card}>
-                {report.invoices.map(invoice => (
-                  <View key={invoice.id} style={styles.row}>
-                    <View style={{flex: 1}}>
-                      <Text style={styles.name} numberOfLines={1}>
-                        {invoice.number}
-                      </Text>
-                      <Text style={styles.dim}>
-                        {invoice.createdAt.slice(0, 16)}
-                      </Text>
-                    </View>
-                    <Badge
-                      label={
-                        invoice.kind === 'return'
-                          ? 'مرتجع'
-                          : invoice.kind === 'debt'
-                          ? 'دين'
-                          : 'نقدي'
-                      }
-                      tone={
-                        invoice.kind === 'return'
-                          ? 'danger'
-                          : invoice.kind === 'debt'
-                          ? 'info'
-                          : 'success'
-                      }
-                    />
-                    <Text
+              <>
+                <View style={styles.filterRow}>
+                  {(
+                    [
+                      {value: 'all', label: `الكل ${kindCounts.all}`},
+                      {value: 'cash', label: `نقدي ${kindCounts.cash}`},
+                      {value: 'debt', label: `دين ${kindCounts.debt}`},
+                      {value: 'return', label: `مرتجع ${kindCounts.return}`},
+                    ] as {value: InvoiceKind; label: string}[]
+                  ).map(chip => (
+                    <Pressable
+                      key={chip.value}
                       style={[
-                        styles.value,
-                        invoice.kind === 'return' ? {color: c.danger} : null,
-                      ]}>
-                      {formatMoney(invoice.total)}
-                    </Text>
-                  </View>
-                ))}
-              </Card>
+                        styles.filterChip,
+                        kindFilter === chip.value ? styles.filterChipOn : null,
+                      ]}
+                      onPress={() => {
+                        setKindFilter(chip.value);
+                        setVisibleCount(INVOICE_PAGE_SIZE);
+                      }}>
+                      <Text
+                        style={[
+                          styles.filterChipText,
+                          kindFilter === chip.value
+                            ? {color: c.onAccent}
+                            : null,
+                        ]}>
+                        {chip.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Card style={styles.card}>
+                  {filteredInvoices
+                    .slice(0, visibleCount)
+                    .map(invoice => (
+                      <View key={invoice.id} style={styles.row}>
+                        <View style={{flex: 1}}>
+                          <Text style={styles.name} numberOfLines={1}>
+                            {invoice.number}
+                          </Text>
+                          <Text style={styles.dim}>
+                            {invoice.createdAt.slice(0, 16)}
+                          </Text>
+                        </View>
+                        <Badge
+                          label={
+                            invoice.kind === 'return'
+                              ? 'مرتجع'
+                              : invoice.kind === 'debt'
+                              ? 'دين'
+                              : 'نقدي'
+                          }
+                          tone={
+                            invoice.kind === 'return'
+                              ? 'danger'
+                              : invoice.kind === 'debt'
+                              ? 'info'
+                              : 'success'
+                          }
+                        />
+                        <Text
+                          style={[
+                            styles.value,
+                            invoice.kind === 'return' ? {color: c.danger} : null,
+                          ]}>
+                          {formatMoney(invoice.total)}
+                        </Text>
+                      </View>
+                    ))}
+                </Card>
+                {filteredInvoices.length > visibleCount ? (
+                  <AppButton
+                    title={`عرض المزيد (${
+                      filteredInvoices.length - visibleCount
+                    } متبقية)`}
+                    variant="ghost"
+                    small
+                    onPress={() =>
+                      setVisibleCount(count => count + INVOICE_PAGE_SIZE)
+                    }
+                  />
+                ) : null}
+              </>
             )}
 
             <AppButton
@@ -324,6 +425,35 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row-reverse',
       flexWrap: 'wrap',
       gap: spacing.sm,
+    },
+    /** v62 (الجولة 66 #3): خلية حتمية — بطاقتان في الصف دائماً
+     *  (StatCard نفسها flex:1 / flexBasis صفر فلو تُركت حرة ازدحمت
+     *  الستّ كلها في صف واحد متلاصق). */
+    gridCell: {
+      width: '48.5%',
+    },
+    /** v62: صف فلاتر نوع الفاتورة. */
+    filterRow: {
+      flexDirection: 'row-reverse',
+      flexWrap: 'wrap',
+      gap: spacing.xs + 2,
+    },
+    filterChip: {
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+    },
+    filterChipOn: {
+      backgroundColor: c.accent,
+      borderColor: c.accent,
+    },
+    filterChipText: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: typography.micro + 2,
     },
     card: {padding: spacing.md, gap: spacing.sm},
     loader: {marginTop: spacing.xl},

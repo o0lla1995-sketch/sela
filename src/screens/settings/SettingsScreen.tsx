@@ -35,6 +35,12 @@ import {SubscriptionSection} from './SubscriptionSection';
 import {useThemeStore, useThemeColors, type ThemeMode} from '../../core/theme';
 import {ExportService} from '../../services/ExportService';
 import {BackupService} from '../../services/BackupService';
+// v62 (الجولة 66 #2): النسخ الاحتياطي التلقائي إلى ذاكرة الهاتف.
+import {
+  getAutoBackupLedger,
+  runAutoBackup,
+  type AutoBackupLedger,
+} from '../../services/AutoBackupService';
 import {wipeAllData} from '../../database/connection';
 import {useToastStore} from '../../stores/toastStore';
 import {useCatalogStore} from '../../stores/catalogStore';
@@ -270,6 +276,34 @@ export function SettingsScreen() {
   const [busyRestore, setBusyRestore] = useState(false);
   // v12 (round-18 #1): manual SILA sync straight from settings.
   const [silaSyncing, setSilaSyncing] = useState(false);
+  // v62 (الجولة 66 #2): دفتر النسخ التلقائي (يعاد جلبه بعد كل تشغيل).
+  const [autoLedger, setAutoLedger] = useState<AutoBackupLedger | null>(() =>
+    getAutoBackupLedger(),
+  );
+  const [autoBusy, setAutoBusy] = useState(false);
+
+  const runAutoBackupNow = useCallback(async () => {
+    if (autoBusy) {
+      return;
+    }
+    setAutoBusy(true);
+    try {
+      const next = await runAutoBackup(true);
+      setAutoLedger(next ?? getAutoBackupLedger());
+      if (next != null) {
+        if (next.lastError != null) {
+          toast(`فشلت النسخة التلقائية: ${next.lastError}`, 'error', 5000);
+        } else {
+          toast(
+            `نسخة احتياطية محفوظة — ${next.lastProducts} منتج و${next.lastSales} فاتورة`,
+            'success',
+          );
+        }
+      }
+    } finally {
+      setAutoBusy(false);
+    }
+  }, [autoBusy, toast]);
 
   const syncSilaNow = useCallback(async () => {
     if (silaSyncing) {
@@ -846,6 +880,48 @@ export function SettingsScreen() {
             title="النسخ الاحتياطي والاستعادة"
             hint="ملف واحد يحمل كل شيء: المنتجات والوحدات والبصمات والفواتير والإعدادات"
           />
+          {/* v62 (الجولة 66 #2): النسخ التلقائي إلى ذاكرة الهاتف — مفعّل
+              افتراضياً، نسخة مضغوطة كل N أيام في Downloads/SmartVisionPOS
+              مع الاحتفاظ بآخر 7 نسخ وحذف الأقدم تلقائياً. */}
+          <SwitchRow
+            label="النسخ التلقائي في ذاكرة الهاتف"
+            hint={
+              autoLedger?.lastError == null && autoLedger != null && autoLedger.lastRunAt > 0
+                ? `آخر نسخة: ${new Date(autoLedger.lastRunAt).toLocaleString('ar-EG', {dateStyle: 'short', timeStyle: 'short'})} — ${autoLedger.lastProducts} منتج`
+                : 'نسخة يومية صامتة في مجلد التنزيلات — يُحتفظ بآخر 7 نسخ'
+            }
+            value={settings.autoBackupEnabled}
+            onValueChange={value => update({autoBackupEnabled: value})}
+            icon="save"
+          />
+          {settings.autoBackupEnabled ? (
+            <>
+              <Segmented<number>
+                value={settings.autoBackupEveryDays}
+                onChange={days => update({autoBackupEveryDays: days})}
+                options={[
+                  {value: 1, label: 'يومي'},
+                  {value: 3, label: 'كل 3 أيام'},
+                  {value: 7, label: 'أسبوعي'},
+                ]}
+              />
+              {autoLedger?.lastError != null ? (
+                <Text style={[styles.backupHint, {color: c.danger}]}>
+                  آخر محاولة فشلت: {autoLedger.lastError} — أعد المحاولة الآن أو
+                  تأكد من مساحة التخزين.
+                </Text>
+              ) : null}
+              <AppButton
+                title={autoBusy ? 'جارٍ إنشاء النسخة…' : 'نسخة احتياطية الآن'}
+                variant="secondary"
+                icon="save"
+                small
+                loading={autoBusy}
+                disabled={autoBusy}
+                onPress={() => void runAutoBackupNow()}
+              />
+            </>
+          ) : null}
           {/* v28 (round-36 #4): the Google Drive cloud-backup center —
               linking, auto-upload every N days, the Drive backups
               list + restore-from-Drive. */}

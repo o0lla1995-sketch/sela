@@ -1,6 +1,7 @@
 package com.sela.pal.native_modules
 
 import android.app.Activity
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -416,6 +417,26 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
    */
   @ReactMethod
   fun exportFile(fileName: String, mimeType: String, content: String, promise: Promise) {
+    writeToDownloads(fileName, mimeType, content, true, promise)
+  }
+
+  /**
+   * v62 (الجولة 66 #2): نفس exportFile لكن بلا Toast — للنسخ
+   * الاحتياطي التلقائي الصامت (مرة يومياً كحد أقصى) حتى لا يزعج
+   * الكاشير أثناء البيع.
+   */
+  @ReactMethod
+  fun exportFileSilent(fileName: String, mimeType: String, content: String, promise: Promise) {
+    writeToDownloads(fileName, mimeType, content, false, promise)
+  }
+
+  private fun writeToDownloads(
+    fileName: String,
+    mimeType: String,
+    content: String,
+    showToast: Boolean,
+    promise: Promise
+  ) {
     try {
       val bytes = content.toByteArray(Charsets.UTF_8)
       val displayName = sanitizeFileName(fileName)
@@ -456,18 +477,20 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
         resultPath = targetFile.absolutePath
       }
 
-      // Friendly confirmation toast.
-      val activity = currentActivity
-      val handler = android.os.Handler((activity ?: reactContext).mainLooper)
-      handler.post {
-        try {
-          Toast.makeText(
-            reactContext,
-            "تم حفظ الملف في: $resultPath",
-            Toast.LENGTH_LONG
-          ).show()
-        } catch (ignored: Exception) {
-          // Toast is cosmetic — never fail the export because of it.
+      // Friendly confirmation toast (manual exports only).
+      if (showToast) {
+        val activity = currentActivity
+        val handler = android.os.Handler((activity ?: reactContext).mainLooper)
+        handler.post {
+          try {
+            Toast.makeText(
+              reactContext,
+              "تم حفظ الملف في: $resultPath",
+              Toast.LENGTH_LONG
+            ).show()
+          } catch (ignored: Exception) {
+            // Toast is cosmetic — never fail the export because of it.
+          }
         }
       }
 
@@ -476,6 +499,72 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
       promise.reject("PERMISSION", "إذن التخزين مطلوب لحفظ الملفات (أندرويد قديم)")
     } catch (t: Throwable) {
       promise.reject("EXPORT_FAILED", "فشل تصدير الملف: ${t.message}")
+    }
+  }
+
+  /**
+   * v62 (الجولة 66 #2): تقليم النسخ الاحتياطية التلقائية القديمة في
+   * Downloads/SmartVisionPOS — يُبقي أحدث `keepCount` ملفاً يبدأ اسمه
+   * بالبادئة المعطاة ويحذف ما بعدها. يعيد عدد الملفات المحذوفة.
+   * MediaStore على أندرويد 10+ (التطبيق يحذف ما أنشأه بنفسه بلا
+   * أذونات)، وملفات مباشرة على الأقدم.
+   */
+  @ReactMethod
+  fun pruneAutoBackups(prefix: String, keepCount: Double, promise: Promise) {
+    val keep = keepCount.toInt().coerceAtLeast(1)
+    try {
+      var deleted = 0
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = reactContext.contentResolver
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val selection =
+          "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND " +
+            "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
+        val args = arrayOf("%$EXPORT_DIR_NAME%", "$prefix%")
+        val cursor = resolver.query(
+          collection,
+          arrayOf(MediaStore.MediaColumns._ID),
+          selection,
+          args,
+          "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+        )
+        val stale = ArrayList<Uri>()
+        cursor?.use { c ->
+          var index = 0
+          while (c.moveToNext()) {
+            if (index >= keep) {
+              stale.add(ContentUris.withAppendedId(collection, c.getLong(0)))
+            }
+            index++
+          }
+        }
+        for (uri in stale) {
+          try {
+            resolver.delete(uri, null, null)
+            deleted++
+          } catch (ignored: SecurityException) {
+            // Not ours to delete — skip silently.
+          }
+        }
+      } else {
+        @Suppress("DEPRECATION")
+        val downloadsDir =
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val dir = File(downloadsDir, EXPORT_DIR_NAME)
+        val files = dir
+          .listFiles { f -> f.isFile && f.name.startsWith(prefix) }
+          ?.sortedByDescending { it.lastModified() }
+          ?: emptyList()
+        for (i in keep until files.size) {
+          if (files[i].delete()) {
+            deleted++
+          }
+        }
+      }
+      promise.resolve(deleted.toDouble())
+    } catch (t: Throwable) {
+      promise.reject("PRUNE_FAILED", "فشل تقليم النسخ القديمة: ${t.message}")
     }
   }
 

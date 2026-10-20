@@ -29,6 +29,15 @@ import {ActivationScreen} from '../screens/license/ActivationScreen';
 // v47 (الجولة 55 #4): تنبيهات الاشتراك — اقتراب الانتهاء/الانتهاء/
 // وضع السماح، مرة واحدة يومياً لكل حدث، إشعار نظام للمهم منها.
 import {LicenseAlertsService} from '../services/LicenseAlertsService';
+// v62 (الجولة 66 #4): التحديث الإجباري — أول توجيه من الإدارة
+// (config/تفعيل/نبضة) يقيَّم محلياً؛ الجهاز الأقدم من الحد الأدنى
+// يُقفل على شاشة التحديث قبل أي شيء آخر.
+import {ForceUpdateScreen} from './ForceUpdateScreen';
+import {
+  fetchServerConfig,
+  getUpdateRequirement,
+  type UpdateRequirement,
+} from '../services/license/LicenseService';
 
 export function LicenseGate({children}: {children: React.ReactNode}) {
   const c = useThemeColors();
@@ -38,18 +47,37 @@ export function LicenseGate({children}: {children: React.ReactNode}) {
   const verifyOnline = useLicenseStore(state => state.verifyOnline);
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const appStateRef = useRef(AppState.currentState);
+  // v62: قرار التحديث الإجباري — يُعاد قراءته من الكاش بعد كل تقييم
+  // حالة (النبضة/التفعيل قد تكون جلبت توجيهاً جديداً من الخادم).
+  const [update, setUpdate] = useState<UpdateRequirement>(() =>
+    getUpdateRequirement(),
+  );
+
+  const recheckUpdate = async () => {
+    await Promise.all([
+      verifyOnline(true),
+      fetchServerConfig(),
+    ]);
+    await refresh();
+    setUpdate(getUpdateRequirement());
+  };
 
   useEffect(() => {
     // 1. Offline gate decision first (instant, cryptographically valid).
     void refresh();
     // 2. Then the throttled online heartbeat.
     void verifyOnline();
+    // v62 (الجولة 66 #1/#4): جلب إعدادات الخادم مباشرة عند الإقلاع
+    // — بيانات التواصل الحية + توجيه التحديث قبل أي تفعيل.
+    void fetchServerConfig().then(() => setUpdate(getUpdateRequirement()));
 
     // v47 (الجولة 55 #4): كل تقييم جديد يمر على تنبيهات الاشتراك
     //    (خصم يومي داخلياً — لا إزعاج). يشمل الإقلاع والعودة
     //    للتطبيق والدورة الخمسية أدناه.
     const unsubscribe = useLicenseStore.subscribe(state => {
       LicenseAlertsService.evaluate(state.status);
+      // v62 (الجولة 66 #4): النبضة قد جلبت توجيه تحديث جديد.
+      setUpdate(getUpdateRequirement());
     });
 
     const subscription = AppState.addEventListener(
@@ -101,6 +129,12 @@ export function LicenseGate({children}: {children: React.ReactNode}) {
         </View>
       </View>
     );
+  }
+
+  // v62 (الجولة 66 #4): التحديث الإجباري له الأولوية على كل شيء —
+  // حتى قبل شاشة التفعيل: الجهاز القديم يرى شاشة التحديث أولاً.
+  if (update.required) {
+    return <ForceUpdateScreen requirement={update} onRecheck={recheckUpdate} />;
   }
 
   if (status.state === 'needs_activation' || status.state === 'locked') {

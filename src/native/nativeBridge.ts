@@ -73,6 +73,15 @@ interface PlatformUtilsNative {
     mimeType: string,
     content: string,
   ): Promise<string>;
+  /** v62 (الجولة 66 #2): نسخة صامتة (بلا Toast) للنسخ التلقائي. */
+  exportFileSilent(
+    fileName: string,
+    mimeType: string,
+    content: string,
+  ): Promise<string>;
+  /** v62 (الجولة 66 #2): يحذف النسخ التلقائية الأقدم من آخر
+   *  keepCount نسخة (بادئة الاسم) — يعيد عدد المحذوفات. */
+  pruneAutoBackups(prefix: string, keepCount: number): Promise<number>;
   /** Opens the system file picker and returns the picked file's text. */
   pickAndReadFile(mimeTypes: string[]): Promise<string>;
   getFilesDir(): Promise<string>;

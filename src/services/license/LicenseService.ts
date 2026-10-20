@@ -267,6 +267,8 @@ async function apiPost<T>(
     }
     // v48: تبنّي رابط التفعيل الموزّع من الإدارة إن وُجد في الرد.
     adoptServerUrlIfProvided(data);
+    // v62 (الجولة 66 #4): تبنّي توجيه التحديث الإجباري إن وُجد.
+    adoptUpdateInfoIfProvided(data);
     return data as T;
   } catch (error) {
     if (error instanceof LicenseError) {
@@ -490,6 +492,136 @@ export function clearLicense(): void {
 
 export function getCachedContact(): LicenseContact | null {
   return getJson<LicenseContact | null>(KEYS.licenseContact, null);
+}
+
+// ── v62 (الجولة 66 #4): التحديث الإجباري ────────────────────────
+
+export interface UpdateRequirement {
+  /** true عندما يكون إصدار هذا الجهاز أقدم من الحد الأدنى الذي
+   *  ضبطته الإدارة — التطبيق يُقفل على شاشة التحديث حتى يحدّث. */
+  required: boolean;
+  minVersion: string | null;
+  updateUrl: string | null;
+  currentVersion: string;
+}
+
+interface UpdateDirective {
+  minAppVersion: string;
+  updateUrl: string;
+  seenAt: number;
+}
+
+/** Parses "62.0.0" (or "62", "62.1") → [62, 0, 0]. */
+export function parseVersionParts(version: string): number[] {
+  const match = /^\s*v?(\d+(?:\.\d+){0,3})/.exec(String(version ?? ''));
+  if (match == null) {
+    return [0];
+  }
+  return match[1].split('.').map(part => parseInt(part, 10) || 0);
+}
+
+/** true فقط عندما يكون installed أقدم من min (مقارنة رقمية
+ *  جزءاً بجزء — semver مبسّط يكفي لإصدارات التطبيق). */
+export function isVersionBelow(installed: string, min: string): boolean {
+  const a = parseVersionParts(installed);
+  const b = parseVersionParts(min);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) {
+      return x < y;
+    }
+  }
+  return false;
+}
+
+/** يتبنّى توجيه التحديث من أي رد خادم (تفعيل/نبضة/إعدادات).
+ *  يُدعى فقط عندما يحمل الرد الحقل فعلاً — الخوادم الأقدم بلا
+ *  الميزة لا تمس الكاش. الإفراغ من الخادم يُفرغ الإجبار هنا. */
+export function adoptUpdateInfoIfProvided(data: unknown): void {
+  try {
+    const d = data as {minAppVersion?: unknown} | null;
+    if (d == null || !('minAppVersion' in d)) {
+      return;
+    }
+    const minAppVersion =
+      typeof d.minAppVersion === 'string' ? d.minAppVersion.trim() : '';
+    const updateUrl =
+      typeof (d as {updateUrl?: unknown}).updateUrl === 'string'
+        ? ((d as {updateUrl: string}).updateUrl).trim()
+        : '';
+    setJson(KEYS.updateRequirement, {
+      minAppVersion,
+      updateUrl,
+      seenAt: Date.now(),
+    } satisfies UpdateDirective);
+    if (isVersionBelow(APP_VERSION, minAppVersion)) {
+      logDiag(
+        'license',
+        `الإدارة تطلب تحديثاً إجبارياً — الحد الأدنى ${minAppVersion} والجهاز على ${APP_VERSION}`,
+        'warn',
+      );
+    }
+  } catch {
+    // Never let update adoption break a license flow.
+  }
+}
+
+/** قرار الإجبار — يُقرأ محلياً (الكاش) فلا يحتاج اتصالاً. */
+export function getUpdateRequirement(): UpdateRequirement {
+  const directive = getJson<UpdateDirective | null>(
+    KEYS.updateRequirement,
+    null,
+  );
+  const minVersion = directive?.minAppVersion ?? '';
+  const updateUrl = directive?.updateUrl ?? '';
+  return {
+    required:
+      minVersion.length > 0 && isVersionBelow(APP_VERSION, minVersion),
+    minVersion: minVersion.length > 0 ? minVersion : null,
+    updateUrl: updateUrl.length > 0 ? updateUrl : null,
+    currentVersion: APP_VERSION,
+  };
+}
+
+/** بيانات التواصل الحية من الخادم — تجلب الآن حتى قبل أي تفعيل
+ *  (كانت شاشة التفعيل تعرض الرقم الاحتياطي المدمج على جهاز
+ *  جديد بلا كاش — الجولة 66 #1). */
+export async function fetchServerConfig(
+  timeoutMs = 10000,
+): Promise<LicenseContact | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${getServerUrl()}/api/v1/config`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+    const data = (await response.json().catch(() => null)) as
+      | (LicenseContact & {
+          ok?: boolean;
+          contact?: LicenseContact;
+          activationUrl?: string;
+          minAppVersion?: string;
+          updateUrl?: string;
+        })
+      | null;
+    if (!response.ok || data == null || data.ok !== true) {
+      return null;
+    }
+    if (data.contact != null) {
+      setJson(KEYS.licenseContact, data.contact);
+    }
+    adoptServerUrlIfProvided(data);
+    adoptUpdateInfoIfProvided(data);
+    return data.contact ?? getCachedContact();
+  } catch {
+    // Offline / server down — الكاش (إن وُجد) يبقى مصدر العرض.
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function storeLicense(

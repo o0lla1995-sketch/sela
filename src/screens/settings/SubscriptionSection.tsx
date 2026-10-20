@@ -25,6 +25,7 @@ import {
 import {LICENSE_CONTACT_FALLBACK} from '../../core/config';
 import {useLicenseStore} from '../../stores/licenseStore';
 import {
+  fetchServerConfig,
   getDeviceId,
   unbindDevice,
   getCachedContact,
@@ -55,6 +56,14 @@ export function SubscriptionSection() {
 
   React.useEffect(() => {
     void getDeviceId().then(setDeviceId);
+  }, []);
+
+  // v62 (الجولة 66 #1): نفس جذر شاشة التفعيل — التواصل يُجلب حياً
+  //  من الخادم عند فتح الإعدادات أيضاً (لا الاعتماد على كاش النبضة
+  //  وحده — لو غيّرت الإدارة رقمها منذ أيام يظهر الجديد فوراً).
+  const [, setContactTick] = useState(0);
+  useEffect(() => {
+    void fetchServerConfig().then(() => setContactTick(t => t + 1));
   }, []);
 
   const contact = getCachedContact() ?? LICENSE_CONTACT_FALLBACK;
