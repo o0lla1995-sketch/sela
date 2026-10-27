@@ -59,18 +59,18 @@ describe('v62 — ④ التحديث الإجباري: مقارنة الإصدا
     // بلا توجيه: لا إجبار.
     expect(getUpdateRequirement().required).toBe(false);
     // توجيه بحد أدنى أعلى من إصدار البناء (62.0.0): إجبار + رابط.
-    adoptUpdateInfoIfProvided({minAppVersion: '63.0.0', updateUrl: 'https://play.google.com/x'});
+    adoptUpdateInfoIfProvided({minAppVersion: '64.0.0', updateUrl: 'https://play.google.com/x'});
     const req = getUpdateRequirement();
     expect(req.required).toBe(true);
-    expect(req.minVersion).toBe('63.0.0');
+    expect(req.minVersion).toBe('64.0.0');
     expect(req.updateUrl).toBe('https://play.google.com/x');
-    expect(req.currentVersion).toBe('62.0.0');
+    expect(req.currentVersion).toBe('63.0.0');
     // إفراغ الخادم يلغي الإجبار.
     adoptUpdateInfoIfProvided({minAppVersion: '', updateUrl: ''});
     expect(getUpdateRequirement().required).toBe(false);
     // رد بلا الحقل إطلاقاً (خادم قديم) لا يمس الكاش.
     storage.delete(KEYS.updateRequirement);
-    adoptUpdateInfoIfProvided({minAppVersion: '63.0.0', updateUrl: ''});
+    adoptUpdateInfoIfProvided({minAppVersion: '64.0.0', updateUrl: ''});
     adoptUpdateInfoIfProvided({somethingElse: 1});
     expect(getUpdateRequirement().required).toBe(true);
   });

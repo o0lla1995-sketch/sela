@@ -113,7 +113,7 @@ describe('database startup & migrations', () => {
       expect(columns(db, table).length).toBeGreaterThan(0);
     }
     // Migrations ran all the way.
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(29); // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(30); // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
     expect(columns(db, 'cash_movements')).toContain('photo_path'); // v46
     // v48 (الجولة 56): جداول البيع أونلاين + توسيع قيود CHECK
     // (الدفتر 'online' وسندات COLL/RFD).
@@ -148,7 +148,7 @@ describe('database startup & migrations', () => {
     const cols = columns(db, 'campaign_debts');
     expect(cols).toContain('active_in_store'); // healed by migration v12
     expect(cols).toContain('store_state'); // added by migration v14
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(29); // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(30); // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
     expect(columns(db, 'cash_movements')).toContain('photo_path'); // v46
 
     fs.rmSync(file, {force: true});
@@ -240,7 +240,7 @@ describe('database startup & migrations', () => {
       .rows[0] as {total_amount: number; returned_minor: number};
     expect(Number(sale.total_amount)).toBeCloseTo(25.5, 5);
     expect(Number(sale.returned_minor)).toBe(0);
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(29); // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(30); // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
     expect(columns(db, 'cash_movements')).toContain('photo_path'); // v46
     fs.rmSync(file, {force: true});
   });
