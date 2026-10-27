@@ -18,19 +18,20 @@ describe('v32 — الخزينة: النقد المتاح والرصيد بعد 
   test('بطاقة الرصيد: متاح الآن + بعد العملية تحت المبلغ مباشرة', () => {
     const src = read(CASH);
     expect(src).toContain('balanceStrip');
-    expect(src).toContain('النقد المتاح بالخزينة');
-    expect(src).toContain('النقد الحالي بالخزينة');
+    // v64: البطاقة صارت بقناة الحركة — «المتاح في الخزينة/القناة»
+    expect(src).toContain('المتاح في');
+    expect(src).toContain('رصيد');
     expect(src).toContain('الرصيد بعد السحب');
     expect(src).toContain('الرصيد بعد الإيداع');
   });
 
   test('الرصيد بعد العملية حيّ يتبع المبلغ (خصم للسحب/المصروف وإضافة للإيداع)', () => {
     const src = read(CASH);
-    // v33: نفس المعادلة — أعيد تنسيقها متعددة الأسطر داخل البطاقة
-    // العلوية؛ التحقق على أجزائها الثلاثة.
-    expect(src).toContain('drawerMinor - amountMinor');
-    expect(src).toContain('drawerMinor + amountMinor');
-    expect(src).toContain('overDrawer');
+    // v64: المعادلة نفسها على رصيد القناة المختارة (channelBalance)
+    // بدل الدرج وحده — القنوات الجديدة بأسقفها المستقلة.
+    expect(src).toContain('channelBalance - amountMinor / 100');
+    expect(src).toContain('channelBalance + amountMinor / 100');
+    expect(src).toContain('overChannel');
   });
 
   test('تحذير تجاوز المتاح يظهر في البطاقة نفسها', () => {

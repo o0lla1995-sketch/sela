@@ -250,7 +250,7 @@ describe('v25 — treasurySnapshot: expenses/withdrawals leave the drawer', () =
     const {CashService} = load('src/services/CashService');
     await expect(
       CashService.recordExpense({category: 'كهرباء', amountMinor: 60000}),
-    ).rejects.toThrow(/أكبر من النقد الموجود/);
+    ).rejects.toThrow(/أكبر من الرصيد المتاح في نقدي/);
     // A within-drawer expense passes.
     const movement = await CashService.recordExpense({
       category: 'كهرباء',
@@ -267,7 +267,7 @@ describe('v25 — treasurySnapshot: expenses/withdrawals leave the drawer', () =
         amountMinor: 31000,
         authMethod: 'none',
       }),
-    ).rejects.toThrow(/أكثر من النقد الموجود/);
+    ).rejects.toThrow(/أكثر من الرصيد المتاح في نقدي/);
     const movement = await CashService.recordWithdrawal({
       amountMinor: 30000,
       authMethod: 'fingerprint',

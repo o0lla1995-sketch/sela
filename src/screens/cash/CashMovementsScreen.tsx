@@ -64,6 +64,9 @@ import {
 import {Icon} from '../../components/Icon';
 import {PinPad} from '../../components/PinPad';
 import {CashService, EXPENSE_CATEGORIES, authorizeWithBiometric, verifyWithdrawalPin, movementSecurityMode} from '../../services/CashService';
+import {activePaymentMethods, paymentMethodById} from '../../core/paymentMethods';
+import {ReportService} from '../../services/ReportService';
+import {useSettingsStore} from '../../stores/settingsStore';
 import {CashRepo} from '../../database/repositories/CashRepo';
 import {useAppLockStore} from '../../stores/appLockStore';
 import {useToastStore} from '../../stores/toastStore';
@@ -800,6 +803,10 @@ export function CashMovementsScreen() {
                     </View>
                     <Text style={styles.ledgerMeta}>
                       {row.ref} · {formatDateTime(row.created_at)}
+                      {row.payment_method != null &&
+                      row.payment_method !== 'cash'
+                        ? ` · عبر ${paymentMethodById(row.payment_method).label}`
+                        : ''}
                     </Text>
                     {row.note ? (
                       <Text style={styles.ledgerNote} numberOfLines={1}>
@@ -1564,6 +1571,36 @@ function MovementSheet({
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [showCustom, setShowCustom] = useState(false);
+  /** v64 (الجولة 76 #5): قناة المصدر/الوجهة — نقدي أو بنك/محفظة
+   *  مفعّلة من الإعدادات (نفس سطح المكتب v72). السقف رصيد القناة. */
+  const [formMethod, setFormMethod] = useState<string>('cash');
+  const [channelBalance, setChannelBalance] = useState<number | null>(null);
+  const paymentMethodsEnabled = useSettingsStore(
+    s => s.settings.paymentMethodsEnabled,
+  );
+  const channels = useMemo(
+    () => activePaymentMethods(paymentMethodsEnabled),
+    [paymentMethodsEnabled],
+  );
+
+  // رصيد القناة المختارة لحظة فتح النافذة أو تغييرها.
+  useEffect(() => {
+    let mounted = true;
+    ReportService.methodBalanceNow(formMethod)
+      .then((balance: number) => {
+        if (mounted) {
+          setChannelBalance(balance);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setChannelBalance(null);
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [formMethod]);
   /** v46→v47: صورة السند المرفقة — مسار ملف محلي داخل filesDir/vouchers
    *  (يُحفظ مع الحركة في عمود photo_path ويمكن مراجعته من السجل).
    *  v47: الإرفاق صار من أيقونة المشبك داخل حقل الملاحظة نفسه —
@@ -1687,10 +1724,15 @@ function MovementSheet({
       : category;
 
   const isOut = mode !== 'deposit';
-  const overDrawer = isOut && amountMinor > drawerMinor;
+  /** v64: السقف على رصيد القناة المختارة (لا الدرج وحده). */
+  const selectedChannel = paymentMethodById(formMethod);
+  const overChannel =
+    isOut &&
+    channelBalance != null &&
+    amountMinor > Math.round(channelBalance * 100);
 
   const confirm = useCallback(async () => {
-    if (busy || amountMinor <= 0 || overDrawer) {
+    if (busy || amountMinor <= 0 || overChannel) {
       return;
     }
     // v27: the gate guards ALL THREE movements — expense and
@@ -1709,6 +1751,7 @@ function MovementSheet({
           amountMinor,
           authMethod,
           photoPath,
+          paymentMethod: formMethod,
         });
       } else if (mode === 'withdrawal') {
         movement = await CashService.recordWithdrawal({
@@ -1716,6 +1759,7 @@ function MovementSheet({
           amountMinor,
           authMethod,
           photoPath,
+          paymentMethod: formMethod,
         });
       } else {
         movement = await CashService.recordDeposit({
@@ -1723,6 +1767,7 @@ function MovementSheet({
           amountMinor,
           authMethod,
           photoPath,
+          paymentMethod: formMethod,
         });
       }
       // v46: الحركة سُجلت بنجاح في القاعدة — الملف الآن ملك السند
@@ -1741,7 +1786,8 @@ function MovementSheet({
   }, [
     busy,
     amountMinor,
-    overDrawer,
+    overChannel,
+    formMethod,
     mode,
     securityMode,
     authStage,
@@ -2048,21 +2094,33 @@ function MovementSheet({
                   <View
                     style={[
                       sheetStyles(c).balanceStrip,
-                      overDrawer ? {borderColor: c.danger} : null,
+                      overChannel ? {borderColor: c.danger} : null,
                     ]}>
                     <View style={sheetStyles(c).balanceCell}>
                       <Text style={sheetStyles(c).balanceLabel}>
-                        {isOut ? 'النقد المتاح بالخزينة' : 'النقد الحالي بالخزينة'}
+                        {isOut
+                          ? `المتاح في ${
+                              selectedChannel.id === 'cash'
+                                ? 'الخزينة'
+                                : selectedChannel.label
+                            }`
+                          : `رصيد ${
+                              selectedChannel.id === 'cash'
+                                ? 'الخزينة'
+                                : selectedChannel.label
+                            }`}
                       </Text>
                       <Text
                         style={[
                           sheetStyles(c).balanceValue,
                           {
-                            color: overDrawer ? c.danger : c.text,
+                            color: overChannel ? c.danger : c.text,
                             fontSize: dyn.balanceFont,
                           },
                         ]}>
-                        {formatMoney(drawerMinor / 100)}
+                        {channelBalance == null
+                          ? '…'
+                          : formatMoney(channelBalance)}
                       </Text>
                     </View>
                     <View style={sheetStyles(c).balanceDivider} />
@@ -2074,7 +2132,7 @@ function MovementSheet({
                           ? 'الرصيد بعد المصروف'
                           : 'الرصيد بعد الإيداع'}
                       </Text>
-                      {overDrawer ? (
+                      {overChannel ? (
                         <Text
                           style={[
                             sheetStyles(c).balanceValue,
@@ -2096,13 +2154,50 @@ function MovementSheet({
                               fontSize: dyn.balanceFont,
                             },
                           ]}>
-                          {formatMoney(
-                            (isOut
-                              ? drawerMinor - amountMinor
-                              : drawerMinor + amountMinor) / 100,
-                          )}
+                          {channelBalance == null
+                            ? '…'
+                            : formatMoney(
+                                isOut
+                                  ? channelBalance - amountMinor / 100
+                                  : channelBalance + amountMinor / 100,
+                              )}
                         </Text>
                       )}
+                    </View>
+                  </View>
+
+                  {/* v64 (الجولة 76 #5): قناة المصدر/الوجهة — نقدي أو
+                      أي بنك/محفظة مفعّلة (نفس سطح المكتب v72). */}
+                  <View style={sheetStyles(c).channelWrap}>
+                    <Text style={sheetStyles(c).channelLabel}>
+                      {mode === 'deposit' ? 'الإيداع إلى' : 'الدفع من'}
+                    </Text>
+                    <View style={sheetStyles(c).catGrid}>
+                      {channels.map(channel => {
+                        const active = formMethod === channel.id;
+                        return (
+                          <TouchableOpacity
+                            key={channel.id}
+                            style={[
+                              sheetStyles(c).catChip,
+                              active && {
+                                backgroundColor: c.accent,
+                                borderColor: c.accent,
+                              },
+                            ]}
+                            onPress={() => setFormMethod(channel.id)}
+                            disabled={busy}
+                            activeOpacity={0.7}>
+                            <Text
+                              style={[
+                                sheetStyles(c).catChipText,
+                                {color: active ? c.onAccent : c.textDim},
+                              ]}>
+                              {channel.label}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
                     </View>
                   </View>
 
@@ -2113,7 +2208,7 @@ function MovementSheet({
                   <View
                     style={[
                       sheetStyles(c).amountRow,
-                      overDrawer ? {borderColor: c.danger} : null,
+                      overChannel ? {borderColor: c.danger} : null,
                     ]}>
                     <Text
                       style={[
@@ -2382,7 +2477,7 @@ function MovementSheet({
                     icon={KIND_META[mode].icon}
                     onPress={() => void confirm()}
                     loading={busy}
-                    disabled={amountMinor <= 0 || overDrawer}
+                    disabled={amountMinor <= 0 || overChannel}
                   />
                 </View>
               </View>
@@ -2789,6 +2884,16 @@ function sheetStyles(c: ReturnType<typeof useThemeColors>) {
     catChipText: {
       fontFamily: fonts.bold,
       fontSize: 11.5,
+    },
+    /** v64 (الجولة 76 #5): قسم قناة المصدر/الوجهة داخل نموذج الحركة. */
+    channelWrap: {
+      gap: 6,
+      marginTop: 4,
+    },
+    channelLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
     customInput: {
       color: c.text,

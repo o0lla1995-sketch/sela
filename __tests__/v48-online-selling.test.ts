@@ -16,7 +16,7 @@
  * ⑤ الواجهات: شاشة الطلبات بفلاترها وأفعالها، شاشة الإعدادات،
  *    زر الوصول السريع مع شارة الجديد، وإخفاء رابط التفعيل من
  *    واجهة المستخدم (يوزعه الخادم activationUrl).
- * ⑥ الإصدار: 63.0.0 (71).
+ * ⑥ الإصدار: 64.0.0 (72).
  */
 const read = (path: string) =>
   require('fs').readFileSync(path, 'utf8') as string;
@@ -174,13 +174,13 @@ describe('v48 — البيع أونلاين: الترحيل والقاعدة', (
     expect(screen).not.toContain('urlInput');
   });
 
-  test('⑥ الإصدار: 63.0.0 (71) في config والبناء', () => {
+  test('⑥ الإصدار: 64.0.0 (72) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '63.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 71');
+    expect(config).toContain("APP_VERSION = '64.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 72');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 71');
-    expect(gradle).toContain('versionName "63.0.0"');
+    expect(gradle).toContain('versionCode 72');
+    expect(gradle).toContain('versionName "64.0.0"');
   });
 });
 

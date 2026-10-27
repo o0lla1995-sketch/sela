@@ -40,6 +40,9 @@ import {ErrorBoundary} from '../../components/ErrorBoundary';
 import {BarChart, peakIndex} from '../../components/charts/BarChart';
 import {Icon} from '../../components/Icon';
 import {ReportService, type ReportBundle} from '../../services/ReportService';
+import {ReportRepo} from '../../database/repositories/ReportRepo';
+import {rangeFor} from '../../services/ReportService';
+import {displayMethod} from '../../core/paymentMethods';
 import {ExportService} from '../../services/ExportService';
 import {useToastStore} from '../../stores/toastStore';
 import {
@@ -76,6 +79,11 @@ export function ReportsScreen() {
   const [rangeKey, setRangeKey] = useState<ReportRangeKey>('last7');
   const [bundle, setBundle] = useState<ReportBundle | null>(null);
   const [loading, setLoading] = useState(true);
+  /** v64 (الجولة 76 #6): الرصيد الصافي لكل قناة دفع بالفترة —
+   *  مبيعات + سدادات + إيداعات مقابل مرتجعات + مسحوبات + مصروفات. */
+  const [payMethods, setPayMethods] = useState<
+    Awaited<ReturnType<typeof ReportRepo.methodLedgerTotals>>
+  >([]);
   const [exporting, setExporting] = useState<'csv' | 'xls' | null>(null);
   const [topMode, setTopMode] = useState<'revenue' | 'profit'>('revenue');
   // v26 (round-34 #6): the cash & debts sections start COLLAPSED —
@@ -94,8 +102,12 @@ export function ReportsScreen() {
     async (key: ReportRangeKey) => {
       setLoading(true);
       try {
-        const next = await ReportService.loadBundle(key);
+        const [next, nextPayMethods] = await Promise.all([
+          ReportService.loadBundle(key),
+          ReportRepo.methodLedgerTotals(rangeFor(key)),
+        ]);
         setBundle(next);
+        setPayMethods(nextPayMethods);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         toast(message, 'error');
@@ -728,6 +740,63 @@ export function ReportsScreen() {
               </Text>
             </Card>
 
+            {/* ── v64 (الجولة 76 #6): أرصدة المحافظ والبنوك — الرصيد
+                الصافي لكل قناة خلال الفترة (نفس سطح المكتب v72). */}
+            {payMethods.length > 0 ? (
+              <View style={styles.methodCard}>
+                <Text style={styles.methodCardTitle}>
+                  أرصدة المحافظ والبنوك
+                </Text>
+                <Text style={styles.methodCardHint}>
+                  الوارد (مبيعات + سدادات + إيداعات) − الصادر (مرتجعات
+                  + مسحوبات + مصروفات) لكل قناة بالفترة
+                </Text>
+                {payMethods.map(row => {
+                  const method = displayMethod(row.method);
+                  return (
+                    <View key={row.method} style={styles.methodRow}>
+                      <View style={styles.methodRowTxts}>
+                        <Text style={styles.methodRowName}>
+                          {method.label}
+                        </Text>
+                        <Text style={styles.methodRowSub} numberOfLines={1}>
+                          {(row.salesCount > 0 || row.repaymentsCount > 0
+                            ? `دخل ${formatMoney(
+                                row.salesIn + row.repaymentsIn,
+                              )}`
+                            : 'لا عمليات بيع') +
+                            (row.depositsIn > 0
+                              ? ` + إيداعات ${formatMoney(row.depositsIn)}`
+                              : '') +
+                            (row.refundsOut > 0
+                              ? ` · رُدّ ${formatMoney(row.refundsOut)}`
+                              : '') +
+                            (row.withdrawalsOut + row.expensesOut > 0
+                              ? ` · خرج ${formatMoney(
+                                  row.withdrawalsOut + row.expensesOut,
+                                )}`
+                              : '')}
+                        </Text>
+                      </View>
+                      <Text
+                        style={[
+                          styles.methodRowValue,
+                          {color: method.color === '#16A34A' ? c.success : method.color},
+                        ]}>
+                        {formatMoney(row.net)}
+                      </Text>
+                    </View>
+                  );
+                })}
+                <Text style={styles.methodCardNote}>
+                  منظور حركة المال: كل مبلغ يدخل القناة أو يخرج منها
+                  بتاريخه — سدادات الديون تدخل بقناتها، ومرتجعات وفروق
+                  الاستبدال تُخصم من قناة التسوية. المبيعات قبل إصدار
+                  طرق الدفع محسوبة نقدياً.
+                </Text>
+              </View>
+            ) : null}
+
             {/* ── 3) Sales performance chart ─────────────────── */}
             <Card>
               {/* v42 (الجولة 50 #3): العنوان يتبع حبيبية السلسلة —
@@ -1042,6 +1111,57 @@ function CollapseSection({
 
 const useStyles = makeStyles(c =>
   StyleSheet.create({
+    /** v64 (الجولة 76 #6): بطاقة أرصدة المحافظ والبنوك. */
+    methodCard: {
+      backgroundColor: c.surface,
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.lg,
+      gap: spacing.sm,
+    },
+    methodCardTitle: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body + 1,
+    },
+    methodCardHint: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 18,
+    },
+    methodRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      paddingVertical: 7,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    methodRowTxts: {flex: 1, minWidth: 0, gap: 2},
+    methodRowName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    methodRowSub: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+    },
+    methodRowValue: {
+      fontFamily: fonts.black,
+      fontSize: typography.body + 2,
+      fontVariant: ['tabular-nums'],
+    },
+    methodCardNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 17,
+      marginTop: 4,
+    },
     screen: {flex: 1, backgroundColor: c.bg},
     content: {
       padding: spacing.lg,

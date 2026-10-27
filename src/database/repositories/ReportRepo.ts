@@ -503,6 +503,331 @@ export const ReportRepo = {
     }));
   },
 
+  /** v64 (الجولة 76 #6): الرصيد الصافي الكامل لكل قناة دفع بفترة —
+   *  ────────────────────────────────────────────────────────────
+   *  منظور حركة المال الفعلي لكل بنك/محفظة/الخزينة النقدية:
+   *    الوارد: مبيعات نقطة البيع (غير الديون) + سدادات الديون
+   *           (دفتر المتجر وصِلة) + الإيداعات.
+   *    الصادر: مرتجعات/فروق الاستبدال (صفوف RET بقناتها) +
+   *            المسحوبات + المصروفات.
+   *  net = الوارد − الصادر — الرقم الذي يطابق كشف الحساب البنكي
+   *  أو رصيد المحفظة للفترة نفسها بلا أي إسقاطات محاسبية أخرى.
+   *  المبيعات القديمة بلا طريقة = نقدية. فواتير الدين لا تدخل
+   *  عند البيع (لم يُدفع منها شيء) لكن سداداتها تدخل بقناتها. */
+  async methodLedgerTotals(
+    range: DateRange,
+  ): Promise<
+    {
+      method: string;
+      /** مبيعات + سدادات (بالشيكل). */
+      inflow: number;
+      /** مبيعات POS فقط + عددها. */
+      salesIn: number;
+      salesCount: number;
+      /** سدادات الديون (دفتر + صِلة). */
+      repaymentsIn: number;
+      repaymentsCount: number;
+      /** إيداعات القناة. */
+      depositsIn: number;
+      /** مرتجعات وفروق استبدال خرجت من القناة (سالب موجب الإشارة
+       *  محسوب: netOut = -(RET totals) — موجب يعني خرج مال). */
+      refundsOut: number;
+      refundsCount: number;
+      /** مسحوبات + مصروفات القناة. */
+      withdrawalsOut: number;
+      expensesOut: number;
+      movementsCount: number;
+      net: number;
+    }[]
+  > {
+    const [start, end] = rangeBounds(range);
+    const result = await getDb().execute(
+      `SELECT method,
+         COALESCE(SUM(sales_in), 0) AS sales_in,
+         COALESCE(SUM(sales_cnt), 0) AS sales_cnt,
+         COALESCE(SUM(rep_in), 0) AS rep_in,
+         COALESCE(SUM(rep_cnt), 0) AS rep_cnt,
+         COALESCE(SUM(deposits_in), 0) AS deposits_in,
+         COALESCE(SUM(refunds_out), 0) AS refunds_out,
+         COALESCE(SUM(refunds_cnt), 0) AS refunds_cnt,
+         COALESCE(SUM(wd_out), 0) AS wd_out,
+         COALESCE(SUM(exp_out), 0) AS exp_out,
+         COALESCE(SUM(mov_cnt), 0) AS mov_cnt
+       FROM (
+         SELECT
+           COALESCE(s.payment_method, 'cash') AS method,
+           SUM(CASE WHEN s.return_kind IS NULL THEN s.total_amount ELSE 0 END) AS sales_in,
+           SUM(CASE WHEN s.return_kind IS NULL THEN 1 ELSE 0 END) AS sales_cnt,
+           0 AS rep_in, 0 AS rep_cnt, 0 AS deposits_in,
+           SUM(CASE WHEN s.return_kind IS NOT NULL THEN -s.total_amount ELSE 0 END) AS refunds_out,
+           SUM(CASE WHEN s.return_kind IS NOT NULL THEN 1 ELSE 0 END) AS refunds_cnt,
+           0 AS wd_out, 0 AS exp_out, 0 AS mov_cnt
+         FROM sales s
+         WHERE s.created_at >= ? AND s.created_at <= ?
+           AND s.invoice_number NOT LIKE 'INV-D-%'
+           AND s.invoice_number NOT LIKE 'INV-L-%'
+           AND s.invoice_number NOT LIKE 'INV-O-%'
+           AND s.invoice_number NOT LIKE 'INV-V-%'
+         GROUP BY COALESCE(s.payment_method, 'cash')
+         UNION ALL
+         SELECT
+           CASE WHEN p.method IN ('card','other') THEN 'other' ELSE COALESCE(p.method, 'cash') END AS method,
+           0, 0,
+           SUM(p.amount_minor) / 100.0 AS rep_in,
+           COUNT(*) AS rep_cnt,
+           0, 0, 0, 0, 0, 0
+         FROM local_payments p
+         WHERE p.created_at >= ? AND p.created_at <= ?
+         GROUP BY 1
+         UNION ALL
+         SELECT
+           CASE WHEN q.payment_method IN ('card','other') THEN 'other'
+                ELSE COALESCE(q.payment_method, 'cash') END AS method,
+           0, 0,
+           SUM(q.amount_minor) / 100.0 AS rep_in,
+           COUNT(*) AS rep_cnt,
+           0, 0, 0, 0, 0, 0
+         FROM sila_payment_queue q
+         WHERE q.kind = 'repayment'
+           AND q.created_at >= ? AND q.created_at <= ?
+         GROUP BY 1
+         UNION ALL
+         SELECT
+           COALESCE(c.payment_method, 'cash') AS method,
+           0, 0, 0, 0,
+           SUM(CASE WHEN c.kind = 'deposit' THEN c.amount_minor ELSE 0 END) / 100.0 AS deposits_in,
+           0, 0,
+           SUM(CASE WHEN c.kind = 'withdrawal' THEN c.amount_minor ELSE 0 END) / 100.0 AS wd_out,
+           SUM(CASE WHEN c.kind = 'expense' THEN c.amount_minor ELSE 0 END) / 100.0 AS exp_out,
+           COUNT(*) AS mov_cnt
+         FROM cash_movements c
+         WHERE c.created_at >= ? AND c.created_at <= ?
+           AND c.kind IN ('deposit','withdrawal','expense')
+         GROUP BY COALESCE(c.payment_method, 'cash')
+       )
+       GROUP BY method`,
+      [start, end, start, end, start, end, start, end],
+    );
+    return (result.rows ?? []).map(raw => {
+      const row = raw as Record<string, unknown>;
+      const salesIn = Number(row.sales_in ?? 0);
+      const repaymentsIn = Number(row.rep_in ?? 0);
+      const depositsIn = Number(row.deposits_in ?? 0);
+      const refundsOut = Number(row.refunds_out ?? 0);
+      const withdrawalsOut = Number(row.wd_out ?? 0);
+      const expensesOut = Number(row.exp_out ?? 0);
+      const inflow = salesIn + repaymentsIn + depositsIn;
+      return {
+        method: String(row.method ?? 'cash'),
+        inflow,
+        salesIn,
+        salesCount: Number(row.sales_cnt ?? 0),
+        repaymentsIn,
+        repaymentsCount: Number(row.rep_cnt ?? 0),
+        depositsIn,
+        refundsOut,
+        refundsCount: Number(row.refunds_cnt ?? 0),
+        withdrawalsOut,
+        expensesOut,
+        movementsCount: Number(row.mov_cnt ?? 0),
+        net: inflow - refundsOut - withdrawalsOut - expensesOut,
+      };
+    });
+  },
+
+  /** v64 (الجولة 76 #6): سجل حركات قناة واحدة خلال الفترة — كل
+   *  سطر {تاريخ، نوع، مرجع، وصف، داخل، خارج} بترتيب زمني تصاعدي،
+   *  يغذّي نافذة التفاصيل وكشف PDF لكل محفظة/بنك. */
+  async methodLedgerRows(
+    range: DateRange,
+    method: string,
+  ): Promise<
+    {
+      at: string;
+      kind: 'sale' | 'return' | 'repayment_local' | 'repayment_sila' | 'deposit' | 'withdrawal' | 'expense';
+      ref: string;
+      label: string;
+      amountIn: number;
+      amountOut: number;
+    }[]
+  > {
+    const [start, end] = rangeBounds(range);
+    const saleKindLabel = (paymentType: unknown, returnKind: unknown): string =>
+      returnKind != null ? 'مرتجع/استبدال' : String(paymentType ?? '') === 'WHOLESALE' ? 'بيع جملة' : 'بيع';
+    const methodClause =
+      method === 'cash'
+        ? "COALESCE(payment_method, 'cash') = 'cash'"
+        : 'payment_method = ?';
+    const methodClauseQ =
+      method === 'cash'
+        ? "COALESCE(payment_method, 'cash') = 'cash'"
+        : 'payment_method = ?';
+    const queries: {
+      sql: string;
+      params: (string | number)[];
+    }[] = [
+      {
+        sql: `SELECT created_at AS at, payment_type, return_kind, invoice_number AS ref,
+                 CASE WHEN return_kind IS NOT NULL THEN -total_amount ELSE total_amount END AS amount
+              FROM sales
+              WHERE created_at >= ? AND created_at <= ?
+                AND invoice_number NOT LIKE 'INV-D-%'
+                AND invoice_number NOT LIKE 'INV-L-%'
+                AND invoice_number NOT LIKE 'INV-O-%'
+                AND invoice_number NOT LIKE 'INV-V-%'
+                AND ${methodClause}`,
+        params:
+          method === 'cash'
+            ? [start, end]
+            : [start, end, method],
+      },
+      {
+        sql: `SELECT created_at AS at, receipt_ref AS ref, amount_minor / 100.0 AS amount
+              FROM local_payments
+              WHERE created_at >= ? AND created_at <= ?
+                AND ${
+                  method === 'cash'
+                    ? "COALESCE(CASE WHEN method IN ('card','other') THEN 'other' ELSE method END, 'cash') = 'cash'"
+                    : "CASE WHEN method IN ('card','other') THEN 'other' ELSE method END = ?"
+                }`,
+        params: method === 'cash' ? [start, end] : [start, end, method],
+      },
+      {
+        sql: `SELECT created_at AS at, pos_receipt_ref AS ref, amount_minor / 100.0 AS amount
+              FROM sila_payment_queue
+              WHERE kind = 'repayment'
+                AND created_at >= ? AND created_at <= ?
+                AND ${
+                  method === 'cash'
+                    ? "COALESCE(CASE WHEN payment_method IN ('card','other') THEN 'other' ELSE payment_method END, 'cash') = 'cash'"
+                    : "CASE WHEN payment_method IN ('card','other') THEN 'other' ELSE payment_method END = ?"
+                }`,
+        params: method === 'cash' ? [start, end] : [start, end, method],
+      },
+      {
+        sql: `SELECT created_at AS at, kind, ref, category, amount_minor / 100.0 AS amount
+              FROM cash_movements
+              WHERE created_at >= ? AND created_at <= ?
+                AND kind IN ('deposit','withdrawal','expense')
+                AND ${methodClauseQ}`,
+        params: method === 'cash' ? [start, end] : [start, end, method],
+      },
+    ];
+    const rows: {
+      at: string;
+      kind: 'sale' | 'return' | 'repayment_local' | 'repayment_sila' | 'deposit' | 'withdrawal' | 'expense';
+      ref: string;
+      label: string;
+      amountIn: number;
+      amountOut: number;
+    }[] = [];
+    for (const q of queries) {
+      const result = await getDb().execute(q.sql, q.params);
+      for (const raw of result.rows ?? []) {
+        const row = raw as Record<string, unknown>;
+        if (row.ref == null) {
+          continue;
+        }
+        const at = String(row.at ?? '');
+        const ref = String(row.ref ?? '');
+        const amount = Number(row.amount ?? 0);
+        if ('kind' in row) {
+          const kind = String(row.kind);
+          const cashKind =
+            kind === 'deposit'
+              ? ('deposit' as const)
+              : kind === 'withdrawal'
+              ? ('withdrawal' as const)
+              : ('expense' as const);
+          rows.push({
+            at,
+            kind: cashKind,
+            ref,
+            label:
+              cashKind === 'deposit'
+                ? `إيداع — ${String(row.category ?? '')}`
+                : cashKind === 'withdrawal'
+                ? `سحب رصيد — ${String(row.category ?? '')}`
+                : `مصروف — ${String(row.category ?? '')}`,
+            amountIn: cashKind === 'deposit' ? amount : 0,
+            amountOut: cashKind === 'deposit' ? 0 : amount,
+          });
+        } else if ('payment_type' in row) {
+          const isReturn = row.return_kind != null;
+          rows.push({
+            at,
+            kind: isReturn ? 'return' : 'sale',
+            ref,
+            label: saleKindLabel(row.payment_type, row.return_kind),
+            amountIn: amount >= 0 ? amount : 0,
+            amountOut: amount < 0 ? -amount : 0,
+          });
+        } else if (queries.indexOf(q) === 1) {
+          rows.push({
+            at,
+            kind: 'repayment_local',
+            ref,
+            label: 'سداد دين دفتر المتجر',
+            amountIn: amount,
+            amountOut: 0,
+          });
+        } else {
+          rows.push({
+            at,
+            kind: 'repayment_sila',
+            ref,
+            label: 'سداد دين صِلة (كاشير)',
+            amountIn: amount,
+            amountOut: 0,
+          });
+        }
+      }
+    }
+    rows.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    return rows;
+  },
+
+  /** v64 (الجولة 76 #5): تصحيح معادلة الخزينة النقدية — قبل v70+ كانت
+   *  كل المبيعات (حتى البنكية والمحفظية) تُحسب داخل «النقد المتوقع
+   *  بالدرج»، والسدادّات كذلك. هذا الاستعلام يجمع صافي ما يجب
+   *  استثناؤه (يُطرح من المعادلة): صفوف البيع/المرتجع غير الدينية
+   *  على قنوات غير النقدية بإشاراتها كما هي (بيع موجب يُستبعد
+   *  فينقص الدرج، ومرتجع سالب يُستبعد فيعود له) + سدادّات الديون
+   *  على قنوات غير النقدية (بالمَاينور). */
+  async nonCashExclusionsMinor(): Promise<{
+    salesNetMinor: number;
+    repaymentsMinor: number;
+  }> {
+    const result = await getDb().execute(
+      `SELECT
+         (SELECT COALESCE(SUM(total_amount), 0) * 100
+            FROM sales
+            WHERE COALESCE(payment_method, 'cash') != 'cash'
+              AND invoice_number NOT LIKE 'INV-D-%'
+              AND invoice_number NOT LIKE 'INV-L-%'
+              AND invoice_number NOT LIKE 'INV-O-%'
+              AND invoice_number NOT LIKE 'INV-V-%') AS sales_net,
+         (SELECT COALESCE(SUM(amount_minor), 0)
+            FROM local_payments
+            WHERE COALESCE(CASE WHEN method IN ('card','other') THEN 'other' ELSE method END, 'cash') != 'cash') AS local_rep,
+         (SELECT COALESCE(SUM(amount_minor), 0)
+            FROM sila_payment_queue
+            WHERE kind = 'repayment'
+              AND COALESCE(CASE WHEN payment_method IN ('card','other') THEN 'other' ELSE payment_method END, 'cash') != 'cash') AS sila_rep`,
+    );
+    const row = (result.rows?.[0] ?? {}) as {
+      sales_net?: number;
+      local_rep?: number;
+      sila_rep?: number;
+    };
+    return {
+      salesNetMinor: Math.round(Number(row.sales_net ?? 0)),
+      repaymentsMinor: Math.round(
+        Number(row.local_rep ?? 0) + Number(row.sila_rep ?? 0),
+      ),
+    };
+  },
+
   safeMessage(error: unknown): string {
     return toMessage(error);
   },

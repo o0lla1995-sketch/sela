@@ -32,6 +32,7 @@ import {ThermalPrinterService} from './printer/ThermalPrinterService';
 import {useSettingsStore} from '../stores/settingsStore';
 import {usePrinterStore} from '../stores/printerStore';
 import {logDiag} from '../core/diagnostics';
+import {paymentMethodById} from '../core/paymentMethods';
 import {formatDateTime, localToday} from '../core/format';
 import type {
   CashAuthMethod,
@@ -122,9 +123,11 @@ async function printMovementSlip(
     return;
   }
   try {
-    const treasury = await ReportService.treasurySnapshot();
+    /** v64: رصيد قناة الحركة نفسها — الدرج للنقدي ورصيد القناة لغيره. */
+    const channel = movement.payment_method ?? 'cash';
+    const channelAfter = await ReportService.methodBalanceNow(channel);
     const job = buildCashMovementJob(
-      {movement, drawerAfterMinor: Math.round(treasury.cashTotal * 100)},
+      {movement, drawerAfterMinor: Math.round(channelAfter * 100)},
       receiptSettings(),
     );
     await ThermalPrinterService.printJob(job);
@@ -147,9 +150,11 @@ export const CashService = {
     if (status !== 'connected') {
       throw new Error('لا توجد طابعة متصلة — أوصل الطابعة أولاً');
     }
-    const treasury = await ReportService.treasurySnapshot();
+    /** v64: رصيد القناة نفسها (الدرج للنقدي). */
+    const channel = movement.payment_method ?? 'cash';
+    const channelAfter = await ReportService.methodBalanceNow(channel);
     const job = buildCashMovementJob(
-      {movement, drawerAfterMinor: Math.round(treasury.cashTotal * 100)},
+      {movement, drawerAfterMinor: Math.round(channelAfter * 100)},
       receiptSettings(),
     );
     await ThermalPrinterService.printJob(job);
@@ -164,11 +169,15 @@ export const CashService = {
     amountMinor: number;
     authMethod?: CashAuthMethod;
     photoPath?: string | null;
+    /** v64 (الجولة 76 #5): القناة التي دُفع منها — سقفها رصيدها. */
+    paymentMethod?: string | null;
   }): Promise<CashMovementRecord> {
-    const treasury = await ReportService.treasurySnapshot();
-    if (input.amountMinor > Math.round(treasury.cashTotal * 100)) {
+    const method = input.paymentMethod ?? 'cash';
+    const balance = await ReportService.methodBalanceNow(method);
+    if (input.amountMinor > Math.round(balance * 100)) {
+      const methodInfo = paymentMethodById(method);
       throw new Error(
-        `المبلغ أكبر من النقد الموجود بالخزينة (${treasury.cashTotal.toFixed(
+        `المبلغ أكبر من الرصيد المتاح في ${methodInfo.label} (${balance.toFixed(
           2,
         )} ₪) — لا يمكن تسجيل مصروف بأكثر من الموجود`,
       );
@@ -180,6 +189,7 @@ export const CashService = {
       amountMinor: input.amountMinor,
       authMethod: input.authMethod ?? 'none',
       photoPath: input.photoPath ?? null,
+      paymentMethod: method,
     });
     await printMovementSlip(movement);
     return movement;
@@ -194,14 +204,17 @@ export const CashService = {
     amountMinor: number;
     authMethod: CashAuthMethod;
     photoPath?: string | null;
+    /** v64: القناة التي سُحب منها — سقفها رصيدها. */
+    paymentMethod?: string | null;
   }): Promise<CashMovementRecord> {
-    const treasury = await ReportService.treasurySnapshot();
-    const drawerMinor = Math.round(treasury.cashTotal * 100);
-    if (input.amountMinor > drawerMinor) {
+    const method = input.paymentMethod ?? 'cash';
+    const balance = await ReportService.methodBalanceNow(method);
+    if (input.amountMinor > Math.round(balance * 100)) {
+      const methodInfo = paymentMethodById(method);
       throw new Error(
-        `لا يمكن سحب أكثر من النقد الموجود بالخزينة (${(
-          drawerMinor / 100
-        ).toFixed(2)} ₪) — راجع المبلغ أو أودع نقداً أولاً`,
+        `لا يمكن سحب أكثر من الرصيد المتاح في ${methodInfo.label} (${balance.toFixed(
+          2,
+        )} ₪) — راجع المبلغ أو أودع فيها أولاً`,
       );
     }
     const movement = await CashRepo.add({
@@ -211,6 +224,7 @@ export const CashService = {
       amountMinor: input.amountMinor,
       authMethod: input.authMethod,
       photoPath: input.photoPath ?? null,
+      paymentMethod: method,
     });
     await printMovementSlip(movement);
     return movement;
@@ -224,6 +238,8 @@ export const CashService = {
     amountMinor: number;
     authMethod?: CashAuthMethod;
     photoPath?: string | null;
+    /** v64: القناة التي أُودع فيها. */
+    paymentMethod?: string | null;
   }): Promise<CashMovementRecord> {
     const movement = await CashRepo.add({
       kind: 'deposit',
@@ -232,6 +248,7 @@ export const CashService = {
       amountMinor: input.amountMinor,
       authMethod: input.authMethod ?? 'none',
       photoPath: input.photoPath ?? null,
+      paymentMethod: input.paymentMethod ?? 'cash',
     });
     await printMovementSlip(movement);
     return movement;

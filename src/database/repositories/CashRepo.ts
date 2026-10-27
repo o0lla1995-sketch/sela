@@ -70,6 +70,7 @@ function rowToRecord(row: Record<string, unknown>): CashMovementRecord {
     note: (row.note as string | null) ?? null,
     amount_minor: Number(row.amount_minor ?? 0),
     auth_method: (row.auth_method as CashAuthMethod) ?? 'none',
+    payment_method: (row.payment_method as string | null) ?? null,
     photo_path:
       typeof photoRaw === 'string' && photoRaw.length > 0
         ? photoRaw
@@ -125,6 +126,8 @@ export const CashRepo = {
     amountMinor: number;
     authMethod?: CashAuthMethod;
     photoPath?: string | null;
+    /** v64: قناة المصدر/الوجهة — null/'cash' = الخزينة النقدية. */
+    paymentMethod?: string | null;
   }): Promise<CashMovementRecord> {
     if (!Number.isFinite(input.amountMinor) || input.amountMinor <= 0) {
       throw new Error('المبلغ غير صالح — يجب أن يكون أكبر من صفر');
@@ -137,10 +140,14 @@ export const CashRepo = {
       typeof input.photoPath === 'string' && input.photoPath.length > 0
         ? input.photoPath
         : null;
+    const method =
+      input.paymentMethod != null && input.paymentMethod !== ''
+        ? input.paymentMethod
+        : null;
     const insert = await db.execute(
       `INSERT INTO cash_movements
-        (ref, kind, category, note, amount_minor, auth_method, photo_path, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (ref, kind, category, note, amount_minor, auth_method, photo_path, payment_method, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         ref,
         input.kind,
@@ -149,6 +156,7 @@ export const CashRepo = {
         Math.round(input.amountMinor),
         input.authMethod ?? 'none',
         photoPath,
+        method,
         localNow(),
       ],
     );
@@ -329,9 +337,13 @@ export const CashRepo = {
     onlineRefundsMinor: number;
   }> {
     try {
+      /** v64: نقدي فقط — سحب/إيداع/مصروف من بنك أو محفظة لا يمسّ
+       *  الدرج النقدي أبداً (NULL = نقدي تاريخياً). */
       const result = await getDb().execute(
         `SELECT kind, COALESCE(SUM(amount_minor), 0) AS total
-         FROM cash_movements GROUP BY kind`,
+         FROM cash_movements
+         WHERE COALESCE(payment_method, 'cash') = 'cash'
+         GROUP BY kind`,
       );
       let expensesMinor = 0;
       let withdrawalsMinor = 0;

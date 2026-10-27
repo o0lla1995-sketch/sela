@@ -1267,6 +1267,8 @@ async function applyMigrations(database: DB): Promise<void> {
         amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
         auth_method TEXT NOT NULL DEFAULT 'none'
           CHECK (auth_method IN ('fingerprint','pin','none')),
+        -- v64 (الجولة 76 #5): قناة المصدر/الوجهة — نقدي أو بنك/محفظة.
+        payment_method TEXT,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       )`,
     );
@@ -2005,6 +2007,23 @@ async function applyMigrations(database: DB): Promise<void> {
     }
     logDiag('db', 'ترحيل v30: عمود طريقة الدفع + توسيع سدادات الدفتر');
     version = 30;
+  }
+
+  if (version < 31) {
+    // ── v64 (الجولة 76 #5): قناة المصدر/الوجهة لحركات الخزينة —
+    //    سحب/إيداع/مصروف من نقدي أو أي بنك/محفظة مفعّلة (نفس
+    //    سطح المكتب v72). NULL = نقدي (كل التاريخ القديم).
+    const col = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('cash_movements') WHERE name = 'payment_method'",
+    );
+    const colRows = (col.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(colRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE cash_movements ADD COLUMN payment_method TEXT',
+      );
+    }
+    logDiag('db', 'ترحيل v31: قناة المصدر/الوجهة لحركات الخزينة');
+    version = 31;
   }
 
   if (version !== storedVersion) {

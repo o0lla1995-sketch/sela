@@ -381,6 +381,9 @@ export const ReportService = {
       returnReversalsTotalMinor,
       cashTotals,
       onlineInvoicedNetMinor,
+      // v64 (الجولة 76 #5): ما يُستثنى من معادلة الدرج — مبيعات
+      // ومرتجعات وسدادّات جرت على بنوك/محافظ (كانت تُحسب نقداً).
+      nonCashExclusions,
     ] = await Promise.all([
       SaleRepo.allTimeRevenue(),
       SilaRepo.totals(),
@@ -397,6 +400,7 @@ export const ReportService = {
       CashRepo.allTimeTotals(),
       // v48 (الجولة 56): المفتور الأونلاين صافياً من المرتجعات.
       OnlineRepo.invoicedNetTotal(),
+      ReportRepo.nonCashExclusionsMinor(),
     ]);
     // Credit sales that never entered the drawer as cash at sale
     // time: the whole INV-D queue (credit-covered parts return via
@@ -476,8 +480,28 @@ export const ReportService = {
         cashTotals.onlineRefundsMinor / 100 +
         cashTotals.depositsMinor / 100 -
         cashTotals.expensesMinor / 100 -
-        cashTotals.withdrawalsMinor / 100,
+        cashTotals.withdrawalsMinor / 100 -
+        // v64 (الجولة 76 #5): تصحيح القنوات — المبيعات والمرتجعات
+        // والسدادّات على بنك/محفظة لا علاقة لها بالدرج النقدي.
+        nonCashExclusions.salesNetMinor / 100 -
+        nonCashExclusions.repaymentsMinor / 100,
     };
+  },
+
+  /** v64 (الجولة 76 #5): الرصيد اللحظي لقناة دفع واحدة — سقف السحب
+   *  والمصروف منها. النقدي = معادلة الخزينة الكاملة؛ البنك/المحفظة =
+   *  دفتر القناة الصافي عبر التاريخ (مبيعات + سدادات + إيداعات −
+   *  مرتجعات − مسحوبات − مصروفات) — نفس منظور كشف الحساب. */
+  async methodBalanceNow(methodId: string): Promise<number> {
+    if (methodId === 'cash' || methodId === '') {
+      const treasury = await this.treasurySnapshot();
+      return treasury.cashTotal;
+    }
+    const rows = await ReportRepo.methodLedgerTotals({
+      from: '2000-01-01',
+      to: '2999-12-31',
+    });
+    return rows.find(row => row.method === methodId)?.net ?? 0;
   },
 
   async salesDetail(key: ReportRangeKey, custom?: DateRange) {
