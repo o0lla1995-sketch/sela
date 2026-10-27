@@ -11,6 +11,7 @@ import {ProductRepo} from '../database/repositories/ProductRepo';
 import {StocktakeRepo} from '../database/repositories/StocktakeRepo';
 import {SaleRepo} from '../database/repositories/SaleRepo';
 import {localToday} from '../core/format';
+import {paymentMethodLabel} from '../core/paymentMethods';
 import type {ReportRangeKey, DateRange, Product} from '../core/types';
 
 const CSV_BOM = '\uFEFF';
@@ -94,7 +95,10 @@ async function exportRows(
 }
 
 export const ExportService = {
-  /** Detailed sales report (invoices) for the selected range. */
+  /** Detailed sales report (invoices) for the selected range.
+   *  v63 (الجولة 75 #9): عمود طريقة الدفع (بنك/محفظة/نقدي) —
+   *  جدول حقيقي كامل بصف إجماليات أسفله (طلب التاجر: استخراج
+   *  منسق بشكل صحيح على حسب التقرير المستخرج). */
   async exportSalesReport(
     key: ReportRangeKey,
     custom: DateRange | undefined,
@@ -112,6 +116,7 @@ export const ExportService = {
         'صافي الربح (₪)',
         'الخصم (₪)',
         'نوع البيع',
+        'طريقة الدفع',
       ],
       ...details.map(row => [
         row.invoice,
@@ -123,6 +128,7 @@ export const ExportService = {
         row.profit.toFixed(2),
         row.discount.toFixed(2),
         row.paymentType,
+        paymentMethodLabel(row.paymentMethod === '—' ? null : row.paymentMethod),
       ]),
       [
         'الإجماليات',
@@ -133,6 +139,7 @@ export const ExportService = {
         details.reduce((sum, row) => sum + row.cost, 0).toFixed(2),
         details.reduce((sum, row) => sum + row.profit, 0).toFixed(2),
         details.reduce((sum, row) => sum + row.discount, 0).toFixed(2),
+        '',
         '',
       ],
     ];

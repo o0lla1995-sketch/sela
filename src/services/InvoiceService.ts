@@ -283,6 +283,10 @@ export interface CompleteSaleOptions {
   lines: CartLine[];
   discount: number;
   paymentType: PricingMode;
+  /** v63 (الجولة 75): طريقة الدفع — بنك/محفظة/نقدي؛ تُخزّن مع
+   *  الفاتورة (sales.payment_method) وتُطبع على الإيصال وتدخل
+   *  أرصدة طرق الدفع في التقارير. غائبة = نقدي. */
+  paymentMethod?: string | null;
   /** Print the receipt right after a successful sale. */
   print: boolean;
   receiptSettings: ReceiptSettings;
@@ -352,6 +356,7 @@ export const InvoiceService = {
           lines: options.lines,
           discount: options.discount,
           paymentType: options.paymentType,
+          paymentMethod: options.paymentMethod ?? null,
           cashierId: options.cashierId ?? null,
           debtRow:
             options.debt == null

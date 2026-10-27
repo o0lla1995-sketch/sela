@@ -103,6 +103,12 @@ interface PlatformUtilsNative {
   /** v25 (round-32 #3): renders the A4 Arabic statement PDF (JSON
    *  payload → Downloads/SmartVisionPOS) → readable location. */
   createStatementPdf(fileName: string, payloadJson: string): Promise<string>;
+  /** v63 (الجولة 75 #7): تقرير الفواتير المفلطة PDF — جدول كامل
+   *  بترويسة المتجر والفلاتر وتوزيع طرق الدفع (طلب التاجر). */
+  createInvoicesReportPdf(
+    fileName: string,
+    payloadJson: string,
+  ): Promise<string>;
   /** v40 (الجولة 48 #4): يرسم شكل الفاتورة الحرارية كصورة PNG
    *  (صفوف JSON بنفس بنية الفاتورة → Tajawal على ورقة بيضاء
    *  بمقاس 58/80مم) ويحفظها في مجلد التنزيلات → المسار. */

@@ -66,6 +66,8 @@ import {
   useThemeColors,
 } from '../../core/theme';
 import {formatDateTime, formatMoney, formatQty, parseNumber} from '../../core/format';
+import {paymentMethodById} from '../../core/paymentMethods';
+import {requirePlatformUtils} from '../../native/nativeBridge';
 import {
   cameraPermissionMessage,
   ensureCameraPermission,
@@ -127,6 +129,8 @@ export function InvoicesScreen() {
   const styles = useStyles();
   const navigation = useNavigation<any>();
   const toast = useToastStore(state => state.show);
+  /** v63 (الجولة 75 #7): تصدير تقرير PDF للفواتير المفلطة. */
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   const [rows, setRows] = useState<InvoiceRow[]>([]);
   const [search, setSearch] = useState('');
@@ -224,6 +228,134 @@ export function InvoicesScreen() {
     setSearch(query);
   }, []);
 
+  /** v63 (الجولة 75 #7): استخراج تقرير PDF للفواتير المفلطة — طلب
+   *  التاجر الصريح («كذلك الأمر يجب في تطبيق نقطة البيع أندرويد»).
+   *  تُجلب كل الصفوف المطابقة (لا المعروضة فقط) وتُبنى بأصلية
+   *  PdfDocument مع Tajawal وRTL — نفس محرك كشف الخزينة المجرب. */
+  const exportPdf = useCallback(async () => {
+    if (pdfBusy) {
+      return;
+    }
+    setPdfBusy(true);
+    try {
+      const allRows: InvoiceRow[] = [];
+      let offset = 0;
+      for (;;) {
+        const page = await SaleRepo.listPagePaged({
+          limit: 100,
+          offset,
+          search: stateRef.current.debouncedSearch,
+          kind: stateRef.current.kindFilter,
+          fromDate: fromDateOf(stateRef.current.dateFilter),
+          toDate: '',
+        });
+        allRows.push(...page);
+        if (page.length < 100) {
+          break;
+        }
+        offset += page.length;
+      }
+      if (allRows.length === 0) {
+        toast('لا فواتير تطابق الفلاتر الحالية', 'error');
+        return;
+      }
+      const settings = useSettingsStore.getState().settings;
+      let sales = 0;
+      let returns = 0;
+      let returned = 0;
+      const byMethod = new Map<string, {total: number; count: number}>();
+      for (const row of allRows) {
+        if (row.return_kind != null) {
+          returns += row.total_amount;
+        } else {
+          sales += row.total_amount;
+          returned += row.returned_minor ?? 0;
+        }
+        const mid =
+          row.return_kind != null
+            ? 'cash'
+            : row.payment_method || 'cash';
+        const entry = byMethod.get(mid) ?? {total: 0, count: 0};
+        entry.total += row.total_amount;
+        entry.count += 1;
+        byMethod.set(mid, entry);
+      }
+      const kindLabel =
+        KIND_CHIPS.find(chip => chip.key === stateRef.current.kindFilter)
+          ?.label ?? 'كل الأنواع';
+      const dateLabel =
+        DATE_CHIPS.find(chip => chip.key === stateRef.current.dateFilter)
+          ?.label ?? 'كل الفترات';
+      const payload = {
+        storeName: settings.storeName || 'sela',
+        periodLabel: dateLabel,
+        filtersLabel: `${kindLabel}${
+          stateRef.current.debouncedSearch.trim()
+            ? ` · بحث: «${stateRef.current.debouncedSearch.trim()}»`
+            : ''
+        }`,
+        generatedAt: formatDateTime(new Date().toISOString()),
+        summary: [
+          {label: 'عدد العمليات', value: String(allRows.length)},
+          {label: 'إجمالي المبيعات', value: formatMoney(sales)},
+          {
+            label: 'المرتجعات',
+            value: formatMoney(returns - returned / 100),
+          },
+          {
+            label: 'الصافي',
+            value: formatMoney(sales - returned / 100 + returns),
+          },
+        ],
+        methods: [...byMethod.entries()].map(([id, v]) => ({
+          name: paymentMethodById(id).label,
+          count: String(v.count),
+          total: formatMoney(v.total),
+        })),
+        rows: allRows.map(row => ({
+          ref: row.invoice_number,
+          kind:
+            row.return_kind != null
+              ? 'مرتجع'
+              : row.invoice_number.startsWith('INV-D-')
+              ? 'دين صِلة'
+              : row.invoice_number.startsWith('INV-L-')
+              ? 'دين متجر'
+              : row.invoice_number.startsWith('INV-V-')
+              ? 'قسيمة'
+              : 'نقدية',
+          method:
+            row.return_kind != null
+              ? '—'
+              : paymentMethodById(row.payment_method).label,
+          items: String(row.itemsCount ?? 0),
+          total: row.total_amount.toFixed(2),
+          returned:
+            row.return_kind == null && (row.returned_minor ?? 0) > 0
+              ? ((row.returned_minor ?? 0) / 100).toFixed(2)
+              : '—',
+          date: String(row.created_at ?? '').replace('T', ' ').slice(0, 16),
+          ret: row.return_kind != null ? '1' : '0',
+        })),
+      };
+      const platform = requirePlatformUtils();
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = await platform.createInvoicesReportPdf(
+        `sela-invoices-${stamp}.pdf`,
+        JSON.stringify(payload),
+      );
+      toast(`تم حفظ تقرير الفواتير في: ${path}`, 'success', 6000);
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل بناء تقرير PDF',
+        'error',
+        5000,
+      );
+    } finally {
+      setPdfBusy(false);
+    }
+  }, [pdfBusy, toast]);
+
   /** v25 (round-32 #4): scan-to-open — the receipt's CODE128
    *  barcode carries the invoice number; one native scan looks
    *  the row up EXACTLY and opens its detail screen instantly. */
@@ -290,6 +422,20 @@ export function InvoicesScreen() {
               placeholder="ابحث برقم الفاتورة أو الزبون أو الصنف أو المبلغ…"
             />
           </View>
+          {/* v63 (الجولة 75 #7): تقرير PDF للفواتير المفلطة — طلب
+              التاجر («بتقرير جميل ومفصل وسهل القراءة»). */}
+          <TouchableOpacity
+            style={[styles.scanBtn, pdfBusy ? {opacity: 0.55} : null]}
+            onPress={() => void exportPdf()}
+            disabled={pdfBusy || rows.length === 0}
+            activeOpacity={0.7}
+            hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
+            {pdfBusy ? (
+              <ActivityIndicator size="small" color={c.accent} />
+            ) : (
+              <Icon name="download" size={22} color={c.accent} />
+            )}
+          </TouchableOpacity>
           <TouchableOpacity
             style={styles.scanBtn}
             onPress={() => void scanInvoice()}

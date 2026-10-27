@@ -142,7 +142,10 @@ const DDL_STATEMENTS: string[] = [
     -- v59 (الجولة 63): مرجع عملية الكاشير الفريد (ميزة العمل دون
     -- اتصال) — NULL لكل فواتير نقطة البيع؛ فهرس فريد جزئي في
     -- الترحيل v29 يمنع ازدواج أي عملية مزامنة مهما تكرر إرسالها.
-    client_ref TEXT
+    client_ref TEXT,
+    -- v63 (الجولة 75): طريقة الدفع — بنك/محفظة/نقدي (تتبع الأرصدة
+    -- الواردة). 'cash' افتراضياً؛ القديم قبل الترحيل v30 كذلك.
+    payment_method TEXT NOT NULL DEFAULT 'cash'
   )`,
   `CREATE TABLE IF NOT EXISTS sale_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -332,8 +335,9 @@ const DDL_STATEMENTS: string[] = [
     local_customer_id INTEGER NOT NULL REFERENCES local_customers(id) ON DELETE CASCADE,
     receipt_ref TEXT NOT NULL UNIQUE,
     amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
-    method TEXT NOT NULL DEFAULT 'cash'
-      CHECK (method IN ('cash','card','other')),
+    -- v63 (الجولة 75 #6): بلا قيد CHECK — يقبل معرفات البنوك
+    -- والمحافظ (bank_palestine/jawwal_pay…) بجانب القيم التاريخية.
+    method TEXT NOT NULL DEFAULT 'cash',
     note TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
@@ -851,8 +855,7 @@ async function applyMigrations(database: DB): Promise<void> {
         local_customer_id INTEGER NOT NULL REFERENCES local_customers(id) ON DELETE CASCADE,
         receipt_ref TEXT NOT NULL UNIQUE,
         amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
-        method TEXT NOT NULL DEFAULT 'cash'
-          CHECK (method IN ('cash','card','other')),
+        method TEXT NOT NULL DEFAULT 'cash',
         note TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`,
@@ -1944,6 +1947,64 @@ async function applyMigrations(database: DB): Promise<void> {
     }
     logDiag('db', 'ترحيل v29: مرجع العميل للفواتير + صلاحيات الكاشير');
     version = 29;
+  }
+
+  if (version < 30) {
+    // ── v63 (الجولة 75): طرق الدفع المتعددة — كل فاتورة تُربط
+    //    بطريقها (بنك/محفظة/نقدي) فتُتتبع الأرصدة الواردة لكل
+    //    حساب مثل سطح المكتب v70 حرفياً. NULL/'cash' = نقدي
+    //    (كل المبيعات القديمة تبقى نقدياً بلا ترحيل).
+    const payCol = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sales') WHERE name = 'payment_method'",
+    );
+    const payRows = (payCol.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(payRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        "ALTER TABLE sales ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'",
+      );
+    }
+    // توسيع قيد طريقة سداد دفتر المتجر — كان محصوراً في
+    // (cash/card/other) فيرفض معرفات البنوك والمحافظ. SQLite لا
+    // يعدّل القيد في مكانه — إعادة بناء الجدول (نفس أسلوب سطح
+    // المكتب v71: نسخ → حذف → تسمية).
+    try {
+      await database.execute(
+        `CREATE TABLE local_payments_v63 (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           local_customer_id INTEGER NOT NULL REFERENCES local_customers(id) ON DELETE CASCADE,
+           receipt_ref TEXT NOT NULL UNIQUE,
+           amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+           method TEXT NOT NULL DEFAULT 'cash',
+           note TEXT,
+           created_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );`,
+      );
+      await database.execute(
+        `INSERT INTO local_payments_v63
+           (id, local_customer_id, receipt_ref, amount_minor, method, note, created_at)
+         SELECT id, local_customer_id, receipt_ref, amount_minor, method, note, created_at
+           FROM local_payments;`,
+      );
+      await database.execute('DROP TABLE local_payments;');
+      await database.execute(
+        'ALTER TABLE local_payments_v63 RENAME TO local_payments;',
+      );
+      await database.execute(
+        `CREATE INDEX IF NOT EXISTS idx_local_pays_cust
+           ON local_payments(local_customer_id, created_at DESC)`,
+      );
+    } catch (e) {
+      // جدول طازج (بلا قيد) أو ترحيل سابق — لا شيء يكسر الإقلاع.
+      logDiag(
+        'db',
+        `ترحيل v30: تخطي إعادة بناء سدادات الدفتر — ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+        'warn',
+      );
+    }
+    logDiag('db', 'ترحيل v30: عمود طريقة الدفع + توسيع سدادات الدفتر');
+    version = 30;
   }
 
   if (version !== storedVersion) {

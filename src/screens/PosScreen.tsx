@@ -48,6 +48,12 @@ import {
 } from '../stores/cartStore';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore, type PosProductView} from '../stores/settingsStore';
+import {
+  activePaymentMethods,
+  paymentMethodById,
+  type PaymentMethod,
+} from '../core/paymentMethods';
+import {PaymentMethodIcon} from '../components/PaymentMethodIcon';
 import {usePrinterStore} from '../stores/printerStore';
 import {useToastStore} from '../stores/toastStore';
 import {useSilaStore} from '../stores/silaStore';
@@ -251,6 +257,17 @@ export function PosScreen({
     prevLinesCountRef.current = lines.length;
   }, [lines.length]);
   const [busy, setBusy] = useState(false);
+  /** v63 (الجولة 75 #2): نافذة الدفع بخطوتين — طلب التاجر الصريح:
+   *  «إذا كانت هناك محافظ أو بنوك مفعّلة وتم الضغط على البيع يظهر
+   *  أولاً خيار الدفع قبل فتح نافذة إدخال المبلغ النقدية».
+   *  • 'method': اختيار طريقة الدفع (شبكة بطاقات بالأيقونات).
+   *  • 'pay': إدخال المبلغ المدفوع نقداً (حساب الباقي) أو تأكيد
+   *    التحويل البنكي/المحفظة.
+   *  عند تفعيل النقدي وحده تُفتح خطوة المبلغ مباشرة (سرعة البيع
+   *  الصغير كما كان). INLINE overlay — نفس درس روم الجهاز. */
+  const [paySheet, setPaySheet] = useState<'method' | 'pay' | null>(null);
+  const [payMethodId, setPayMethodId] = useState<string>('cash');
+  const [payAmountText, setPayAmountText] = useState('');
   const [unitPickerLine, setUnitPickerLine] = useState<CartLine | null>(null);
   const [unitPickerRows, setUnitPickerRows] = useState<ProductUnit[] | null>(
     null,
@@ -1668,7 +1685,11 @@ export function PosScreen({
   );
 
   const completeSale = useCallback(
-    async (withPrint: boolean) => {
+    async (
+      withPrint: boolean,
+      salePaymentMethod: string = 'cash',
+      paidMinor: number | null = null,
+    ) => {
       if (lines.length === 0) {
         toast('السلة فارغة — أضف منتجات أولاً', 'error');
         return;
@@ -1679,6 +1700,18 @@ export function PosScreen({
         // other caller: print silently skipped, sale still proceeds.
         withPrint = false;
       }
+      const method = paymentMethodById(salePaymentMethod);
+      const totalMinor = Math.round(totals.total * 100);
+      // نقدي: المبلغ المدفوع يجب أن يغطي الإجمالي (فارغ = كامل).
+      if (method.id === 'cash' && paidMinor != null && paidMinor < totalMinor) {
+        toast(
+          `المدفوع أقل من الإجمالي (${formatMoney(
+            totals.total,
+          )}) — أكمل المبلغ أو استخدم «كامل المبلغ»`,
+          'error',
+        );
+        return;
+      }
       setBusy(true);
       Keyboard.dismiss();
       try {
@@ -1686,6 +1719,7 @@ export function PosScreen({
           lines,
           discount,
           paymentType: pricingMode,
+          paymentMethod: method.id,
           print: withPrint,
           receiptSettings: {
             storeName: settings.storeName,
@@ -1703,10 +1737,26 @@ export function PosScreen({
         clear();
         setDiscountText('');
         void refreshCatalog();
-        toast(
-          `تم إتمام البيع بنجاح ${withPrint ? 'وإرساله للطابعة' : ''}`,
-          'success',
-        );
+        if (method.id === 'cash' && paidMinor != null && paidMinor > totalMinor) {
+          toast(
+            `تم البيع — الباقي للزبون: ${formatMoney(
+              (paidMinor - totalMinor) / 100,
+            )}`,
+            'success',
+            6000,
+          );
+        } else if (method.id !== 'cash') {
+          toast(
+            `تم البيع عبر ${method.label} — يُتابَع من التقارير ← أرصدة طرق الدفع`,
+            'success',
+            5000,
+          );
+        } else {
+          toast(
+            `تم إتمام البيع بنجاح ${withPrint ? 'وإرساله للطابعة' : ''}`,
+            'success',
+          );
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         toast(message, 'error');
@@ -1720,11 +1770,29 @@ export function PosScreen({
       pricingMode,
       printerStatus,
       settings,
+      totals.total,
       clear,
       refreshCatalog,
       toast,
     ],
   );
+
+  /** v63 (الجولة 75 #2): فتح نافذة الدفع — خطوتان عند تفعيل بنوك
+   *  أو محافظ (الطريقة أولاً ثم المبلغ)، وخطوة واحدة عند تفعيل
+   *  النقدي وحده — البيع السريع اليومي لا يتأثر بنقرة إضافية. */
+  const openPaySheet = useCallback(() => {
+    if (lines.length === 0) {
+      toast('السلة فارغة — أضف منتجات أولاً', 'error');
+      return;
+    }
+    if (busy) {
+      return;
+    }
+    const methods = activePaymentMethods(settings.paymentMethodsEnabled);
+    setPayMethodId('cash');
+    setPayAmountText('');
+    setPaySheet(methods.length > 1 ? 'method' : 'pay');
+  }, [lines.length, busy, settings.paymentMethodsEnabled, toast]);
 
   /** v11 (SILA §9.2): بيع بالدين — v15 (round-21 #5) opens a
    *  CHOOSER first: scan the customer's SILA QR (identity card or
@@ -3249,13 +3317,13 @@ export function PosScreen({
 
                 <View style={styles.checkoutRow}>
                   {/* v11 (round-17 #1): ONE dual-mode sell button — the
-                    printer icon appears ONLY when a printer is live,
-                    and then the sale prints automatically; with no
-                    printer it is a plain fast sale. */}
+                    printer icon appears ONLY when a printer is live.
+                    v63 (الجولة 75 #2): يفتح نافذة الدفع (الطريقة ثم
+                    المبلغ) بدل إتمام البيع مباشرة — طلب التاجر. */}
                   <AppButton
                     title="بيع"
                     icon={printerStatus === 'connected' ? 'printer' : 'check'}
-                    onPress={() => completeSale(printerStatus === 'connected')}
+                    onPress={openPaySheet}
                     loading={busy}
                     style={{flex: 1.5}}
                   />
@@ -3431,6 +3499,35 @@ export function PosScreen({
         pricingMode={pricingMode}
         onClose={closeWeightSheet}
         onConfirm={confirmWeight}
+      />
+
+      {/* ── v63 (الجولة 75 #2): نافذة الدفع — الخطوة الأولى اختيار
+          طريقة الدفع عند تفعيل بنوك/محافظ (طلب التاجر الصريح)، ثم
+          إدخال المبلغ النقدي (باقي الزبون) أو تأكيد التحويل.
+          INLINE absolute overlay — نفس درس روم الجهاز. ── */}
+      <PaySheet
+        step={paySheet}
+        methods={activePaymentMethods(settings.paymentMethodsEnabled)}
+        selectedId={payMethodId}
+        amountText={payAmountText}
+        total={totals.total}
+        busy={busy}
+        printerConnected={printerStatus === 'connected'}
+        onSelectMethod={id => {
+          setPayMethodId(id);
+          setPaySheet('pay');
+        }}
+        onAmountChange={setPayAmountText}
+        onStepMethod={() => setPaySheet('method')}
+        onClose={() => setPaySheet(null)}
+        onConfirm={(methodId, paidMinor) => {
+          setPaySheet(null);
+          void completeSale(
+            printerStatus === 'connected',
+            methodId,
+            paidMinor,
+          );
+        }}
       />
 
       {/* ── v35 (الجولة 43): نافذة البيع الموحدة — لكل منتج نافذة
@@ -4209,6 +4306,282 @@ function WeightSheet({
             disabled={validWeight <= 0}
             style={{flex: 1.8}}
           />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * PaySheet — v63 (الجولة 75 #2): نافذة الدفع بخطوتين.
+ * ─────────────────────────────────────────────────────────────────
+ * طلب التاجر الصريح: «إذا كانت هناك محافظ أو بنوك مفعّلة وتم
+ * الضغط على البيع يظهر أولاً خيار الدفع قبل فتح نافذة إدخال
+ * المبلغ النقدية».
+ *
+ * • الخطوة الأولى (method): شبكة بطاقات كبيرة بأيقونات الهوية —
+ *   نقرة واحدة تختار وتنتقل للمبلغ فوراً.
+ * • الخطوة الثانية (pay): نقدي = لوحة أرقام مدمجة (لا كيبورد
+ *   نظام أبداً — نفس درس لوحة الوزن) + كامل المبلغ + الباقي
+ *   للزبون حياً؛ بنك/محفظة = بطاقة تأكيد واضحة.
+ * • زر «تغيير الطريقة» + زر الرجوع يعيدان لخطوة الاختيار.
+ *
+ * INLINE absolute overlay — نفس درس روم الجهاز (لا Modal أبداً).
+ */
+function PaySheet({
+  step,
+  methods,
+  selectedId,
+  amountText,
+  total,
+  busy,
+  printerConnected,
+  onSelectMethod,
+  onAmountChange,
+  onStepMethod,
+  onClose,
+  onConfirm,
+}: {
+  step: 'method' | 'pay' | null;
+  methods: PaymentMethod[];
+  selectedId: string;
+  amountText: string;
+  total: number;
+  busy: boolean;
+  printerConnected: boolean;
+  onSelectMethod: (id: string) => void;
+  onAmountChange: (next: string) => void;
+  onStepMethod: () => void;
+  onClose: () => void;
+  onConfirm: (methodId: string, paidMinor: number | null) => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  const selected = paymentMethodById(selectedId);
+  const totalMinor = Math.round(total * 100);
+  const paid = amountText === '' ? NaN : Number(amountText);
+  const paidMinor =
+    Number.isFinite(paid) && paid > 0 ? Math.round(paid * 100) : null;
+  const change = paidMinor != null ? paidMinor - totalMinor : 0;
+
+  /** نقرة مفتاح — نفس منطق لوحة الوزن (رقم/فاصلة/حذف). */
+  const pressKey = (key: string) => {
+    onAmountChange((() => {
+      const prev = amountText;
+      if (key === '⌫') {
+        return prev.length <= 1 ? '' : prev.slice(0, -1);
+      }
+      if (key === '.') {
+        if (prev.includes('.')) {
+          return prev;
+        }
+        return prev === '' ? '0.' : `${prev}.`;
+      }
+      if (prev.replace('.', '').length >= 7) {
+        return prev;
+      }
+      if (prev === '0') {
+        return key;
+      }
+      return prev + key;
+    })());
+  };
+
+  if (step == null) {
+    return null;
+  }
+
+  const confirmCash = () => {
+    onConfirm(selected.id, selected.id === 'cash' ? paidMinor : null);
+  };
+
+  return (
+    <View style={styles.inlineOverlay}>
+      <TouchableOpacity
+        style={styles.inlineOverlayDim}
+        activeOpacity={1}
+        onPress={onClose}
+      />
+      <BackHandlerCloser active={step != null} onClose={onClose} />
+      <View style={styles.paySheet}>
+        <View style={styles.unitModalHandle} />
+        <View style={styles.payHeadRow}>
+          <View style={{flex: 1}}>
+            <Text style={styles.paySheetTitle}>
+              {step === 'method'
+                ? 'اختر طريقة الدفع'
+                : `الدفع — ${selected.label}`}
+            </Text>
+            <Text style={styles.payTotalText}>
+              المطلوب: {formatMoney(total)}
+            </Text>
+          </View>
+          {step === 'pay' && methods.length > 1 ? (
+            <TouchableOpacity
+              style={styles.payChangeChip}
+              onPress={onStepMethod}
+              activeOpacity={0.75}>
+              <Text style={styles.payChangeChipText}>تغيير الطريقة</Text>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity
+            style={styles.weightClearChip}
+            onPress={onClose}
+            activeOpacity={0.75}>
+            <Icon name="x" size={16} color={c.textFaint} />
+          </TouchableOpacity>
+        </View>
+
+        {step === 'method' ? (
+          <ScrollView
+            style={{flex: 1}}
+            contentContainerStyle={styles.payMethodsGrid}
+            showsVerticalScrollIndicator={false}>
+            {methods.map(method => {
+              const isSelected = method.id === selectedId;
+              return (
+                <TouchableOpacity
+                  key={method.id}
+                  style={[
+                    styles.payMethodCard,
+                    isSelected
+                      ? {borderColor: c.accent, backgroundColor: c.surfaceHi}
+                      : null,
+                  ]}
+                  activeOpacity={0.7}
+                  onPress={() => onSelectMethod(method.id)}>
+                  <PaymentMethodIcon method={method} size={46} />
+                  <Text style={styles.payMethodName} numberOfLines={1}>
+                    {method.label}
+                  </Text>
+                  <Text style={styles.payMethodKind} numberOfLines={1}>
+                    {method.kind === 'cash'
+                      ? 'الخزينة النقدية'
+                      : method.kind === 'bank'
+                      ? 'تحويل بنكي'
+                      : 'محفظة إلكترونية'}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        ) : selected.id === 'cash' ? (
+          <ScrollView
+            style={{flex: 1}}
+            contentContainerStyle={styles.payScroll}
+            showsVerticalScrollIndicator={false}>
+            <View style={styles.payAmountDisplay}>
+              <Text
+                style={[
+                  styles.payAmountValue,
+                  amountText === '' ? {color: c.textFaint} : null,
+                ]}>
+                {amountText === '' ? '0' : amountText} ₪
+              </Text>
+              {paidMinor != null ? (
+                <Text
+                  style={[
+                    styles.payChangeValue,
+                    change < 0 ? {color: c.danger} : null,
+                  ]}>
+                  {change < 0
+                    ? `الباقي على الزبون: ${formatMoney(-change / 100)}`
+                    : `الباقي للزبون: ${formatMoney(change / 100)}`}
+                </Text>
+              ) : (
+                <Text style={styles.payChangeHint}>
+                  أدخل المبلغ المستلم من الزبون لحساب الباقي
+                </Text>
+              )}
+            </View>
+            <View style={styles.payQuickRow}>
+              <TouchableOpacity
+                style={styles.payQuickChip}
+                activeOpacity={0.75}
+                onPress={() => onAmountChange(String(total))}>
+                <Text style={styles.payQuickText}>كامل المبلغ</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.payQuickChip, {opacity: 0.75}]}
+                activeOpacity={0.75}
+                onPress={() => onAmountChange('')}>
+                <Text style={styles.payQuickText}>تصفير</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.keypad}>
+              {KEYPAD_KEYS.map((row, rowIndex) => (
+                <View key={rowIndex} style={styles.keypadRow}>
+                  {row.map(key => (
+                    <TouchableOpacity
+                      key={key}
+                      style={[
+                        styles.keypadKey,
+                        key === '⌫' ? styles.keypadKeyDanger : null,
+                      ]}
+                      onPress={() => pressKey(key)}
+                      activeOpacity={0.65}>
+                      <Text style={styles.keypadKeyText}>{key}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ))}
+            </View>
+          </ScrollView>
+        ) : (
+          <ScrollView
+            style={{flex: 1}}
+            contentContainerStyle={styles.payScroll}
+            showsVerticalScrollIndicator={false}>
+            <View style={styles.payConfirmCard}>
+              <PaymentMethodIcon method={selected} size={56} />
+              <View style={{flex: 1}}>
+                <Text style={styles.payConfirmTitle}>
+                  الدفع عبر {selected.label}
+                </Text>
+                <Text style={styles.payConfirmHint}>
+                  يُسجَّل المبلغ كاملاً ({formatMoney(total)}) على{' '}
+                  {selected.kind === 'bank' ? 'حسابك البنكي' : 'محفظتك الإلكترونية'}{' '}
+                  — يُتابَع من التقارير ← أرصدة طرق الدفع، ويُطبع على الإيصال.
+                </Text>
+              </View>
+            </View>
+          </ScrollView>
+        )}
+
+        <View style={styles.weightActionRow}>
+          <AppButton
+            title={step === 'pay' && methods.length > 1 ? 'رجوع' : 'إلغاء'}
+            variant="secondary"
+            onPress={() => {
+              if (step === 'pay' && methods.length > 1) {
+                onStepMethod();
+              } else {
+                onClose();
+              }
+            }}
+            style={{flex: 1}}
+          />
+          {step === 'method' ? (
+            <AppButton
+              title={`متابعة بـ «${selected.label}»`}
+              icon="check"
+              onPress={() => onStepMethod.call(null)}
+              style={{flex: 1.8}}
+            />
+          ) : (
+            <AppButton
+              title={
+                selected.id === 'cash'
+                  ? `تأكيد البيع${printerConnected ? ' والطباعة' : ''}`
+                  : `تأكيد الدفع عبر ${selected.label}`
+              }
+              icon="check"
+              onPress={confirmCash}
+              loading={busy}
+              disabled={selected.id === 'cash' && paidMinor != null && paidMinor < totalMinor}
+              style={{flex: 1.8}}
+            />
+          )}
         </View>
       </View>
     </View>
@@ -6101,6 +6474,141 @@ const useStyles = makeStyles(c =>
       paddingBottom: spacing.lg + 4,
       gap: spacing.sm,
       maxHeight: '84%',
+    },
+    /* ── v63 (الجولة 75 #2): نافذة الدفع ── */
+    paySheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg + 4,
+      borderTopRightRadius: radius.lg + 4,
+      padding: spacing.lg,
+      paddingBottom: spacing.lg + 4,
+      gap: spacing.sm,
+      maxHeight: '88%',
+    },
+    payHeadRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    paySheetTitle: {
+      color: c.text,
+      fontSize: typography.heading,
+      fontFamily: fonts.bold,
+    },
+    payTotalText: {
+      color: c.accent,
+      fontSize: typography.body + 1,
+      fontFamily: fonts.bold,
+      marginTop: 2,
+    },
+    payChangeChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+    },
+    payChangeChipText: {
+      color: c.textDim,
+      fontSize: typography.micro + 0.5,
+      fontFamily: fonts.medium,
+    },
+    payMethodsGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      justifyContent: 'space-between',
+      gap: spacing.sm,
+      paddingBottom: spacing.sm,
+    },
+    payMethodCard: {
+      width: '31%',
+      minWidth: 100,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      paddingVertical: 14,
+      paddingHorizontal: 6,
+      borderRadius: radius.md + 2,
+      borderWidth: 2,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    payMethodName: {
+      color: c.text,
+      fontSize: typography.small + 1,
+      fontFamily: fonts.bold,
+    },
+    payMethodKind: {
+      color: c.textFaint,
+      fontSize: typography.micro,
+      fontFamily: fonts.medium,
+    },
+    payScroll: {
+      gap: spacing.sm,
+      paddingBottom: spacing.sm,
+    },
+    payAmountDisplay: {
+      alignItems: 'center',
+      gap: 4,
+      paddingVertical: 10,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    payAmountValue: {
+      color: c.text,
+      fontSize: 30,
+      fontFamily: fonts.bold,
+    },
+    payChangeValue: {
+      color: c.success,
+      fontSize: typography.body,
+      fontFamily: fonts.bold,
+    },
+    payChangeHint: {
+      color: c.textFaint,
+      fontSize: typography.micro + 1,
+      fontFamily: fonts.medium,
+    },
+    payQuickRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    payQuickChip: {
+      flex: 1,
+      alignItems: 'center',
+      paddingVertical: 9,
+      borderRadius: radius.md,
+      backgroundColor: c.accentSoft,
+    },
+    payQuickText: {
+      color: c.accentDark,
+      fontSize: typography.small,
+      fontFamily: fonts.bold,
+    },
+    payConfirmCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      padding: spacing.md,
+      borderRadius: radius.md + 2,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    payConfirmTitle: {
+      color: c.text,
+      fontSize: typography.body + 1,
+      fontFamily: fonts.bold,
+    },
+    payConfirmHint: {
+      color: c.textDim,
+      fontSize: typography.small,
+      fontFamily: fonts.medium,
+      lineHeight: 20,
+      marginTop: 4,
     },
     weightScroll: {
       flexShrink: 1,

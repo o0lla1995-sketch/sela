@@ -30,6 +30,8 @@ import {
   SwitchRow,
 } from '../../components/ui';
 import {Icon, type IconName} from '../../components/Icon';
+import {PaymentMethodIcon} from '../../components/PaymentMethodIcon';
+import {PAYMENT_METHODS} from '../../core/paymentMethods';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {SubscriptionSection} from './SubscriptionSection';
 import {useThemeStore, useThemeColors, type ThemeMode} from '../../core/theme';
@@ -650,6 +652,55 @@ export function SettingsScreen() {
               {value: 'WHOLESALE', label: 'جملة'},
             ]}
           />
+          {/* ── v63 (الجولة 75 #1): طرق الدفع — التاجر يفعّل ما يملكه
+              فعلاً من بنوك ومحافظ؛ النقدي مقفل مفعّل دائماً. عند تفعيل
+              أي بنك/محفظة يظهر اختيار الطريقة أولاً عند البيع. ── */}
+          <Text style={styles.fieldLabel}>طرق الدفع المفعّلة</Text>
+          <View style={styles.pmGrid}>
+            {PAYMENT_METHODS.map(m => {
+              const enabled =
+                m.locked ||
+                settings.paymentMethodsEnabled?.[m.id] !== false;
+              return (
+                <TouchableOpacity
+                  key={m.id}
+                  style={[
+                    styles.pmCard,
+                    enabled ? {borderColor: m.color} : null,
+                  ]}
+                  disabled={m.locked}
+                  onPress={() =>
+                    update({
+                      paymentMethodsEnabled: {
+                        ...settings.paymentMethodsEnabled,
+                        [m.id]: !enabled,
+                      },
+                    })
+                  }
+                  activeOpacity={0.75}>
+                  <PaymentMethodIcon method={m} size={34} />
+                  <View style={{flex: 1, minWidth: 0}}>
+                    <Text style={styles.pmName} numberOfLines={1}>
+                      {m.label}
+                    </Text>
+                    <Text style={styles.pmKind} numberOfLines={1}>
+                      {m.kind === 'cash'
+                        ? 'مفعّل دائماً'
+                        : enabled
+                        ? 'مفعّل'
+                        : 'مطفأ'}
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.pmDot,
+                      enabled ? {backgroundColor: m.color} : null,
+                    ]}
+                  />
+                </TouchableOpacity>
+              );
+            })}
+          </View>
         </Card>
 
         {/* ── Receipts ───────────────────────────────────────── */}
@@ -1220,6 +1271,37 @@ const useStyles = makeStyles(c =>
       color: c.textDim,
       fontFamily: fonts.bold,
       fontSize: typography.small,
+    },
+    /* v63 (الجولة 75 #1): بطاقات تفعيل طرق الدفع. */
+    pmGrid: {
+      gap: spacing.sm,
+    },
+    pmCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      padding: spacing.md,
+      borderRadius: radius.md,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    pmName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body - 1,
+    },
+    pmKind: {
+      color: c.textFaint,
+      fontFamily: fonts.medium,
+      fontSize: typography.micro,
+      marginTop: 1,
+    },
+    pmDot: {
+      width: 12,
+      height: 12,
+      borderRadius: 6,
+      backgroundColor: c.border,
     },
     scannerHint: {
       color: c.textFaint,

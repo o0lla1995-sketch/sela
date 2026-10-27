@@ -14,7 +14,7 @@
  *    للتجاوز حتى يحدّث.
  * ⑤ نافذة إضافة كاشير: «التالي» بين الحقول، إظهار كلمة المرور،
  *    أخطاء داخلية لكل حقل، تمرير داخلي، و«إنشاء وإضافة التالي».
- * ⑥ الإصدار: 62.0.0 (70).
+ * ⑥ الإصدار: 63.0.0 (71).
  */
 import {
   isVersionBelow,
@@ -214,12 +214,12 @@ describe('v62 — حرّوس المصدر للجولة كاملة', () => {
     expect(screen).toContain('keyboardShouldPersistTaps="handled"');
   });
 
-  test('⑥ الإصدار: 62.0.0 (70)', () => {
+  test('⑥ الإصدار: 63.0.0 (71)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '62.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 70');
+    expect(config).toContain("APP_VERSION = '63.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 71');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "62.0.0"');
-    expect(gradle).toContain('versionCode 70');
+    expect(gradle).toContain('versionName "63.0.0"');
+    expect(gradle).toContain('versionCode 71');
   });
 });

@@ -79,6 +79,10 @@ export interface AppSettings {
   autoBackupEnabled: boolean;
   /** v62: تواتر النسخ التلقائي بالأيام (1 / 3 / 7). */
   autoBackupEveryDays: number;
+  /** v63 (الجولة 75): طرق الدفع المفعّلة (بنوك ومحافظ) — التاجر
+   *  يفعّل ما يملكه فعلاً من الإعدادات؛ النقدي مقفل مفعّل دائماً.
+   *  مفتاح غائب = مفعّل (توافق الترقيات — نفس منطق سطح المكتب). */
+  paymentMethodsEnabled: Record<string, boolean>;
 }
 
 const DEFAULTS: AppSettings = {
@@ -111,6 +115,15 @@ const DEFAULTS: AppSettings = {
   lanPort: 8950,
   autoBackupEnabled: true,
   autoBackupEveryDays: 1,
+  paymentMethodsEnabled: {
+    cash: true,
+    bank_palestine: true,
+    bank_quds: true,
+    bank_islami: true,
+    jawwal_pay: true,
+    palpay: true,
+    malchat: true,
+  },
 };
 
 interface SettingsState {

@@ -52,6 +52,11 @@ import {
   Segmented,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
+import {PaymentMethodIcon} from '../../components/PaymentMethodIcon';
+import {
+  activePaymentMethods,
+  paymentMethodById,
+} from '../../core/paymentMethods';
 import {useSilaStore} from '../../stores/silaStore';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {usePrinterStore} from '../../stores/printerStore';
@@ -178,6 +183,9 @@ export function SilaScreen() {
     new Map(),
   );
   const [payAmountText, setPayAmountText] = useState('');
+  /** v63 (الجولة 75 #6): طريقة سداد صِلة — البنوك والمحافظ
+   *  المفعّلة (طلب التاجر)؛ نقدي افتراضياً. */
+  const [payMethod, setPayMethod] = useState('cash');
   const [payBusy, setPayBusy] = useState(false);
 
   // v43 (الجولة 51 #4): نافذة صرف الطرود (بدون سلة) حُذفت بطلب
@@ -591,15 +599,19 @@ export function SilaScreen() {
       setPayBusy(true);
       try {
         const receiptRef = await SilaRepo.reserveReceiptRef();
+        const method = paymentMethodById(payMethod);
         await SilaRepo.enqueuePayment({
           idempotencyKey: uuidV4(),
           customerId: customer.customer_id,
           customerName: customer.name,
           customerPhoneLast4: customer.phone_last4,
           amountMinor: Math.round(amount * 100),
-          paymentMethod: 'cash',
+          paymentMethod: method.id,
           posReceiptRef: receiptRef,
-          description: `سداد نقدي — ${customer.name}`,
+          description:
+            method.id === 'cash'
+              ? `سداد نقدي — ${customer.name}`
+              : `سداد عبر ${method.label} — ${customer.name}`,
           paidAt: new Date().toISOString(),
         });
         setPaySheet(null);
@@ -608,7 +620,7 @@ export function SilaScreen() {
         toast(
           `سُجّل سداد ${formatMoney(amount)} من ${
             customer.name
-          } — إيصال ${receiptRef} سيُرفع لصِلة`,
+          }${method.id === 'cash' ? '' : ` عبر ${method.label}`} — إيصال ${receiptRef} سيُرفع لصِلة`,
           'success',
           5000,
         );
@@ -623,7 +635,7 @@ export function SilaScreen() {
         setPayBusy(false);
       }
     },
-    [payBusy, paySheet, reload, toast],
+    [payBusy, paySheet, payMethod, reload, toast],
   );
 
   const confirmPayment = useCallback(async () => {
@@ -1599,7 +1611,7 @@ export function SilaScreen() {
           />
           <View style={styles.paySheet}>
             <View style={styles.payHandle} />
-            <Text style={styles.payTitle}>تسجيل سداد نقدي</Text>
+            <Text style={styles.payTitle}>تسجيل سداد</Text>
             <View style={styles.payCustomerRow}>
               <Icon name="wallet" size={20} color={c.accent} />
               <View style={{flex: 1}}>
@@ -1650,6 +1662,43 @@ export function SilaScreen() {
                 </Text>
               </TouchableOpacity>
             ) : null}
+            {/* v63 (الجولة 75 #6): طريقة السداد — نقدي + البنوك
+                والمحافظ المفعّلة من الإعدادات (طلب التاجر). */}
+            <View>
+              <Text style={styles.payLabel}>طريقة السداد</Text>
+              <View style={styles.pmRow}>
+                {activePaymentMethods(
+                  useSettingsStore.getState().settings.paymentMethodsEnabled,
+                ).map(m => {
+                  const on = payMethod === m.id;
+                  return (
+                    <TouchableOpacity
+                      key={m.id}
+                      style={[
+                        styles.pmChip,
+                        on
+                          ? {
+                              borderColor: m.color,
+                              backgroundColor: `${m.color}1F`,
+                            }
+                          : null,
+                      ]}
+                      onPress={() => setPayMethod(m.id)}
+                      activeOpacity={0.75}>
+                      <PaymentMethodIcon method={m} size={24} />
+                      <Text
+                        style={[
+                          styles.pmChipText,
+                          on ? {color: m.color} : null,
+                        ]}
+                        numberOfLines={1}>
+                        {m.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
             <Text style={styles.payHint}>
               قيود صارمة: مبلغ أكبر من صفر، أرقام فقط بفاصلة عشرية واحدة (مثال
               12.50)، ولا يُقبل مبلغ أكبر من دين فواتير متجرك — السداد من المتجر
@@ -2286,6 +2335,29 @@ const useStyles = makeStyles(c =>
     payQuickBtn: {
       alignItems: 'center',
       paddingVertical: spacing.xs,
+    },
+    /* v63 (الجولة 75 #6): رقائق طريقة سداد صِلة. */
+    pmRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+      marginTop: 4,
+    },
+    pmChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      borderRadius: 10,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    pmChipText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
     payQuickText: {
       color: c.accent,

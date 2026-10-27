@@ -28,6 +28,9 @@ export interface CreateSaleInput {
   /** Absolute discount in ₪ applied to the whole invoice. */
   discount: number;
   paymentType: PricingMode;
+  /** v63 (الجولة 75): طريقة الدفع — بنك/محفظة/نقدي (تتبع الأرصدة
+   *  الواردة). غير مرسلة = 'cash'. */
+  paymentMethod?: string | null;
   /** v58 (الجولة 62): الكاشير صاحب الفاتورة عبر الشبكة المحلية
    *  (سيلّا كاشير) — null = بيع نقطة البيع نفسها (كما كان دائماً). */
   cashierId?: number | null;
@@ -206,8 +209,8 @@ export const SaleRepo = {
     await db.transaction(async tx => {
       const insertSale = await tx.execute(
         `INSERT INTO sales
-          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, cashier_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, cashier_id, payment_method)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.invoiceNumber,
           totalAmount,
@@ -217,6 +220,7 @@ export const SaleRepo = {
           input.paymentType,
           createdAt,
           input.cashierId ?? null,
+          input.paymentMethod || 'cash',
         ],
       );
       saleId = insertSale.insertId ?? -1;

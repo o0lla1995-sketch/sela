@@ -270,6 +270,9 @@ export interface SaleRecord {
   cashier_id?: number | null;
   /** v58: اسم الكاشير (JOIN من lan_cashiers حيث يُطلب). */
   cashier_name?: string | null;
+  /** v63 (الجولة 75): طريقة الدفع — بنك/محفظة/نقدي؛ غائب = نقدي
+   *  (توافق السجلات قبل الترحيل v30). */
+  payment_method?: string | null;
 }
 
 export interface SaleItemRecord {
@@ -767,7 +770,9 @@ export interface LocalPayment {
   local_customer_id: number;
   receipt_ref: string;
   amount_minor: number;
-  method: 'cash' | 'card' | 'other';
+  /** v63 (الجولة 75 #6): نص حر — معرفات طرق الدفع الجديدة
+   *  (bank_palestine…) بجانب القيم التاريخية cash/card/other. */
+  method: string;
   note: string | null;
   created_at: string;
 }

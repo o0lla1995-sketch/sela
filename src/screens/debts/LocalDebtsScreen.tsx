@@ -38,6 +38,12 @@ import {
   StatCard,
 } from '../../components/ui';
 import {Icon} from '../../components/Icon';
+import {PaymentMethodIcon} from '../../components/PaymentMethodIcon';
+import {
+  activePaymentMethods,
+  paymentMethodById,
+} from '../../core/paymentMethods';
+import {useSettingsStore} from '../../stores/settingsStore';
 import {
   LocalDebtsRepo,
   isValidIdNumber,
@@ -108,6 +114,9 @@ export function LocalDebtsScreen() {
   const [detailPays, setDetailPays] = useState<LocalPayment[]>([]);
   const [payOpen, setPayOpen] = useState(false);
   const [payAmount, setPayAmount] = useState('');
+  /** v63 (الجولة 75 #6): طريقة السداد — البنوك والمحافظ المفعّلة
+   *  من الإعدادات (طلب التاجر)؛ نقدي افتراضياً. */
+  const [payMethod, setPayMethod] = useState('cash');
   const [payBusy, setPayBusy] = useState(false);
   /** v17 (round-23 #8): the link+scan flow's busy flag. */
   const [linkBusy, setLinkBusy] = useState(false);
@@ -373,7 +382,7 @@ export function LocalDebtsScreen() {
         await LocalDebtsRepo.addPayment({
           localCustomerId: detail.customer.id,
           amountMinor: Math.round(amount * 100),
-          method: 'cash',
+          method: payMethod,
         });
         const customerId = detail.customer.id;
         const customerName = detail.customer.name;
@@ -383,10 +392,14 @@ export function LocalDebtsScreen() {
         setPayAmount('');
         setPayOpen(false);
         await refreshDetail(customerId);
+        const methodLabel =
+          payMethod === 'cash'
+            ? ''
+            : ` عبر ${paymentMethodById(payMethod).label}`;
         toast(
           wasExcess
-            ? `سُجّل سداد ${formatMoney(amount)} من ${customerName} — الدين مُطفأ والزيادة رصيد دائن`
-            : `سُجّل سداد ${formatMoney(amount)} من ${customerName}`,
+            ? `سُجّل سداد ${formatMoney(amount)} من ${customerName}${methodLabel} — الدين مُطفأ والزيادة رصيد دائن`
+            : `سُجّل سداد ${formatMoney(amount)} من ${customerName}${methodLabel}`,
           'success',
           wasExcess ? 5000 : undefined,
         );
@@ -399,7 +412,7 @@ export function LocalDebtsScreen() {
         setPayBusy(false);
       }
     },
-    [detail, refreshDetail, toast],
+    [detail, payMethod, refreshDetail, toast],
   );
 
   const recordPayment = useCallback(async () => {
@@ -1157,7 +1170,7 @@ export function LocalDebtsScreen() {
           <View style={styles.sheet}>
             <View style={styles.sheetHandle} />
             <Text style={styles.sheetTitle}>
-              سداد نقدي — {detail.customer.name}
+              سداد من {detail.customer.name}
             </Text>
             <Text style={styles.payBalanceText}>
               {detail.outstandingMinor > 0
@@ -1180,6 +1193,38 @@ export function LocalDebtsScreen() {
                 void recordPayment();
               }}
             />
+            {/* v63 (الجولة 75 #6): طريقة السداد — نقدي + البنوك
+                والمحافظ المفعّلة من الإعدادات (طلب التاجر). */}
+            <View>
+              <Text style={styles.payMethodLabel}>طريقة السداد</Text>
+              <View style={styles.payMethodsRow}>
+                {activePaymentMethods(
+                  useSettingsStore.getState().settings.paymentMethodsEnabled,
+                ).map(m => {
+                  const on = payMethod === m.id;
+                  return (
+                    <TouchableOpacity
+                      key={m.id}
+                      style={[
+                        styles.payMethodChip,
+                        on ? {borderColor: m.color, backgroundColor: `${m.color}1F`} : null,
+                      ]}
+                      onPress={() => setPayMethod(m.id)}
+                      activeOpacity={0.75}>
+                      <PaymentMethodIcon method={m} size={26} />
+                      <Text
+                        style={[
+                          styles.payMethodChipText,
+                          on ? {color: m.color} : null,
+                        ]}
+                        numberOfLines={1}>
+                        {m.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
             {detail.outstandingMinor > 0 ? (
               <TouchableOpacity
                 style={styles.payQuickBtn}
@@ -1364,6 +1409,34 @@ const useStyles = makeStyles(c =>
       color: c.accent,
       fontFamily: fonts.bold,
       fontSize: 13,
+    },
+    /* v63 (الجولة 75 #6): رقائق اختيار طريقة السداد. */
+    payMethodLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: 12.5,
+      marginBottom: 6,
+    },
+    payMethodsRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+    },
+    payMethodChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      borderRadius: 10,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    payMethodChipText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: 12,
     },
     detailSheet: {
       backgroundColor: c.surface,

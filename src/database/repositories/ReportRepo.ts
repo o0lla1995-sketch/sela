@@ -455,6 +455,8 @@ export const ReportRepo = {
       profit: number;
       discount: number;
       paymentType: string;
+      /** v63 (الجولة 75 #9): طريقة الدفع — لعمود CSV/التقارير. */
+      paymentMethod: string;
     }[]
   > {
     const [start, end] = rangeBounds(range);
@@ -469,6 +471,7 @@ export const ReportRepo = {
          s.total_profit AS profit,
          s.discount AS discount,
          s.payment_type AS payment_type,
+         s.payment_method AS payment_method,
          s.return_kind AS return_kind
        FROM sales s
        LEFT JOIN (${RETURN_ORIGINAL_LINK}) link
@@ -493,6 +496,10 @@ export const ReportRepo = {
           : String(row.payment_type ?? 'RETAIL') === 'WHOLESALE'
           ? 'جملة'
           : 'مفرق',
+      paymentMethod:
+        row.return_kind != null
+          ? '—'
+          : String(row.payment_method ?? 'cash') || 'cash',
     }));
   },
 
