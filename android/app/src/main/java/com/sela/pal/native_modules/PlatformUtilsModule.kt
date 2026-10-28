@@ -1197,7 +1197,11 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
         style = android.graphics.Paint.Style.STROKE
         strokeWidth = maxOf(1f, 0.25f * mmPt)
         color = android.graphics.Color.rgb(0xB9, 0xC0, 0xCC)
-        pathEffect = android.graphics.DashPathEffect(2.2f * mmPt, 1.6f * mmPt)
+        // إطار القص المتقطع: شرطة 2.2مم ثم فجوة 1.6مم (نمط المقص).
+        pathEffect = android.graphics.DashPathEffect(
+          floatArrayOf(2.2f * mmPt, 1.6f * mmPt),
+          0f
+        )
         isAntiAlias = true
       }
       val cropPaint = android.graphics.Paint().apply {
