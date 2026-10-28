@@ -51,6 +51,7 @@ import {useSettingsStore, type PosProductView} from '../stores/settingsStore';
 import {
   activePaymentMethods,
   paymentMethodById,
+  PAYMENT_METHODS,
   type PaymentMethod,
 } from '../core/paymentMethods';
 import {PaymentMethodIcon} from '../components/PaymentMethodIcon';
@@ -1777,9 +1778,12 @@ export function PosScreen({
     ],
   );
 
-  /** v63 (الجولة 75 #2): فتح نافذة الدفع — خطوتان عند تفعيل بنوك
-   *  أو محافظ (الطريقة أولاً ثم المبلغ)، وخطوة واحدة عند تفعيل
-   *  النقدي وحده — البيع السريع اليومي لا يتأثر بنقرة إضافية. */
+  /** v63→v66 (الجولة 78 — أندرويد #١): فتح نافذة الدفع — خطوة
+   *  اختيار الطريقة أولاً دائماً. كانت تُتخطى عند تفعيل النقدي
+   *  وحده، فإذا عطّل التاجر البنوك والمحافظ من الإعدادات (بغلطة
+   *  أو تجربة) تفتح نافذة النقدي مباشرة ويظن أن نافذة الطرق
+   *  معطوبة — شكوى التاجر نصاً مرتين. الآن النافذة تظهر دائماً:
+   *  المفعّل كبطاقات + رقائق تفعيل فوري للمعطّل داخلها نفسها. */
   const openPaySheet = useCallback(() => {
     if (lines.length === 0) {
       toast('السلة فارغة — أضف منتجات أولاً', 'error');
@@ -1788,11 +1792,10 @@ export function PosScreen({
     if (busy) {
       return;
     }
-    const methods = activePaymentMethods(settings.paymentMethodsEnabled);
     setPayMethodId('cash');
     setPayAmountText('');
-    setPaySheet(methods.length > 1 ? 'method' : 'pay');
-  }, [lines.length, busy, settings.paymentMethodsEnabled, toast]);
+    setPaySheet('method');
+  }, [lines.length, busy, toast]);
 
   /** v11 (SILA §9.2): بيع بالدين — v15 (round-21 #5) opens a
    *  CHOOSER first: scan the customer's SILA QR (identity card or
@@ -3508,6 +3511,22 @@ export function PosScreen({
       <PaySheet
         step={paySheet}
         methods={activePaymentMethods(settings.paymentMethodsEnabled)}
+        /* v66 (الجولة 78 — أندرويد #١): المعطّل يظهر داخل نافذة
+         *  الدفع نفسها كرقائق تفعيل فوري — إن عطّل التاجر محفظته
+         *  بالخطأ يفعّلها من هنا بنقرة واحدة بلا خروج للإعدادات. */
+        disabledMethods={PAYMENT_METHODS.filter(
+          m =>
+            !m.locked && settings.paymentMethodsEnabled?.[m.id] === false,
+        )}
+        onEnableMethod={id => {
+          updateSettings({
+            paymentMethodsEnabled: {
+              ...settings.paymentMethodsEnabled,
+              [id]: true,
+            },
+          });
+          toast(`فُعّلت ${paymentMethodById(id).label} — أصبحت متاحة للدفع`, 'success');
+        }}
         selectedId={payMethodId}
         amountText={payAmountText}
         total={totals.total}
@@ -4331,6 +4350,8 @@ function WeightSheet({
 function PaySheet({
   step,
   methods,
+  disabledMethods,
+  onEnableMethod,
   selectedId,
   amountText,
   total,
@@ -4344,6 +4365,9 @@ function PaySheet({
 }: {
   step: 'method' | 'pay' | null;
   methods: PaymentMethod[];
+  /** v66 (الجولة 78): المعطّلة — تُعرض كرقائق تفعيل فوري. */
+  disabledMethods: PaymentMethod[];
+  onEnableMethod: (id: string) => void;
   selectedId: string;
   amountText: string;
   total: number;
@@ -4416,7 +4440,7 @@ function PaySheet({
               المطلوب: {formatMoney(total)}
             </Text>
           </View>
-          {step === 'pay' && methods.length > 1 ? (
+          {step === 'pay' ? (
             <TouchableOpacity
               style={styles.payChangeChip}
               onPress={onStepMethod}
@@ -4464,6 +4488,37 @@ function PaySheet({
                 </TouchableOpacity>
               );
             })}
+            {/* v66 (الجولة 78 — أندرويد #١): رقائق التفعيل الفوري —
+                كل بنك/محفظة معطّلة تظهر هنا بشعارها الرسمي ونقطة
+                تفعيل، فلا تختفي طريقة الدفع من نافذة الدفع أبداً:
+                نقرة واحدة تفعّلها فتنتقل فوراً لشبكة الطرق أعلاه
+                (القائمة تفاعلية عبر مخزن الإعدادات). */}
+            {disabledMethods.length > 0 ? (
+              <View style={styles.payQuickEnableWrap}>
+                <Text style={styles.payQuickEnableTitle}>
+                  طرق دفع أخرى — فعّل ما تستخدمه بنقرة:
+                </Text>
+                <View style={styles.payQuickEnableRow}>
+                  {disabledMethods.map(method => (
+                    <TouchableOpacity
+                      key={method.id}
+                      style={styles.payQuickEnableChip}
+                      activeOpacity={0.7}
+                      onPress={() => onEnableMethod(method.id)}>
+                      <PaymentMethodIcon method={method} size={22} />
+                      <Text
+                        style={styles.payQuickEnableText}
+                        numberOfLines={1}>
+                        {method.label}
+                      </Text>
+                      <View style={styles.payQuickEnablePlus}>
+                        <Icon name="plus" size={10} color={c.onAccent} />
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            ) : null}
           </ScrollView>
         ) : selected.id === 'cash' ? (
           <ScrollView
@@ -4508,14 +4563,14 @@ function PaySheet({
                 <Text style={styles.payQuickText}>تصفير</Text>
               </TouchableOpacity>
             </View>
-            {/* v65 (الجولة 77 — أندرويد #١): تلميح صريح عندما لا تظهر
-                البنوك والمحافظ في نافذة الدفع — السبب الوحيد المتبقي
-                أنها معطّلة من إعدادات «طرق الدفع المفعّلة»، فنقود
-                التاجر إلى مكان تفعيلها بدل ظنها عطلاً في النافذة. */}
+            {/* v65 (الجولة 77 — أندرويد #١): تلميح عند النقدي وحده —
+                v66: خطوة الطريقة صارت تفتح دائماً وفيها رقائق تفعيل
+                فوري، فالتلميح هنا يحيل إليها مباشرة. */}
             {methods.length === 1 && selected.id === 'cash' ? (
               <Text style={styles.payMethodsOffHint}>
-                طرق الدفع الأخرى (بنوك ومحافظ) معطّلة — فعّلها من الإعدادات ←
-                البيع ← طرق الدفع المفعّلة
+                طرق الدفع الأخرى (بنوك ومحافظ) معطّلة — اضغط «تغيير
+                الطريقة» لتفعيل أي جهة بنقرة واحدة من داخل النافذة، أو
+                من الإعدادات ← البيع ← طرق الدفع المفعّلة
               </Text>
             ) : null}
             <View style={styles.keypad}>
@@ -4560,10 +4615,13 @@ function PaySheet({
 
         <View style={styles.weightActionRow}>
           <AppButton
-            title={step === 'pay' && methods.length > 1 ? 'رجوع' : 'إلغاء'}
+            /* v66 (الجولة 78): خطوة الطريقة تفتح دائماً — فرجوع
+             *  خطوة الدفع يعود إليها دائماً (لا «إلغاء» إلا من
+             *  خطوة الاختيار نفسها). */
+            title={step === 'pay' ? 'رجوع' : 'إلغاء'}
             variant="secondary"
             onPress={() => {
-              if (step === 'pay' && methods.length > 1) {
+              if (step === 'pay') {
                 onStepMethod();
               } else {
                 onClose();
@@ -6610,6 +6668,52 @@ const useStyles = makeStyles(c =>
       lineHeight: 17,
       textAlign: 'center',
       paddingHorizontal: 8,
+    },
+    /* v66 (الجولة 78 — أندرويد #١): رقائق التفعيل الفوري داخل نافذة
+       الدفع — كل جهة معطّلة بشعارها الرسمي + نقطة زائد بلون العلامة. */
+    payQuickEnableWrap: {
+      width: '100%',
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+      paddingTop: spacing.sm + 2,
+      marginTop: 2,
+      gap: spacing.sm - 2,
+    },
+    payQuickEnableTitle: {
+      color: c.textDim,
+      fontSize: typography.small,
+      fontFamily: fonts.bold,
+      textAlign: 'right',
+    },
+    payQuickEnableRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 6,
+    },
+    payQuickEnableChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      borderWidth: 1.5,
+      borderStyle: 'dashed',
+      borderColor: c.border,
+      borderRadius: radius.md,
+      backgroundColor: c.surfaceAlt,
+      paddingHorizontal: 9,
+      paddingVertical: 6,
+    },
+    payQuickEnableText: {
+      color: c.textDim,
+      fontSize: typography.small,
+      fontFamily: fonts.bold,
+    },
+    payQuickEnablePlus: {
+      width: 16,
+      height: 16,
+      borderRadius: 999,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     payConfirmCard: {
       flexDirection: 'row',

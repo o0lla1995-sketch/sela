@@ -14,6 +14,7 @@ import {
   Platform,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -654,7 +655,13 @@ export function SettingsScreen() {
           />
           {/* ── v63 (الجولة 75 #1): طرق الدفع — التاجر يفعّل ما يملكه
               فعلاً من بنوك ومحافظ؛ النقدي مقفل مفعّل دائماً. عند تفعيل
-              أي بنك/محفظة يظهر اختيار الطريقة أولاً عند البيع. ── */}
+              أي بنك/محفظة يظهر اختيار الطريقة أولاً عند البيع.
+              v66 (الجولة 78 — أندرويد #١): البطاقة كانت تُبدّل حالتها
+              بنقرة على كامل مساحتها والنقطة الصغيرة وحدها تدل على
+              الحال — فنقر التاجر الجهات التي يريدها ظاناً أنه
+              «يختارها» فتعطّلت واختفت من نافذة الدفع (الجذر الحقيقي
+              لشكواه مرتين). الآن مفتاح Switch حقيقي بيد التاجر:
+              البطاقة معلوماتية والتبديل من المفتاح وحده. ── */}
           <Text style={styles.fieldLabel}>طرق الدفع المفعّلة</Text>
           <View style={styles.pmGrid}>
             {PAYMENT_METHODS.map(m => {
@@ -662,45 +669,54 @@ export function SettingsScreen() {
                 m.locked ||
                 settings.paymentMethodsEnabled?.[m.id] !== false;
               return (
-                <TouchableOpacity
+                <View
                   key={m.id}
                   style={[
                     styles.pmCard,
                     enabled ? {borderColor: m.color} : null,
-                  ]}
-                  disabled={m.locked}
-                  onPress={() =>
-                    update({
-                      paymentMethodsEnabled: {
-                        ...settings.paymentMethodsEnabled,
-                        [m.id]: !enabled,
-                      },
-                    })
-                  }
-                  activeOpacity={0.75}>
-                  <PaymentMethodIcon method={m} size={34} />
+                  ]}>
+                  <PaymentMethodIcon method={m} size={38} />
                   <View style={{flex: 1, minWidth: 0}}>
                     <Text style={styles.pmName} numberOfLines={1}>
                       {m.label}
                     </Text>
                     <Text style={styles.pmKind} numberOfLines={1}>
                       {m.kind === 'cash'
-                        ? 'مفعّل دائماً'
+                        ? 'مفعّل دائماً — الخزينة النقدية'
                         : enabled
                         ? 'مفعّل'
                         : 'مطفأ'}
                     </Text>
                   </View>
-                  <View
-                    style={[
-                      styles.pmDot,
-                      enabled ? {backgroundColor: m.color} : null,
-                    ]}
-                  />
-                </TouchableOpacity>
+                  {m.locked ? (
+                    <View style={styles.pmLockedBadge}>
+                      <Icon name="lock" size={13} color={c.success} />
+                    </View>
+                  ) : (
+                    <Switch
+                      value={enabled}
+                      onValueChange={next =>
+                        update({
+                          paymentMethodsEnabled: {
+                            ...settings.paymentMethodsEnabled,
+                            [m.id]: next,
+                          },
+                        })
+                      }
+                      trackColor={{false: c.surfaceHi, true: m.color}}
+                      thumbColor="#FFFFFF"
+                      disabled={false}
+                    />
+                  )}
+                </View>
               );
             })}
           </View>
+          <Text style={styles.pmHint}>
+            المفتاح بجانب كل جهة يفعّلها أو يعطّلها — الجهات المفعّلة
+            تظهر في نافذة الدفع عند كل عملية بيع، ويمكن تفعيل أي جهة
+            لاحقاً من داخل نافذة الدفع نفسها بنقرة واحدة.
+          </Text>
         </Card>
 
         {/* ── Receipts ───────────────────────────────────────── */}
@@ -1302,6 +1318,22 @@ const useStyles = makeStyles(c =>
       height: 12,
       borderRadius: 6,
       backgroundColor: c.border,
+    },
+    /* v66 (الجولة 78): شارة القفل للنقدي (مفعّل دائماً — لا مفتاح). */
+    pmLockedBadge: {
+      width: 40,
+      height: 24,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.successSoft,
+    },
+    pmHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 17,
+      marginTop: 2,
     },
     scannerHint: {
       color: c.textFaint,

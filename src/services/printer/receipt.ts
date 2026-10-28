@@ -8,6 +8,7 @@
 import {ReceiptBuilder} from './escpos';
 import {formatDateTime} from '../../core/format';
 import {APP_NAME, RECEIPT_WIDTH_58, RECEIPT_WIDTH_80} from '../../core/config';
+import {paymentMethodLabel} from '../../core/paymentMethods';
 import type {SaleRecord, SaleItemRecord} from '../../core/types';
 
 export interface ReceiptSettings {
@@ -79,6 +80,11 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
           : LABELS.paymentRetail
       }`,
     )
+    /* v66 (الجولة 78): طريقة الدفع على الإيصال — بنك/محفظة/نقدي
+     *  باسم الجهة كما اختارها التاجر لحظة البيع (تُقرأ من سجل
+     *  الفاتورة نفسه، فتنطبق على الطباعة الأولى وإعادة الطباعة
+     *  معاً). سطر عربي محاذى لليمين كأسطر أسماء الأصناف. */
+    .textLine(`طريقة الدفع: ${paymentMethodLabel(data.sale.payment_method)}`)
     .separator(width);
 
   // ── Items ─────────────────────────────────────────────────────

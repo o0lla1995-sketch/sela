@@ -96,6 +96,15 @@ function rowToSale(row: Record<string, unknown>): SaleRecord {
       row.cashier_name == null || row.cashier_name === undefined
         ? null
         : String(row.cashier_name),
+    /* v66 (الجولة 78): طريقة الدفع كانت تُسقط هنا تماماً رغم وجودها
+     * في SELECT s.* وفي نوع SaleRecord — فكانت كل الفواتير تظهر
+     * «نقدي» في القائمة والتفصيل وتقرير PDF وإعادة الطباعة مهما
+     * اختار التاجر من بنك أو محفظة. الآن تمر كما خُزّنت (غائبة =
+     * نقدي للسجلات قبل v63 — يقررها العرض عبر paymentMethodById). */
+    payment_method:
+      row.payment_method == null || row.payment_method === undefined
+        ? null
+        : String(row.payment_method),
   };
 }
 
@@ -1132,6 +1141,9 @@ export const SaleRepo = {
     /** v23: inclusive local-date bounds ('' = open). */
     fromDate?: string;
     toDate?: string;
+    /** v66 (الجولة 78): فلترة صفحة الفواتير بطريقة الدفع — 'all' أو
+     *  معرّف طريقة (cash يطابق كذلك السجلات القديمة NULL/فارغ). */
+    method?: 'all' | string;
   }): Promise<(SaleRecord & {itemsCount: number})[]> {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
@@ -1204,6 +1216,19 @@ export const SaleRepo = {
     if (options.toDate) {
       conditions.push('date(s.created_at) <= date(?)');
       params.push(options.toDate);
+    }
+    /* v66 (الجولة 78): فلترة طريقة الدفع — النقدي يطابق أيضاً
+     *  السجلات القديمة قبل v63 (NULL أو '') بلا ترحيل، تماماً
+     *  كقرار العرض في paymentMethodById. */
+    if (options.method != null && options.method !== 'all') {
+      if (options.method === 'cash') {
+        conditions.push(
+          "(s.payment_method IS NULL OR s.payment_method = '' OR s.payment_method = 'cash')",
+        );
+      } else {
+        conditions.push('s.payment_method = ?');
+        params.push(options.method);
+      }
     }
 
     const where =

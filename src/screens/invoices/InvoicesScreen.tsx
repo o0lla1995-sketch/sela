@@ -66,7 +66,8 @@ import {
   useThemeColors,
 } from '../../core/theme';
 import {formatDateTime, formatMoney, formatQty, parseNumber} from '../../core/format';
-import {paymentMethodById} from '../../core/paymentMethods';
+import {paymentMethodById, PAYMENT_METHODS} from '../../core/paymentMethods';
+import {PaymentMethodIcon} from '../../components/PaymentMethodIcon';
 import {requirePlatformUtils} from '../../native/nativeBridge';
 import {
   cameraPermissionMessage,
@@ -139,6 +140,23 @@ export function InvoicesScreen() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [dateFilter, setDateFilter] = useState<DateFilter>('all');
+  /* v66 (الجولة 78 — أندرويد #2): فلترة الفواتير بطريقة الدفع —
+   *  طلب التاجر نصاً: «اجعل الفواتير مميزة بطريقة الدفع التي تمت
+   *  بها وخصوصا في صفحة الفواتير يمكن فلترتها علي حسب أيضا طريقة
+   *  الدفع». تُقرأ الطرق المفعّلة من إعدادات التاجر نفسها. */
+  const [methodFilter, setMethodFilter] = useState<'all' | string>('all');
+  const paymentMethodsEnabled = useSettingsStore(
+    s => s.settings.paymentMethodsEnabled,
+  );
+  const methodChips = useMemo(
+    () =>
+      PAYMENT_METHODS.filter(
+        m =>
+          m.locked ||
+          paymentMethodsEnabled?.[m.id] !== false,
+      ),
+    [paymentMethodsEnabled],
+  );
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [reachedEnd, setReachedEnd] = useState(false);
@@ -166,6 +184,7 @@ export function InvoicesScreen() {
       date: DateFilter,
       replace: boolean,
       currentCount: number,
+      method: 'all' | string = 'all',
     ) => {
       if (replace) {
         setLoading(true);
@@ -181,6 +200,7 @@ export function InvoicesScreen() {
           kind,
           fromDate: fromDateOf(date),
           toDate: '',
+          method,
         });
         setRows(prev => (replace ? page : [...prev, ...page]));
         setLoadedCount(replace ? page.length : currentCount + page.length);
@@ -197,8 +217,18 @@ export function InvoicesScreen() {
 
   // Latest filter state in refs so the focus callback stays
   // identity-stable (empty deps) while never going stale.
-  const stateRef = useRef({debouncedSearch, kindFilter, dateFilter});
-  stateRef.current = {debouncedSearch, kindFilter, dateFilter};
+  const stateRef = useRef({
+    debouncedSearch,
+    kindFilter,
+    dateFilter,
+    methodFilter,
+  });
+  stateRef.current = {
+    debouncedSearch,
+    kindFilter,
+    dateFilter,
+    methodFilter,
+  };
   const loadRef = useRef(load);
   loadRef.current = load;
 
@@ -210,8 +240,9 @@ export function InvoicesScreen() {
         debouncedSearch: q,
         kindFilter: k,
         dateFilter: d,
+        methodFilter: pm,
       } = stateRef.current;
-      void loadRef.current(q, k, d, true, 0);
+      void loadRef.current(q, k, d, true, 0, pm);
       // v11 (SILA): refresh the debt-invoice badge set with it.
       void SilaRepo.allDebtInvoiceRefs().then(setDebtRefs);
       // v20: the prepaid-covered set for the «رصيد» badge.
@@ -221,8 +252,8 @@ export function InvoicesScreen() {
 
   // Reload whenever the debounced query or a filter changes.
   useEffect(() => {
-    void load(debouncedSearch, kindFilter, dateFilter, true, 0);
-  }, [debouncedSearch, kindFilter, dateFilter, load]);
+    void load(debouncedSearch, kindFilter, dateFilter, true, 0, methodFilter);
+  }, [debouncedSearch, kindFilter, dateFilter, methodFilter, load]);
 
   const onSearch = useCallback((query: string) => {
     setSearch(query);
@@ -248,6 +279,7 @@ export function InvoicesScreen() {
           kind: stateRef.current.kindFilter,
           fromDate: fromDateOf(stateRef.current.dateFilter),
           toDate: '',
+          method: stateRef.current.methodFilter,
         });
         allRows.push(...page);
         if (page.length < 100) {
@@ -286,10 +318,18 @@ export function InvoicesScreen() {
       const dateLabel =
         DATE_CHIPS.find(chip => chip.key === stateRef.current.dateFilter)
           ?.label ?? 'كل الفترات';
+      /* v66 (الجولة 78): تسمية فلتر طريقة الدفع في التقرير — يطابق
+       *  الرقائق المعروضة في الشاشة تماماً. */
+      const methodLabel =
+        stateRef.current.methodFilter === 'all'
+          ? ''
+          : ` · طريقة الدفع: ${paymentMethodById(
+              stateRef.current.methodFilter,
+            ).label}`;
       const payload = {
         storeName: settings.storeName || 'sela',
         periodLabel: dateLabel,
-        filtersLabel: `${kindLabel}${
+        filtersLabel: `${kindLabel}${methodLabel}${
           stateRef.current.debouncedSearch.trim()
             ? ` · بحث: «${stateRef.current.debouncedSearch.trim()}»`
             : ''
@@ -475,6 +515,32 @@ export function InvoicesScreen() {
               />
             ))}
           </ScrollView>
+          {/* v66 (الجولة 78 — أندرويد #2): صف فلترة طريقة الدفع —
+              طلب التاجر: «يمكن فلترتها علي حسب أيضا طريقة الدفع».
+              رقائق بشعار كل جهة رسمي (نفس شعارات نافذة الدفع)،
+              تُقرأ الطرق من المفعّل في إعدادات التاجر. */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{gap: 6, paddingVertical: 2}}>
+            <MethodFilterChip
+              label="كل الطرق"
+              withLogo={false}
+              active={methodFilter === 'all'}
+              onPress={() => setMethodFilter('all')}
+            />
+            {methodChips.map(method => (
+              <MethodFilterChip
+                key={method.id}
+                label={method.label}
+                withLogo
+                methodId={method.id}
+                methodLabel={method.label}
+                active={methodFilter === method.id}
+                onPress={() => setMethodFilter(method.id)}
+              />
+            ))}
+          </ScrollView>
         </View>
 
         {loading ? (
@@ -510,6 +576,7 @@ export function InvoicesScreen() {
                   dateFilter,
                   false,
                   loadedCount,
+                  methodFilter,
                 );
               }
             }}>
@@ -653,6 +720,45 @@ export function InvoicesScreen() {
                           </Text>
                         </View>
                       ) : null}
+                      {/* v66 (الجولة 78 — أندرويد #2): شارة طريقة الدفع
+                          على كل فاتورة بيع — شعار الجهة الرسمي الصغير +
+                          اسمها بلون علامتها، فتتميز الفواتير بنظرة
+                          واحدة (طلب التاجر نصاً). المرتجعات تظهر «—»
+                          لأن قيمتها تُسوّى عبر قناة تُختار وقت الإرجاع. */}
+                      {isReturn ? (
+                        <View style={[styles.debtChip, styles.methodChip]}>
+                          <Text style={styles.debtChipText}>تسوية مرتجع</Text>
+                        </View>
+                      ) : (
+                        <View
+                          style={[
+                            styles.debtChip,
+                            styles.methodChip,
+                            {
+                              borderColor:
+                                paymentMethodById(row.payment_method).color,
+                            },
+                          ]}>
+                          <PaymentMethodIcon
+                            method={{
+                              id: paymentMethodById(row.payment_method).id,
+                              label: paymentMethodById(row.payment_method)
+                                .label,
+                            }}
+                            size={15}
+                          />
+                          <Text
+                            style={[
+                              styles.debtChipText,
+                              {
+                                color: paymentMethodById(row.payment_method)
+                                  .color,
+                              },
+                            ]}>
+                            {paymentMethodById(row.payment_method).label}
+                          </Text>
+                        </View>
+                      )}
                     </View>
                   </View>
                 </TouchableOpacity>
@@ -707,6 +813,61 @@ function FilterChip({
   );
 }
 
+/** v66 (الجولة 78 — أندرويد #2): رقاقة فلترة بطريقة الدفع — شعار
+ *  الجهة الرسمي داخل الرقاقة نفسها (كما في نافذة الدفع) فلا يخطئ
+ *  التاجر الجهة التي يفلتر عليها، والتفعيل بلون العلامة. */
+function MethodFilterChip({
+  label,
+  active,
+  onPress,
+  withLogo,
+  methodId,
+  methodLabel,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+  withLogo: boolean;
+  methodId?: string;
+  methodLabel?: string;
+}) {
+  const c = useThemeColors();
+  const methodColor =
+    methodId != null ? paymentMethodById(methodId).color : c.accent;
+  return (
+    <TouchableOpacity
+      style={[
+        chipStyles(c).chip,
+        chipStyles(c).methodChip,
+        active
+          ? {
+              backgroundColor: `${methodColor}22`,
+              borderColor: methodColor,
+              borderWidth: 1.5,
+            }
+          : null,
+      ]}
+      onPress={onPress}
+      activeOpacity={0.7}
+      hitSlop={{top: 4, bottom: 4, left: 2, right: 2}}>
+      {withLogo && methodId != null && methodLabel != null ? (
+        <PaymentMethodIcon
+          method={{id: methodId, label: methodLabel}}
+          size={17}
+        />
+      ) : null}
+      <Text
+        style={{
+          color: active ? methodColor : c.textDim,
+          fontFamily: fonts.bold,
+          fontSize: 11.5,
+        }}>
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
 function chipStyles(c: ReturnType<typeof useThemeColors>) {
   return StyleSheet.create({
     chip: {
@@ -718,6 +879,14 @@ function chipStyles(c: ReturnType<typeof useThemeColors>) {
       minHeight: 26,
       justifyContent: 'center',
       backgroundColor: c.surface,
+    },
+    /* v66 (الجولة 78): رقاقة طريقة الدفع — تستوعب الشعار بجانب
+     *  الاسم وتتوسط عمودياً كرقائق الفلترة الأخرى. */
+    methodChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingVertical: 3,
     },
   });
 }
@@ -995,10 +1164,43 @@ export function InvoiceDetailScreen() {
                 {formatDateTime(sale.created_at)}
               </Text>
             </View>
-            <Badge
-              label={sale.payment_type === 'WHOLESALE' ? 'جملة' : 'مفرق'}
-              tone={sale.payment_type === 'WHOLESALE' ? 'info' : 'neutral'}
-            />
+            <View style={styles.detailHeadBadges}>
+              <Badge
+                label={sale.payment_type === 'WHOLESALE' ? 'جملة' : 'مفرق'}
+                tone={sale.payment_type === 'WHOLESALE' ? 'info' : 'neutral'}
+              />
+              {/* v66 (الجولة 78 — أندرويد #2): طريقة الدفع في تفصيل
+                  الفاتورة — الشعار الرسمي + الاسم بلون العلامة،
+                  فتتطابق القائمة والتفصيل والتقرير (طلب التاجر). */}
+              {sale.return_kind == null ? (
+                <View
+                  style={[
+                    styles.debtChip,
+                    styles.methodChip,
+                    {
+                      borderColor:
+                        paymentMethodById(sale.payment_method).color,
+                    },
+                  ]}>
+                  <PaymentMethodIcon
+                    method={{
+                      id: paymentMethodById(sale.payment_method).id,
+                      label: paymentMethodById(sale.payment_method).label,
+                    }}
+                    size={16}
+                  />
+                  <Text
+                    style={[
+                      styles.debtChipText,
+                      {
+                        color: paymentMethodById(sale.payment_method).color,
+                      },
+                    ]}>
+                    {paymentMethodById(sale.payment_method).label}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
           </View>
         </Card>
 
@@ -3637,6 +3839,13 @@ const useStyles = makeStyles(c =>
     retailChip: {
       backgroundColor: c.surfaceHi,
     },
+    /* v66 (الجولة 78): شارة طريقة الدفع على صف الفاتورة — إطار
+     *  بلون علامة الجهة يحمل شعارها الرسمي الصغير واسمها. */
+    methodChip: {
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+    },
     debtChipText: {
       color: c.warning,
       fontFamily: fonts.bold,
@@ -3757,6 +3966,13 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
+    },
+    /* v66 (الجولة 78): عمود الشارات في رأس التفصيل — جملة/مفرق فوق
+     *  شارة طريقة الدفع بشعارها الرسمي. */
+    detailHeadBadges: {
+      flexDirection: 'column',
+      alignItems: 'flex-end',
+      gap: 5,
     },
     detailHeadIcon: {
       width: 48,
