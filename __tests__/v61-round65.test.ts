@@ -51,9 +51,9 @@ describe('v61 — الجولة 65: حل أسطر الإرجاع عند الخا�
     expect(src).toContain('const discount = Math.min(requested, maxDiscount)');
   });
 
-  test('⑤ الإصدار: 66.0.0 (74)', () => {
+  test('⑤ الإصدار: 67.0.0 (75)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '66.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 74');
+    expect(config).toContain("APP_VERSION = '67.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 75');
   });
 });

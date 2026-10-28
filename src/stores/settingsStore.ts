@@ -83,6 +83,14 @@ export interface AppSettings {
    *  يفعّل ما يملكه فعلاً من الإعدادات؛ النقدي مقفل مفعّل دائماً.
    *  مفتاح غائب = مفعّل (توافق الترقيات — نفس منطق سطح المكتب). */
   paymentMethodsEnabled: Record<string, boolean>;
+  /** v67 (الجولة 79 — أندرويد #١): المقاسات المخصصة التي أضافها
+   *  التاجر في نموذج المنتج (مقاس 48، 50… أو حجم مطعم جديد) —
+   *  تُحفظ لكل نمط متجر على حدة وتظهر كرقائق في كل منتج جديد
+   *  بعده. كان التاجر يضيف المقاس فيُفقد مع أول «حفظ وإضافة
+   *  آخر» أو إغلاق النافذة فيعيد كتابته كل مرة. */
+  customSizes: Record<string, string[]>;
+  /** v67: الألوان المخصصة بنفس المنطق — لكل نمط متجر قائمتها. */
+  customColors: Record<string, string[]>;
 }
 
 const DEFAULTS: AppSettings = {
@@ -124,6 +132,8 @@ const DEFAULTS: AppSettings = {
     palpay: true,
     malchat: true,
   },
+  customSizes: {},
+  customColors: {},
 };
 
 interface SettingsState {
@@ -168,4 +178,69 @@ export const useSettingsStore = create<SettingsState>(set => ({
 /** Imperative accessor for services outside React. */
 export function getSettings(): AppSettings {
   return useSettingsStore.getState().settings;
+}
+
+/* ── v67 (الجولة 79): المقاسات والألوان المخصصة الدائمة ──────────
+ * مساعدات صرفة فوق مخزن الإعدادات — كل واجهة نموذج المنتج تقرأ
+ * وتكتب بها، فتظهر إضافات التاجر في كل منتج جديد بعدها. */
+
+function optionList(
+  kind: 'size' | 'color',
+  mode: string,
+): string[] {
+  const settings = getSettings();
+  const map = kind === 'size' ? settings.customSizes : settings.customColors;
+  const list = map?.[mode];
+  return Array.isArray(list) ? list : [];
+}
+
+/** قائمة المخصصة المحفوظة لنمط متجر (فارغة عند أول استخدام). */
+export function customVariantOptions(
+  kind: 'size' | 'color',
+  mode: string,
+): string[] {
+  return [...optionList(kind, mode)];
+}
+
+/** حفظ مقاس/لون مخصص (idempotent — موجود مسبقاً لا يكرر). */
+export function addCustomVariantOption(
+  kind: 'size' | 'color',
+  mode: string,
+  value: string,
+): void {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return;
+  }
+  const current = optionList(kind, mode);
+  if (current.some(v => v === trimmed)) {
+    return;
+  }
+  const settings = getSettings();
+  const sizes = {...(settings.customSizes ?? {})};
+  const colors = {...(settings.customColors ?? {})};
+  if (kind === 'size') {
+    sizes[mode] = [...current, trimmed];
+  } else {
+    colors[mode] = [...current, trimmed];
+  }
+  useSettingsStore.getState().update({customSizes: sizes, customColors: colors});
+}
+
+/** حذف مقاس/لون مخصص محفوظ (ضغط مطوّل على الرقاقة). */
+export function removeCustomVariantOption(
+  kind: 'size' | 'color',
+  mode: string,
+  value: string,
+): void {
+  const current = optionList(kind, mode).filter(v => v !== value);
+  const settings = getSettings();
+  const sizes = {...(settings.customSizes ?? {})};
+  const colors = {...(settings.customColors ?? {})};
+  if (kind === 'size') {
+    sizes[mode] = current;
+  } else {
+    colors[mode] = current;
+  }
+  useSettingsStore.getState().update({customSizes: sizes, customColors: colors});
 }

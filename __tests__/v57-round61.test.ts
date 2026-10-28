@@ -10,7 +10,7 @@
  * ② شارات أعداد الطلبات على فلاتر صفحة الطلبات أونلاين — طلب
  *    التاجر: «عدد العمليات الحالية والتي لم تتم معالجتها كرقم
  *    تنبيه» — تحميل الكل مرة واحدة وتصفية محلية.
- * ③ الإصدار: 66.0.0 (74).
+ * ③ الإصدار: 67.0.0 (75).
  */
 const read = (p: string) => require('fs').readFileSync(p, 'utf8') as string;
 
@@ -53,12 +53,12 @@ describe('v57 — الجولة 61: إصلاح الإرسال المباشر + ش
     expect(src).toContain('actionable');
   });
 
-  test('③ الإصدار: 66.0.0 (74)', () => {
+  test('③ الإصدار: 67.0.0 (75)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '66.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 74');
+    expect(config).toContain("APP_VERSION = '67.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 75');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "66.0.0"');
-    expect(gradle).toContain('versionCode 74');
+    expect(gradle).toContain('versionName "67.0.0"');
+    expect(gradle).toContain('versionCode 75');
   });
 });

@@ -337,7 +337,12 @@ describe('v38 #2 — حرّوس رياضيات وحدة الإدخال في صف
     expect(form).not.toContain(
       'units.find(unit => !used.has(unit.id)))',
     );
-    expect(form).toContain('وحدات القطع مستخدمة');
+    /* v67 (الجولة 79): نفاد الوحدات الحرة لم يعد رسالة «اذهب
+     * لشاشة الوحدات» — إنشاء الوحدة من النموذج نفسه مباشرة
+     * (promptCreateUnit يحفظها في القاعدة فوراً). */
+    expect(form).toContain('unitKindAllowed');
+    expect(form).toContain('promptCreateUnit');
+    expect(form).toContain('وحدة جديدة');
   });
 });
 
@@ -382,12 +387,14 @@ describe('v38 #7 — ضغط أحجام نافذتي الإرجاع والاست�
 describe('v38 #8 — المقاس/اللون المخصص يظهر بجانب الافتراضية', () => {
   test('رقائق الملابس تعرض اتحاد الافتراضي + المخصص', () => {
     const form = read(FORM);
-    expect(form).toContain(
-      '[...new Set([...(modeConfig.variantSizes ?? []), ...lotSizes])]',
-    );
-    expect(form).toContain(
-      '[...new Set([...(modeConfig.variantColors ?? []), ...lotColors])]',
-    );
+    /* v67 (الجولة 79): الاتحاد الثلاثي — الافتراضي + المحفوظ
+     * دائماً في الإعدادات (savedCustom*) + مخصصات هذه الجلسة. */
+    expect(form).toContain('...(modeConfig.variantSizes ?? []),');
+    expect(form).toContain('...(modeConfig.variantColors ?? []),');
+    expect(form).toContain('...savedCustomSizes,');
+    expect(form).toContain('...savedCustomColors,');
+    expect(form).toContain("addCustomVariantOption('size'");
+    expect(form).toContain("addCustomVariantOption('color'");
   });
 });
 

@@ -4458,7 +4458,15 @@ function PaySheet({
 
         {step === 'method' ? (
           <ScrollView
-            style={{flex: 1}}
+            /* v67 (الجولة 79 — أندرويد #٢): الجذر الحقيقي لاختفاء
+             * البنوك والمحافظ من النافذة — «flex: 1» داخل حاوية بلا
+             * ارتفاع محدد (paySheet بلا height، فقط maxHeight) يجعل
+             * Yoga يقيس الابن على أساس flexBasis = 0 فينهار الشبكة
+             * كلها لارتفاع صفر: التاجر يرى العنوان و«المطلوب»
+             * وزرّي إلغاء/متابعة فقط بلا أي بطاقة طريقة. نفس درس
+             * نافذة الوزن العاملة: flexShrink يجعل المحتوى يأخذ
+             * ارتفاعه الطبيعي ويتقلص فقط عند بلوغ السقف. */
+            style={styles.payScrollArea}
             contentContainerStyle={styles.payMethodsGrid}
             showsVerticalScrollIndicator={false}>
             {methods.map(method => {
@@ -4522,7 +4530,9 @@ function PaySheet({
           </ScrollView>
         ) : selected.id === 'cash' ? (
           <ScrollView
-            style={{flex: 1}}
+            /* v67: نفس إصلاح الانهيار — لوحة المبلغ تتقلص بلا
+             * flex:1 داخل حاوية بلا ارتفاع. */
+            style={styles.payScrollArea}
             contentContainerStyle={styles.payScroll}
             showsVerticalScrollIndicator={false}>
             <View style={styles.payAmountDisplay}>
@@ -4594,7 +4604,8 @@ function PaySheet({
           </ScrollView>
         ) : (
           <ScrollView
-            style={{flex: 1}}
+            /* v67: بطاقة تأكيد البنك/المحفظة — نفس إصلاح الانهيار. */
+            style={styles.payScrollArea}
             contentContainerStyle={styles.payScroll}
             showsVerticalScrollIndicator={false}>
             <View style={styles.payConfirmCard}>
@@ -6556,6 +6567,13 @@ const useStyles = makeStyles(c =>
       paddingBottom: spacing.lg + 4,
       gap: spacing.sm,
       maxHeight: '88%',
+    },
+    /* v67 (الجولة 79): منطقة التمرير داخل نافذة الدفع — flexShrink
+     * فقط (نفس weightScroll): المحتوى يأخذ ارتفاعه الطبيعي فتظهر
+     * بطاقات البنوك والمحافظ، ويتقلص عند بلوغ سقف النافذة. كان
+     * «flex: 1» ينهره إلى صفر داخل حاوية بلا ارتفاع محدد. */
+    payScrollArea: {
+      flexShrink: 1,
     },
     payHeadRow: {
       flexDirection: 'row',

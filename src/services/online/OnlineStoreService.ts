@@ -589,7 +589,14 @@ export async function sendOrder(order: OnlineOrder): Promise<string> {
  * سند COLL بالمبلغ القائم وقت التسليم (الإجمالي − المرتجعات حتى
  * الآن). الطلب يصبح «مسلّماً» والدين يقفل.
  */
-export async function deliverOrder(order: OnlineOrder): Promise<string> {
+export async function deliverOrder(
+  order: OnlineOrder,
+  /** v67 (الجولة 79 — أهم مطلب): طريقة الدفع التي حُصّل بها الطلب —
+   *  نقدي (الافتراضي) أو أي بنك/محفظة مفعلة. تُسجل على سند
+   *  التحصيل (قناة الخزينة الصحيحة) وعلى فاتورة الطلب نفسها
+   *  فتميّزها في مركز الفواتير وتقارير أرصدة طرق الدفع. */
+  paymentMethod: string = 'cash',
+): Promise<string> {
   const order2 = (await OnlineRepo.byNumber(order.order_number)) ?? order;
   if (order2.status !== 'sent') {
     throw new Error('لا يمكن تأكيد تسليم طلب لم يُرسل');
@@ -611,7 +618,23 @@ export async function deliverOrder(order: OnlineOrder): Promise<string> {
     kind: 'online_collection',
     note: saleNote,
     amountMinor: outstanding,
+    /* v67: القناة الصحيحة — بنك/محفظة/نقدي (سند COLL على قناة
+     * التاجر الفعلية، فتوازن أرصدة القنوات والتقارير لحظياً). */
+    paymentMethod,
   });
+  /* v67: فاتورة الطلب تحمل الطريقة الفعلية — تمييز بصري في مركز
+   * الفواتير (شارة اللون + الأيقونة) وفلترة، وتقرير أرصدة طرق
+   * الدفع يلتقط التحصيل من السند والفاتورة معاً. */
+  if (order2.invoice_ref != null && order2.invoice_ref.length > 0) {
+    try {
+      await getDb().execute(
+        'UPDATE sales SET payment_method = ? WHERE invoice_number = ?',
+        [paymentMethod, order2.invoice_ref],
+      );
+    } catch {
+      /* تحديث الفاتورة أفضل جهد — السند هو المصدر المحاسبي. */
+    }
+  }
   try {
     await OnlineApi.action({orderNumber: order2.order_number, action: 'deliver'});
   } catch (error) {
@@ -626,7 +649,7 @@ export async function deliverOrder(order: OnlineOrder): Promise<string> {
   await OnlineRepo.markLocalStatus(order2.order_number, 'delivered');
   logDiag(
     'online',
-    `سُلّم الطلب ${order2.order_number} — ${(outstanding / 100).toFixed(2)} ₪ من الدين إلى الخزينة بسند ${ref}`,
+    `سُلّم الطلب ${order2.order_number} — ${(outstanding / 100).toFixed(2)} ₪ عبر «${paymentMethod}» بسند ${ref}`,
   );
   return record.ref;
 }

@@ -49,6 +49,11 @@ import {useCatalogStore} from '../../stores/catalogStore';
 import {usePrinterStore} from '../../stores/printerStore';
 import {storeModeConfig} from '../../core/storeModes';
 import {useSettingsStore} from '../../stores/settingsStore';
+import {
+  addCustomVariantOption,
+  customVariantOptions,
+  removeCustomVariantOption,
+} from '../../stores/settingsStore';
 import {useToastStore} from '../../stores/toastStore';
 import {VisionRecognitionService} from '../../services/vision/VisionRecognitionService';
 import {scanBarcode, capturePhoto} from '../../services/vision/scanFlow';
@@ -161,6 +166,18 @@ export function ProductFormScreen() {
    *  وطريقة البيع الافتراضية حسب مجال المتجر (بقالة/كافيتريا/ملابس/
    *  صيدلية/فواكه/مطعم). */
   const modeConfig = storeModeConfig(settings.storeMode);
+  /* v67 (الجولة 79 — أندرويد #١): المقاسات والألوان المخصصة المحفوظة
+   * دائماً — تُقرأ من الإعدادات فتبقى بعد «حفظ وإضافة آخر» وبعد
+   * إغلاق الشاشة وتظهر كرقائق في كل منتج جديد بعدها. كانت حالة
+   * نموذج مؤقتة تضيع مع أول تصفير فيعيد التاجر كتابتها كل مرة. */
+  const savedCustomSizes = useMemo(
+    () => customVariantOptions('size', settings.storeMode),
+    [settings.storeMode, settings.customSizes],
+  );
+  const savedCustomColors = useMemo(
+    () => customVariantOptions('color', settings.storeMode),
+    [settings.storeMode, settings.customColors],
+  );
   // v9.1 (round-14 #6): label printing state.
   const [labelCopies, setLabelCopies] = useState(1);
   /* v65 (الجولة 77 — أندرويد #٢ب): خيارات ملصقات PDF — مقاس
@@ -951,26 +968,90 @@ export function ProductFormScreen() {
   ]);
 
   // ── Unit rows ─────────────────────────────────────────────────
+  /* v67 (الجولة 79 — أندرويد #١): أنواع الوحدات المتاحة للمنتج —
+   * كانت القوائم تقبل قطعة/وزن فقط فتموت وحدات الطول والحجم
+   * (التي ينشئها التاجر من شاشة الوحدات «بالوزن والقطعة والحجم
+   * والطول») في قوائم المنتج أبداً: تُحفظ في قاعدة البيانات ولا
+   * تظهر عند أي منتج. الآن: منتج قطعي يقبل قطعة + طول + حجم
+   * (متر قماش، لتر عصير…) ومنتج وزني يقبل وزن + حجم — والمعامل
+   * يحدده التاجر فتبقى رياضيات وحدة الأساس سليمة. */
+  const unitKindAllowed = useCallback(
+    (unit: {kind: string}): boolean =>
+      saleMode === 'weight'
+        ? unit.kind === 'weight' || unit.kind === 'volume'
+        : unit.kind === 'piece' ||
+          unit.kind === 'length' ||
+          unit.kind === 'volume',
+    [saleMode],
+  );
+
+  /** v67 (الجولة 79): إنشاء وحدة جديدة من داخل النموذج — اسم + نوع
+   *  مستنتج من طريقة البيع (وزني → وحدة وزن، قطعي → قطعة) داخل
+   *  نطاق نمط المتجر؛ تُحفظ في القاعدة فوراً وتُلحق صفاً جديداً. */
+  const promptCreateUnit = useCallback(() => {
+    Alert.prompt(
+      'وحدة جديدة',
+      saleMode === 'weight'
+        ? 'اسم وحدة الوزن الجديدة (مثال: ربع كغ، أونصة):'
+        : 'اسم الوحدة الجديدة (مثال: متر، لتر، دزينة):',
+      [
+        {text: 'إلغاء', style: 'cancel'},
+        {
+          text: 'إنشاء وإضافة',
+          onPress: async (value?: string) => {
+            const name = (value ?? '').trim();
+            if (name.length === 0) {
+              return;
+            }
+            try {
+              const unitId = await UnitRepo.create(
+                name,
+                name,
+                saleMode === 'weight' ? 'weight' : 'piece',
+                settings.storeMode,
+              );
+              const unitList = await UnitRepo.list(settings.storeMode);
+              setUnits(unitList);
+              setUnitRows(prev =>
+                prev.some(row => row.unit_id === unitId)
+                  ? prev
+                  : [
+                      ...prev,
+                      {
+                        unit_id: unitId,
+                        conversion: '',
+                        retail: '',
+                        wholesale: '',
+                        barcode: '',
+                      },
+                    ],
+              );
+              toast(
+                `أُنشئت وحدة «${name}» — حُفظت وستظهر في كل منتج جديد`,
+                'success',
+              );
+            } catch (error) {
+              toast(
+                error instanceof Error
+                  ? error.message
+                  : 'تعذر إنشاء الوحدة',
+                'error',
+              );
+            }
+          },
+        },
+      ],
+      'plain-text',
+    );
+  }, [saleMode, settings.storeMode, toast]);
+
   const addUnitRow = useCallback(() => {
     const used = new Set(unitRows.map(row => row.unit_id));
-    // v17 (round-23 #6): the first FREE unit OF THE RIGHT KIND — a
-    // weight product must never start with a كرتونة row (and vice
-    // versa); before this the picker filtered by kind but the blank
-    // row itself didn't, inviting mismatched conversions.
-    const kindMatch = (unit: {kind: string}) =>
-      saleMode === 'weight' ? unit.kind === 'weight' : unit.kind === 'piece';
-    // v38 (الجولة 46 #2): صرامة كاملة — لا احتياطي عبر النوع إطلاقاً:
-    //  كانت آخر وحدة حرة تُضاف مهما كان نوعها (وحدة وزن على منتج
-    //  قطعي!) فتلوث رياضيات وحدة الإدخال بمعاملات كسرية قد تُنهار
-    //  الكمية بالتقريب. لا يوجد من النوع الصحيح؟ رسالة واضحة.
-    const free = units.find(unit => !used.has(unit.id) && kindMatch(unit));
+    const free = units.find(unit => !used.has(unit.id) && unitKindAllowed(unit));
     if (free == null) {
-      toast(
-        saleMode === 'weight'
-          ? 'كل وحدات الوزن مستخدمة — أضف وحدات جديدة من شاشة الوحدات'
-          : 'كل وحدات القطع مستخدمة — أضف وحدات جديدة من شاشة الوحدات',
-        'info',
-      );
+      /* v67: لا مزيد من «اذهب لشاشة الوحدات» — إنشاء الوحدة من
+       * هنا مباشرة (تُحفظ فوراً في القاعدة فتظهر لكل منتج). */
+      promptCreateUnit();
       return;
     }
     setUnitRows(prev => [
@@ -983,7 +1064,7 @@ export function ProductFormScreen() {
         barcode: '',
       },
     ]);
-  }, [unitRows, units, toast, saleMode]);
+  }, [unitRows, units, saleMode, unitKindAllowed, promptCreateUnit]);
 
   const updateUnitRow = useCallback(
     (index: number, patch: Partial<UnitRowDraft>) => {
@@ -2685,43 +2766,59 @@ export function ProductFormScreen() {
     {/* المقاسات التي تأتي بها الربطة — متعددة الاختيار.
         v38 (الجولة 46 #8): الرقائق تعرض الافتراضية + المخصصة معاً —
         كان المقاس/اللون المضاف يدخل الحفظ لكنه لا يظهر بين الخيارات
-        فلا يمكن رؤيته ولا إلغاؤه (شكوى التاجر نصاً). */}
+        فلا يمكن رؤيته ولا إلغاؤه (شكوى التاجر نصاً).
+        v67 (الجولة 79): المخصص يُحفظ دائماً في الإعدادات فيظهر في كل
+        منتج جديد — والضغط المطوّل على رقاقة مخصصة يحذفها من
+        القائمة الدائمة. */}
     <Text style={styles.lotSubLabel}>المقاسات بالربطة (اختر كل ما فيها)</Text>
     <View style={styles.variantChipsRow}>
-      {[...new Set([...(modeConfig.variantSizes ?? []), ...lotSizes])].map(
-        size => {
-          const custom = !(modeConfig.variantSizes ?? []).includes(size);
-          const selected = lotSizes.includes(size);
-          return (
-            <TouchableOpacity
-              key={`size-${size}`}
-              style={[
-                styles.catChip,
-                selected
-                  ? {backgroundColor: c.accent, borderColor: c.accent}
-                  : null,
-                custom ? {borderStyle: 'dashed' as const} : null,
-              ]}
-              onPress={() =>
-                setLotSizes(prev =>
-                  prev.includes(size)
-                    ? prev.filter(entry => entry !== size)
-                    : [...prev, size],
-                )
+      {[
+        ...new Set([
+          ...(modeConfig.variantSizes ?? []),
+          ...savedCustomSizes,
+          ...lotSizes,
+        ]),
+      ].map(size => {
+        const custom = !(modeConfig.variantSizes ?? []).includes(size);
+        const selected = lotSizes.includes(size);
+        const saved = savedCustomSizes.includes(size);
+        return (
+          <TouchableOpacity
+            key={`size-${size}`}
+            style={[
+              styles.catChip,
+              selected
+                ? {backgroundColor: c.accent, borderColor: c.accent}
+                : null,
+              custom ? {borderStyle: 'dashed' as const} : null,
+            ]}
+            onPress={() =>
+              setLotSizes(prev =>
+                prev.includes(size)
+                  ? prev.filter(entry => entry !== size)
+                  : [...prev, size],
+              )
+            }
+            onLongPress={() => {
+              if (!custom) {
+                return;
               }
-              activeOpacity={0.75}>
-              <Text
-                style={[
-                  styles.catChipText,
-                  {color: selected ? c.onAccent : c.textDim},
-                ]}>
-                {size}
-                {custom ? ' ✎' : ''}
-              </Text>
-            </TouchableOpacity>
-          );
-        },
-      )}
+              removeCustomVariantOption('size', settings.storeMode, size);
+              setLotSizes(prev => prev.filter(entry => entry !== size));
+              toast(`أُزيل مقاس «${size}» من القائمة الدائمة`, 'info');
+            }}
+            activeOpacity={0.75}>
+            <Text
+              style={[
+                styles.catChipText,
+                {color: selected ? c.onAccent : c.textDim},
+              ]}>
+              {size}
+              {custom ? (saved ? ' ★' : ' ✎') : ''}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
     </View>
     <View style={styles.lotCustomRow}>
       <TextInput
@@ -2735,6 +2832,11 @@ export function ProductFormScreen() {
           const custom = lotCustomSize.trim();
           if (custom.length > 0 && !lotSizes.includes(custom)) {
             setLotSizes(prev => [...prev, custom]);
+            /* v67: يُحفظ دائماً فيظهر في كل منتج جديد لاحق. */
+            if (!(modeConfig.variantSizes ?? []).includes(custom)) {
+              addCustomVariantOption('size', settings.storeMode, custom);
+              toast(`حُفظ مقاس «${custom}» — سيظهر في كل منتج جديد`, 'info');
+            }
           }
           setLotCustomSize('');
         }}
@@ -2745,6 +2847,10 @@ export function ProductFormScreen() {
           const custom = lotCustomSize.trim();
           if (custom.length > 0 && !lotSizes.includes(custom)) {
             setLotSizes(prev => [...prev, custom]);
+            if (!(modeConfig.variantSizes ?? []).includes(custom)) {
+              addCustomVariantOption('size', settings.storeMode, custom);
+              toast(`حُفظ مقاس «${custom}» — سيظهر في كل منتج جديد`, 'info');
+            }
           }
           setLotCustomSize('');
         }}
@@ -2754,43 +2860,57 @@ export function ProductFormScreen() {
     </View>
 
     {/* الألوان — متعددة الاختيار: كل لون يدخل بعدد الربط نفسه.
-        v38 (الجولة 46 #8): نفس اتحاد الافتراضي + المخصص. */}
+        v38 (الجولة 46 #8): نفس اتحاد الافتراضي + المخصص.
+        v67 (الجولة 79): المخصص يُحفظ دائماً + حذف بالضغط المطوّل. */}
     <Text style={styles.lotSubLabel}>الألوان (اختر كل ما وصلك)</Text>
     <View style={styles.variantChipsRow}>
-      {[...new Set([...(modeConfig.variantColors ?? []), ...lotColors])].map(
-        color => {
-          const custom = !(modeConfig.variantColors ?? []).includes(color);
-          const selected = lotColors.includes(color);
-          return (
-            <TouchableOpacity
-              key={`color-${color}`}
-              style={[
-                styles.catChip,
-                selected
-                  ? {backgroundColor: c.accent, borderColor: c.accent}
-                  : null,
-                custom ? {borderStyle: 'dashed' as const} : null,
-              ]}
-              onPress={() =>
-                setLotColors(prev =>
-                  prev.includes(color)
-                    ? prev.filter(entry => entry !== color)
-                    : [...prev, color],
-                )
+      {[
+        ...new Set([
+          ...(modeConfig.variantColors ?? []),
+          ...savedCustomColors,
+          ...lotColors,
+        ]),
+      ].map(color => {
+        const custom = !(modeConfig.variantColors ?? []).includes(color);
+        const selected = lotColors.includes(color);
+        const saved = savedCustomColors.includes(color);
+        return (
+          <TouchableOpacity
+            key={`color-${color}`}
+            style={[
+              styles.catChip,
+              selected
+                ? {backgroundColor: c.accent, borderColor: c.accent}
+                : null,
+              custom ? {borderStyle: 'dashed' as const} : null,
+            ]}
+            onPress={() =>
+              setLotColors(prev =>
+                prev.includes(color)
+                  ? prev.filter(entry => entry !== color)
+                  : [...prev, color],
+              )
+            }
+            onLongPress={() => {
+              if (!custom) {
+                return;
               }
-              activeOpacity={0.75}>
-              <Text
-                style={[
-                  styles.catChipText,
-                  {color: selected ? c.onAccent : c.textDim},
-                ]}>
-                {color}
-                {custom ? ' ✎' : ''}
-              </Text>
-            </TouchableOpacity>
-          );
-        },
-      )}
+              removeCustomVariantOption('color', settings.storeMode, color);
+              setLotColors(prev => prev.filter(entry => entry !== color));
+              toast(`أُزيل لون «${color}» من القائمة الدائمة`, 'info');
+            }}
+            activeOpacity={0.75}>
+            <Text
+              style={[
+                styles.catChipText,
+                {color: selected ? c.onAccent : c.textDim},
+              ]}>
+              {color}
+              {custom ? (saved ? ' ★' : ' ✎') : ''}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
     </View>
     <View style={styles.lotCustomRow}>
       <TextInput
@@ -2806,6 +2926,11 @@ export function ProductFormScreen() {
           const custom = lotCustomColor.trim();
           if (custom.length > 0 && !lotColors.includes(custom)) {
             setLotColors(prev => [...prev, custom]);
+            /* v67: يُحفظ دائماً فيظهر في كل منتج جديد لاحق. */
+            if (!(modeConfig.variantColors ?? []).includes(custom)) {
+              addCustomVariantOption('color', settings.storeMode, custom);
+              toast(`حُفظ لون «${custom}» — سيظهر في كل منتج جديد`, 'info');
+            }
           }
           setLotCustomColor('');
         }}
@@ -2816,6 +2941,10 @@ export function ProductFormScreen() {
           const custom = lotCustomColor.trim();
           if (custom.length > 0 && !lotColors.includes(custom)) {
             setLotColors(prev => [...prev, custom]);
+            if (!(modeConfig.variantColors ?? []).includes(custom)) {
+              addCustomVariantOption('color', settings.storeMode, custom);
+              toast(`حُفظ لون «${custom}» — سيظهر في كل منتج جديد`, 'info');
+            }
           }
           setLotCustomColor('');
         }}
@@ -3286,36 +3415,62 @@ export function ProductFormScreen() {
             {sizesEnabled ? (
               <>
                 <View style={styles.variantChipsRow}>
-                  {(modeConfig.productCopy.sizeSeeds ?? []).map(seed => (
-                    <TouchableOpacity
-                      key={`sizesize-${seed}`}
-                      style={[
-                        styles.catChip,
-                        sizeDrafts.some(d => d.size === seed)
-                          ? {backgroundColor: c.accent, borderColor: c.accent}
-                          : null,
-                      ]}
-                      onPress={() =>
-                        setSizeDrafts(prev =>
-                          prev.some(d => d.size === seed)
-                            ? prev.filter(d => d.size !== seed)
-                            : [...prev, {size: seed, price: '', cost: ''}],
-                        )
-                      }
-                      activeOpacity={0.75}>
-                      <Text
+                  {[
+                    ...new Set([
+                      ...(modeConfig.productCopy.sizeSeeds ?? []),
+                      ...savedCustomSizes,
+                    ]),
+                  ].map(seed => {
+                    const customSeed = !(
+                      modeConfig.productCopy.sizeSeeds ?? []
+                    ).includes(seed);
+                    return (
+                      <TouchableOpacity
+                        key={`sizesize-${seed}`}
                         style={[
-                          styles.catChipText,
-                          {
-                            color: sizeDrafts.some(d => d.size === seed)
-                              ? c.onAccent
-                              : c.textDim,
-                          },
-                        ]}>
-                        {seed}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
+                          styles.catChip,
+                          sizeDrafts.some(d => d.size === seed)
+                            ? {backgroundColor: c.accent, borderColor: c.accent}
+                            : null,
+                          customSeed
+                            ? {borderStyle: 'dashed' as const}
+                            : null,
+                        ]}
+                        onPress={() =>
+                          setSizeDrafts(prev =>
+                            prev.some(d => d.size === seed)
+                              ? prev.filter(d => d.size !== seed)
+                              : [...prev, {size: seed, price: '', cost: ''}],
+                          )
+                        }
+                        onLongPress={() => {
+                          if (!customSeed) {
+                            return;
+                          }
+                          removeCustomVariantOption(
+                            'size',
+                            settings.storeMode,
+                            seed,
+                          );
+                          setSizeDrafts(prev => prev.filter(d => d.size !== seed));
+                          toast(`أُزيل حجم «${seed}» من القائمة الدائمة`, 'info');
+                        }}
+                        activeOpacity={0.75}>
+                        <Text
+                          style={[
+                            styles.catChipText,
+                            {
+                              color: sizeDrafts.some(d => d.size === seed)
+                                ? c.onAccent
+                                : c.textDim,
+                            },
+                          ]}>
+                          {seed}
+                          {customSeed ? ' ★' : ''}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
                 <View style={styles.lotCustomRow}>
                   <TextInput
@@ -3335,6 +3490,23 @@ export function ProductFormScreen() {
                           ...prev,
                           {size: custom, price: '', cost: ''},
                         ]);
+                        /* v67 (الجولة 79): الحجم المخصص يُحفظ دائماً —
+                         * يظهر في كل منتج جديد بنفس النمط. */
+                        if (
+                          !(modeConfig.productCopy.sizeSeeds ?? []).includes(
+                            custom,
+                          )
+                        ) {
+                          addCustomVariantOption(
+                            'size',
+                            settings.storeMode,
+                            custom,
+                          );
+                          toast(
+                            `حُفظ حجم «${custom}» — سيظهر في كل منتج جديد`,
+                            'info',
+                          );
+                        }
                       }
                       setCustomSizeName('');
                     }}
@@ -3351,6 +3523,21 @@ export function ProductFormScreen() {
                           ...prev,
                           {size: custom, price: '', cost: ''},
                         ]);
+                        if (
+                          !(modeConfig.productCopy.sizeSeeds ?? []).includes(
+                            custom,
+                          )
+                        ) {
+                          addCustomVariantOption(
+                            'size',
+                            settings.storeMode,
+                            custom,
+                          );
+                          toast(
+                            `حُفظ حجم «${custom}» — سيظهر في كل منتج جديد`,
+                            'info',
+                          );
+                        }
                       }
                       setCustomSizeName('');
                     }}
@@ -4299,16 +4486,16 @@ export function ProductFormScreen() {
                       the matching TYPE — weight products see weight units
                       (وقية، رطل…) and piece products see packaging units
                       (كرتونة، علبة…); a unit already attached to the row
-                      always stays visible. */}
+                      always stays visible.
+                      v67 (الجولة 79): الطول والحجم يدخلان القائمة —
+                      وحدات التاجر كلها متاحة (unitKindAllowed). */}
                   <View style={styles.unitPickWrap}>
                     {units
                       .filter(
                         unit =>
                           unit.id === row.unit_id ||
                           (!unitRows.some(r => r.unit_id === unit.id) &&
-                            (saleMode === 'weight'
-                              ? unit.kind === 'weight'
-                              : unit.kind === 'piece')),
+                            unitKindAllowed(unit)),
                       )
                       .map(unit => {
                         const active = row.unit_id === unit.id;
@@ -4474,13 +4661,27 @@ export function ProductFormScreen() {
               ))}
             </View>
           )}
-          <AppButton
-            title="إضافة وحدة للمنتج"
-            variant="secondary"
-            icon="plus"
-            small
-            onPress={addUnitRow}
-          />
+          <View style={{flexDirection: 'row', gap: spacing.sm}}>
+            <AppButton
+              title="إضافة وحدة للمنتج"
+              variant="secondary"
+              icon="plus"
+              small
+              onPress={addUnitRow}
+              style={{flex: 1}}
+            />
+            {/* v67 (الجولة 79): إنشاء وحدة جديدة من هنا — تُحفظ في
+             * القاعدة فوراً فتظهر في كل منتج جديد (لا خروج للشاشة
+             * الأخرى). */}
+            <AppButton
+              title="وحدة جديدة"
+              variant="ghost"
+              icon="edit"
+              small
+              onPress={promptCreateUnit}
+              style={{flex: 1}}
+            />
+          </View>
           {/* v32: زر طي القسم من الداخل — نفس عمل الترويسة. */}
           <AppButton
             title="طي قسم الوحدات"

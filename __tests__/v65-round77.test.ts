@@ -17,7 +17,7 @@
  * ٥. الشعارات الرسمية الحقيقية للبنوك والمحافظ (أيقونات Google
  *    Play الرسمية) بدل الرسوم التقريبية — في الدفع والإعدادات
  *    والرئيسية.
- * ٦. الإصدار: 66.0.0 (74).
+ * ٦. الإصدار: 67.0.0 (75).
  */
 import {load} from './helpers/app';
 
@@ -128,12 +128,12 @@ describe('v65 — ٥ الشعارات الرسمية الحقيقية', () => {
 });
 
 describe('v65 — ٦ الإصدار', () => {
-  test('الإصدار: 66.0.0 (74) في config والبناء', () => {
+  test('الإصدار: 67.0.0 (75) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '66.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 74');
+    expect(config).toContain("APP_VERSION = '67.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 75');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 74');
-    expect(gradle).toContain('versionName "66.0.0"');
+    expect(gradle).toContain('versionCode 75');
+    expect(gradle).toContain('versionName "67.0.0"');
   });
 });

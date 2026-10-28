@@ -37,9 +37,23 @@ import {onlineErrorText} from '../../services/online/OnlineStoreService';
 import {formatDateTime, formatMoney} from '../../core/format';
 import {fonts, makeStyles, spacing, useThemeColors} from '../../core/theme';
 import {useToastStore} from '../../stores/toastStore';
+import {useSettingsStore} from '../../stores/settingsStore';
+import {
+  activePaymentMethods,
+  paymentMethodById,
+} from '../../core/paymentMethods';
+import {PaymentMethodIcon} from '../../components/PaymentMethodIcon';
 import type {OnlineOrder, OnlineOrderItem, OnlineOrderStatus, Product} from '../../core/types';
 
 type FilterKey = OnlineOrderStatus | 'all';
+
+/** v67 (الجولة 79): المبلغ القائم للتحصيل — الإجمالي − المرتجعات
+ *  حتى الآن (نفس معادلة السند في deliverOrder). */
+function outstandingMinor(order: OnlineOrder): number {
+  return (
+    order.total_minor - Math.min(order.returned_minor, order.items_total_minor)
+  );
+}
 
 const FILTERS: {key: FilterKey; label: string}[] = [
   {key: 'new', label: 'جديد'},
@@ -265,6 +279,40 @@ export function OnlineOrdersScreen() {
     },
     [busyAction, reload, toast],
   );
+
+  /* v67 (الجولة 79 — أهم مطلب): استلام دفع الطلبات أونلاين — قبل
+   * تأكيد التسليم يختار البائع طريقة التحصيل (نقدي أو أي بنك/
+   * محفظة مفعلة): سند التحصيل يُسجل على القناة الصحيحة وفاتورة
+   * الطلب تحمل الطريقة فتظهر مميزة في مركز الفواتير وتقارير
+   * الأرصدة. نافذة INLINE بنفس نمط التطبيق (لا Modal). */
+  const [collectOpen, setCollectOpen] = useState<OnlineOrder | null>(null);
+  const [collectMethod, setCollectMethod] = useState('cash');
+  const paymentMethodsEnabled = useSettingsStore(
+    s => s.settings.paymentMethodsEnabled,
+  );
+  const collectMethods = useMemo(
+    () => activePaymentMethods(paymentMethodsEnabled),
+    [paymentMethodsEnabled],
+  );
+
+  const openCollect = useCallback((order: OnlineOrder) => {
+    setCollectMethod('cash');
+    setCollectOpen(order);
+  }, []);
+
+  const confirmCollect = useCallback(() => {
+    if (collectOpen == null) {
+      return;
+    }
+    const order = collectOpen;
+    const method = paymentMethodById(collectMethod);
+    setCollectOpen(null);
+    setDetail(null);
+    void runAction(async () => {
+      await OnlineStore.deliverOrder(order, collectMethod);
+      return `تم تأكيد التسليم — حُصّل ${(outstandingMinor(order) / 100).toFixed(2)} ₪ عبر ${method.label} بسند تحصيل على قناته — وفاتورة الطلب تحمل الطريقة`; 
+    }, 'deliver');
+  }, [collectOpen, collectMethod, runAction]);
 
   const counts = useMemo(() => {
     const map = new Map<FilterKey, number>();
@@ -681,21 +729,25 @@ export function OnlineOrdersScreen() {
                 <View style={styles.actionCol}>
                   <TouchableOpacity
                     style={[styles.actionBtn, {backgroundColor: c.success}]}
-                    onPress={() =>
-                      void runAction(async () => {
-                        await OnlineStore.deliverOrder(detail);
-                        return 'تم تأكيد التسليم — حُوّل المبلغ من الدين إلى الخزينة بسند تحصيل';
-                      }, 'deliver')
-                    }
+                    /* v67 (الجولة 79 — أهم مطلب): التسليم يفتح نافذة
+                     * اختيار طريقة التحصيل أولاً — نقدي أو أي بنك/
+                     * محفظة مفعلة — ثم يُسجل السند على قناته الصحيحة
+                     * وفاتورة الطلب تحمل الطريقة. */
+                    onPress={() => openCollect(detail)}
                     disabled={busyAction != null}>
-                    <Text style={styles.actionBtnText}>
-                      تأكيد التسليم (الدين → الخزينة)
-                    </Text>
+                    {busyAction === 'deliver' ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Text style={styles.actionBtnText}>
+                        تأكيد التسليم واستلام الدفع
+                      </Text>
+                    )}
                   </TouchableOpacity>
                   <Text style={styles.hintText}>
-                    يُسجّل سند تحصيل بالمبلغ القائم ويُطبع من سجل الخزينة —
-                    الإرجاع بعد التسليم يتم من مركز الفواتير على فاتورة{' '}
-                    {detail.invoice_ref ?? 'INV-O'} كأي بيع عادي.
+                    اختر طريقة التحصيل (نقدي أو بنك/محفظة مفعلة) — يُسجّل سند
+                    تحصيل بالمبلغ القائم على القناة التي اخترتها، وفاتورة الطلب
+                    تُميَّز بطريتها في مركز الفواتير. الإرجاع بعد التسليم من
+                    مركز الفواتير على فاتورة {detail.invoice_ref ?? 'INV-O'}.
                   </Text>
                 </View>
               ) : null}
@@ -707,6 +759,99 @@ export function OnlineOrdersScreen() {
                 </Text>
               ) : null}
             </ScrollView>
+          </View>
+        </View>
+      ) : null}
+
+      {/* v67 (الجولة 79 — أهم مطلب): نافذة استلام دفع الطلب أونلاين —
+          اختيار طريقة التحصيل قبل تأكيد التسليم. INLINE overlay. */}
+      {collectOpen != null ? (
+        <View style={styles.overlay}>
+          <BackHandlerCloser
+            active={collectOpen != null}
+            onClose={() => setCollectOpen(null)}
+          />
+          <TouchableOpacity
+            style={styles.overlayBack}
+            activeOpacity={1}
+            onPress={() => setCollectOpen(null)}
+          />
+          <View style={styles.collectSheet}>
+            <View style={styles.sheetHeader}>
+              <View style={{flex: 1}}>
+                <Text style={styles.sheetTitle}>
+                  استلام دفع الطلب {collectOpen.order_number}
+                </Text>
+                <Text style={styles.sheetSub}>
+                  المبلغ القائم:{' '}
+                  {formatMoney(outstandingMinor(collectOpen) / 100)} — اختر
+                  الطريقة التي حُصّل بها
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.closeBtn}
+                onPress={() => setCollectOpen(null)}>
+                <Icon name="x" size={18} color={c.textDim} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              style={styles.collectScroll}
+              contentContainerStyle={styles.collectGrid}
+              showsVerticalScrollIndicator={false}>
+              {collectMethods.map(method => {
+                const selected = method.id === collectMethod;
+                return (
+                  <TouchableOpacity
+                    key={method.id}
+                    style={[
+                      styles.collectCard,
+                      selected
+                        ? {borderColor: c.accent, backgroundColor: c.surfaceHi}
+                        : null,
+                    ]}
+                    activeOpacity={0.7}
+                    onPress={() => setCollectMethod(method.id)}>
+                    <PaymentMethodIcon method={method} size={44} />
+                    <Text style={styles.collectName} numberOfLines={1}>
+                      {method.label}
+                    </Text>
+                    <Text style={styles.collectKind} numberOfLines={1}>
+                      {method.kind === 'cash'
+                        ? 'الخزينة النقدية'
+                        : method.kind === 'bank'
+                        ? 'تحويل بنكي'
+                        : 'محفظة إلكترونية'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.collectActions}>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.ghostBtn, {flex: 1}]}
+                onPress={() => setCollectOpen(null)}
+                disabled={busyAction != null}>
+                <Text style={[styles.actionBtnText, {color: c.danger}]}>
+                  إلغاء
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.actionBtn,
+                  {backgroundColor: c.success, flex: 1.8},
+                ]}
+                onPress={confirmCollect}
+                disabled={busyAction != null}>
+                {busyAction === 'deliver' ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.actionBtnText}>
+                    تحصيل عبر {paymentMethodById(collectMethod).label} وتأكيد
+                    التسليم
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       ) : null}
@@ -1060,6 +1205,56 @@ const useStyles = makeStyles(c =>
       justifyContent: 'center',
     },
     sheetBody: {padding: spacing.md, gap: 8, paddingBottom: 40},
+    /* ── v67 (الجولة 79): نافذة استلام دفع الطلب أونلاين ── */
+    collectSheet: {
+      maxHeight: '72%',
+      backgroundColor: c.bg,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      overflow: 'hidden',
+    },
+    collectScroll: {flexShrink: 1},
+    collectGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      justifyContent: 'space-between',
+      gap: spacing.sm,
+      padding: spacing.md,
+      paddingBottom: spacing.sm,
+    },
+    collectCard: {
+      width: '31%',
+      minWidth: 100,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: 12,
+      paddingHorizontal: 6,
+      borderRadius: 14,
+      borderWidth: 2,
+      borderColor: c.border,
+      backgroundColor: c.surfaceAlt,
+    },
+    collectName: {
+      color: c.text,
+      fontSize: 13,
+      fontFamily: fonts.bold,
+    },
+    collectKind: {
+      color: c.textFaint,
+      fontSize: 10.5,
+      fontFamily: fonts.medium,
+    },
+    collectActions: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      padding: spacing.md,
+      paddingTop: spacing.sm,
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+    },
     infoRow: {
       flexDirection: 'row',
       alignItems: 'center',
