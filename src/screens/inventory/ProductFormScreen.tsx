@@ -55,6 +55,7 @@ import {scanBarcode, capturePhoto} from '../../services/vision/scanFlow';
 import {
   PlatformUtilsNative,
   SelaImagePickerNative,
+  requirePlatformUtils,
 } from '../../native/nativeBridge';
 import {BarcodeView} from '../../components/BarcodeView';
 import {
@@ -62,6 +63,7 @@ import {
   isValidEan13,
 } from '../../services/BarcodeService';
 import {buildLabelJob} from '../../services/printer/label';
+import {exportBarcodeLabelsPdf} from '../../services/BarcodeLabelsPdfService';
 import {ThermalPrinterService} from '../../services/printer/ThermalPrinterService';
 import {Stepper} from '../../components/ui';
 import {formatMoney, formatQty, parseNumber} from '../../core/format';
@@ -161,6 +163,12 @@ export function ProductFormScreen() {
   const modeConfig = storeModeConfig(settings.storeMode);
   // v9.1 (round-14 #6): label printing state.
   const [labelCopies, setLabelCopies] = useState(1);
+  /* v65 (الجولة 77 — أندرويد #٢ب): خيارات ملصقات PDF — مقاس
+   *  الملصق المربع وشكل الصفحة وعرض السعر (نفس سطح المكتب). */
+  const [pdfLabelMm, setPdfLabelMm] = useState<40 | 50 | 60>(50);
+  const [pdfPageKind, setPdfPageKind] = useState<'square' | 'a4'>('square');
+  const [pdfShowPrice, setPdfShowPrice] = useState(true);
+  const [pdfBusy, setPdfBusy] = useState(false);
   const [labelBusy, setLabelBusy] = useState(false);
 
   // ── Keyboard field chain (round-8: "صعوبة الانتقال بين الحقول
@@ -238,6 +246,15 @@ export function ProductFormScreen() {
   const [variantDrafts, setVariantDrafts] = useState<
     {color: string; size: string; stock: number}[]
   >([]);
+  /* v65 (الجولة 77 — أندرويد #٢أ): تعديل مباشر لعدد القطع لكل
+   * (لون × مقاس) عند إنشاء موديل جديد — نفس شبكة سطح المكتب
+   * (v70 الجولة 74 #8): الربطة تملأ البداية تلقائياً، وأول تعديل
+   * يدوي يوقف الملء التلقائي، وزر «إعادة الملء من الربطة» يعيده.
+   * النقص والزيادة واقعيان — لا قيد بحاصل ضرب الربطة. */
+  const [lotDrafts, setLotDrafts] = useState<
+    {color: string; size: string; stock: number}[]
+  >([]);
+  const [lotManuallyEdited, setLotManuallyEdited] = useState(false);
   /** v35: أحجام المطعم/الكافيتريا — حجم بسعره الخاص وتكلفته
    *  الاختيارية (صغير/وسط/كبير + مخصص). */
   const [sizesEnabled, setSizesEnabled] = useState(false);
@@ -867,6 +884,72 @@ export function ProductFormScreen() {
     toast,
   ]);
 
+  /** v65 (الجولة 77 — أندرويد #٢ب): توليد ملف ملصقات PDF (شبكة
+   *  ملصقات مربعة بصفحات مربعة أو A4) ثم مشاركته أو طباعته من أي
+   *  طابعة ورقية عبر إطار الطباعة النظامي — نفس ميزة سطح المكتب. */
+  const exportLabelsPdf = useCallback(async () => {
+    const trimmed = barcode.trim();
+    if (trimmed.length === 0) {
+      toast('لا يوجد باركود للتصدير', 'error');
+      return;
+    }
+    const retail = parseNumber(retailPrice);
+    setPdfBusy(true);
+    try {
+      const {fileName, location} = await exportBarcodeLabelsPdf(
+        [
+          {
+            name: name.trim() || 'منتج',
+            barcode: trimmed,
+            price: Number.isNaN(retail) ? null : retail,
+            copies: labelCopies,
+          },
+        ],
+        {labelMm: pdfLabelMm, pageKind: pdfPageKind, showPrice: pdfShowPrice},
+      );
+      toast(`جاهز: ${location} (${labelCopies} ملصق)`, 'success');
+      Alert.alert(
+        'ملصقات الباركود جاهزة',
+        `حُفظ الملف في ${location}. شاركه مع أي طابعة أو اطبعه مباشرة.`,
+        [
+          {
+            text: 'مشاركة الملف',
+            onPress: () => {
+              void requirePlatformUtils()
+                .shareExportedPdf(fileName, 'ملصقات الباركود')
+                .catch(() => undefined);
+            },
+          },
+          {
+            text: 'طباعة',
+            onPress: () => {
+              void requirePlatformUtils()
+                .printExportedPdf(fileName, 'ملصقات الباركود')
+                .catch(() => undefined);
+            },
+          },
+          {text: 'تم', style: 'cancel'},
+        ],
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل تجهيز ملف الملصقات',
+        'error',
+      );
+    } finally {
+      setPdfBusy(false);
+    }
+  }, [
+    barcode,
+    name,
+    retailPrice,
+    labelCopies,
+    pdfLabelMm,
+    pdfPageKind,
+    pdfShowPrice,
+    toast,
+  ]);
+
   // ── Unit rows ─────────────────────────────────────────────────
   const addUnitRow = useCallback(() => {
     const used = new Set(unitRows.map(row => row.unit_id));
@@ -1480,6 +1563,63 @@ export function ProductFormScreen() {
    *  متعددة وعدد الربط ويضرب في الكمية علي حسب عدد المقاسات
    *  الموجودة بالربط وهكذا فقط». لا توزيع على عدة منتجات بعد
    *  اليوم — الموديل تجان واحد يُباع من نافذة اللون والمقاس. */
+  /* ── v65 (الجولة 77 — أندرويد #٢أ): شبكة القطع لكل (لون × مقاس)
+   *  عند إنشاء موديل جديد — نفس منطق سطح المكتب حرفياً (v70
+   *  الجولة 74 #8): الربطة تملأ البداية تلقائياً، وأول تعديل يدوي
+   *  يوقف الملء التلقائي للخلايا الجديدة، وزر «إعادة الملء من
+   *  الربطة» يعيد كل الخلايا لعدد الربطة. النقص والزيادة واقعيان
+   *  — لا قيد بحاصل ضرب الربطة. ── */
+  const lotBundlesCount = useMemo(
+    () => Math.max(1, Math.round(parseNumber(lotBundles) || 1)),
+    [lotBundles],
+  );
+  /** إعادة بناء مسودات الشبكة عند تغيّر الألوان/المقاسات — تحفظ
+   *  قيم الخلايا القائمة وتملأ الجديدة من عدد الربطة. */
+  useEffect(() => {
+    setLotDrafts(prev => {
+      const kept = new Map<string, number>(
+        prev.map(d => [`${d.color}|${d.size}`, d.stock] as const),
+      );
+      const next: {color: string; size: string; stock: number}[] = [];
+      for (const color of lotColors) {
+        for (const size of lotSizes) {
+          const key = `${color}|${size}`;
+          next.push({
+            color,
+            size,
+            stock: kept.get(key) ?? lotBundlesCount,
+          });
+        }
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lotColors.join(','), lotSizes.join(',')]);
+
+  const setLotCellStock = useCallback(
+    (color: string, size: string, stock: number) => {
+      setLotManuallyEdited(true);
+      setLotDrafts(prev =>
+        prev.map(d =>
+          d.color === color && d.size === size
+            ? {...d, stock: Math.max(0, Math.round(stock) || 0)}
+            : d,
+        ),
+      );
+    },
+    [],
+  );
+
+  const refillLotFromBundles = useCallback(() => {
+    setLotManuallyEdited(false);
+    setLotDrafts(prev => prev.map(d => ({...d, stock: lotBundlesCount})));
+  }, [lotBundlesCount]);
+
+  const lotPieces = useMemo(
+    () => lotDrafts.reduce((sum, d) => sum + Math.max(0, d.stock), 0),
+    [lotDrafts],
+  );
+
   const saveLot = useCallback(async () => {
     const modelName = name.trim();
     const colors = [...lotColors];
@@ -1536,7 +1676,22 @@ export function ProductFormScreen() {
     setBusy(true);
     try {
       // الموديل منتج واحد — مخزونه مجموع متغيراته.
-      const totalPieces = colors.length * lotSizes.length * bundles;
+      // v65: قيم الشبكة اليدوية (لون × مقاس) هي الحقيقة عند وجودها —
+      // وإلا حاصل ضرب الربطة كما كان.
+      const variantInputs = colors.flatMap(color =>
+        lotSizes.map(size => ({
+          kind: 'variant' as const,
+          color,
+          size,
+          stock_quantity:
+            lotDrafts.find(d => d.color === color && d.size === size)
+              ?.stock ?? bundles,
+        })),
+      );
+      const totalPieces = variantInputs.reduce(
+        (sum, v) => sum + Math.max(0, v.stock_quantity),
+        0,
+      );
       const productIdNew = await ProductRepo.create({
         name: modelName,
         cost_price: cost,
@@ -1562,15 +1717,6 @@ export function ProductFormScreen() {
       if (productIdNew < 0) {
         throw new Error('فشل حفظ الموديل');
       }
-      // المتغيرات: كل (لون × مقاس) مخزونه = عدد الربط.
-      const variantInputs = colors.flatMap(color =>
-        lotSizes.map(size => ({
-          kind: 'variant' as const,
-          color,
-          size,
-          stock_quantity: bundles,
-        })),
-      );
       await VariantRepo.replaceForProduct(productIdNew, variantInputs);
       await refreshCatalog();
       toast(
@@ -1596,6 +1742,9 @@ export function ProductFormScreen() {
     lotCustomColor,
     lotSizes,
     lotBundles,
+    /* v65: مسودات الشبكة اليدوية — بدونها يهدر حفظ الموديل قيم
+     * الخلايا المعدلة (stale closure). */
+    lotDrafts,
     costPrice,
     retailPrice,
     wholesalePrice,
@@ -2382,20 +2531,132 @@ export function ProductFormScreen() {
                 <Stepper
                   compact
                   value={labelCopies}
-                  onIncrement={() => setLabelCopies(v => Math.min(20, v + 1))}
+                  /* v65: حتى 500 — الطباعة الحرارية تُقيّد نفسها
+                   * بـ 20 داخلياً (حد ESC/POS)، وملف PDF يحتمل 500. */
+                  onIncrement={() => setLabelCopies(v => Math.min(500, v + 1))}
                   onDecrement={() => setLabelCopies(v => Math.max(1, v - 1))}
                 />
               </View>
               <AppButton
                 title={
                   printerStatus === 'connected'
-                    ? `طباعة ${labelCopies} ملصق`
-                    : 'طباعة الملصق (أوصل الطابعة أولاً)'
+                    ? `طباعة ${Math.min(20, labelCopies)} ملصق حراري`
+                    : 'طباعة حرارية (أوصل الطابعة أولاً)'
                 }
                 icon="printer"
                 small
                 onPress={() => void printLabel()}
                 loading={labelBusy}
+              />
+              {/* ── v65 (الجولة 77 — أندرويد #٢ب): ملصقات PDF —
+                  نفس خيارات سطح المكتب: مقاس الملصق 40/50/60مم،
+                  صفحات مربعة أو A4، والسعر ظاهر/مخفي. يولّد الملف
+                  في مجلد التنزيلات ثم يُشارك أو يُطبع بأي طابعة. ── */}
+              <View style={styles.pdfOptionsRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pdfOptChip,
+                    pdfLabelMm === 40 ? styles.pdfOptChipOn : null,
+                  ]}
+                  onPress={() => setPdfLabelMm(40)}
+                  activeOpacity={0.75}>
+                  <Text
+                    style={[
+                      styles.pdfOptText,
+                      pdfLabelMm === 40 ? styles.pdfOptTextOn : null,
+                    ]}>
+                    40مم
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pdfOptChip,
+                    pdfLabelMm === 50 ? styles.pdfOptChipOn : null,
+                  ]}
+                  onPress={() => setPdfLabelMm(50)}
+                  activeOpacity={0.75}>
+                  <Text
+                    style={[
+                      styles.pdfOptText,
+                      pdfLabelMm === 50 ? styles.pdfOptTextOn : null,
+                    ]}>
+                    50مم
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pdfOptChip,
+                    pdfLabelMm === 60 ? styles.pdfOptChipOn : null,
+                  ]}
+                  onPress={() => setPdfLabelMm(60)}
+                  activeOpacity={0.75}>
+                  <Text
+                    style={[
+                      styles.pdfOptText,
+                      pdfLabelMm === 60 ? styles.pdfOptTextOn : null,
+                    ]}>
+                    60مم
+                  </Text>
+                </TouchableOpacity>
+                <View style={styles.pdfOptDivider} />
+                <TouchableOpacity
+                  style={[
+                    styles.pdfOptChip,
+                    pdfPageKind === 'square' ? styles.pdfOptChipOn : null,
+                  ]}
+                  onPress={() => setPdfPageKind('square')}
+                  activeOpacity={0.75}>
+                  <Text
+                    style={[
+                      styles.pdfOptText,
+                      pdfPageKind === 'square' ? styles.pdfOptTextOn : null,
+                    ]}>
+                    مربعة
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pdfOptChip,
+                    pdfPageKind === 'a4' ? styles.pdfOptChipOn : null,
+                  ]}
+                  onPress={() => setPdfPageKind('a4')}
+                  activeOpacity={0.75}>
+                  <Text
+                    style={[
+                      styles.pdfOptText,
+                      pdfPageKind === 'a4' ? styles.pdfOptTextOn : null,
+                    ]}>
+                    A4
+                  </Text>
+                </TouchableOpacity>
+                <View style={styles.pdfOptDivider} />
+                <TouchableOpacity
+                  style={[
+                    styles.pdfOptChip,
+                    pdfShowPrice ? styles.pdfOptChipOn : null,
+                  ]}
+                  onPress={() => setPdfShowPrice(v => !v)}
+                  activeOpacity={0.75}>
+                  <Text
+                    style={[
+                      styles.pdfOptText,
+                      pdfShowPrice ? styles.pdfOptTextOn : null,
+                    ]}>
+                    السعر
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <AppButton
+                title={
+                  pdfBusy
+                    ? 'جارٍ تجهيز الملف…'
+                    : `ملف PDF — ${labelCopies} ملصق`
+                }
+                icon="download"
+                small
+                variant="secondary"
+                onPress={() => void exportLabelsPdf()}
+                loading={pdfBusy}
               />
             </Card>
           ) : null}
@@ -2596,6 +2857,94 @@ export function ProductFormScreen() {
         />
       </View>
     </View>
+
+    {/* ── v65 (الجولة 77 — أندرويد #٢أ): شبكة القطع لكل (لون × مقاس)
+        — الربطة ملأت البداية، عدّل ما شئت خلية خلية؛ زر إعادة الملء
+        يعيد الكل لعدد الربطة. الإجمالي الفعلي يظهر لحظياً. ── */}
+    {lotSizes.length > 0 && lotColors.length > 0 ? (
+      <View style={styles.lotGridWrap}>
+        <View style={styles.lotGridHead}>
+          <Text style={styles.lotSubLabel}>
+            القطع لكل (لون × مقاس) — الإجمالي الفعلي{' '}
+            <Text style={{color: c.accent, fontFamily: fonts.bold}}>
+              {lotPieces} قطعة
+            </Text>
+          </Text>
+          {lotManuallyEdited ? (
+            <TouchableOpacity
+              style={styles.lotRefillBtn}
+              onPress={refillLotFromBundles}
+              activeOpacity={0.75}>
+              <Icon name="refresh" size={13} color={c.accent} />
+              <Text style={styles.lotRefillText}>
+                إعادة الملء من الربطة ({lotBundlesCount})
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View>
+            {/* رأس المقاسات */}
+            <View style={styles.lotGridRow}>
+              <Text style={[styles.lotGridCell, styles.lotGridCellHead, styles.lotGridCellColor]}>
+                اللون \ المقاس
+              </Text>
+              {lotSizes.map(size => (
+                <Text
+                  key={`h-${size}`}
+                  style={[styles.lotGridCell, styles.lotGridCellHead]}>
+                  {size}
+                </Text>
+              ))}
+              <Text
+                key="h-total"
+                style={[styles.lotGridCell, styles.lotGridCellHead, styles.lotGridCellTotal]}>
+                Σ
+              </Text>
+            </View>
+            {/* صف لكل لون */}
+            {lotColors.map(color => {
+              const rowTotal = lotDrafts
+                .filter(d => d.color === color)
+                .reduce((sum, d) => sum + Math.max(0, d.stock), 0);
+              return (
+                <View key={`row-${color}`} style={styles.lotGridRow}>
+                  <Text style={[styles.lotGridCell, styles.lotGridCellColor]}>
+                    {color}
+                  </Text>
+                  {lotSizes.map(size => {
+                    const cell = lotDrafts.find(
+                      d => d.color === color && d.size === size,
+                    );
+                    return (
+                      <TextInput
+                        key={`c-${color}-${size}`}
+                        style={styles.lotGridInput}
+                        value={String(cell?.stock ?? 0)}
+                        onChangeText={text =>
+                          setLotCellStock(
+                            color,
+                            size,
+                            Number(text.replace(/[^0-9]/g, '')) || 0,
+                          )
+                        }
+                        keyboardType="numeric"
+                        selectTextOnFocus
+                      />
+                    );
+                  })}
+                  <Text
+                    key={`t-${color}`}
+                    style={[styles.lotGridCell, styles.lotGridCellTotal]}>
+                    {rowTotal}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        </ScrollView>
+      </View>
+    ) : null}
 
     {/* معاينة حية للمخزون الناتج */}
     {lotSizes.length > 0 && lotColors.length > 0 ? (
@@ -4764,6 +5113,81 @@ const useStyles = makeStyles(c =>
       fontSize: typography.body,
       textAlign: 'center',
     },
+    /* ── v65 (الجولة 77 — أندرويد #٢أ): شبكة القطع لكل (لون × مقاس)
+     *  عند إنشاء الموديل — خلايا مضغوطة قابلة للتمرير أفقياً عند
+     *  كثرة المقاسات، ورأس مقاسات وعمود مجموع بارز. ── */
+    lotGridWrap: {
+      marginTop: 8,
+      gap: 6,
+    },
+    lotGridHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+      flexWrap: 'wrap',
+    },
+    lotRefillBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      borderWidth: 1,
+      borderColor: c.accent,
+      backgroundColor: c.accentSoft,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+    },
+    lotRefillText: {
+      color: c.accentDark,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    lotGridRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+    },
+    lotGridCell: {
+      minWidth: 44,
+      textAlign: 'center',
+      color: c.text,
+      fontFamily: fonts.medium,
+      fontSize: typography.small,
+      paddingVertical: 4,
+    },
+    lotGridCellHead: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    lotGridCellColor: {
+      minWidth: 78,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      textAlign: 'right',
+    },
+    lotGridCellTotal: {
+      minWidth: 40,
+      color: c.accentDark,
+      fontFamily: fonts.black,
+      fontVariant: ['tabular-nums'],
+    },
+    lotGridInput: {
+      width: 48,
+      height: 38,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.sm,
+      backgroundColor: c.surfaceAlt,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small + 1,
+      textAlign: 'center',
+      padding: 0,
+      fontVariant: ['tabular-nums'],
+    },
     lotColorGroup: {
       borderWidth: 1,
       borderColor: c.borderSoft,
@@ -5148,6 +5572,40 @@ const useStyles = makeStyles(c =>
       color: c.textDim,
       fontFamily: fonts.bold,
       fontSize: typography.small,
+    },
+    /* ── v65 (الجولة 77 — أندرويد #٢ب): خيارات ملصقات PDF — رقائق
+     *  مضغوطة بمقاس الملصق وشكل الصفحة والسعر. ── */
+    pdfOptionsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: 5,
+    },
+    pdfOptChip: {
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      backgroundColor: c.surfaceAlt,
+    },
+    pdfOptChipOn: {
+      borderColor: c.accent,
+      backgroundColor: c.accentSoft,
+    },
+    pdfOptText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
+    pdfOptTextOn: {
+      color: c.accentDark,
+    },
+    pdfOptDivider: {
+      width: 1,
+      height: 16,
+      backgroundColor: c.borderSoft,
+      marginHorizontal: 2,
     },
     unitInvalidText: {
       color: c.danger,

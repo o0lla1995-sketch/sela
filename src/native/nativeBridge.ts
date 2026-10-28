@@ -109,6 +109,13 @@ interface PlatformUtilsNative {
     fileName: string,
     payloadJson: string,
   ): Promise<string>;
+  /** v65 (الجولة 77 — أندرويد #٢ب): ملصقات الباركود PDF — شبكة
+   *  ملصقات مربعة (40/50/60مم) على صفحات مربعة أو A4 بإطار قص
+   *  وأعمدة باركود من نمط الوحدات (bits من encodeBarcodeBars). */
+  createBarcodeLabelsPdf(
+    fileName: string,
+    payloadJson: string,
+  ): Promise<string>;
   /** v40 (الجولة 48 #4): يرسم شكل الفاتورة الحرارية كصورة PNG
    *  (صفوف JSON بنفس بنية الفاتورة → Tajawal على ورقة بيضاء
    *  بمقاس 58/80مم) ويحفظها في مجلد التنزيلات → المسار. */

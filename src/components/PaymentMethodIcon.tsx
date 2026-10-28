@@ -15,8 +15,18 @@
  *   • البنك الإسلامي — الأخضر + هلال ونجمة.
  */
 import React from 'react';
+import {Image, StyleSheet, View} from 'react-native';
 import Svg, {Defs, LinearGradient, Path, Rect, Circle, Stop, Text} from 'react-native-svg';
 import type {PaymentMethod} from '../core/paymentMethods';
+/* v65 (الجولة 77 — ملاحظة التاجر الأخيرة): الشعارات الرسمية
+ * الحقيقية — أيقونات التطبيقات المنشورة على Google Play لكل بنك
+ * ومحفظة فلسطينية، بدل الرسوم التقريبية. */
+import bankPalestineLogo from '../assets/pm-logos/bank_palestine.png';
+import bankQudsLogo from '../assets/pm-logos/bank_quds.png';
+import bankIslamiLogo from '../assets/pm-logos/bank_islami.png';
+import jawwalPayLogo from '../assets/pm-logos/jawwal_pay.png';
+import palPayLogo from '../assets/pm-logos/palpay.png';
+import malchatLogo from '../assets/pm-logos/malchat.png';
 
 function CashIcon({size}: {size: number}): React.ReactElement {
   return (
@@ -244,6 +254,47 @@ export function PaymentMethodIcon({
   method: PaymentIconMethod | PaymentMethod;
   size?: number;
 }): React.ReactElement {
-  const Icon = ICONS[method.id] ?? CashIcon;
-  return <Icon size={size} />;
+  const logo = REAL_LOGOS[method.id];
+  if (logo != null) {
+    // رقاقة بيضاء مستديرة تحمل الشعار الرسمي — نمط أنظمة الدفع
+    // العالمية، ويُبقي الشعار مقروءاً على الوضعين الليلي والنهاري.
+    return (
+      <View
+        style={[
+          styles.logoChip,
+          {width: size, height: size, borderRadius: size * 0.24},
+        ]}>
+        <Image
+          source={logo}
+          style={{width: '100%', height: '100%', borderRadius: size * 0.16}}
+          resizeMode="cover"
+        />
+      </View>
+    );
+  }
+  const IconCmp = ICONS[method.id] ?? CashIcon;
+  return <IconCmp size={size} />;
 }
+
+/** خريطة الشعارات الرسمية (أيقونات Google Play الرسمية). */
+const REAL_LOGOS: Record<string, number> = {
+  bank_palestine: bankPalestineLogo,
+  bank_quds: bankQudsLogo,
+  bank_islami: bankIslamiLogo,
+  jawwal_pay: jawwalPayLogo,
+  palpay: palPayLogo,
+  malchat: malchatLogo,
+};
+
+const styles = StyleSheet.create({
+  logoChip: {
+    backgroundColor: '#FFFFFF',
+    padding: 2,
+    overflow: 'hidden',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 3,
+    shadowOffset: {width: 0, height: 1},
+  },
+});

@@ -4508,6 +4508,16 @@ function PaySheet({
                 <Text style={styles.payQuickText}>تصفير</Text>
               </TouchableOpacity>
             </View>
+            {/* v65 (الجولة 77 — أندرويد #١): تلميح صريح عندما لا تظهر
+                البنوك والمحافظ في نافذة الدفع — السبب الوحيد المتبقي
+                أنها معطّلة من إعدادات «طرق الدفع المفعّلة»، فنقود
+                التاجر إلى مكان تفعيلها بدل ظنها عطلاً في النافذة. */}
+            {methods.length === 1 && selected.id === 'cash' ? (
+              <Text style={styles.payMethodsOffHint}>
+                طرق الدفع الأخرى (بنوك ومحافظ) معطّلة — فعّلها من الإعدادات ←
+                البيع ← طرق الدفع المفعّلة
+              </Text>
+            ) : null}
             <View style={styles.keypad}>
               {KEYPAD_KEYS.map((row, rowIndex) => (
                 <View key={rowIndex} style={styles.keypadRow}>
@@ -4565,7 +4575,11 @@ function PaySheet({
             <AppButton
               title={`متابعة بـ «${selected.label}»`}
               icon="check"
-              onPress={() => onStepMethod.call(null)}
+              /* v65 (الجولة 77 — أندرويد #١): كان الزر لا-op — يستدعي
+               * onStepMethod فيثبّت الخطوة على «method» بدل التقدم،
+               * فلا يصل المستخدم لخطوة المبلغ إلا بنقر البطاقة نفسها.
+               * الآن يختار الطريقة المعلمة ويتقدم فعلاً. */
+              onPress={() => onSelectMethod(selectedId)}
               style={{flex: 1.8}}
             />
           ) : (
@@ -6587,6 +6601,15 @@ const useStyles = makeStyles(c =>
       color: c.accentDark,
       fontSize: typography.small,
       fontFamily: fonts.bold,
+    },
+    /* v65: تلميح «الطرق معطّلة» في نافذة الدفع — سطر واحد هادئ. */
+    payMethodsOffHint: {
+      color: c.textDim,
+      fontSize: typography.small - 1,
+      fontFamily: fonts.medium,
+      lineHeight: 17,
+      textAlign: 'center',
+      paddingHorizontal: 8,
     },
     payConfirmCard: {
       flexDirection: 'row',

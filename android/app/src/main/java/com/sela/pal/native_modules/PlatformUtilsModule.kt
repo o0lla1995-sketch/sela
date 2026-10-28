@@ -1120,6 +1120,324 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
   }
 
   /**
+   * v65 (الجولة 77 — أندرويد #٢ب): ملصقات الباركود PDF — نفس محرك
+   * سطح المكتب (BarcodePdfService v70) منقولاً للموبايل حرفياً:
+   * شبكة ملصقات مربعة (40/50/60مم) على صفحات مربعة أو A4، بإطار
+   * قص متقطع وعلامات زوايا واسم المنتج (Tajawal RTL) وأعمدة
+   * الباركود من نمط الوحدات المحسوب في JS (encodeBarcodeBars)
+   * والكود نصاً والسعر الاختياري. 300DPI مكافئ — الحساب كله
+   * بالنقاط (72/inch) والمقاسات بالمليمتر.
+   *
+   * JSON payload:
+   *   {
+   *     "labelMm": 50, "pageKind": "square", "showPrice": true,
+   *     "entries": [
+   *       {"name":"…","barcode":"…","price":"12.00 ₪","copies":3,
+   *        "bits":"101100…"} ]
+   *   }
+   * يُحفظ في Downloads/SmartVisionPOS ويعيد المسار المقروء.
+   */
+  @ReactMethod
+  fun createBarcodeLabelsPdf(fileName: String, payloadJson: String, promise: Promise) {
+    try {
+      val json = org.json.JSONObject(payloadJson)
+      val labelMm = json.optDouble("labelMm", 50.0).toFloat().coerceIn(30f, 80f)
+      val pageKind = json.optString("pageKind", "square")
+      val showPrice = json.optBoolean("showPrice", true)
+      val entries = ArrayList<org.json.JSONObject>()
+      val arr = json.optJSONArray("entries")
+      if (arr != null) {
+        for (i in 0 until arr.length()) {
+          entries.add(arr.getJSONObject(i))
+        }
+      }
+      if (entries.isEmpty()) {
+        throw IllegalStateException("لا توجد ملصقات للتصدير")
+      }
+
+      // ── هندسة الصفحة (مطابقة لسطح المكتب) ──
+      val mmPt = 72f / 25.4f // 1مم بالنقاط.
+      val pageMarginMm = 6f
+      val a4W = 210f
+      val a4H = 297f
+      val squareMax = 200f
+      val cols: Int
+      val rows: Int
+      val pageW: Float
+      val pageH: Float
+      if (pageKind == "a4") {
+        cols = maxOf(1, ((a4W - 2 * pageMarginMm) / labelMm).toInt())
+        rows = maxOf(1, ((a4H - 2 * pageMarginMm) / labelMm).toInt())
+        pageW = a4W
+        pageH = a4H
+      } else {
+        val usable = squareMax - 2 * pageMarginMm
+        val n = maxOf(1, (usable / labelMm).toInt())
+        val side = n * labelMm + 2 * pageMarginMm
+        cols = n
+        rows = n
+        pageW = side
+        pageH = side
+      }
+      val capacity = cols * rows
+
+      // تمدد النسخ: كل بند بعدد نسخه.
+      val placements = ArrayList<Int>() // فهارس البنود بالترتيب.
+      entries.forEachIndexed { index, entry ->
+        val copies = maxOf(1, entry.optInt("copies", 1)).coerceIn(1, 500)
+        repeat(copies) { placements.add(index) }
+      }
+      val pageCount = (placements.size + capacity - 1) / capacity
+
+      val pdf = android.graphics.pdf.PdfDocument()
+      val regular = loadTajawal(reactContext, "Tajawal-Regular.ttf")
+      val bold = loadTajawal(reactContext, "Tajawal-Bold.ttf")
+
+      val framePaint = android.graphics.Paint().apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = maxOf(1f, 0.25f * mmPt)
+        color = android.graphics.Color.rgb(0xB9, 0xC0, 0xCC)
+        pathEffect = android.graphics.DashPathEffect(2.2f * mmPt, 1.6f * mmPt)
+        isAntiAlias = true
+      }
+      val cropPaint = android.graphics.Paint().apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = maxOf(1f, 0.35f * mmPt)
+        color = android.graphics.Color.rgb(0x8E, 0x97, 0xA6)
+        isAntiAlias = true
+      }
+      val namePaint = android.graphics.Paint().apply {
+        typeface = bold
+        textSize = (if (labelMm >= 50f) 3.4f else 2.8f) * mmPt
+        color = android.graphics.Color.rgb(0x11, 0x14, 0x18)
+        textAlign = android.graphics.Paint.Align.CENTER
+        isAntiAlias = true
+      }
+      val codePaint = android.graphics.Paint().apply {
+        typeface = regular
+        textSize = 2.6f * mmPt
+        color = android.graphics.Color.rgb(0x11, 0x14, 0x18)
+        textAlign = android.graphics.Paint.Align.CENTER
+        isAntiAlias = true
+      }
+      val pricePaint = android.graphics.Paint().apply {
+        typeface = bold
+        textSize = 3.6f * mmPt
+        color = android.graphics.Color.rgb(0x0B, 0x7A, 0x3B)
+        textAlign = android.graphics.Paint.Align.CENTER
+        isAntiAlias = true
+      }
+      val barPaint = android.graphics.Paint().apply {
+        style = android.graphics.Paint.Style.FILL
+        color = android.graphics.Color.BLACK
+      }
+      val whitePaint = android.graphics.Paint().apply {
+        style = android.graphics.Paint.Style.FILL
+        color = android.graphics.Color.WHITE
+      }
+
+      /** لف الاسم على سطرين كحد أقصى (كما في سطح المكتب). */
+      fun wrapName(name: String, maxChars: Int): List<String> {
+        val trimmed = name.trim()
+        if (trimmed.length <= maxChars) return listOf(trimmed)
+        val words = trimmed.split(Regex("\\s+"))
+        val lines = ArrayList<String>()
+        var line = StringBuilder()
+        for (word in words) {
+          val candidate = if (line.isEmpty()) word else "$line $word"
+          if (candidate.length > maxChars && line.isNotEmpty()) {
+            lines.add(line.toString())
+            line = StringBuilder(word)
+            if (lines.size == 2) break
+          } else {
+            line = StringBuilder(candidate)
+          }
+        }
+        if (lines.size < 2 && line.isNotEmpty()) lines.add(line.toString())
+        if (lines.size == 2) {
+          val consumed = lines.joinToString(" ").length
+          if (trimmed.length > consumed) {
+            lines[1] = lines[1].take(maxOf(1, maxChars - 1)) + "…"
+          }
+        }
+        return lines.take(2)
+      }
+
+      var pageNo = 0
+      while (pageNo < pageCount) {
+        pageNo += 1
+        val page = pdf.startPage(
+          android.graphics.pdf.PdfDocument.PageInfo
+            .Builder(pageW.toInt(), pageH.toInt(), pageNo).create()
+        )
+        val canvas = page.canvas
+        canvas.drawRect(0f, 0f, pageW, pageH, whitePaint)
+
+        val pageStart = (pageNo - 1) * capacity
+        val pageEnd = minOf(placements.size, pageStart + capacity)
+        for (slot in pageStart until pageEnd) {
+          val entry = entries[placements[slot]]
+          val col = (slot - pageStart) % cols
+          val row = (slot - pageStart) / cols
+          val x = pageMarginMm * mmPt + col * labelMm * mmPt
+          val y = pageMarginMm * mmPt + row * labelMm * mmPt
+          val size = labelMm * mmPt
+          val pad = 2.2f * mmPt
+
+          // إطار القص المتقطع.
+          canvas.drawRect(x + 0.5f, y + 0.5f, x + size - 1f, y + size - 1f, framePaint)
+          // علامات قص الزوايا.
+          val crop = 3f * mmPt
+          val corners = arrayOf(
+            floatArrayOf(x, y, 1f, 1f),
+            floatArrayOf(x + size, y, -1f, 1f),
+            floatArrayOf(x, y + size, 1f, -1f),
+            floatArrayOf(x + size, y + size, -1f, -1f)
+          )
+          for (corner in corners) {
+            val cx = corner[0]
+            val cy = corner[1]
+            val dx = corner[2]
+            val dy = corner[3]
+            val path = android.graphics.Path()
+            path.moveTo(cx + dx * crop, cy)
+            path.lineTo(cx, cy)
+            path.lineTo(cx, cy + dy * crop)
+            canvas.drawPath(path, cropPaint)
+          }
+
+          // اسم المنتج.
+          val maxChars = if (labelMm >= 50f) 18 else 13
+          val nameLines = wrapName(entry.optString("name", ""), maxChars)
+          var textY = y + pad - namePaint.ascent()
+          for (lineText in nameLines) {
+            canvas.drawText(lineText, x + size / 2f, textY, namePaint)
+            textY += namePaint.textSize * 1.22f
+          }
+
+          // أعمدة الباركود من نمط الوحدات.
+          val bits = entry.optString("bits", "")
+          val barcode = entry.optString("barcode", "")
+          val bottomPad = (if (showPrice) 5.2f else 3.4f) * mmPt
+          val barsBottom = y + size - pad - bottomPad
+          if (bits.length >= 30) {
+            val modules = bits.length
+            val maxBarWidth = (size - 2 * pad) / modules
+            val modulePt = maxOf(0.19f * mmPt, minOf(0.33f * mmPt, maxBarWidth))
+            val barcodeWidth = modules * modulePt
+            val barcodeLeft = x + (size - barcodeWidth) / 2f
+            val barTop = textY + 1.6f * mmPt
+            val barHeight = maxOf(6f * mmPt, barsBottom - barTop - 3.2f * mmPt)
+            for (i in 0 until modules) {
+              if (bits[i] == '1') {
+                val left = barcodeLeft + i * modulePt
+                canvas.drawRect(
+                  left,
+                  barTop,
+                  left + maxOf(0.6f, modulePt),
+                  barTop + barHeight,
+                  barPaint
+                )
+              }
+            }
+            canvas.drawText(
+              barcode,
+              x + size / 2f,
+              barTop + barHeight + 0.6f * mmPt - codePaint.ascent(),
+              codePaint
+            )
+          } else {
+            // غير قابل للرسم — يُكتب نصاً كي لا يخرج ملصق فارغ.
+            val warnPaint = android.graphics.Paint(codePaint).apply {
+              color = android.graphics.Color.rgb(0x99, 0x1B, 0x1B)
+            }
+            canvas.drawText(
+              barcode,
+              x + size / 2f,
+              (textY + barsBottom) / 2f,
+              warnPaint
+            )
+          }
+
+          // السعر.
+          if (showPrice) {
+            val price = entry.optString("price", "")
+            if (price.isNotEmpty()) {
+              canvas.drawText(
+                price,
+                x + size / 2f,
+                y + size - pad - pricePaint.ascent() * 0.72f,
+                pricePaint
+              )
+            }
+          }
+        }
+        pdf.finishPage(page)
+      }
+
+      val bytes = java.io.ByteArrayOutputStream().use { stream ->
+        pdf.writeTo(stream)
+        pdf.close()
+        stream.toByteArray()
+      }
+      val displayName = sanitizeFileName(fileName)
+      val resultPath: String
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = reactContext.contentResolver
+        val values = ContentValues().apply {
+          put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+          put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+          put(
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            Environment.DIRECTORY_DOWNLOADS + "/" + EXPORT_DIR_NAME
+          )
+        }
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(collection, values)
+          ?: throw IllegalStateException("فشل إنشاء الملف في مجلد التنزيلات")
+        resolver.openOutputStream(uri)?.use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        } ?: throw IllegalStateException("تعذّر فتح الملف للكتابة")
+        resultPath = "Downloads/$EXPORT_DIR_NAME/$displayName"
+      } else {
+        @Suppress("DEPRECATION")
+        val downloadsDir =
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val targetDir = File(downloadsDir, EXPORT_DIR_NAME)
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+          throw IllegalStateException("تعذّر إنشاء مجلد التصدير")
+        }
+        val targetFile = File(targetDir, displayName)
+        FileOutputStream(targetFile).use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        }
+        resultPath = targetFile.absolutePath
+      }
+
+      val activity = currentActivity
+      val handler = android.os.Handler((activity ?: reactContext).mainLooper)
+      handler.post {
+        try {
+          Toast.makeText(
+            reactContext,
+            "تم حفظ ملصقات الباركود PDF في: $resultPath",
+            Toast.LENGTH_LONG
+          ).show()
+        } catch (ignored: Exception) {
+          // Cosmetic only.
+        }
+      }
+
+      promise.resolve(resultPath)
+    } catch (t: Throwable) {
+      promise.reject("PDF_FAILED", "فشل إنشاء ملصقات PDF: ${t.message}")
+    }
+  }
+
+  /**
    * v63 (الجولة 75 #7): تقرير الفواتير المفلترة PDF — طلب التاجر
    * نصاً: «زر في صفحة الفواتير لطباعة أو استخراج التقرير pdf الخاص
    * بالفواتير التي تمت فلترتها بتقرير جميل ومفصل وسهل القراءة».

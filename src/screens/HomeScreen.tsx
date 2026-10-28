@@ -54,6 +54,8 @@ import {formatMoney, formatQty, relativeTime} from '../core/format';
 import {APP_NAME, APP_VERSION_LABEL, BASE_UNIT_NAME} from '../core/config';
 import {baseUnitLabelOf} from '../core/types';
 import {SaleRepo} from '../database/repositories/SaleRepo';
+import {activePaymentMethods} from '../core/paymentMethods';
+import {PaymentMethodIcon} from '../components/PaymentMethodIcon';
 
 const QUICK_ACTIONS: {
   key: string;
@@ -134,6 +136,13 @@ export function HomeScreen() {
     count: number;
     minor: number;
   } | null>(null);
+  /* v65 (الجولة 77 — أندرويد #2): الرصيد المتوقع لكل بنك/محفظة
+   *  مفعّلة — دفتر القناة الصافي (مبيعات + سدادات + إيداعات −
+   *  مرتجعات − مسحوبات − مصروفات) في شريط مضغوط داخل بطاقة
+   *  الخزينة، بشعار كل جهة الرسمي. */
+  const [methodBalances, setMethodBalances] = useState<
+    {id: string; label: string; balance: number}[]
+  >([]);
   // v26 (round-34 #6): the money card's breakdown starts COLLAPSED —
   // «اظهار فقط النقد بالخزينة والدين القائم وتظهر باقي التفاصيل عند
   // الضغط» — one tap expands the full sources/deductions list.
@@ -188,6 +197,23 @@ export function HomeScreen() {
       });
     } catch {
       // Dashboard is informational — previous data stays shown.
+    }
+    // v65: أرصدة البنوك والمحافظ المفعّلة (بنك/محفظة فقط — النقدي
+    // له خانة «النقد بالخزينة» أعلاه). أفضل جهد.
+    try {
+      const channels = activePaymentMethods(
+        useSettingsStore.getState().settings.paymentMethodsEnabled,
+      ).filter(m => m.id !== 'cash');
+      const balances = await Promise.all(
+        channels.map(async m => ({
+          id: m.id,
+          label: m.label,
+          balance: await ReportService.methodBalanceNow(m.id),
+        })),
+      );
+      setMethodBalances(balances);
+    } catch {
+      // معلوماتية فقط.
     }
     // v48: استطلاع فوري للطلبات الجديدة عند كل عودة للرئيسية (إن
     // كان البيع أونلاين مفعّلاً) — بلا انتظار الدورة الدورية.
@@ -372,6 +398,45 @@ export function HomeScreen() {
             </View>
           </View>
 
+          {/* v65 (الجولة 77 — أندرويد #2): شريط مضغوط بأرصدة
+              البنوك والمحافظ المفعّلة — شريط أفقي واحد قابل للتمرير
+              (شعار 20 نقطة + الرصيد) بلا أي مساحة إضافية تُذكر؛
+              النقدي مستثنى لأنه الرقم الكبير أعلاه. */}
+          {methodBalances.length > 0 ? (
+            <View style={styles.channelsWrap}>
+              <View style={styles.todayRule} />
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.channelsRow}>
+                {methodBalances.map(channel => (
+                  <View
+                    key={channel.id}
+                    style={[
+                      styles.channelChip,
+                      channel.balance < 0 ? {borderColor: c.danger} : null,
+                    ]}>
+                    <PaymentMethodIcon
+                      method={{
+                        id: channel.id,
+                        label: channel.label,
+                      }}
+                      size={22}
+                    />
+                    <Text
+                      style={[
+                        styles.channelBalance,
+                        channel.balance < 0 ? {color: c.danger} : null,
+                      ]}
+                      numberOfLines={1}>
+                      {formatMoney(channel.balance)}
+                    </Text>
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+
           {/* v26 (round-34 #6): the breakdown starts COLLAPSED — only
               the two hero numbers show; one tap drops the full list
               of sources/deductions down («لتوفير مساحة في الصفحة
@@ -514,6 +579,11 @@ export function HomeScreen() {
             </View>
           ) : null}
 
+          {/* v65 (الجولة 77 — أندرويد #3): ملاحظة «اربط صِلة» حُذفت
+              بطلب التاجر («قم بازالة ملاحظة الربط بصلة وما يتعلق بها
+              من قسم الإحصائيات في الصفحة الرئيسية حتي نوفر مساحة») —
+              يبقى شريط الانتظار وطابع التحديث عند الاقتران فقط،
+              والربط متاح من إجراء «دفتر صِلة» وصفحة صِلة نفسها. */}
           {paired ? (
             <>
               {(pendingDebts?.count ?? 0) > 0 || silaPending > 0 ? (
@@ -535,22 +605,7 @@ export function HomeScreen() {
                 </Text>
               ) : null}
             </>
-          ) : (
-            <TouchableOpacity
-              style={styles.silaLinkRow}
-              onPress={() => navigation.navigate('Sila' as never)}
-              activeOpacity={0.8}>
-              <Icon name="qrFrame" size={14} color={c.textDim} />
-              {/* v52 (طلب الجولة): النص الطويل المزدوج الأسطر قُصِّر
-                  لسطر واحد مضغوط — «مربوط بالتطبيق؟ اربط صِلة لمزامنة
-                  الديون والتحصيلات سحابياً» كان يستهلك مساحة كبيرة من
-                  الرئيسية بلا فائدة تُذكر. */}
-              <Text style={styles.silaLinkText} numberOfLines={1}>
-                اربط صِلة لمزامنة الديون سحابياً
-              </Text>
-              <Icon name="chevronLeft" size={13} color={c.textFaint} />
-            </TouchableOpacity>
-          )}
+          ) : null}
         </Card>
 
         {/* ── Quick actions ──────────────────────────────────── */}
@@ -860,6 +915,31 @@ const useStyles = makeStyles(c =>
       height: 1,
       backgroundColor: c.borderSoft,
     },
+    /* v65 (الجولة 77 — أندرويد #2): شريط أرصدة البنوك والمحافظ
+     * المفعّلة — شريط أفقي واحد مضغوط داخل بطاقة الخزينة. */
+    channelsWrap: {marginTop: spacing.sm, gap: spacing.sm},
+    channelsRow: {
+      flexDirection: 'row',
+      gap: 7,
+      paddingVertical: 1,
+    },
+    channelChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: 999,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+    },
+    channelBalance: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
     moneyValueToday: {
       fontFamily: fonts.black,
       fontSize: typography.title - 2,
@@ -936,27 +1016,6 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.micro + 2,
       textAlign: 'left',
-    },
-    // v18 (round-24 #3): a SUBTLE one-line hint — never a wall that
-    // pushes the merchant's own numbers away.
-    // v48 (الجولة 56 #1): النص flexShrink:1 + توسيط — كان flex:0
-    // لا ينكمش أبداً فالسطر الطويل يدفعه وأيقوناته خارج حدود
-    // البطاقة على الشاشات الضيقة؛ الآن يلتف داخل البطاقة ويتوسّط
-    // فيها («يحتاج إلى وساطة»).
-    silaLinkRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 6,
-      paddingVertical: 6,
-      flexWrap: 'wrap',
-    },
-    silaLinkText: {
-      color: c.textDim,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro + 1,
-      flexShrink: 1,
-      textAlign: 'center',
     },
     // v48 (الجولة 56): شارة الطلبات الأونلاين الجديدة.
     onlineBadge: {

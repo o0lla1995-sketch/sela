@@ -154,10 +154,13 @@ describe('v33 #9 — صفحة المنتج: طي وترتيب', () => {
     expect(src).toContain('lotBundles');
     expect(src).toContain('has_variants: 1');
     expect(src).toContain('VariantRepo.replaceForProduct');
-    // إجمالي القطع = ألوان × مقاسات × ربط.
+    // v65 (الجولة 77): إجمالي القطع = مجموع مخزون المتغيرات —
+    // يساوي ألوان × مقاسات × ربط عند عدم التعديل اليدوي، ويتبع
+    // قيم شبكة (لون × مقاس) عند تعديلها (شارة سطح المكتب).
     expect(src).toContain(
-      'colors.length * lotSizes.length * bundles',
+      'variantInputs.reduce(',
     );
+    expect(src).toContain('lotDrafts.find(d => d.color === color && d.size === size)');
   });
 });
 
