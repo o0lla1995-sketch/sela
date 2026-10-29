@@ -1770,6 +1770,384 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
     }
   }
 
+  /**
+   * v68 (الجولة 80 #٢): تقرير المخزون التفصيلي PDF — طلب التاجر نصاً
+   * «إضافة زر في صفحة المخزون يمكن من خلاله طباعة تقرير pdf بكافة
+   * المنتجات بالمخزون بالتفصيل وبشكل مرتب ومفصل» — نفس تصميم سطح
+   * المكتب (InventoryReportPdf v76) على محرك Kotlin المجرب:
+   * PdfDocument A4 + Tajawal + RTL مع جدول مجمّع بالتصنيفات،
+   * مجاميع كل تصنيف، حالة ملونة للمخزون، وصف الإجمالي الكبير:
+   *   {
+   *     "storeName": "…", "filtersLabel": "…", "generatedAt": "…",
+   *     "summary":  [ {"label":"قيمة بالتكلفة","value":"…"}, … ],
+   *     "groups":   [ {"name":"مشروبات","count":"12","cost":"…",
+   *                    "value":"…",
+   *                    "rows":[{"name":"…","barcode":"…","cost":"3.00",
+   *                             "qty":"12 قطعة","state":"جيد",
+   *                             "stateKind":"ok","value":"36.00 ₪"} , …] } ],
+   *     "totalRow": {"tracked":"48 متتبع","cost":"…","value":"…"}
+   *   }
+   */
+  @ReactMethod
+  fun createInventoryReportPdf(fileName: String, payloadJson: String, promise: Promise) {
+    try {
+      val pdf = android.graphics.pdf.PdfDocument()
+      val pageWidth = 595
+      val pageHeight = 842
+      val margin = 36f
+
+      val json = org.json.JSONObject(payloadJson)
+      val storeName = json.optString("storeName", "sela")
+      val filtersLabel = json.optString("filtersLabel", "")
+      val generatedAt = json.optString("generatedAt", "")
+
+      fun optArray(name: String): List<org.json.JSONObject> {
+        val out = ArrayList<org.json.JSONObject>()
+        val arr = json.optJSONArray(name) ?: return out
+        for (i in 0 until arr.length()) {
+          out.add(arr.getJSONObject(i))
+        }
+        return out
+      }
+      // v68: نفس optArray لكن من أي كائن (صفوف كل تصنيف).
+      fun optArrayFrom(
+        source: org.json.JSONObject,
+        name: String
+      ): List<org.json.JSONObject> {
+        val out = ArrayList<org.json.JSONObject>()
+        val arr = source.optJSONArray(name) ?: return out
+        for (i in 0 until arr.length()) {
+          out.add(arr.getJSONObject(i))
+        }
+        return out
+      }
+      val summary = optArray("summary")
+      val groups = optArray("groups")
+      val totalRow = json.optJSONObject("totalRow")
+
+      val regular = loadTajawal(reactContext, "Tajawal-Regular.ttf")
+      val bold = loadTajawal(reactContext, "Tajawal-Bold.ttf")
+
+      var page = pdf.startPage(
+        android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
+      )
+      var canvas = page.canvas
+      var pageNo = 1
+      var y = 0f
+
+      fun text(
+        value: String,
+        x: Float,
+        cy: Float,
+        paint: android.graphics.Paint,
+        align: android.graphics.Paint.Align = android.graphics.Paint.Align.RIGHT
+      ) {
+        paint.textAlign = align
+        canvas.drawText(value, x, cy, paint)
+      }
+
+      fun newPage() {
+        pdf.finishPage(page)
+        pageNo += 1
+        page = pdf.startPage(
+          android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNo).create()
+        )
+        canvas = page.canvas
+        y = margin + 18f
+        val headPaint = android.graphics.Paint().apply {
+          typeface = bold
+          textSize = 10f
+          color = android.graphics.Color.GRAY
+          isAntiAlias = true
+        }
+        text("$storeName — تقرير المخزون (تابع)", pageWidth - margin, y, headPaint)
+        text("صفحة $pageNo", margin, y, headPaint, android.graphics.Paint.Align.LEFT)
+        y += 26f
+      }
+
+      fun ensureSpace(needed: Float) {
+        if (y + needed > pageHeight - margin - 24f) {
+          newPage()
+        }
+      }
+
+      val titlePaint = android.graphics.Paint().apply {
+        typeface = bold; textSize = 22f; color = android.graphics.Color.BLACK; isAntiAlias = true
+      }
+      val subPaint = android.graphics.Paint().apply {
+        typeface = regular; textSize = 11.5f; color = android.graphics.Color.DKGRAY; isAntiAlias = true
+      }
+      val cellPaint = android.graphics.Paint().apply {
+        typeface = regular; textSize = 10f; color = android.graphics.Color.BLACK; isAntiAlias = true
+      }
+      val cellBold = android.graphics.Paint().apply {
+        typeface = bold; textSize = 10f; color = android.graphics.Color.BLACK; isAntiAlias = true
+      }
+      val accentPaint = android.graphics.Paint().apply {
+        typeface = bold; textSize = 16f; color = android.graphics.Color.rgb(0xF9, 0x73, 0x16); isAntiAlias = true
+      }
+      val linePaint = android.graphics.Paint().apply {
+        strokeWidth = 1f; color = android.graphics.Color.rgb(0xCC, 0xCC, 0xCC)
+      }
+      val headerBgPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.rgb(0xF3, 0xF4, 0xF6)
+      }
+      val zebraPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.rgb(0xF8, 0xF9, 0xFB)
+      }
+      val groupBgPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.rgb(0xFF, 0xED, 0xD5)
+      }
+      // حالات المخزون الملونة — نفس لوحة سطح المكتب.
+      val statePaintFor = { kind: String ->
+        android.graphics.Paint().apply {
+          typeface = bold; textSize = 10f; isAntiAlias = true
+          color = when (kind) {
+            "out" -> android.graphics.Color.rgb(0xDC, 0x26, 0x26)
+            "low" -> android.graphics.Color.rgb(0xB4, 0x53, 0x09)
+            "ok" -> android.graphics.Color.rgb(0x16, 0xA3, 0x4A)
+            else -> android.graphics.Color.rgb(0x6B, 0x72, 0x80)
+          }
+        }
+      }
+
+      fun ellipsizeTo(value: String, maxWidth: Float, paint: android.graphics.Paint): String {
+        if (value.isEmpty() || maxWidth <= 10f) return ""
+        if (paint.measureText(value) <= maxWidth) return value
+        val marker = "..."
+        val markerW = paint.measureText(marker)
+        var out = value
+        while (out.length > 1 && paint.measureText(out) + markerW > maxWidth) {
+          out = out.substring(0, out.length - 1)
+        }
+        return out.trimEnd() + marker
+      }
+
+      // ── Title block ──
+      y = margin + 20f
+      text(storeName, pageWidth - margin, y, titlePaint)
+      y += 28f
+      text("تقرير المخزون التفصيلي", pageWidth - margin, y, accentPaint)
+      y += 20f
+      text("الفلاتر: $filtersLabel", pageWidth - margin, y, subPaint)
+      y += 15f
+      text("صدر بتاريخ: $generatedAt", pageWidth - margin, y, subPaint)
+      y += 14f
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 20f
+
+      // ── Summary boxes (بطاقات القيمة) ──
+      if (summary.isNotEmpty()) {
+        var col = 0
+        val colW = (pageWidth - 2 * margin) / 2f
+        for (item in summary) {
+          val label = item.optString("label", "")
+          val value = item.optString("value", "")
+          if (col == 0) {
+            ensureSpace(30f)
+          }
+          val boxRight = pageWidth - margin - col * (colW + 8f)
+          canvas.drawRoundRect(
+            boxRight - colW, y - 4f, boxRight, y + 24f, 6f, 6f, headerBgPaint
+          )
+          text(label, boxRight - 8f, y + 6f, cellPaint)
+          text(value, boxRight - 8f, y + 19f, cellBold)
+          col += 1
+          if (col >= 2) {
+            col = 0
+            y += 34f
+          }
+        }
+        if (col != 0) {
+          y += 34f
+        }
+        y += 6f
+      }
+
+      // ── Table columns (RTL): المنتج | الباركود | التكلفة | الكمية | الحالة | القيمة ──
+      val colName = pageWidth - margin
+      val colBarcode = colName - 155f
+      val colCost = colBarcode - 95f
+      val colQty = colCost - 58f
+      val colState = colQty - 95f
+      val colValue = colState - 52f
+      val cellPad = 5f
+      val rowH = 17f
+
+      fun tableHeader() {
+        canvas.drawRect(margin, y - 12f, pageWidth - margin, y + 6f, headerBgPaint)
+        text("المنتج", colName, y, cellBold)
+        text("الباركود", colBarcode, y, cellBold)
+        text("التكلفة", colCost, y, cellBold)
+        text("الكمية", colQty, y, cellBold)
+        text("الحالة", colState, y, cellBold)
+        text("القيمة", colValue, y, cellBold)
+        y += 22f
+      }
+
+      var itemCount = 0
+      for (group in groups) {
+        val groupName = group.optString("name", "بلا تصنيف")
+        val groupCount = group.optString("count", "0")
+        val groupCost = group.optString("cost", "")
+        val groupValue = group.optString("value", "")
+        val rows = optArrayFrom(group, "rows")
+
+        ensureSpace(56f)
+        // شريط التصنيف — برتقالي هادئ مع عدّه ومجموعيه.
+        canvas.drawRect(margin, y - 12f, pageWidth - margin, y + 6f, groupBgPaint)
+        text(
+          "$groupName ($groupCount منتجاً)",
+          pageWidth - margin - 8f,
+          y,
+          cellBold
+        )
+        text(
+          "مجموع القيمة: $groupValue",
+          margin + 8f,
+          y,
+          cellBold,
+          android.graphics.Paint.Align.LEFT
+        )
+        y += 22f
+        tableHeader()
+
+        var zebra = false
+        for (row in rows) {
+          if (y + rowH > pageHeight - margin - 26f) {
+            newPage()
+            tableHeader()
+            zebra = false
+          }
+          val name = row.optString("name", "")
+          val barcode = row.optString("barcode", "—")
+          val cost = row.optString("cost", "")
+          val qty = row.optString("qty", "")
+          val state = row.optString("state", "")
+          val stateKind = row.optString("stateKind", "ok")
+          val value = row.optString("value", "")
+          itemCount += 1
+
+          if (zebra) {
+            canvas.drawRect(margin, y - 12f, pageWidth - margin, y + 5f, zebraPaint)
+          }
+          zebra = !zebra
+
+          val statePaint = statePaintFor(stateKind)
+          text(ellipsizeTo(name, colName - colBarcode - cellPad, cellPaint), colName, y, cellPaint)
+          text(ellipsizeTo(barcode, colBarcode - colCost - cellPad, cellPaint), colBarcode, y, cellPaint)
+          text(ellipsizeTo(cost, colCost - colQty - cellPad, cellPaint), colCost, y, cellPaint)
+          text(ellipsizeTo(qty, colQty - colState - cellPad, cellPaint), colQty, y, cellPaint)
+          text(ellipsizeTo(state, colState - colValue - cellPad, statePaint), colState, y, statePaint)
+          text(ellipsizeTo(value, colValue - margin - cellPad, cellBold), colValue, y, cellBold)
+          y += rowH
+        }
+
+        // صف مجموع التصنيف — تكلفته وما تساوي بيعه.
+        ensureSpace(24f)
+        canvas.drawLine(margin, y - 6f, pageWidth - margin, y - 6f, linePaint)
+        text("مجموع $groupName", pageWidth - margin - 8f, y + 8f, cellBold)
+        text(
+          "التكلفة $groupCost · القيمة $groupValue",
+          margin + 8f,
+          y + 8f,
+          cellBold,
+          android.graphics.Paint.Align.LEFT
+        )
+        y += 26f
+      }
+
+      // ── Grand total row ──
+      if (totalRow != null) {
+        ensureSpace(34f)
+        canvas.drawRect(margin, y - 12f, pageWidth - margin, y + 10f, headerBgPaint)
+        text("الإجمالي الكبير", pageWidth - margin - 8f, y, cellBold)
+        text(
+          "${totalRow.optString("tracked", "")} · تكلفة ${totalRow.optString("cost", "")} · قيمة ${totalRow.optString("value", "")}",
+          margin + 8f,
+          y,
+          cellBold,
+          android.graphics.Paint.Align.LEFT
+        )
+        y += 26f
+      }
+
+      // ── Footer ──
+      y += 12f
+      ensureSpace(30f)
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 18f
+      val footPaint = android.graphics.Paint().apply {
+        typeface = regular; textSize = 9f; color = android.graphics.Color.GRAY; isAntiAlias = true
+      }
+      text("أُنشئ بواسطة تطبيق sela — $itemCount منتجاً", pageWidth - margin, y, footPaint)
+      text("صفحة $pageNo", margin, y, footPaint, android.graphics.Paint.Align.LEFT)
+
+      pdf.finishPage(page)
+
+      // ── Save via MediaStore ── (نفس مسار تقرير الفواتير)
+      val bytes = ByteArrayOutputStream().use { stream ->
+        pdf.writeTo(stream)
+        pdf.close()
+        stream.toByteArray()
+      }
+      val displayName = sanitizeFileName(fileName)
+      val resultPath: String
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = reactContext.contentResolver
+        val values = ContentValues().apply {
+          put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+          put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+          put(
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            Environment.DIRECTORY_DOWNLOADS + "/" + EXPORT_DIR_NAME
+          )
+        }
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(collection, values)
+          ?: throw IllegalStateException("فشل إنشاء ملف التقرير")
+        resolver.openOutputStream(uri)?.use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        } ?: throw IllegalStateException("تعذّر فتح ملف التقرير للكتابة")
+        resultPath = "Downloads/$EXPORT_DIR_NAME/$displayName"
+      } else {
+        @Suppress("DEPRECATION")
+        val downloadsDir =
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val targetDir = File(downloadsDir, EXPORT_DIR_NAME)
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+          throw IllegalStateException("تعذّر إنشاء مجلد التصدير")
+        }
+        val targetFile = File(targetDir, displayName)
+        FileOutputStream(targetFile).use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        }
+        resultPath = targetFile.absolutePath
+      }
+
+      val activity = currentActivity
+      val handler = android.os.Handler((activity ?: reactContext).mainLooper)
+      handler.post {
+        try {
+          Toast.makeText(
+            reactContext,
+            "تم حفظ تقرير المخزون PDF في: $resultPath",
+            Toast.LENGTH_LONG
+          ).show()
+        } catch (ignored: Exception) {
+          // Cosmetic only.
+        }
+      }
+
+      promise.resolve(resultPath)
+    } catch (t: Throwable) {
+      promise.reject("PDF_FAILED", "فشل إنشاء تقرير المخزون PDF: ${t.message}")
+    }
+  }
+
   /** Opens the system share sheet for a saved file in the export
    *  folder (WhatsApp / email / any PDF printer app the merchant
    *  has). On Android 10+ the file lives in MediaStore — we look it

@@ -35,7 +35,7 @@ import {
   typography,
   useThemeColors,
 } from '../../core/theme';
-import {formatMoney, formatQty} from '../../core/format';
+import {formatMoney, formatQty, formatDateTime} from '../../core/format';
 import {
   baseUnitLabelOf,
   daysUntilExpiry,
@@ -50,8 +50,19 @@ import {
   ensureCameraPermission,
   scanBarcode,
 } from '../../services/vision/scanFlow';
+import {requirePlatformUtils} from '../../native/nativeBridge';
 
 type CategoryFilter = number | 'all';
+
+/** v68 (الجولة 80 #١): السعر النهائي بعد خصم المنتج (0–95) —
+ * نفس معادلة سطح المكتب حرفياً لقيمة البضاعة بالبيع. */
+function finalPriceOf(product: Product): number {
+  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  if (pct <= 0) {
+    return product.retail_price;
+  }
+  return Math.round(product.retail_price * (1 - pct / 100) * 100) / 100;
+}
 
 export function InventoryScreen() {
   const products = useCatalogStore(state => state.products);
@@ -140,6 +151,41 @@ export function InventoryScreen() {
     [products, settings.expiryAlertDays],
   );
 
+  /* ── v68 (الجولة 80 #١): قيمة البضاعة في المخزون — نفس معادلة
+     سطح المكتب: تكلفة×كمية لكل منتج متتبع الكمية. منتجات «الكمية
+     المفتوحة» (stock_untracked=1) لا كمية معروفة لها فلا تُحتسب
+     قيمتها — تُعد وتُعرض منفصلة كي يعرف التاجر بدقة ما الذي
+     يشمله الرقم. المتغيرات محسوبة تلقائياً: stock_quantity يساوي
+     دائماً مجموع مخزون متغيراتها. ── */
+  const stockValue = useMemo(() => {
+    let costValue = 0;
+    let retailValue = 0;
+    let trackedCount = 0;
+    let untrackedCount = 0;
+    let outCount = 0;
+    for (const product of products) {
+      if (product.stock_untracked === 1) {
+        untrackedCount += 1;
+        continue;
+      }
+      trackedCount += 1;
+      const qty = Math.max(0, product.stock_quantity ?? 0);
+      if (qty <= 0) {
+        outCount += 1;
+      }
+      costValue += product.cost_price * qty;
+      retailValue += finalPriceOf(product) * qty;
+    }
+    return {
+      costValue: Math.round(costValue * 100) / 100,
+      retailValue: Math.round(retailValue * 100) / 100,
+      margin: Math.round((retailValue - costValue) * 100) / 100,
+      trackedCount,
+      untrackedCount,
+      outCount,
+    };
+  }, [products]);
+
   return (
     <>
     <InventoryLayout
@@ -159,6 +205,7 @@ export function InventoryScreen() {
       showExpiring={showExpiring}
       setShowExpiring={setShowExpiring}
       expiringProducts={expiringProducts}
+      stockValue={stockValue}
       defaultThreshold={settings.lowStockDefaultThreshold}
       expiryAlertDays={settings.expiryAlertDays}
       onRefresh={refresh}
@@ -202,6 +249,7 @@ function InventoryLayout({
   setShowExpiring,
   expiringProducts,
   expiryAlertDays,
+  stockValue,
   quickAddVisible,
   onQuickAdd,
 }: {
@@ -231,12 +279,23 @@ function InventoryLayout({
   setShowExpiring: (value: boolean) => void;
   expiringProducts: Product[];
   expiryAlertDays: number;
+  /** v68 (الجولة 80 #١): قيمة البضاعة في المخزون للعرض بالبطاقة. */
+  stockValue: {
+    costValue: number;
+    retailValue: number;
+    margin: number;
+    trackedCount: number;
+    untrackedCount: number;
+    outCount: number;
+  };
 }) {
   const c = useThemeColors();
   const styles = useStyles();
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const toast = useToastStore(state => state.show);
+  // v68 (الجولة 80 #٢): اسم المتجر لترويسة تقرير PDF.
+  const settings = useSettingsStore(state => state.settings);
 
   // v28 (round-36 #2): barcode SEARCH beside the text search — one
   // native scan fills the search box with the code; a UNIQUE exact
@@ -286,6 +345,166 @@ function InventoryLayout({
       setScanBusy(false);
     }
   }, [scanBusy, allProducts, navigation, toast, setSearch]);
+
+  /* ── v68 (الجولة 80 #٢): تقرير PDF للمخزون بالتفصيل — طلب التاجر
+     نصاً «إضافة زر في صفحة المخزون يمكن من خلاله طباعة تقرير pdf
+     بكافة المنتجات بالمخزون بالتفصيل وبشكل مرتب ومفصل». يبني
+     الجدول من القائمة النشطة (الفلاتر الحالية تُذكر في الترويسة)
+     مجمّعاً بالتصنيفات مع مجاميع كل تصنيف وصف الإجمالي الكبير —
+     نفس بنية سطح المكتب (InventoryReportPdf v76) على محرك Kotlin
+     المجرب (PdfDocument A4 + Tajawal + RTL). ── */
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const exportInventoryPdf = useCallback(async () => {
+    if (pdfBusy || products.length === 0) {
+      return;
+    }
+    setPdfBusy(true);
+    try {
+      const activeFilters: string[] = [];
+      if (filter !== 'all') {
+        const cat = categories.find(c => c.id === filter);
+        if (cat != null) {
+          activeFilters.push(`تصنيف: ${cat.name}`);
+        }
+      }
+      if (showExpiring) {
+        activeFilters.push('الصلاحية القريبة/المنتهية');
+      }
+      if (showArchived) {
+        activeFilters.push('المؤرشفة');
+      }
+      if (search.trim()) {
+        activeFilters.push(`بحث: «${search.trim()}»`);
+      }
+      const filtersLabel =
+        activeFilters.length > 0
+          ? activeFilters.join(' · ')
+          : 'كل المنتجات النشطة';
+
+      // الصفوف بالترتيب نفسه الذي تراه العين — مجمعة بالتصنيف.
+      const catNameById = new Map(categories.map(c => [c.id, c.name] as const));
+      const stateLabel: Record<string, string> = {
+        out: 'نفد',
+        low: 'منخفض',
+        ok: 'جيد',
+        untracked: 'مفتوح',
+      };
+      interface GroupAcc {
+        name: string;
+        rows: Product[];
+      }
+      const groupMap = new Map<string, GroupAcc>();
+      let grandCost = 0;
+      let grandValue = 0;
+      for (const product of products) {
+        const groupName =
+          product.category_id != null
+            ? catNameById.get(product.category_id) ?? 'بلا تصنيف'
+            : 'بلا تصنيف';
+        let acc = groupMap.get(groupName);
+        if (acc == null) {
+          acc = {name: groupName, rows: []};
+          groupMap.set(groupName, acc);
+        }
+        acc.rows.push(product);
+        if (product.stock_untracked !== 1) {
+          const qty = Math.max(0, product.stock_quantity ?? 0);
+          grandCost += product.cost_price * qty;
+          grandValue += finalPriceOf(product) * qty;
+        }
+      }
+      const groups = [...groupMap.values()]
+        .sort((a, b) => a.name.localeCompare(b.name, 'ar'))
+        .map(acc => {
+          let groupCost = 0;
+          let groupValue = 0;
+          const rows = acc.rows.map(product => {
+            const untracked = product.stock_untracked === 1;
+            const state = stockStateOf(product, defaultThreshold);
+            if (!untracked) {
+              const qty = Math.max(0, product.stock_quantity ?? 0);
+              groupCost += product.cost_price * qty;
+              groupValue += finalPriceOf(product) * qty;
+            }
+            return {
+              name: product.name,
+              barcode: (product.barcode ?? '').trim() || '—',
+              cost: product.cost_price.toFixed(2),
+              qty: untracked
+                ? 'كمية مفتوحة'
+                : `${formatQty(product.stock_quantity)} ${baseUnitLabelOf(product, BASE_UNIT_NAME)}`,
+              state: stateLabel[state],
+              stateKind: state,
+              value: untracked
+                ? '—'
+                : formatMoney(
+                    product.cost_price * Math.max(0, product.stock_quantity ?? 0),
+                  ),
+            };
+          });
+          return {
+            name: acc.name,
+            count: String(acc.rows.length),
+            cost: formatMoney(groupCost),
+            value: formatMoney(groupValue),
+            rows,
+          };
+        });
+
+      const payload = {
+        storeName: settings.storeName || 'متجر سيلا',
+        filtersLabel,
+        generatedAt: formatDateTime(new Date().toISOString()),
+        summary: [
+          {label: 'قيمة بالتكلفة', value: formatMoney(stockValue.costValue)},
+          {label: 'قيمة بالبيع', value: formatMoney(stockValue.retailValue)},
+          {label: 'هامش متوقع', value: formatMoney(stockValue.margin)},
+          {label: 'منتجات متتبعة', value: String(stockValue.trackedCount)},
+          {
+            label: 'كمية مفتوحة (بلا تتبع)',
+            value: String(stockValue.untrackedCount),
+          },
+        ],
+        groups,
+        totalRow: {
+          tracked: `${stockValue.trackedCount} متتبع`,
+          cost: formatMoney(grandCost),
+          value: formatMoney(grandValue),
+        },
+      };
+      const platform = requirePlatformUtils();
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = await platform.createInventoryReportPdf(
+        `sela-inventory-${stamp}.pdf`,
+        JSON.stringify(payload),
+      );
+      toast(
+        `تم حفظ تقرير المخزون (${products.length} منتجاً) في: ${path}`,
+        'success',
+        6000,
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل بناء تقرير المخزون PDF',
+        'error',
+        5000,
+      );
+    } finally {
+      setPdfBusy(false);
+    }
+  }, [
+    pdfBusy,
+    products,
+    filter,
+    categories,
+    showExpiring,
+    showArchived,
+    search,
+    defaultThreshold,
+    stockValue,
+    settings.storeName,
+    toast,
+  ]);
 
   // v29 (round-37 #2): صفر مستمعات Keyboard — شرائح التصنيفات
   // تبقى دائماً في مكانها. طيّها لحظة فتح اللوحة (v8.3) كان يحرّك
@@ -370,6 +589,17 @@ function InventoryLayout({
                 navigation.navigate('ManageUnits' as never);
               }}
             />
+            {/* v68 (الجولة 80 #٢): تقرير PDF للمخزون بالتفصيل —
+                مجمّع بالتصنيفات مع مجاميع كل تصنيف وصف الإجمالي. */}
+            <MenuItem
+              icon="printer"
+              label={pdfBusy ? 'جارٍ بناء تقرير المخزون…' : 'تقرير PDF للمخزون'}
+              hint="كل المنتجات بالتفصيل مجمّعة بالتصنيفات"
+              onPress={() => {
+                setMenuOpen(false);
+                void exportInventoryPdf();
+              }}
+            />
           </View>
         </TouchableOpacity>
       ) : null}
@@ -398,6 +628,31 @@ function InventoryLayout({
               <Icon name="barcode" size={22} color={c.accent} />
             )}
           </TouchableOpacity>
+        </View>
+
+        {/* ── v68 (الجولة 80 #١): شريط قيمة البضاعة في المخزون —
+            نفس بطاقة سطح المكتب: تكلفة×كمية لكل متتبع + قيمتها
+            بالبيع وهامشها، والكمية المفتوحة تُعد منفصلة كي يعرف
+            التاجر بدقة ما الذي يشمله الرقم. ── */}
+        <View style={styles.valueStrip}>
+          <View style={styles.valueHero}>
+            <Text style={styles.valueLabel}>قيمة البضاعة (تكلفة)</Text>
+            <Text style={[styles.valueAmount, {color: c.accent}]}>
+              {formatMoney(stockValue.costValue)}
+            </Text>
+            <Text style={styles.valueMeta}>
+              قيمة بيعها {formatMoney(stockValue.retailValue)} · هامش{' '}
+              {formatMoney(stockValue.margin)}
+            </Text>
+            <Text style={styles.valueMeta}>
+              متتبع {stockValue.trackedCount}
+              {stockValue.untrackedCount > 0
+                ? ` · ${stockValue.untrackedCount} كمية مفتوحة بلا قيمة محسوبة`
+                : stockValue.outCount > 0
+                ? ` · ${stockValue.outCount} نافد`
+                : ''}
+            </Text>
+          </View>
         </View>
 
         {/* ── Category chips — compact, horizontally scrollable.
@@ -793,7 +1048,7 @@ function MenuItem({
   hint,
   onPress,
 }: {
-  icon: 'clipboard' | 'shapes' | 'scale';
+  icon: 'clipboard' | 'shapes' | 'scale' | 'printer';
   label: string;
   hint: string;
   onPress: () => void;
@@ -893,6 +1148,33 @@ const useStyles = makeStyles(c =>
       borderColor: c.border,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    // ── v68 (الجولة 80 #١): بطاقة قيمة البضاعة في المخزون ──
+    valueStrip: {
+      backgroundColor: c.surface,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingVertical: spacing.md,
+      paddingHorizontal: spacing.lg,
+      borderStartWidth: 3,
+      borderStartColor: c.accent,
+    },
+    valueHero: {gap: 3},
+    valueLabel: {
+      fontSize: typography.small,
+      color: c.textDim,
+      fontWeight: '600',
+    },
+    valueAmount: {
+      fontSize: typography.heading,
+      fontWeight: '800',
+      fontVariant: ['tabular-nums'],
+    },
+    valueMeta: {
+      fontSize: typography.small,
+      color: c.textDim,
+      lineHeight: 18,
     },
     // v8.2 (round-11 #4): header overflow menu — replaces the three
     // tall quick-action cards that used to push the list down.

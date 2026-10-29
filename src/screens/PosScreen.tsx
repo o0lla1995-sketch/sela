@@ -4482,7 +4482,7 @@ function PaySheet({
                   ]}
                   activeOpacity={0.7}
                   onPress={() => onSelectMethod(method.id)}>
-                  <PaymentMethodIcon method={method} size={46} />
+                  <PaymentMethodIcon method={method} size={54} />
                   <Text style={styles.payMethodName} numberOfLines={1}>
                     {method.label}
                   </Text>
@@ -4513,7 +4513,7 @@ function PaySheet({
                       style={styles.payQuickEnableChip}
                       activeOpacity={0.7}
                       onPress={() => onEnableMethod(method.id)}>
-                      <PaymentMethodIcon method={method} size={22} />
+                      <PaymentMethodIcon method={method} size={28} />
                       <Text
                         style={styles.payQuickEnableText}
                         numberOfLines={1}>
@@ -4609,7 +4609,7 @@ function PaySheet({
             contentContainerStyle={styles.payScroll}
             showsVerticalScrollIndicator={false}>
             <View style={styles.payConfirmCard}>
-              <PaymentMethodIcon method={selected} size={56} />
+              <PaymentMethodIcon method={selected} size={64} />
               <View style={{flex: 1}}>
                 <Text style={styles.payConfirmTitle}>
                   الدفع عبر {selected.label}

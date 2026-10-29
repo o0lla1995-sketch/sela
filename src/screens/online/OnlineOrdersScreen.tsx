@@ -811,7 +811,7 @@ export function OnlineOrdersScreen() {
                     ]}
                     activeOpacity={0.7}
                     onPress={() => setCollectMethod(method.id)}>
-                    <PaymentMethodIcon method={method} size={44} />
+                    <PaymentMethodIcon method={method} size={52} />
                     <Text style={styles.collectName} numberOfLines={1}>
                       {method.label}
                     </Text>

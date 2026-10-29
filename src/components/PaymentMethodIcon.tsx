@@ -289,7 +289,10 @@ const REAL_LOGOS: Record<string, number> = {
 const styles = StyleSheet.create({
   logoChip: {
     backgroundColor: '#FFFFFF',
-    padding: 2,
+    /* v68 (الجولة 80 #٤أ): الحشوة 2→1 — الشعارات الرسمية قُصّت
+       حوافها المدمجة (نفس ملفات سطح المكتب) فصارت تملأ إطارها
+       بالكامل بدل أن «يبدو صغيراً في اطار الصورة». */
+    padding: 1,
     overflow: 'hidden',
     elevation: 2,
     shadowColor: '#000',

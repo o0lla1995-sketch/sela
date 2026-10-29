@@ -109,6 +109,13 @@ interface PlatformUtilsNative {
     fileName: string,
     payloadJson: string,
   ): Promise<string>;
+  /** v68 (الجولة 80 #٢): تقرير المخزون التفصيلي PDF — جدول مجمّع
+   *  بالتصنيفات مع مجاميع كل تصنيف وحالة ملونة للمخزون وصف
+   *  الإجمالي الكبير (طلب التاجر: زر في صفحة المخزون). */
+  createInventoryReportPdf(
+    fileName: string,
+    payloadJson: string,
+  ): Promise<string>;
   /** v65 (الجولة 77 — أندرويد #٢ب): ملصقات الباركود PDF — شبكة
    *  ملصقات مربعة (40/50/60مم) على صفحات مربعة أو A4 بإطار قص
    *  وأعمدة باركود من نمط الوحدات (bits من encodeBarcodeBars). */

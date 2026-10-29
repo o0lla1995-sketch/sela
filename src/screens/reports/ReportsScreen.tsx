@@ -38,7 +38,7 @@ import {
 } from '../../components/ui';
 import {ErrorBoundary} from '../../components/ErrorBoundary';
 import {BarChart, peakIndex} from '../../components/charts/BarChart';
-import {Icon} from '../../components/Icon';
+import {Icon, type IconName} from '../../components/Icon';
 import {ReportService, type ReportBundle} from '../../services/ReportService';
 import {ReportRepo} from '../../database/repositories/ReportRepo';
 import {rangeFor} from '../../services/ReportService';
@@ -288,6 +288,20 @@ export function ReportsScreen() {
   const cash = bundle?.cash;
   const paired = cash?.paired ?? false;
 
+  /* ── v68 (الجولة 80 #٤ب): تنظيم صفحة التقارير بتبويبات — طلب
+     التاجر نصاً «تحسين وتنظيم صفحة التقارير بشكل احترافي… حتى مع
+     كمية كبيرة من البيانات» (نفس تقسيم سطح المكتب v76): أربع
+     مناطق محاسبية مستقلة بدل التمرير الطويل الواحد — الملخص،
+     النقد والخزينة، الديون والقسائم، المنتجات والتصدير. ── */
+  type ReportTab = 'overview' | 'cash' | 'debts' | 'products';
+  const [activeTab, setActiveTab] = useState<ReportTab>('overview');
+  const TABS: {key: ReportTab; label: string; icon: IconName}[] = [
+    {key: 'overview', label: 'الملخص', icon: 'chart'},
+    {key: 'cash', label: 'النقد والخزينة', icon: 'wallet'},
+    {key: 'debts', label: 'الديون والقسائم', icon: 'book'},
+    {key: 'products', label: 'المنتجات والتصدير', icon: 'list'},
+  ];
+
   return (
     <View style={styles.screen}>
       {/* v26 (round-34 #6): the الخزينة + الفواتير header buttons are
@@ -312,6 +326,35 @@ export function ReportsScreen() {
           <EmptyState icon="chart" title="جارٍ تحميل التقارير…" />
         ) : bundle ? (
           <>
+            {/* ── v68 (الجولة 80 #٤ب): شريط التبويبات — أربع مناطق
+                محاسبية مستقلة؛ التبويب النشط بالبرتقالي وشرحه تحته. */}
+            <View style={styles.repTabsRow}>
+              {TABS.map(tab => (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={[styles.repTab, activeTab === tab.key ? styles.repTabOn : null]}
+                  activeOpacity={0.75}
+                  onPress={() => setActiveTab(tab.key)}>
+                  <Icon
+                    name={tab.icon}
+                    size={16}
+                    color={activeTab === tab.key ? '#FFFFFF' : c.textDim}
+                  />
+                  <Text
+                    style={[
+                      styles.repTabText,
+                      activeTab === tab.key ? styles.repTabTextOn : null,
+                    ]}
+                    numberOfLines={1}>
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* v68: تبويب «الملخص» — KPIs + رسما الأداء والذروة. */}
+            {activeTab === 'overview' ? (
+            <>
             {/* ── 1) ملخص المبيعات — clean 2×3 KPI grid ─────── */}
             <SectionTitle title="ملخص المبيعات" />
             <View style={styles.statsGrid}>
@@ -384,7 +427,13 @@ export function ReportsScreen() {
                 />
               </View>
             </View>
+            </>
+            ) : null}
 
+            {/* v68: تبويب «النقد والخزينة» — النقد المحصّل +
+                المصروفات + الخزينة الآن + أرصدة القنوات. */}
+            {activeTab === 'cash' ? (
+            <>
             {/* ── 2) النقد والديون — ONE clean card (v18) ────── */}
             <Card>
               <SectionTitle
@@ -472,117 +521,6 @@ export function ReportsScreen() {
                         </View>
                       ) : null}
                     </>
-                  ) : null}
-                </View>
-              </CollapseSection>
-
-              {/* 2-ج) Credit invoices issued in the range — v26:
-                  headline (count + total) + expandable split. */}
-              <CollapseSection
-                title={`فواتير الدين بالفترة · ${cash?.creditSalesCount ?? 0} فاتورة`}
-                valueText={formatMoney(cash?.creditSalesAmount ?? 0)}
-                valueColor={c.warning}
-                open={openSections.credit === true}
-                onToggle={() => toggleSection('credit')}
-                show={(cash?.creditSalesCount ?? 0) > 0}>
-                <View style={styles.rowBox}>
-                  <View style={styles.rowLine}>
-                    <Text style={styles.rowLabel}>
-                      إجمالي مبيعات الدين · {cash?.creditSalesCount ?? 0} فاتورة
-                    </Text>
-                    <Text style={[styles.rowValue, {color: c.warning}]}>
-                      {formatMoney(cash?.creditSalesAmount ?? 0)}
-                    </Text>
-                  </View>
-                  <View style={styles.rowLine}>
-                    <Text style={styles.rowLabel}>منها: دفتر المتجر (INV-L)</Text>
-                    <Text style={styles.rowValue}>
-                      {formatMoney(cash?.localCreditSalesAmount ?? 0)}
-                    </Text>
-                  </View>
-                  {paired ? (
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>منها: عبر صِلة (INV-D)</Text>
-                      <Text style={styles.rowValue}>
-                        {formatMoney(cash?.silaCreditSalesAmount ?? 0)}
-                      </Text>
-                    </View>
-                  ) : null}
-                  {/* v24 (round-31 #3): the coupon-born debts of the
-                      period — the claims created on the institutions by
-                      voucher redemptions (face value), until the
-                      settlements land. Its own line, NOT a «منها» of
-                      the customer-debt total above. */}
-                  {(cash?.voucherCreditSalesAmount ?? 0) > 0 ? (
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        عبر قسائم صِلة · {cash?.voucherCreditSalesCount ?? 0}{' '}
-                        عملية صرف (مستحقات على المؤسسات حتى التسوية)
-                      </Text>
-                      <Text style={[styles.rowValue, {color: c.info}]}>
-                        {formatMoney(cash?.voucherCreditSalesAmount ?? 0)}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-              </CollapseSection>
-
-              {/* 2-ج-2) v20: مبيعات القسائم الشرائية بالفترة — v26:
-                  collapsed headline (count + face value) with the
-                  goods/settlements split inside. Shown only when there
-                  is voucher activity in the range. v21: every figure
-                  counts ACTIVE-IN-STORE campaigns only. */}
-              <CollapseSection
-                title={`القسائم الشرائية بالفترة · ${cash?.voucherSalesCount ?? 0} عملية`}
-                valueText={formatMoney(cash?.voucherSalesAmount ?? 0)}
-                valueColor={c.info}
-                open={openSections.vouchers === true}
-                onToggle={() => toggleSection('vouchers')}
-                show={(cash?.voucherSalesCount ?? 0) > 0}>
-                <View style={styles.rowBox}>
-                  <View style={styles.rowLine}>
-                    <Text style={styles.rowLabel}>
-                      قسائم مصروفة · {cash?.voucherSalesCount ?? 0} عملية
-                    </Text>
-                    <Text style={[styles.rowValue, {color: c.info}]}>
-                      {formatMoney(cash?.voucherSalesAmount ?? 0)}
-                    </Text>
-                  </View>
-                  <View style={styles.rowLine}>
-                    <Text style={styles.rowLabel}>
-                      منها: بضاعة مسجّلة (INV-V)
-                    </Text>
-                    <Text style={styles.rowValue}>
-                      {formatMoney(cash?.voucherGoodsAmount ?? 0)}
-                    </Text>
-                  </View>
-                  {(cash?.voucherCounterExtraAmount ?? 0) > 0 ? (
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        منها: فرق نقدي استُلم فوراً بالكاشير
-                      </Text>
-                      <Text style={styles.rowValue}>
-                        {formatMoney(cash?.voucherCounterExtraAmount ?? 0)}
-                      </Text>
-                    </View>
-                  ) : null}
-                  <View style={styles.rowLine}>
-                    <Text style={styles.rowLabel}>
-                      مستلم تسويات الحملات بالفترة
-                    </Text>
-                    <Text style={styles.rowValue}>
-                      {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
-                    </Text>
-                  </View>
-                  {(cash?.campaignDueMinor ?? 0) > 0 ? (
-                    <View style={styles.rowLine}>
-                      <Text style={styles.rowLabel}>
-                        المستحق الآن من الحملات المفعّلة (دين على المؤسسات)
-                      </Text>
-                      <Text style={[styles.rowValue, {color: c.warning}]}>
-                        {formatMoney((cash?.campaignDueMinor ?? 0) / 100)}
-                      </Text>
-                    </View>
                   ) : null}
                 </View>
               </CollapseSection>
@@ -796,7 +734,12 @@ export function ReportsScreen() {
                 </Text>
               </View>
             ) : null}
+            </>
+            ) : null}
 
+            {/* v68: رسما الأداء والذروة — تبويب «الملخص». */}
+            {activeTab === 'overview' ? (
+            <>
             {/* ── 3) Sales performance chart ─────────────────── */}
             <Card>
               {/* v42 (الجولة 50 #3): العنوان يتبع حبيبية السلسلة —
@@ -880,7 +823,146 @@ export function ReportsScreen() {
                 النشطة — جهّز المخزون والطاقم لأيام وساعات الذروة
               </Text>
             </Card>
+            </>
+            ) : null}
 
+            {/* v68 (الجولة 80 #٤ب): تبويب «الديون والقسائم» — فواتير
+                الدين وقسائم الشراء بالفترة نُقلت من بطاقة النقد إلى
+                منطقتها المستقلة (نفس تقسيم سطح المكتب). */}
+            {activeTab === 'debts' && cash != null ? (
+              <Card>
+                <SectionTitle
+                  title="الديون والقسائم بالفترة"
+                  hint="فواتير الدين وقسائم الشراء — تفاصيلها الكاملة"
+                />
+                {(cash?.creditSalesCount ?? 0) === 0 &&
+                (cash?.voucherSalesCount ?? 0) === 0 ? (
+                  <EmptyState
+                    icon="book"
+                    title="لا فواتير دين ولا قسائم بهذه الفترة"
+                    subtitle="كل مبيعات هذه الفترة نقدية أو عبر القنوات"
+                  />
+                ) : (
+                  <>
+              {/* 2-ج) Credit invoices issued in the range — v26:
+                  headline (count + total) + expandable split. */}
+              <CollapseSection
+                title={`فواتير الدين بالفترة · ${cash?.creditSalesCount ?? 0} فاتورة`}
+                valueText={formatMoney(cash?.creditSalesAmount ?? 0)}
+                valueColor={c.warning}
+                open={openSections.credit === true}
+                onToggle={() => toggleSection('credit')}
+                show={(cash?.creditSalesCount ?? 0) > 0}>
+                <View style={styles.rowBox}>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      إجمالي مبيعات الدين · {cash?.creditSalesCount ?? 0} فاتورة
+                    </Text>
+                    <Text style={[styles.rowValue, {color: c.warning}]}>
+                      {formatMoney(cash?.creditSalesAmount ?? 0)}
+                    </Text>
+                  </View>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>منها: دفتر المتجر (INV-L)</Text>
+                    <Text style={styles.rowValue}>
+                      {formatMoney(cash?.localCreditSalesAmount ?? 0)}
+                    </Text>
+                  </View>
+                  {paired ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>منها: عبر صِلة (INV-D)</Text>
+                      <Text style={styles.rowValue}>
+                        {formatMoney(cash?.silaCreditSalesAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {/* v24 (round-31 #3): the coupon-born debts of the
+                      period — the claims created on the institutions by
+                      voucher redemptions (face value), until the
+                      settlements land. Its own line, NOT a «منها» of
+                      the customer-debt total above. */}
+                  {(cash?.voucherCreditSalesAmount ?? 0) > 0 ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        عبر قسائم صِلة · {cash?.voucherCreditSalesCount ?? 0}{' '}
+                        عملية صرف (مستحقات على المؤسسات حتى التسوية)
+                      </Text>
+                      <Text style={[styles.rowValue, {color: c.info}]}>
+                        {formatMoney(cash?.voucherCreditSalesAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </CollapseSection>
+
+              {/* 2-ج-2) v20: مبيعات القسائم الشرائية بالفترة — v26:
+                  collapsed headline (count + face value) with the
+                  goods/settlements split inside. Shown only when there
+                  is voucher activity in the range. v21: every figure
+                  counts ACTIVE-IN-STORE campaigns only. */}
+              <CollapseSection
+                title={`القسائم الشرائية بالفترة · ${cash?.voucherSalesCount ?? 0} عملية`}
+                valueText={formatMoney(cash?.voucherSalesAmount ?? 0)}
+                valueColor={c.info}
+                open={openSections.vouchers === true}
+                onToggle={() => toggleSection('vouchers')}
+                show={(cash?.voucherSalesCount ?? 0) > 0}>
+                <View style={styles.rowBox}>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      قسائم مصروفة · {cash?.voucherSalesCount ?? 0} عملية
+                    </Text>
+                    <Text style={[styles.rowValue, {color: c.info}]}>
+                      {formatMoney(cash?.voucherSalesAmount ?? 0)}
+                    </Text>
+                  </View>
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      منها: بضاعة مسجّلة (INV-V)
+                    </Text>
+                    <Text style={styles.rowValue}>
+                      {formatMoney(cash?.voucherGoodsAmount ?? 0)}
+                    </Text>
+                  </View>
+                  {(cash?.voucherCounterExtraAmount ?? 0) > 0 ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        منها: فرق نقدي استُلم فوراً بالكاشير
+                      </Text>
+                      <Text style={styles.rowValue}>
+                        {formatMoney(cash?.voucherCounterExtraAmount ?? 0)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  <View style={styles.rowLine}>
+                    <Text style={styles.rowLabel}>
+                      مستلم تسويات الحملات بالفترة
+                    </Text>
+                    <Text style={styles.rowValue}>
+                      {formatMoney(cash?.campaignSettlementsAmount ?? 0)}
+                    </Text>
+                  </View>
+                  {(cash?.campaignDueMinor ?? 0) > 0 ? (
+                    <View style={styles.rowLine}>
+                      <Text style={styles.rowLabel}>
+                        المستحق الآن من الحملات المفعّلة (دين على المؤسسات)
+                      </Text>
+                      <Text style={[styles.rowValue, {color: c.warning}]}>
+                        {formatMoney((cash?.campaignDueMinor ?? 0) / 100)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </CollapseSection>
+
+                  </>
+                )}
+              </Card>
+            ) : null}
+
+            {/* v68: تبويب «المنتجات والتصدير». */}
+            {activeTab === 'products' ? (
+            <>
             {/* ── 5) Top products — v37 (الجولة 45 #3أ) ──────────
                 إعادة تصميم قسم «الأكثر إيراداً وربحاً» بشكل احترافي:
                 ترويسة متمركزة في منتصف الشاشة (العنوان ثم المبدّل
@@ -1037,6 +1119,8 @@ export function ReportsScreen() {
                 />
               </View>
             </Card>
+            </>
+            ) : null}
           </>
         ) : null}
       </ScrollView>
@@ -1111,6 +1195,38 @@ function CollapseSection({
 
 const useStyles = makeStyles(c =>
   StyleSheet.create({
+    // ── v68 (الجولة 80 #٤ب): شريط تبويبات التقارير ──
+    repTabsRow: {
+      flexDirection: 'row',
+      gap: 6,
+      marginVertical: 2,
+      marginBottom: 10,
+    },
+    repTab: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: 10,
+      paddingHorizontal: 6,
+      borderRadius: 12,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    repTabOn: {
+      backgroundColor: c.accent,
+      borderColor: c.accent,
+    },
+    repTabText: {
+      fontSize: 12,
+      fontFamily: fonts.bold,
+      color: c.textDim,
+    },
+    repTabTextOn: {
+      color: '#FFFFFF',
+    },
     /** v64 (الجولة 76 #6): بطاقة أرصدة المحافظ والبنوك. */
     methodCard: {
       backgroundColor: c.surface,

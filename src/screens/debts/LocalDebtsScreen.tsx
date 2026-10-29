@@ -1211,7 +1211,7 @@ export function LocalDebtsScreen() {
                       ]}
                       onPress={() => setPayMethod(m.id)}
                       activeOpacity={0.75}>
-                      <PaymentMethodIcon method={m} size={26} />
+                      <PaymentMethodIcon method={m} size={32} />
                       <Text
                         style={[
                           styles.payMethodChipText,

@@ -675,7 +675,7 @@ export function SettingsScreen() {
                     styles.pmCard,
                     enabled ? {borderColor: m.color} : null,
                   ]}>
-                  <PaymentMethodIcon method={m} size={38} />
+                  <PaymentMethodIcon method={m} size={46} />
                   <View style={{flex: 1, minWidth: 0}}>
                     <Text style={styles.pmName} numberOfLines={1}>
                       {m.label}

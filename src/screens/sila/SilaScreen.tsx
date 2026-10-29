@@ -1685,7 +1685,7 @@ export function SilaScreen() {
                       ]}
                       onPress={() => setPayMethod(m.id)}
                       activeOpacity={0.75}>
-                      <PaymentMethodIcon method={m} size={24} />
+                      <PaymentMethodIcon method={m} size={28} />
                       <Text
                         style={[
                           styles.pmChipText,
