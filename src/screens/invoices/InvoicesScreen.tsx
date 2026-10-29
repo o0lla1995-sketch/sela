@@ -66,7 +66,12 @@ import {
   useThemeColors,
 } from '../../core/theme';
 import {formatDateTime, formatMoney, formatQty, parseNumber} from '../../core/format';
-import {paymentMethodById, PAYMENT_METHODS} from '../../core/paymentMethods';
+import {
+  activePaymentMethods,
+  paymentMethodById,
+  paymentMethodLabel,
+  PAYMENT_METHODS,
+} from '../../core/paymentMethods';
 import {PaymentMethodIcon} from '../../components/PaymentMethodIcon';
 import {requirePlatformUtils} from '../../native/nativeBridge';
 import {
@@ -1600,6 +1605,12 @@ export function InvoiceDetailScreen() {
                             ret.debt_adjusted_minor / 100,
                           )}`
                         : ''}
+                      {/* v69 (الجولة 81 #٣): قناة التسوية إن كانت محفظة/
+                          بنك — النقدي من الخزينة يبقى بلا لاحقة. */}
+                      {ret.refund_channel != null &&
+                      ret.refund_channel !== 'cash'
+                        ? ` · عبر ${paymentMethodLabel(ret.refund_channel)}`
+                        : ''}
                     </Text>
                   </View>
                   <Badge
@@ -1751,6 +1762,11 @@ function ReturnSheet({
   // Cash invoices choose how to refund; debt invoices always
   // reduce the debt (the goods come back, the customer owes less).
   const [refundMethod, setRefundMethod] = useState<'cash' | 'none'>('cash');
+  // v69 (الجولة 81 #٣): قناة التسوية — الخزينة النقدية أو أي محفظة/
+  // بنك مفعّل. تظهر للإرجاع المالي النقدي ولفرق الاستبدال بالاتجاهين
+  // (زيادة للزبون أو نقصان عليه) — «حيث يسهل في عملية الارجاع
+  // والاستبدال باستخدام المحافظ والبنوك وليس فقط النقد بالخزينة».
+  const [refundChannel, setRefundChannel] = useState<string>('cash');
   // v36: الاستبدال بقيمة المرجع — أصناف بديلة تخرج من المخزون بدل
   // الإرجاع المالي. بلا أي أثر مالي: المرتجع يعود للمخزون والبديل
   // يخرج منه؛ لا استرداد نقدي ولا خصم دين ولا عكس رفع لصلة.
@@ -1766,6 +1782,7 @@ function ReturnSheet({
     setError(null);
     setQuantities({});
     setRefundMethod('cash');
+    setRefundChannel('cash');
     setExchangePicks([]);
     setExchangeOpen(false);
     InvoiceService.prepareReturn(saleId)
@@ -1911,6 +1928,14 @@ function ReturnSheet({
         saleId,
         lines: payload,
         refundMethod: book === 'cash' ? refundMethod : 'none',
+        // v69 (الجولة 81 #٣): قناة التسوية — للكتاب النقدي فقط؛
+        // كتب الدين تسوّى في الدفتر فلا قناة نقدية لها.
+        refundChannel:
+          book === 'cash' &&
+          ((exchangePicks.length > 0 && Math.abs(exchangeDiff) > 0.0001) ||
+            (exchangePicks.length === 0 && refundMethod === 'cash'))
+            ? refundChannel
+            : 'cash',
         note: null,
         print: printerConnected,
         receiptSettings: {
@@ -1927,20 +1952,31 @@ function ReturnSheet({
         },
         exchange: exchangePayload,
       });
-      // v40 (الجولة 48 #2): رسالة النجاح تشرح تسوية الفرق بوضوح —
-      //  ماذا حدث للفرق بالضبط (نقد خارج/داخل، خصم/زيادة دين، أو
-      //  استبدال متكافئ) كي يعرف الكاشير ما ينفذه فوراً.
+      // v40 (الجولة 48 #2) ← v69 (الجولة 81 #٣): رسالة النجاح تشرح
+      //  تسوية الفرق بوضوح — ماذا حدث للفرق بالضبط (نقد خارج/داخل،
+      //  خصم/زيادة دين، أو استبدال متكافئ) ومن أي قناة (الخزينة
+      //  النقدية أو محفظة/بنك) كي يعرف الكاشير ما ينفذه فوراً.
+      const channelLabel =
+        book === 'cash' && refundChannel !== 'cash'
+          ? paymentMethodLabel(refundChannel)
+          : null;
       toast(
         exchangePayload != null
           ? exchangeDiff > 0.0001
             ? book === 'cash'
-              ? `سُجّل الاستبدال — سلّم الزبون الفرق ${formatMoney(exchangeDiff)} نقداً من الخزينة`
+              ? channelLabel != null
+                ? `سُجّل الاستبدال — حوّل للزبون الفرق ${formatMoney(exchangeDiff)} عبر ${channelLabel}`
+                : `سُجّل الاستبدال — سلّم الزبون الفرق ${formatMoney(exchangeDiff)} نقداً من الخزينة`
               : `سُجّل الاستبدال — خُصم الفرق ${formatMoney(exchangeDiff)} من دين الزبون`
             : exchangeDiff < -0.0001
             ? book === 'cash'
-              ? `سُجّل الاستبدال — قبض الفرق ${formatMoney(-exchangeDiff)} نقداً من الزبون إلى الخزينة`
+              ? channelLabel != null
+                ? `سُجّل الاستبدال — استلم الفرق ${formatMoney(-exchangeDiff)} من الزبون عبر ${channelLabel}`
+                : `سُجّل الاستبدال — قبض الفرق ${formatMoney(-exchangeDiff)} نقداً من الزبون إلى الخزينة`
               : `سُجّل الاستبدال — زاد دين الزبون بالفرق ${formatMoney(-exchangeDiff)}`
             : 'سُجّل الاستبدال المتكافئ — المرتجع عاد والبديل خرج ولا فرق'
+          : book === 'cash' && refundMethod === 'cash' && channelLabel != null
+          ? `سُجّل المرتجع — حوّل للزبون ${formatMoney(refundTotal)} عبر ${channelLabel} وأُعيدت الكميات للمخزون`
           : 'سُجّل المرتجع وأُعيدت الكميات للمخزون',
         'success',
         6000,
@@ -1970,6 +2006,8 @@ function ReturnSheet({
     //  التأكيد بعد حذف ملاحظة الإرجاع من النافذة.
     debtState,
     exchangeModeOn,
+    // v69 (الجولة 81 #٣): قناة التسوية ضمن تبعيات التأكيد.
+    refundChannel,
   ]);
 
   // v24 (round-31 #1): hardware back closes the sheet — the
@@ -2304,6 +2342,58 @@ function ReturnSheet({
                             : 'يُضاف إلى دين الزبون'
                         }`}
                   </Text>
+                </View>
+              ) : null}
+
+              {/* ── v69 (الجولة 81 #٣): قناة التسوية — الخزينة النقدية
+                  أو محفظة/بنك — للإرجاع المالي النقدي ولفرق الاستبدال
+                  بالاتجاهين. طلب التاجر نصاً: «يجب أن يخير في التعامل
+                  مع الرصيد ليس فقط من خلال الخزينة بل من خلال المحافظ
+                  والبنوك أيضاً». القنوات المعطلة من الإعدادات مخفية. */}
+              {book === 'cash' &&
+              ((exchangeModeOn && Math.abs(exchangeDiff) > 0.0001) ||
+                (!exchangeModeOn && refundMethod === 'cash')) ? (
+                <View style={retStyles(c).channelBox}>
+                  <Text style={retStyles(c).channelLabel}>
+                    {exchangeModeOn
+                      ? exchangeDiff > 0
+                        ? `سدّد الفرق ${formatMoney(exchangeDiff)} للزبون من:`
+                        : `اقبض الفرق ${formatMoney(-exchangeDiff)} من الزبون عبر:`
+                      : `قناة استرداد ${formatMoney(refundTotal)}:`}
+                  </Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={retStyles(c).channelRow}>
+                    {activePaymentMethods(
+                      settings.paymentMethodsEnabled,
+                    ).map(method => {
+                      const on = refundChannel === method.id;
+                      return (
+                        <TouchableOpacity
+                          key={method.id}
+                          style={[
+                            retStyles(c).channelChip,
+                            on ? retStyles(c).channelChipOn : null,
+                          ]}
+                          onPress={() => setRefundChannel(method.id)}
+                          disabled={busy}
+                          activeOpacity={0.75}
+                          accessibilityRole="button"
+                          accessibilityLabel={method.label}>
+                          <PaymentMethodIcon method={method} size={24} />
+                          <Text
+                            style={[
+                              retStyles(c).channelChipText,
+                              on ? retStyles(c).channelChipTextOn : null,
+                            ]}
+                            numberOfLines={1}>
+                            {method.id === 'cash' ? 'الخزينة' : method.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
                 </View>
               ) : null}
 
@@ -3653,6 +3743,45 @@ function retStyles(c: ReturnType<typeof useThemeColors>) {
     methodRow: {
       flexDirection: 'row',
       gap: spacing.sm,
+    },
+    /* ── v69 (الجولة 81 #٣): قناة التسوية (خزينة/محفظة/بنك) — صندوق
+       مضغوط فوق صف الأزرار: سطر عنوان يشرح الاتجاه (سداد للزبون أو
+       قبض منه) + شريط شرائح أفقي بشعارات الجهات الرسمية. ── */
+    channelBox: {
+      gap: 6,
+    },
+    channelLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    channelRow: {
+      flexDirection: 'row',
+      gap: 6,
+      paddingVertical: 2,
+    },
+    channelChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      paddingVertical: 6,
+      paddingHorizontal: 10,
+      backgroundColor: c.surface,
+    },
+    channelChipOn: {
+      borderColor: c.accent,
+      backgroundColor: c.accentSoft,
+    },
+    channelChipText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    channelChipTextOn: {
+      color: c.accent,
     },
     methodChip: {
       flex: 1,

@@ -88,6 +88,71 @@ export interface ProductInput {
   stock_untracked?: number;
   /** v35: عدد المقاسات بربطة الملابس (أساس بيع الجملة بالربطة). */
   sizes_count?: number | null;
+  /** v69 (الجولة 81 #٤): تجاوز فحص تكرار الاسم — للمنتجات النظامية
+   *  فقط (سطر التوصيل الأونلاين يُنشأ مؤرشفاً فوراً). التاجر لا
+   *  يمرره أبداً من أي نموذج. */
+  allowDuplicateName?: boolean;
+}
+
+/* ── v69 (الجولة 81 #٤): منع تكرار اسم المنتج والباركود — طلب
+   التاجر نصاً: «لا اريد عند إدخال منتج جديد أن يتكرر اسم المنتج
+   والباركود اذا كان موجود بمنتج سابق». الفحص على المنتجات النشطة
+   (غير المؤرشفة) فقط: المؤرشف ذو السجل لا يمنع إعادة الإضافة
+   (نفس قاعدة v23: الحي يفوز عند المسح). الاسم بمطابقة غير حساسة
+   للحالة والتشذيب، والباركود يُفحص في جدول المنتجات وفي باركودات
+   الوحدات (product_units) معاً كي لا يتعطل مسح نقطة البيع أبداً. */
+async function assertNameBarcodeAvailable(
+  name: string,
+  barcode: string | null | undefined,
+  excludeId?: number,
+  options?: {skipName?: boolean},
+): Promise<void> {
+  const db = getDb();
+  const cleanName = name.trim();
+  // ١) الاسم — مطابقة غير حساسة لحالة الأحرف اللاتينية.
+  if (!options?.skipName) {
+    const nameHit = await db.execute(
+      `SELECT name FROM products
+        WHERE LOWER(TRIM(name)) = LOWER(?) AND is_archived = 0 AND id != ?
+        LIMIT 1`,
+      [cleanName, excludeId ?? -1],
+    );
+    const nameRow = nameHit.rows?.[0] as {name?: string} | undefined;
+    if (nameRow != null) {
+      throw new Error(
+        `يوجد منتج بنفس الاسم «${nameRow.name}» — لا يمكن تكرار اسم المنتج`,
+      );
+    }
+  }
+  // ٢) الباركود — منتجات نشطة (أساسي) ثم باركودات وحداتها.
+  const cleanBarcode = barcode?.trim() ?? '';
+  if (cleanBarcode !== '') {
+    const productHit = await db.execute(
+      `SELECT name FROM products
+        WHERE barcode = ? AND is_archived = 0 AND id != ?
+        LIMIT 1`,
+      [cleanBarcode, excludeId ?? -1],
+    );
+    const productRow = productHit.rows?.[0] as {name?: string} | undefined;
+    if (productRow != null) {
+      throw new Error(
+        `الباركود ${cleanBarcode} مستخدم بالفعل للمنتج «${productRow.name}» — لا يمكن تكرار الباركود`,
+      );
+    }
+    const unitHit = await db.execute(
+      `SELECT p.name FROM product_units pu
+        JOIN products p ON p.id = pu.product_id
+        WHERE pu.barcode = ? AND p.is_archived = 0 AND pu.product_id != ?
+        LIMIT 1`,
+      [cleanBarcode, excludeId ?? -1],
+    );
+    const unitRow = unitHit.rows?.[0] as {name?: string} | undefined;
+    if (unitRow != null) {
+      throw new Error(
+        `الباركود ${cleanBarcode} مستخدم كوحدة للمنتج «${unitRow.name}» — لا يمكن تكرار الباركود`,
+      );
+    }
+  }
 }
 
 export const ProductRepo = {
@@ -153,6 +218,11 @@ export const ProductRepo = {
   async create(input: ProductInput): Promise<number> {
     const name = input.name.trim();
     if (!name) throw new Error('اسم المنتج مطلوب');
+    // v69 (الجولة 81 #٤): لا اسم مكرراً ولا باركوداً مكرراً بين
+    // المنتجات النشطة — يُتجاوز فحص الاسم للمنتجات النظامية فقط.
+    await assertNameBarcodeAvailable(name, input.barcode, undefined, {
+      skipName: input.allowDuplicateName === true,
+    });
     if (
       input.retail_price < 0 ||
       input.wholesale_price < 0 ||
@@ -204,6 +274,11 @@ export const ProductRepo = {
   async update(id: number, input: ProductInput): Promise<void> {
     const name = input.name.trim();
     if (!name) throw new Error('اسم المنتج مطلوب');
+    // v69 (الجولة 81 #٤): نفس حارس الإنشاء — باستثناء المنتج نفسه
+    // كي لا يمنع تعديله دون تغيير اسمه/باركوده.
+    await assertNameBarcodeAvailable(name, input.barcode, id, {
+      skipName: input.allowDuplicateName === true,
+    });
     if (
       input.retail_price < 0 ||
       input.wholesale_price < 0 ||

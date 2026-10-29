@@ -14,7 +14,7 @@
  * ٤ب. تنظيم صفحة التقارير بتبويبات: أربع مناطق محاسبية مستقلة
  *    بدل التمرير الطويل — وفواتير الدين والقسائم الشرائية نُقلت
  *    من بطاقة النقد إلى تبويبها المستقل.
- * ٥. الإصدار: 68.0.0 (76).
+ * ٥. الإصدار: 69.0.0 (76).
  */
 import {freshApp} from './helpers/app';
 
@@ -44,12 +44,18 @@ describe('v68 — ١ قيمة البضاعة في المخزون', () => {
     expect(src).toContain('Math.min(95, product.discount_pct ?? 0)');
   });
 
-  test('البطاقة في الواجهة فوق شريط التصنيفات', () => {
+  test('البطاقة انتقلت للمخزون→التقارير (تحديث الجولة 81)', () => {
+    // v69 (الجولة 81 #٢): حُذفت البطاقة من صفحة المخزون بطلب
+    // التاجر وانتقلت لتبويب مستقل في التقارير — المعادلة نفسها
+    // باقية في المخزون فقط لتغذية تقرير PDF.
     const src = read(INVENTORY);
-    expect(src).toContain('قيمة البضاعة (تكلفة)');
-    expect(src).toContain('قيمة بيعها');
-    expect(src).toContain('كمية مفتوحة بلا قيمة محسوبة');
-    expect(src).toContain('styles.valueStrip');
+    expect(src).toContain('const stockValue = useMemo(');
+    expect(src).not.toContain('styles.valueStrip');
+    const rep = read(REPORTS);
+    expect(rep).toContain('قيمة البضاعة');
+    expect(rep).toContain('styles.svHero');
+    expect(rep).toContain('قيمة المخزون بالكامل (تكلفة)');
+    expect(rep).toContain('كمية مفتوحة');
   });
 });
 
@@ -106,10 +112,10 @@ describe('v68 — ٤أ شعارات الجهات تملأ إطارها', () => {
 });
 
 describe('v68 — ٤ب صفحة التقارير بتبويبات', () => {
-  test('أربع تبويبات مستقلة بنفس تقسيم سطح المكتب', () => {
+  test('تبويبات مستقلة بنفس تقسيم سطح المكتب (خمسة بعد الجولة 81)', () => {
     const src = read(REPORTS);
     expect(src).toContain(
-      "type ReportTab = 'overview' | 'cash' | 'debts' | 'products';",
+      "type ReportTab = 'overview' | 'cash' | 'debts' | 'products' | 'stockValue';",
     );
     expect(src).toContain("const [activeTab, setActiveTab]");
     expect(src).toContain("key: 'overview', label: 'الملخص', icon: 'chart'");
@@ -122,6 +128,8 @@ describe('v68 — ٤ب صفحة التقارير بتبويبات', () => {
     expect(src).toContain(
       "key: 'products', label: 'المنتجات والتصدير', icon: 'list'",
     );
+    // v69 (الجولة 81 #٢): تبويب قيمة البضاعة المستقل.
+    expect(src).toContain("key: 'stockValue'");
     expect(src).toContain('styles.repTabsRow');
     expect(src).toContain('styles.repTabOn');
   });
@@ -141,12 +149,12 @@ describe('v68 — ٤ب صفحة التقارير بتبويبات', () => {
 });
 
 describe('v68 — ٥ الإصدار', () => {
-  test('68.0.0 (76) في config والبناء', () => {
+  test('69.0.0 (76) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '68.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 76');
+    expect(config).toContain("APP_VERSION = '69.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 77');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "68.0.0"');
-    expect(gradle).toContain('versionCode 76');
+    expect(gradle).toContain('versionName "69.0.0"');
+    expect(gradle).toContain('versionCode 77');
   });
 });

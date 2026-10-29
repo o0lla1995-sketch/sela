@@ -246,6 +246,41 @@ export const UnitRepo = {
     }[],
   ): Promise<void> {
     const db = getDb();
+    /* ── v69 (الجولة 81 #٤): لا باركود وحدة مكرراً — كل باركود
+       وحدة جديد يُفحص ضد باركودات المنتجات النشطة (الأساسية)
+       وباركودات وحدات منتجات أخرى. تكرار الباركود يكسر مسح نقطة
+       البيع (أي منتج يفتح؟) — يُرفض برسالة تسمّي صاحب الباركود. */
+    for (const row of rows) {
+      const code = row.barcode?.trim() ?? '';
+      if (code === '') {
+        continue;
+      }
+      const baseHit = await db.execute(
+        `SELECT name FROM products
+          WHERE barcode = ? AND is_archived = 0 AND id != ?
+          LIMIT 1`,
+        [code, productId],
+      );
+      const baseRow = baseHit.rows?.[0] as {name?: string} | undefined;
+      if (baseRow != null) {
+        throw new Error(
+          `باركود الوحدة ${code} مستخدم للمنتج «${baseRow.name}» — لا يمكن تكرار الباركود`,
+        );
+      }
+      const unitHit = await db.execute(
+        `SELECT p.name FROM product_units pu
+          JOIN products p ON p.id = pu.product_id
+          WHERE pu.barcode = ? AND p.is_archived = 0 AND pu.product_id != ?
+          LIMIT 1`,
+        [code, productId],
+      );
+      const unitRow = unitHit.rows?.[0] as {name?: string} | undefined;
+      if (unitRow != null) {
+        throw new Error(
+          `باركود الوحدة ${code} مستخدم كوحدة للمنتج «${unitRow.name}» — لا يمكن تكرار الباركود`,
+        );
+      }
+    }
     await db.execute('DELETE FROM product_units WHERE product_id = ?', [
       productId,
     ]);

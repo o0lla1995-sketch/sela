@@ -45,6 +45,7 @@ import {rangeFor} from '../../services/ReportService';
 import {displayMethod} from '../../core/paymentMethods';
 import {ExportService} from '../../services/ExportService';
 import {useToastStore} from '../../stores/toastStore';
+import {useCatalogStore} from '../../stores/catalogStore';
 import {
   fonts,
   makeStyles,
@@ -55,6 +56,7 @@ import {
 } from '../../core/theme';
 import {formatMoney, dayMonthLabel, weekdayLabel} from '../../core/format';
 import type {ReportRangeKey} from '../../core/types';
+import type {Product} from '../../core/types';
 import type {BarDatum} from '../../components/charts/BarChart';
 
 const RANGE_OPTIONS: {value: ReportRangeKey; label: string}[] = [
@@ -70,6 +72,17 @@ function arabicHour(hour: number): string {
   const safe = Math.min(23, Math.max(0, Math.round(hour)));
   const h12 = safe % 12 === 0 ? 12 : safe % 12;
   return `${h12} ${safe < 12 ? 'صباحاً' : 'مساءً'}`;
+}
+
+/** v69 (الجولة 81 #٢): السعر النهائي بعد خصم المنتج (0–95) — نفس
+ *  معادلة المخزون ونقطة البيع حرفياً كي تتطابق قيمة البضاعة هنا
+ *  مع رقم المخزون وتقرير PDF للمخزون. */
+function finalPriceOf(product: Product): number {
+  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  if (pct <= 0) {
+    return product.retail_price;
+  }
+  return Math.round(product.retail_price * (1 - pct / 100) * 100) / 100;
 }
 
 export function ReportsScreen() {
@@ -153,6 +166,78 @@ export function ReportsScreen() {
   // بدونهما كان الرسم أعرض من المتاح ببكسلين فيطرد الصف الأخير
   // خارج حدود البطاقة.
   const chartWidth = Math.max(220, winW - spacing.lg * 4 - 2);
+
+  /* ── v69 (الجولة 81 #٢): قيمة البضاعة الحالية — انتقلت من بطاقة
+     المخزون إلى تبويبها المستقل هنا. تُقرأ من كتالوج الذاكرة ويُعاد
+     تحميله عند كل دخول للشاشة فتبقى القيمة حية بعد كل بيع وإرجاع
+     (الكميات في products.stock_quantity تخصمها الفواتير وتعيدها
+     المرتجعات داخل معاملة واحدة). نفس معادلة المخزون حرفياً:
+     تكلفة×كمية لكل متتبع، والمفتوحة (بلا تتبع) تُعد ولا تُحتسب. ── */
+  const catalogProducts = useCatalogStore(state => state.products);
+  const catalogCategories = useCatalogStore(state => state.categories);
+  const refreshCatalog = useCatalogStore(state => state.refresh);
+  useFocusEffect(
+    useCallback(() => {
+      void refreshCatalog();
+    }, [refreshCatalog]),
+  );
+
+  const stockValue = useMemo(() => {
+    let costValue = 0;
+    let retailValue = 0;
+    let trackedCount = 0;
+    let untrackedCount = 0;
+    let outCount = 0;
+    const byCategory = new Map<
+      string,
+      {cost: number; retail: number; count: number}
+    >();
+    for (const product of catalogProducts) {
+      if (product.stock_untracked === 1) {
+        untrackedCount += 1;
+        const key = 'بلا تصنيف';
+        const bucket = byCategory.get(key) ?? {cost: 0, retail: 0, count: 0};
+        bucket.count += 1;
+        byCategory.set(key, bucket);
+        continue;
+      }
+      trackedCount += 1;
+      const qty = Math.max(0, product.stock_quantity ?? 0);
+      if (qty <= 0) {
+        outCount += 1;
+      }
+      const lineCost = product.cost_price * qty;
+      const lineRetail = finalPriceOf(product) * qty;
+      costValue += lineCost;
+      retailValue += lineRetail;
+      const categoryId = product.category_id ?? -1;
+      const name =
+        catalogCategories.find(cat => cat.id === categoryId)?.name ??
+        'بلا تصنيف';
+      const bucket = byCategory.get(name) ?? {cost: 0, retail: 0, count: 0};
+      bucket.cost += lineCost;
+      bucket.retail += lineRetail;
+      bucket.count += 1;
+      byCategory.set(name, bucket);
+    }
+    const categoryRows = Array.from(byCategory.entries())
+      .map(([name, value]) => ({
+        name,
+        cost: Math.round(value.cost * 100) / 100,
+        retail: Math.round(value.retail * 100) / 100,
+        count: value.count,
+      }))
+      .sort((a, b) => b.cost - a.cost);
+    return {
+      costValue: Math.round(costValue * 100) / 100,
+      retailValue: Math.round(retailValue * 100) / 100,
+      margin: Math.round((retailValue - costValue) * 100) / 100,
+      trackedCount,
+      untrackedCount,
+      outCount,
+      categoryRows,
+    };
+  }, [catalogProducts, catalogCategories]);
 
   // v42 (الجولة 50 #3): رسم المبيعات يتبع الفترة المحددة بدقة
   //  — لا اقتطاع لآخر عشرة أعمدة بعد اليوم ولا أسماء أسابيع
@@ -288,19 +373,36 @@ export function ReportsScreen() {
   const cash = bundle?.cash;
   const paired = cash?.paired ?? false;
 
-  /* ── v68 (الجولة 80 #٤ب): تنظيم صفحة التقارير بتبويبات — طلب
-     التاجر نصاً «تحسين وتنظيم صفحة التقارير بشكل احترافي… حتى مع
-     كمية كبيرة من البيانات» (نفس تقسيم سطح المكتب v76): أربع
-     مناطق محاسبية مستقلة بدل التمرير الطويل الواحد — الملخص،
-     النقد والخزينة، الديون والقسائم، المنتجات والتصدير. ── */
-  type ReportTab = 'overview' | 'cash' | 'debts' | 'products';
+  /* ── v68 (الجولة 80 #٤ب) ← v69 (الجولة 81 #١/#٢): تنظيم صفحة
+     التقارير بتبويبات — طلب التاجر نصاً «تحسين وتنظيم صفحة التقارير
+     بشكل احترافي… حتى مع كمية كبيرة من البيانات» (نفس تقسيم سطح
+     المكتب v76): خمس مناطق مستقلة بدل التمرير الطويل الواحد —
+     الملخص، النقد والخزينة، الديون والقسائم، المنتجات والتصدير،
+     وقيمة البضاعة. الجولة 81: التبويبات أيقونات فقط بلا نص بجانبها
+     (بطلب التاجر نصاً)، واسم التبويب النشط يظهر سطراً صغيراً تحت
+     الشريط؛ وقيمة البضاعة انتقلت من بطاقة المخزون إلى تبويبها
+     المستقل هنا — قيمة حية تتحدث بعد كل بيع وإرجاع (المخزون في
+     الذاكرة يُعاد تحميله عند كل دخول للشاشة). ── */
+  type ReportTab = 'overview' | 'cash' | 'debts' | 'products' | 'stockValue';
   const [activeTab, setActiveTab] = useState<ReportTab>('overview');
-  const TABS: {key: ReportTab; label: string; icon: IconName}[] = [
-    {key: 'overview', label: 'الملخص', icon: 'chart'},
-    {key: 'cash', label: 'النقد والخزينة', icon: 'wallet'},
-    {key: 'debts', label: 'الديون والقسائم', icon: 'book'},
-    {key: 'products', label: 'المنتجات والتصدير', icon: 'list'},
+  const TABS: {
+    key: ReportTab;
+    label: string;
+    icon: IconName;
+    hint: string;
+  }[] = [
+    {key: 'overview', label: 'الملخص', icon: 'chart', hint: 'مؤشرات المبيعات وأداؤها'},
+    {key: 'cash', label: 'النقد والخزينة', icon: 'wallet', hint: 'المحصّل والمصروفات وأرصدة القنوات'},
+    {key: 'debts', label: 'الديون والقسائم', icon: 'book', hint: 'فواتير الدين والقسائم الشرائية'},
+    {key: 'products', label: 'المنتجات والتصدير', icon: 'list', hint: 'الأكثر إيراداً وتصدير التقارير'},
+    {
+      key: 'stockValue',
+      label: 'قيمة البضاعة',
+      icon: 'box',
+      hint: 'قيمة مخزونك الحالية بالتكلفة والبيع',
+    },
   ];
+  const activeTabMeta = TABS.find(tab => tab.key === activeTab);
 
   return (
     <View style={styles.screen}>
@@ -326,31 +428,31 @@ export function ReportsScreen() {
           <EmptyState icon="chart" title="جارٍ تحميل التقارير…" />
         ) : bundle ? (
           <>
-            {/* ── v68 (الجولة 80 #٤ب): شريط التبويبات — أربع مناطق
-                محاسبية مستقلة؛ التبويب النشط بالبرتقالي وشرحه تحته. */}
+            {/* ── v69 (الجولة 81 #١): شريط التبويبات أيقونات فقط —
+                طلب التاجر نصاً «بايقونات دون نص بجانبه». اسم التبويب
+                النشط يبقى سطراً صغيراً تحت الشريط كي لا يضيع التاجر
+                بين خمسة رموز. ── */}
             <View style={styles.repTabsRow}>
               {TABS.map(tab => (
                 <TouchableOpacity
                   key={tab.key}
                   style={[styles.repTab, activeTab === tab.key ? styles.repTabOn : null]}
                   activeOpacity={0.75}
-                  onPress={() => setActiveTab(tab.key)}>
+                  onPress={() => setActiveTab(tab.key)}
+                  accessibilityRole="tab"
+                  accessibilityLabel={tab.label}
+                  accessibilityState={{selected: activeTab === tab.key}}>
                   <Icon
                     name={tab.icon}
-                    size={16}
+                    size={19}
                     color={activeTab === tab.key ? '#FFFFFF' : c.textDim}
                   />
-                  <Text
-                    style={[
-                      styles.repTabText,
-                      activeTab === tab.key ? styles.repTabTextOn : null,
-                    ]}
-                    numberOfLines={1}>
-                    {tab.label}
-                  </Text>
                 </TouchableOpacity>
               ))}
             </View>
+            <Text style={styles.repTabHint} numberOfLines={1}>
+              {activeTabMeta?.label} — {activeTabMeta?.hint}
+            </Text>
 
             {/* v68: تبويب «الملخص» — KPIs + رسما الأداء والذروة. */}
             {activeTab === 'overview' ? (
@@ -1121,6 +1223,129 @@ export function ReportsScreen() {
             </Card>
             </>
             ) : null}
+
+            {/* ── v69 (الجولة 81 #٢): تبويب «قيمة البضاعة» — طلب
+                التاجر نصاً: القيمة في صفحة التقارير بتبويب منفرد،
+                محدثة بعد البيع والارجاع «لان ما يهم التاجر ان يعرف
+                قيمة البضاعة الحالية للمنتجات في المخزون بعد كل
+                العمليات». القيمة حية من كتالوج الذاكرة (يُعاد
+                تحميله عند دخول الشاشة) — بطاقة بطل + KPIs + تفصيل
+                بالتصنيفات بترتيب الأغلى. ── */}
+            {activeTab === 'stockValue' ? (
+            <>
+            <Card>
+              <SectionTitle
+                title="قيمة البضاعة الحالية"
+                hint="تتحدث تلقائياً بعد كل عملية بيع وإرجاع"
+              />
+              <View style={styles.svHero}>
+                <Text style={styles.svHeroLabel}>
+                  قيمة المخزون بالكامل (تكلفة)
+                </Text>
+                <Text style={[styles.svHeroValue, {color: c.accent}]}>
+                  {formatMoney(stockValue.costValue)}
+                </Text>
+                <Text style={styles.svHeroMeta}>
+                  قيمة بيعها {formatMoney(stockValue.retailValue)} · هامش{' '}
+                  <Text style={[styles.svHeroMeta, {color: c.success}]}>
+                    {formatMoney(stockValue.margin)}
+                  </Text>
+                </Text>
+              </View>
+              <View style={styles.statsGrid}>
+                <View style={styles.statsCell}>
+                  <StatCard
+                    label="قيمة بالتكلفة"
+                    value={formatMoney(stockValue.costValue)}
+                    tone="accent"
+                    icon="calculator"
+                  />
+                </View>
+                <View style={styles.statsCell}>
+                  <StatCard
+                    label="قيمة بالبيع"
+                    value={formatMoney(stockValue.retailValue)}
+                    tone="success"
+                    icon="tag"
+                  />
+                </View>
+                <View style={styles.statsCell}>
+                  <StatCard
+                    label="منتجات متتبعة"
+                    value={String(stockValue.trackedCount)}
+                    icon="box"
+                  />
+                </View>
+                <View style={styles.statsCell}>
+                  <StatCard
+                    label={
+                      stockValue.outCount > 0
+                        ? `نافد · ${stockValue.outCount}`
+                        : 'كمية مفتوحة (بلا تتبع)'
+                    }
+                    value={
+                      stockValue.outCount > 0
+                        ? String(stockValue.outCount)
+                        : String(stockValue.untrackedCount)
+                    }
+                    tone={stockValue.outCount > 0 ? 'danger' : undefined}
+                    icon={stockValue.outCount > 0 ? 'alert' : 'info'}
+                  />
+                </View>
+              </View>
+              {stockValue.untrackedCount > 0 ? (
+                <Text style={styles.svNote}>
+                  {stockValue.untrackedCount} منتجاً بكمية مفتوحة (بلا تتبع)
+                  لا تُحتسب قيمتها — ليس لكميتها رقم معروف.
+                </Text>
+              ) : null}
+            </Card>
+
+            {stockValue.categoryRows.length > 0 ? (
+            <Card>
+              <SectionTitle
+                title="القيمة حسب التصنيف"
+                hint="الأغلى تكلفةً أولاً — من متتبعي الكمية فقط"
+              />
+              {stockValue.categoryRows.map((row, index) => {
+                const maxCost =
+                  stockValue.categoryRows[0]?.cost > 0
+                    ? stockValue.categoryRows[0].cost
+                    : 1;
+                const pct = Math.max(
+                  4,
+                  Math.round((row.cost / maxCost) * 100),
+                );
+                return (
+                  <View key={row.name} style={styles.svCatRow}>
+                    <View style={styles.svCatHead}>
+                      <Text style={styles.svCatName} numberOfLines={1}>
+                        {index + 1}. {row.name}
+                        <Text style={styles.svCatCount}> · {row.count} منتجاً</Text>
+                      </Text>
+                      <Text
+                        style={[
+                          styles.svCatValue,
+                          {color: c.accent},
+                        ]}>
+                        {formatMoney(row.cost)}
+                      </Text>
+                    </View>
+                    <View style={styles.svCatBarTrack}>
+                      <View
+                        style={[styles.svCatBarFill, {width: `${pct}%`}]}
+                      />
+                    </View>
+                    <Text style={styles.svCatMeta}>
+                      قيمة بيعها {formatMoney(row.retail)}
+                    </Text>
+                  </View>
+                );
+              })}
+            </Card>
+            ) : null}
+            </>
+            ) : null}
           </>
         ) : null}
       </ScrollView>
@@ -1195,20 +1420,20 @@ function CollapseSection({
 
 const useStyles = makeStyles(c =>
   StyleSheet.create({
-    // ── v68 (الجولة 80 #٤ب): شريط تبويبات التقارير ──
+    // ── v68 (الجولة 80 #٤ب) ← v69 (الجولة 81 #١): شريط تبويبات
+    //    التقارير — أيقونات فقط بلا نص بجانبها (بطلب التاجر)، كل
+    //    تبويب مربع متساوٍ يتوسطه الرمز، واسم النشط تحت الشريط. ──
     repTabsRow: {
       flexDirection: 'row',
       gap: 6,
       marginVertical: 2,
-      marginBottom: 10,
+      marginBottom: 4,
     },
     repTab: {
       flex: 1,
-      flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 6,
-      paddingVertical: 10,
+      paddingVertical: 11,
       paddingHorizontal: 6,
       borderRadius: 12,
       backgroundColor: c.surface,
@@ -1219,13 +1444,90 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.accent,
       borderColor: c.accent,
     },
-    repTabText: {
-      fontSize: 12,
-      fontFamily: fonts.bold,
-      color: c.textDim,
+    /** v69: اسم التبويب النشط وشرحه — سطر صغير تحت الشريط. */
+    repTabHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small - 1,
+      lineHeight: 17,
+      marginBottom: 8,
+      textAlign: 'right',
     },
-    repTabTextOn: {
-      color: '#FFFFFF',
+    /* ── v69 (الجولة 81 #٢): تبويب قيمة البضاعة — البطاقة البطل
+       وصفوف التصنيفات (نفس لغة cashHero/topRow القائمة). ── */
+    svHero: {
+      alignItems: 'center',
+      gap: 3,
+      paddingVertical: spacing.sm + 2,
+      marginBottom: spacing.md,
+    },
+    svHeroLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    svHeroValue: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.title + 4,
+      fontVariant: ['tabular-nums'],
+    },
+    svHeroMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 18,
+      textAlign: 'center',
+    },
+    svNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 17,
+      marginTop: spacing.sm,
+    },
+    svCatRow: {
+      gap: 4,
+      paddingVertical: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    svCatHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    svCatName: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body - 1,
+    },
+    svCatCount: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+    },
+    svCatValue: {
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      fontVariant: ['tabular-nums'],
+    },
+    svCatBarTrack: {
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: c.borderSoft,
+      overflow: 'hidden',
+    },
+    svCatBarFill: {
+      height: '100%',
+      borderRadius: 3,
+      backgroundColor: c.accent,
+    },
+    svCatMeta: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
     },
     /** v64 (الجولة 76 #6): بطاقة أرصدة المحافظ والبنوك. */
     methodCard: {

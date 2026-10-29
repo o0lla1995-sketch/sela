@@ -141,6 +141,11 @@ function rowToReturn(row: Record<string, unknown>): SaleReturnRecord {
     invoice_ref: String(row.invoice_ref ?? ''),
     book: String(row.book ?? 'cash') as SaleReturnRecord['book'],
     refund_method: String(row.refund_method ?? 'none') as 'none' | 'cash',
+    // v69 (الجولة 81 #٣): قناة التسوية — NULL = نقد من الخزينة.
+    refund_channel:
+      row.refund_channel == null || row.refund_channel === ''
+        ? null
+        : String(row.refund_channel),
     refund_minor: Number(row.refund_minor ?? 0),
     debt_adjusted_minor: Number(row.debt_adjusted_minor ?? 0),
     is_exchange: Number(row.is_exchange ?? 0) === 1 ? 1 : 0,
@@ -523,6 +528,12 @@ export const SaleRepo = {
     invoiceRef: string;
     book: ReturnBook;
     refundMethod: 'none' | 'cash';
+    /** v69 (الجولة 81 #٣): قناة تسوية الاسترداد/الفرق — null أو
+     *  'cash' = نقد من الخزينة؛ معرف محفظة/بنك = حُوّل المبلغ
+     *  إليها/منها. تُخزن في sale_returns.refund_channel وعلى صف
+     *  RET في sales.payment_method فتتغذى أرصدة القنوات (تقارير
+     *  methodLedgerTotals) من نفس المحرك بلا تغيير استعلام. */
+    refundChannel?: string | null;
     /** Pro-rata discount ratio of the original invoice (0..1]. */
     discountRatio: number;
     lines: ReturnLineInput[];
@@ -634,6 +645,12 @@ export const SaleRepo = {
     const diffMinor = exchangeMode ? refundMinor - exchangeMinor : 0;
 
     let returnId = -1;
+    // v69 (الجولة 81 #٣): القناة الفعلية للتسوية — نقدي (null/'cash')
+    // أو محفظة/بنك؛ تُكتب على صف RET فتُحسب أرصدة القنوات تلقائياً.
+    const refundChannel =
+      input.refundChannel != null && input.refundChannel !== 'cash'
+        ? input.refundChannel
+        : null;
 
     await db.transaction(async tx => {
       // 1) The NEGATIVE invoice — every existing aggregation (revenue,
@@ -642,8 +659,8 @@ export const SaleRepo = {
       //    which side to net.
       const insertRet = await tx.execute(
         `INSERT INTO sales
-          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, return_kind, cashier_id)
-         VALUES (?, ?, ?, ?, 0, 'RETAIL', ?, ?, ?)`,
+          (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, return_kind, cashier_id, payment_method)
+         VALUES (?, ?, ?, ?, 0, 'RETAIL', ?, ?, ?, ?)`,
         [
           input.returnNumber,
           // v40 (الجولة 48 #2): وضع الاستبدال يحمل الصافي —
@@ -660,6 +677,9 @@ export const SaleRepo = {
           createdAt,
           input.book,
           input.cashierId ?? null,
+          // v69 (الجولة 81 #٣): قناة التسوية على صف RET —
+          // methodLedgerTotals يجمّع مرتجعات كل قناة من هذا العمود.
+          refundChannel ?? 'cash',
         ],
       );
       const retSaleId = insertRet.insertId ?? -1;
@@ -737,10 +757,12 @@ export const SaleRepo = {
       // 3) The return receipt + its line snapshots.
       //    v36: وضع الاستبدال → refund_method 'none' قسراً (لا نقد)
       //    + is_exchange=1 + exchange_minor؛ الدين لا يُمس إطلاقاً.
+      //    v69 (الجولة 81 #٣): قناة التسوية تُخزن بجانب الطريقة —
+      //    النقدي من الخزينة NULL، والمحفظة/البنك بمعرفها.
       const insertReturn = await tx.execute(
         `INSERT INTO sale_returns
-          (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, is_exchange, exchange_minor, note, created_at, cashier_id)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+          (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, is_exchange, exchange_minor, note, created_at, cashier_id, refund_channel)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
         [
           input.returnNumber,
           input.saleId,
@@ -753,6 +775,7 @@ export const SaleRepo = {
           input.note?.trim() || null,
           createdAt,
           input.cashierId ?? null,
+          refundChannel,
         ],
       );
       returnId = insertReturn.insertId ?? -1;

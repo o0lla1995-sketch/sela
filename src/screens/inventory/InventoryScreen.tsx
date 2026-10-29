@@ -630,30 +630,10 @@ function InventoryLayout({
           </TouchableOpacity>
         </View>
 
-        {/* ── v68 (الجولة 80 #١): شريط قيمة البضاعة في المخزون —
-            نفس بطاقة سطح المكتب: تكلفة×كمية لكل متتبع + قيمتها
-            بالبيع وهامشها، والكمية المفتوحة تُعد منفصلة كي يعرف
-            التاجر بدقة ما الذي يشمله الرقم. ── */}
-        <View style={styles.valueStrip}>
-          <View style={styles.valueHero}>
-            <Text style={styles.valueLabel}>قيمة البضاعة (تكلفة)</Text>
-            <Text style={[styles.valueAmount, {color: c.accent}]}>
-              {formatMoney(stockValue.costValue)}
-            </Text>
-            <Text style={styles.valueMeta}>
-              قيمة بيعها {formatMoney(stockValue.retailValue)} · هامش{' '}
-              {formatMoney(stockValue.margin)}
-            </Text>
-            <Text style={styles.valueMeta}>
-              متتبع {stockValue.trackedCount}
-              {stockValue.untrackedCount > 0
-                ? ` · ${stockValue.untrackedCount} كمية مفتوحة بلا قيمة محسوبة`
-                : stockValue.outCount > 0
-                ? ` · ${stockValue.outCount} نافد`
-                : ''}
-            </Text>
-          </View>
-        </View>
+        {/* ── v68 (الجولة 80 #١) ← v69 (الجولة 81 #٢): شريط قيمة
+            البضاعة حُذف من هنا بطلب التاجر — انتقل إلى صفحة التقارير
+            بتبويبه المستقل (قيمة حية تتحدث بعد كل بيع وإرجاع).
+            المعادلة نفسها باقية هنا فقط لتغذية تقرير PDF للمخزون. ── */}
 
         {/* ── Category chips — compact, horizontally scrollable.
             v29 (round-37 #2): ALWAYS rendered — the keyboard-reactive
@@ -1149,33 +1129,9 @@ const useStyles = makeStyles(c =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    // ── v68 (الجولة 80 #١): بطاقة قيمة البضاعة في المخزون ──
-    valueStrip: {
-      backgroundColor: c.surface,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingVertical: spacing.md,
-      paddingHorizontal: spacing.lg,
-      borderStartWidth: 3,
-      borderStartColor: c.accent,
-    },
-    valueHero: {gap: 3},
-    valueLabel: {
-      fontSize: typography.small,
-      color: c.textDim,
-      fontWeight: '600',
-    },
-    valueAmount: {
-      fontSize: typography.heading,
-      fontWeight: '800',
-      fontVariant: ['tabular-nums'],
-    },
-    valueMeta: {
-      fontSize: typography.small,
-      color: c.textDim,
-      lineHeight: 18,
-    },
+    // ── v68 (الجولة 80 #١) ← v69 (الجولة 81 #٢): أنماط بطاقة قيمة
+    //    البضاعة حُذفت مع البطاقة — القيمة الآن تبويب مستقل في
+    //    صفحة التقارير (svHero/svCat* في ReportsScreen). ──
     // v8.2 (round-11 #4): header overflow menu — replaces the three
     // tall quick-action cards that used to push the list down.
     headerActions: {

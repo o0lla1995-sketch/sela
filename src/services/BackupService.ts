@@ -49,6 +49,8 @@ interface SaleReturnBackupEntry {
   sale_invoice_ref: string;
   book: string;
   refund_method: string;
+  /** v69 (الجولة 81 #٣): قناة التسوية — null = نقد من الخزينة. */
+  refund_channel?: string | null;
   refund_minor: number;
   debt_adjusted_minor: number;
   note: string | null;
@@ -204,6 +206,7 @@ export interface BackupFile {
     sale_invoice_ref: string;
     book: string;
     refund_method: string;
+    refund_channel?: string | null;
     refund_minor: number;
     debt_adjusted_minor: number;
     note: string | null;
@@ -496,7 +499,7 @@ export const BackupService = {
       db
         .execute(
           `SELECT sr.return_number, sr.invoice_ref AS sale_invoice_ref, sr.book,
-                  sr.refund_method, sr.refund_minor, sr.debt_adjusted_minor,
+                  sr.refund_method, sr.refund_channel, sr.refund_minor, sr.debt_adjusted_minor,
                   sr.note, sr.created_at,
                   si.id AS sale_item_id, si.product_id, si.product_name,
                   si.quantity, si.unit_name, si.base_quantity, si.unit_price,
@@ -760,6 +763,11 @@ export const BackupService = {
               sale_invoice_ref: String(row.sale_invoice_ref ?? ''),
               book: String(row.book ?? 'cash'),
               refund_method: String(row.refund_method ?? 'none'),
+              // v69 (الجولة 81 #٣): قناة التسوية مع المرتجع.
+              refund_channel:
+                row.refund_channel == null || row.refund_channel === ''
+                  ? null
+                  : String(row.refund_channel),
               refund_minor: Number(row.refund_minor ?? 0),
               debt_adjusted_minor: Number(row.debt_adjusted_minor ?? 0),
               note: row.note == null ? null : String(row.note),
@@ -1474,8 +1482,8 @@ export const BackupService = {
         }
         const insertedReturn = await tx.execute(
           `INSERT INTO sale_returns
-            (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, note, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, note, created_at, refund_channel)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             ret.return_number,
             newSaleId,
@@ -1486,6 +1494,8 @@ export const BackupService = {
             Number(ret.debt_adjusted_minor ?? 0),
             ret.note ?? null,
             ret.created_at || nowLocal(),
+            // v69 (الجولة 81 #٣): قناة التسوية إن وُجدت بالنسخة.
+            ret.refund_channel ?? null,
           ],
         );
         for (const line of ret.items ?? []) {

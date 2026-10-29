@@ -1060,6 +1060,11 @@ export const InvoiceService = {
     saleId: number;
     lines: ReturnLineInput[];
     refundMethod: 'none' | 'cash';
+    /** v69 (الجولة 81 #٣): قناة تسوية الاسترداد/الفرق — null أو
+     *  'cash' = نقد من الخزينة؛ معرف محفظة/بنك = التاجر حوّل
+     *  المبلغ للزبون منها أو قبضه فيها. تصل إلى sale_returns
+     *  وصف RET في sales.payment_method (أرصدة القنوات). */
+    refundChannel?: string | null;
     note?: string | null;
     print: boolean;
     receiptSettings: ReceiptSettings;
@@ -1298,6 +1303,7 @@ export const InvoiceService = {
           invoiceRef: prep.sale.invoice_number,
           book: prep.book,
           refundMethod: input.refundMethod,
+          refundChannel: input.refundChannel ?? null,
           discountRatio: prep.discountRatio,
           lines: input.lines,
           silaReversal,

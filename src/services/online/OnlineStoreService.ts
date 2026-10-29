@@ -679,6 +679,9 @@ export async function ensureDeliveryFeeProduct(): Promise<number> {
     category_id: null,
     image_uri: null,
     stock_untracked: 1,
+    // v69 (الجولة 81 #٤): منتج نظامي يُنشأ مؤرشفاً فوراً — يتجاوز
+    // فحص تكرار الاسم (لو سمّى تاجر منتجاً حياً بنفس الاسم).
+    allowDuplicateName: true,
   }).then(async id => {
     // تأريش فوري: منتج نظامي لا يظهر في أي قائمة.
     await getDb().execute('UPDATE products SET is_archived = 1 WHERE id = ?', [id]);

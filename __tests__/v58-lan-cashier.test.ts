@@ -63,7 +63,7 @@ describe('v58 — الكاشير على الشبكة المحلية', () => {
       "SELECT COUNT(*) AS cnt FROM pragma_table_info('sale_returns') WHERE name = 'cashier_id'",
     );
     expect(Number((retCol.rows as any[])[0].cnt)).toBe(1);
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(31); // v64: قنوات الخزينة // v63: طرق الدفع // v59: client_ref
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(32); // v69: قناة تسوية الاسترداد // v64: قنوات الخزينة // v63: طرق الدفع // v59: client_ref
   });
 
   test('② الحساب والمصادقة: الصحيح يمر والخاطئ يُرفض', async () => {

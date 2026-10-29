@@ -175,7 +175,10 @@ const DDL_STATEMENTS: string[] = [
     refund_minor INTEGER NOT NULL CHECK (refund_minor > 0),
     debt_adjusted_minor INTEGER NOT NULL DEFAULT 0,
     note TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    /* v69 (الجولة 81 #٣): قناة تسوية الاسترداد/الفرق — نقدي من
+       الخزينة (NULL) أو محفظة/بنك (معرف طريقة الدفع). */
+    refund_channel TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS sale_return_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2024,6 +2027,26 @@ async function applyMigrations(database: DB): Promise<void> {
     }
     logDiag('db', 'ترحيل v31: قناة المصدر/الوجهة لحركات الخزينة');
     version = 31;
+  }
+
+  if (version < 32) {
+    // ── v69 (الجولة 81 #٣): قناة تسوية الاسترداد وفرق الاستبدال —
+    //    التاجر يخيّر الكاشير: نقد من الخزينة أو تحويل بمحفظة/بنك
+    //    (نفس معرفات طرق الدفع). NULL = نقدي/خزينة (كل التاريخ
+    //    القائم بلا ترحيل قيم). القناة تُكتب أيضاً في صف RET بجدول
+    //    sales (payment_method) فتتغذى أرصدة القنوات في التقارير
+    //    من نفس محرك methodLedgerTotals بلا أي تغيير استعلام.
+    const retCol = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sale_returns') WHERE name = 'refund_channel'",
+    );
+    const retRows = (retCol.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(retRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE sale_returns ADD COLUMN refund_channel TEXT',
+      );
+    }
+    logDiag('db', 'ترحيل v32: قناة تسوية الاسترداد (محافظ/بنوك)');
+    version = 32;
   }
 
   if (version !== storedVersion) {

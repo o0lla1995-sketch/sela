@@ -11,6 +11,7 @@
 import {ReceiptBuilder} from './escpos';
 import {formatDateTime} from '../../core/format';
 import {APP_NAME, RECEIPT_WIDTH_58, RECEIPT_WIDTH_80} from '../../core/config';
+import {paymentMethodLabel} from '../../core/paymentMethods';
 import type {
   SaleReturnExchange,
   SaleReturnItem,
@@ -40,6 +41,8 @@ const LABELS = {
   diffDebtDown: 'Debt REDUCED by the difference',
   diffDebtUp: 'Debt INCREASED by the difference',
   diffDebtUpQueued: 'SILA debt increase queued',
+  // v69 (الجولة 81 #٣): قناة التسوية حين ليست نقداً من الخزينة.
+  viaChannel: 'Via',
   qty: 'Qty x Price = Amount',
   thanks: 'Thank You!',
 } as const;
@@ -159,6 +162,15 @@ export function buildReturnReceiptJob(
         .align(2);
       if (data.ret.book === 'cash') {
         b.textLine(diffMinor > 0 ? LABELS.diffCashOut : LABELS.diffCashIn);
+        // v69 (الجولة 81 #٣): القناة على السطر التالي حين ليست نقداً.
+        if (
+          data.ret.refund_channel != null &&
+          data.ret.refund_channel !== 'cash'
+        ) {
+          b.textLine(
+            `${LABELS.viaChannel}: ${paymentMethodLabel(data.ret.refund_channel)}`,
+          );
+        }
       } else if (diffMinor > 0) {
         b.textLine(LABELS.diffDebtDown);
       } else {
@@ -185,6 +197,16 @@ export function buildReturnReceiptJob(
     b.align(2).textLine(
       data.ret.refund_method === 'cash' ? LABELS.cashRefund : LABELS.noRefund,
     );
+    // v69 (الجولة 81 #٣): القناة على السطر التالي حين ليست نقداً.
+    if (
+      data.ret.refund_method === 'cash' &&
+      data.ret.refund_channel != null &&
+      data.ret.refund_channel !== 'cash'
+    ) {
+      b.textLine(
+        `${LABELS.viaChannel}: ${paymentMethodLabel(data.ret.refund_channel)}`,
+      );
+    }
   }
 
   // ── Footer ──

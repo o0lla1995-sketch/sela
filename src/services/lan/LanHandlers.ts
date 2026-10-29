@@ -1396,6 +1396,12 @@ async function handleReturn(
   }
 
   const refundMethod = body.refundMethod === 'none' ? 'none' : 'cash';
+  // v69 (الجولة 81 #٣): قناة التسوية من الكاشير (اختيارية — بلاها
+  // نقد من الخزينة كالسلوك التاريخي).
+  const refundChannel =
+    typeof body.refundChannel === 'string' && body.refundChannel !== ''
+      ? body.refundChannel
+      : 'cash';
   // v60: طباعة إيصال المرتجع من طابعة نقطة البيع إن طُلبت ومتصلة.
   const print = body.print === true && (await printerConnected());
   try {
@@ -1404,6 +1410,7 @@ async function handleReturn(
       lines,
       // الاستبدال يسوّى بالفرق — نفس قاعدة نقطة البيع (none).
       refundMethod: exchange.length > 0 ? 'none' : refundMethod,
+      refundChannel,
       note: body.note ? String(body.note).slice(0, 200) : null,
       print,
       receiptSettings: receiptSettings(),

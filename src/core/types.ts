@@ -314,6 +314,10 @@ export interface SaleReturnRecord {
   invoice_ref: string;
   book: ReturnBook;
   refund_method: 'none' | 'cash';
+  /** v69 (الجولة 81 #٣): قناة تسوية الاسترداد/الفرق — null = نقد
+   *  من الخزينة، أو معرف محفظة/بنك (jawwal_pay، bank_quds…) عندما
+   *  حُوّل المبلغ للزبون أو قبضه منها. */
+  refund_channel: string | null;
   /** Value of the returned goods, minor units. */
   refund_minor: number;
   /** The part that reduced a DEBT book (sila queue / local row). */
