@@ -1557,6 +1557,11 @@ export function InvoiceDetailScreen() {
                   <View style={{flex: 1}}>
                     <Text style={styles.itemName} numberOfLines={2}>
                       {names.get(item.product_id) ?? `#${item.product_id}`}
+                      {/* v71 (الجولة 83 #١): وصف المتغير/الحجم/الباكج —
+                          تمييز ما بيع تحديداً كما في الإيصال المطبوع. */}
+                      {item.variant_label
+                        ? ` (${item.variant_label})`
+                        : ''}
                       {item.unit_name && item.unit_name !== 'قطعة'
                         ? ` (${item.unit_name})`
                         : ''}
@@ -1568,6 +1573,14 @@ export function InvoiceDetailScreen() {
                         {formatMoney(item.total_line_price)}
                       </Text>
                     </Text>
+                    {/* v71: القطع الفعلية للوحدات/الباكجات (2 علبة =
+                        40 حبة — باكجان 3 حبات = 6 حبات). */}
+                    {item.base_quantity != null &&
+                    item.base_quantity > item.quantity + 0.0001 ? (
+                      <Text style={styles.itemMeta}>
+                        = {formatQty(item.base_quantity)} قطعة
+                      </Text>
+                    ) : null}
                   </View>
                 </View>
               ))}
