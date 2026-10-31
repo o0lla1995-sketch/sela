@@ -195,7 +195,9 @@ export function QuickProductSheet({
 
     setBusy(true);
     try {
-      const packages = parsePackageRows();
+      // v71: الوزني يُباع بالوزن من لوحة الوزن — صفوف الباكجات (إن
+      //  بقيت من اختيار قطعي سابق) تُتجاهل بصمت لا أن تُفشل الحفظ.
+      const packages = sellBy === 'gram' ? [] : parsePackageRows();
       const stockInput = parsePositiveNumber(stock);
       await QuickProductService.createQuickProduct({
         name: trimmed,
