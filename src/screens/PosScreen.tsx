@@ -38,13 +38,13 @@ import {
   Stepper,
 } from '../components/ui';
 import {Icon} from '../components/Icon';
-import {QuickProductSheet} from '../components/QuickProductSheet';
 import {
   useCartStore,
   cartTotals,
   unitPriceFor,
   applyProductDiscount,
   applyPctDiscount,
+  UNTRACKED_STOCK,
 } from '../stores/cartStore';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useSettingsStore, type PosProductView} from '../stores/settingsStore';
@@ -65,6 +65,8 @@ import {getJson, setJson, KEYS} from '../storage/storage';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {VariantRepo} from '../database/repositories/VariantRepo';
+import {SaleRepo} from '../database/repositories/SaleRepo';
+import {parsePackageCount} from '../services/QuickProductService';
 import {SilaRepo} from '../services/sila/SilaRepo';
 import {SilaSync} from '../services/sila/SilaSync';
 import {parseSilaQr} from '../services/sila/qr';
@@ -120,6 +122,8 @@ import type {
   Product,
   ProductUnit,
   ProductVariant,
+  SaleItemRecord,
+  SaleRecord,
 } from '../core/types';
 
 const GRID_COLUMNS = 3;
@@ -146,6 +150,138 @@ function makeScanSession() {
   };
 }
 type ScanSession = ReturnType<typeof makeScanSession>;
+
+/** v71 (الجولة 83 #٥): بناء أسطر سلة من بنود فاتورة سابقة —
+ *  «الرجوع للفاتورة السابقة» بطلب التاجر نصاً: «في السلة أن يستطيع
+ *  المستخدم الرجوع إلى الفاتورة السابقة بكل سهولة إذا كانت السلة
+ *  فارغة».
+ *  ─────────────────────────────────────────────────────────────────
+ *  المطابقة على المنتجات الحية من الكتالوج (والمتغيرات/الوحدات
+ *  من قاعدة البيانات عند غيابها)، والأسعار من الفاتورة نفسها
+ *  (لا تُعاد تسعيرتها) حتى يُرى ما بيع فعلاً لحظتها. المخزون
+ *  المتاح يُقرأ من الوضع الحالي (بلا تتبع → غير محدود). إن ضاع
+ *  سياق الوحدة/المتغير يُحوَّل السطر لوحدة الأساس بالقطع مع حفظ
+ *  قيمة السطر كاملة (الكمية = القطع الأساسية، السعر = القيمة ÷
+ *  القطع). الربط والباكجات تستعيد معامل تحويلها من القطع الأساسية
+ *  المسجلة (base_quantity ÷ quantity). */
+async function buildRecallLines(
+  items: SaleItemRecord[],
+  products: Product[],
+): Promise<{lines: CartLine[]; missing: number}> {
+  const byId = new Map(products.map(p => [p.id, p]));
+  const out: CartLine[] = [];
+  let missing = 0;
+
+  const pushLine = (line: CartLine) => {
+    const existing = out.find(entry => entry.key === line.key);
+    if (existing != null) {
+      existing.quantity += line.quantity;
+      return;
+    }
+    out.push(line);
+  };
+
+  for (const item of items) {
+    const product = byId.get(item.product_id);
+    if (product == null) {
+      missing += 1;
+      continue;
+    }
+
+    // المتغير الحي (كتالوج أو قاعدة) — إن حُذف يبقى وصفه وسعره.
+    let variants = product.variants ?? [];
+    if (
+      item.variant_id != null &&
+      !variants.some(v => v.id === item.variant_id)
+    ) {
+      try {
+        variants = await VariantRepo.listByProduct(product.id);
+      } catch {
+        variants = [];
+      }
+    }
+    const variant =
+      item.variant_id != null
+        ? variants.find(v => v.id === item.variant_id) ?? null
+        : null;
+
+    // وحدة البيع بالاسم (لأسطر الوحدات فقط — لا المتغيرات).
+    let unit: ProductUnit | null = null;
+    if (
+      variant == null &&
+      item.variant_color == null &&
+      item.unit_name != null &&
+      item.unit_name !== '' &&
+      item.unit_name !== 'قطعة'
+    ) {
+      try {
+        const rows = await UnitRepo.listForProduct(product.id);
+        unit = rows.find(row => row.unitName === item.unit_name) ?? null;
+      } catch {
+        unit = null;
+      }
+    }
+
+    const qty = item.quantity > 0 ? item.quantity : 1;
+    const baseQty =
+      item.base_quantity != null && item.base_quantity > 0
+        ? item.base_quantity
+        : qty;
+    // معامل التحويل: وحدة حية → معاملها؛ وإلا من القطع المسجلة
+    // (باكج 3 حبات: 6÷2=3 — ربطة 4 مقاسات: 4÷1=4).
+    const conversion =
+      unit != null
+        ? unit.conversion
+        : baseQty > qty + 0.0001
+        ? Math.round((baseQty / qty) * 1000) / 1000
+        : 1;
+
+    const untracked = product.stock_untracked === 1;
+    // المخزون المتاح للحرس: ربطة → أقصى ربط متاح؛ متغير ملابس متتبع
+    // → مخزونه؛ غير ذلك → مخزون المنتج بالقطع.
+    let availableStock = untracked
+      ? UNTRACKED_STOCK
+      : product.stock_quantity;
+    if (!untracked) {
+      if (item.variant_color != null && conversion > 0) {
+        availableStock = Math.floor(product.stock_quantity / conversion);
+      } else if (
+        variant != null &&
+        variant.kind === 'variant' &&
+        variant.stock_quantity > 0
+      ) {
+        availableStock = variant.stock_quantity;
+      }
+    }
+
+    pushLine({
+      key: `${product.id}:${unit?.unit_id ?? 0}:${item.variant_id ?? 0}`,
+      productId: product.id,
+      name: product.name,
+      unitPrice: item.unit_price,
+      costPrice: item.cost_price,
+      retailPrice: item.unit_price,
+      wholesalePrice: item.unit_price,
+      quantity: qty,
+      availableStock,
+      unitId: unit?.unit_id ?? null,
+      unitName:
+        item.unit_name && item.unit_name !== ''
+          ? item.unit_name
+          : baseUnitLabelOf(
+              product,
+              product.base_unit_name ?? BASE_UNIT_NAME,
+            ),
+      conversion,
+      byWeight: product.sold_by_weight === 1,
+      variantId: item.variant_id ?? null,
+      variantLabel: item.variant_label ?? null,
+      bundleColor: item.variant_color ?? null,
+      discountPct: 0,
+    });
+  }
+  return {lines: out, missing};
+}
 
 /** v9.2 (round-15 #4): the add-confirmation message — product name +
  *  how many times this session + its price, e.g.
@@ -195,6 +331,8 @@ export function PosScreen({
   const addVariantLine = useCartStore(state => state.addVariantLine);
   const addBundleLine = useCartStore(state => state.addBundleLine);
   const addSizedLine = useCartStore(state => state.addSizedLine);
+  const addPackageLine = useCartStore(state => state.addPackageLine);
+  const restoreLines = useCartStore(state => state.restoreLines);
   const setLineUnit = useCartStore(state => state.setLineUnit);
   const increment = useCartStore(state => state.increment);
   const decrement = useCartStore(state => state.decrement);
@@ -208,8 +346,6 @@ export function PosScreen({
   const embeddingsCount = useCatalogStore(state => state.embeddingsCount);
 
   const settings = useSettingsStore(state => state.settings);
-  // v58 (الجولة 62): الإضافة السريعة لمود «نقطة البيع».
-  const [quickAddOpen, setQuickAddOpen] = useState(false);
   const updateSettings = useSettingsStore(state => state.update);
   const printerStatus = usePrinterStore(state => state.status);
   const toast = useToastStore(state => state.show);
@@ -223,6 +359,29 @@ export function PosScreen({
   const silaActiveCampaigns = useSilaStore(state => state.activeCampaigns);
 
   const [search, setSearch] = useState('');
+  /** v71 (الجولة 83 #٥): آخر فاتورة — تُعرض في السلة الفارغة
+   *  كي يرجع إليها التاجر بلمسة واحدة (طلبه نصاً: «الرجوع
+   *  للفاتورة السابقة بكل سهولة إذا كانت السلة فارغة»). */
+  const [lastSale, setLastSale] = useState<SaleRecord | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (lines.length === 0) {
+      SaleRepo.listRecent(1)
+        .then(rows => {
+          if (alive) {
+            setLastSale(rows[0] ?? null);
+          }
+        })
+        .catch(() => {
+          if (alive) {
+            setLastSale(null);
+          }
+        });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [lines.length]);
   /** v9 (round-13 #3): true while the search box holds KEYBOARD
    *  focus — the cart folds to a one-line summary strip so the
    *  product grid keeps the whole remaining height and the merchant
@@ -636,6 +795,55 @@ export function PosScreen({
     }
   }, [settings.soundEnabled]);
 
+  /** v71 (الجولة 83 #٥): الرجوع للفاتورة السابقة — يعيد بنود آخر
+   *  فاتورة إلى السلة بأسعارها الأصلية (المسودة تُستبدل كاملة):
+   *  للتتميم عليها ببيع جديد أو لمراجعتها سريعاً. الفاتورة
+   *  الأصلية تبقى مسجلة كما هي؛ إن أراد التاجر إلغاءها فمن مركز
+   *  الفواتير (مرتجع). */
+  const recallLastInvoice = useCallback(async () => {
+    try {
+      const rows = await SaleRepo.listRecent(1);
+      const sale = rows[0] ?? null;
+      if (sale == null) {
+        toast('لا توجد فواتير سابقة بعد', 'info');
+        return;
+      }
+      const items = await SaleRepo.getItemsForSale(sale.id);
+      const {lines: restored, missing} = await buildRecallLines(
+        items,
+        useCatalogStore.getState().products,
+      );
+      if (restored.length === 0) {
+        toast(
+          'تعذر استرجاع الفاتورة — منتجاتها لم تعد موجودة في المخزون',
+          'error',
+        );
+        return;
+      }
+      restoreLines(
+        restored,
+        sale.payment_type === 'WHOLESALE' ? 'WHOLESALE' : 'RETAIL',
+        sale.discount,
+      );
+      setDiscountText(sale.discount > 0 ? String(sale.discount) : '');
+      beep();
+      toast(
+        `استُرجعت الفاتورة ${sale.invoice_number} — ${restored.length} صنف في السلة${
+          missing > 0 ? ` (تخطي ${missing} صنف لم يعد موجوداً)` : ''
+        }`,
+        'success',
+        4500,
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : 'تعذر استرجاع الفاتورة السابقة',
+        'error',
+      );
+    }
+  }, [restoreLines, toast, beep]);
+
   /** v8.3: opens the weight pad for a product (loads its sellable
    *  sub-units — وقية و غيرها — for the quick-add rows). */
   const openWeightPad = useCallback((product: Product) => {
@@ -896,8 +1104,12 @@ export function PosScreen({
           ) {
             // منتج متتبع ولا متغير منه متوفر = نفد كله؛ بلا تتبع
             // (مطعم/كافيتريا غالباً) تفتح النافذة دائماً.
+            // v71 (الجولة 83 #٢): أحجام الباكجات وباكجات المنتج
+            // السريع مخزونها على مستوى المنتج (متتبع) — يكفي
+            // مخزون المنتج نفسه لفتح النافذة.
             const variantsHaveStock =
               product.stock_untracked === 1 ||
+              product.stock_quantity > 0 ||
               (product.variants ?? []).some(v => v.stock_quantity > 0);
             if (!variantsHaveStock) {
               return {
@@ -2433,17 +2645,9 @@ export function PosScreen({
               />
               <Text style={styles.scanButtonText}>{scannerLabel}</Text>
             </TouchableOpacity>
-            {/* v58 (الجولة 62): مود نقطة البيع — زر إضافة سريعة
-                (سجائر بالحبة/العلبة/الغرام) بجانب زر المسح. */}
-            {settings.storeMode === 'pos' ? (
-              <TouchableOpacity
-                style={styles.quickAddBtn}
-                onPress={() => setQuickAddOpen(true)}
-                activeOpacity={0.8}
-                accessibilityLabel="إضافة منتج سريع">
-                <Icon name="plus" size={19} color={c.onAccent} />
-              </TouchableOpacity>
-            ) : null}
+            {/* v71 (الجولة 83 #٣): زر «منتج سريع» حُذف من صفحة
+                البيع بطلب التاجر — الإضافة السريعة تبقى من شاشة
+                المخزون، وصفحة البيع للبيع فقط. */}
             <View style={{flex: 1}}>
               <SearchInput
                 value={search}
@@ -2749,7 +2953,7 @@ export function PosScreen({
                                   clothingVariants.map(v => v.size),
                                 ).size} مقاس`
                               : sizeVariants.length > 0
-                              ? ` · ${sizeVariants.length} أحجام`
+                              ? ` · ${sizeVariants.length} خيارات بيع`
                               : ''}
                           </Text>
                           <View style={styles.listMetaRow}>
@@ -2827,7 +3031,7 @@ export function PosScreen({
                         ) : sizeVariants.length > 0 ? (
                           <View style={styles.styleSizesBadge}>
                             <Text style={styles.styleSizesBadgeText}>
-                              {sizeVariants.length} أحجام
+                              {sizeVariants.length} خيارات بيع
                             </Text>
                           </View>
                         ) : null}
@@ -2965,34 +3169,52 @@ export function PosScreen({
           <View
             style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
             {lines.length === 0 ? (
-              // v17 (round-23 #4): tappable with a SPOKEN hint — the
-              // empty-cart strip NEVER opens the product scanner by
-              // itself; a press just reminds the merchant where the
-              // products come from (grid tap / the scan button up
-              // top — his explicit choice, never an auto-launch).
-              <TouchableOpacity
-                style={styles.cartEmptyRow}
-                activeOpacity={0.75}
-                onPress={() =>
-                  toast(
-                    'السلة فارغة — المس منتجاً من الشبكة بالأعلى، أو استخدم زر المسح بجانب البحث',
-                    'info',
-                    3500,
-                  )
-                }>
-                <Icon name="cart" size={18} color={c.textFaint} />
-                <Text style={styles.cartEmptyText}>
-                  السلة فارغة — المس منتجاً من الشبكة أو امسحه
-                  {barcodeActive ? ' بالباركود' : ''}
-                  {barcodeActive && visualActive ? ' أو ' : ''}
-                  {visualActive ? 'بالكاميرا' : ''}
-                  {embeddingsCount === 0 &&
-                  products.length > 0 &&
-                  !barcodeActive
-                    ? ' (لا توجد بصمات بصرية محفوظة بعد — البيع باللمس متاح)'
-                    : ''}
-                </Text>
-              </TouchableOpacity>
+              <>
+                {/* v17 (round-23 #4): tappable with a SPOKEN hint — the
+                empty-cart strip NEVER opens the product scanner by
+                itself; a press just reminds the merchant where the
+                products come from (grid tap / the scan button up
+                top — his explicit choice, never an auto-launch). */}
+                <TouchableOpacity
+                  style={styles.cartEmptyRow}
+                  activeOpacity={0.75}
+                  onPress={() =>
+                    toast(
+                      'السلة فارغة — المس منتجاً من الشبكة بالأعلى، أو استخدم زر المسح بجانب البحث',
+                      'info',
+                      3500,
+                    )
+                  }>
+                  <Icon name="cart" size={18} color={c.textFaint} />
+                  <Text style={styles.cartEmptyText}>
+                    السلة فارغة — المس منتجاً من الشبكة أو امسحه
+                    {barcodeActive ? ' بالباركود' : ''}
+                    {barcodeActive && visualActive ? ' أو ' : ''}
+                    {visualActive ? 'بالكاميرا' : ''}
+                    {embeddingsCount === 0 &&
+                    products.length > 0 &&
+                    !barcodeActive
+                      ? ' (لا توجد بصمات بصرية محفوظة بعد — البيع باللمس متاح)'
+                      : ''}
+                  </Text>
+                </TouchableOpacity>
+                {/* v71 (الجولة 83 #٥): الرجوع للفاتورة السابقة من
+                    السلة الفارغة بلمسة واحدة — آخر فاتورة برقمها
+                    وإجماليها. */}
+                {lastSale != null ? (
+                  <TouchableOpacity
+                    style={styles.recallBtn}
+                    activeOpacity={0.8}
+                    accessibilityLabel="الرجوع للفاتورة السابقة"
+                    onPress={() => void recallLastInvoice()}>
+                    <Icon name="undo" size={15} color={c.accent} />
+                    <Text style={styles.recallBtnText} numberOfLines={1}>
+                      الرجوع للفاتورة السابقة · {lastSale.invoice_number} ·{' '}
+                      {formatMoney(lastSale.total_amount)}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+              </>
             ) : (
               <>
                 {/* Compact header: cart size buttons + title + live
@@ -3582,7 +3804,15 @@ export function PosScreen({
           }
         }}
         onAddSized={(product, sizeVariant, qty) => {
-          const result = addSizedLine(product, sizeVariant, qty);
+          // v71 (الجولة 83 #٢): تسمية الباكج «N حبات» تُميّز خيار
+          //  العدد عن أحجام المطاعم — سطر الباكج يخصم المخزون
+          //  بالقطع (3 حبات = 3 قطع للباكج الواحد) ويظهر بعدده
+          //  في الفاتورة، وأحجام المطاعم تبقى كما كانت تماماً.
+          const packageCount = parsePackageCount(sizeVariant.size);
+          const result =
+            packageCount != null
+              ? addPackageLine(product, sizeVariant, packageCount, qty)
+              : addSizedLine(product, sizeVariant, qty);
           if (result.added) {
             beep();
             setSaleSheet(null);
@@ -4073,11 +4303,8 @@ export function PosScreen({
         </View>
       ) : null}
 
-      {/* v58 (الجولة 62): نافذة الإضافة السريعة لمود نقطة البيع. */}
-      <QuickProductSheet
-        visible={quickAddOpen}
-        onClose={() => setQuickAddOpen(false)}
-      />
+      {/* v71 (الجولة 83 #٣): نافذة «منتج سريع» حُذفت من صفحة البيع
+          بطلب التاجر — الإضافة السريعة تبقى من شاشة المخزون. */}
     </View>
   );
 }
@@ -4782,9 +5009,16 @@ function SaleSheetView({
   const activeColor = color ?? colors[0] ?? null;
   const colorVariants = clothingVariants.filter(v => v.color === activeColor);
   const sizesOfColor = colorVariants.map(v => v.size);
+  // v71 (الجولة 83 #٤): اختيار افتراضي مسبق — طلب التاجر نصاً:
+  // «عند الضغط على منتج له أحجام أو عدد يبقى زر الإضافة للسلة
+  // مغلقاً ولا يكون فيه حجم محدد مسبقاً... إذا لم يختر عند الضغط
+  // على الزر يُضاف الاختيار الافتراضي ليسهل البيع بسرعة». المقاس
+  // المختار أولاً وإلا أول مقاس متوفر منه وإلا أول مقاس — فزر
+  // الإضافة فعّال دائماً والبيع السريع لمسة واحدة.
   const activeVariant =
     colorVariants.find(v => v.size === size) ??
     colorVariants.find(v => v.stock_quantity > 0) ??
+    colorVariants[0] ??
     null;
   const untracked = product.stock_untracked === 1;
 
@@ -4797,7 +5031,11 @@ function SaleSheetView({
   const sheetPct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
   const sheetHasDiscount = sheetPct > 0;
   const pickedSizeVariant =
-    sizeVariants.find(v => v.id === pickedSizeId) ?? null;
+    sizeVariants.find(v => v.id === pickedSizeId) ??
+    // v71 (الجولة 83 #٤): أول حجم/خيار افتراضياً — الحجم الأول إن
+    // لم يختر التاجر شيئاً، فزر الإضافة فعّال من اللحظة الأولى.
+    sizeVariants[0] ??
+    null;
   const pickedUnitRow =
     (unitRows ?? []).find(row => row.unit_id === pickedUnitId) ?? null;
   const pickedSizePriceRaw =
@@ -4840,7 +5078,7 @@ function SaleSheetView({
                     perPieceRetailFinal,
                   )} مفرق${sheetHasDiscount ? ` (خصم ${Math.round(sheetPct)}%)` : ''}`
                 : sheet.kind === 'sizes'
-                ? `${sizeVariants.length} أحجام — اختر الحجم وسعره${
+                ? `${sizeVariants.length} خيارات بيع — اختر ما يناسب البيع بسعره${
                     sheetHasDiscount ? ` (خصم ${Math.round(sheetPct)}%)` : ''
                   }`
                 : `يُباع افتراضياً بال${
@@ -5030,7 +5268,7 @@ function SaleSheetView({
           {/* ════ أحجام مطعم/كافيتريا ════ */}
           {sheet.kind === 'sizes' ? (
             <>
-              <Text style={styles.sheetPickLabel}>اختر الحجم</Text>
+              <Text style={styles.sheetPickLabel}>اختر خيار البيع</Text>
               <View style={styles.sheetChipsColumn}>
                 {sizeVariants.map(variant => {
                   const rawPrice = variant.retail_price ?? product.retail_price;
@@ -5265,11 +5503,13 @@ function SaleSheetView({
           ) : sheet.kind === 'sizes' ? (
             <>
               <Text style={styles.sheetTotalText}>
+                {/* v71 (#٤): الخيار الافتراضي معيّن دائماً — المجموع
+                    ظاهر دائماً وزر الإضافة فعّال دائماً. */}
                 {pickedSizeVariant != null
                   ? `${qty} × ${pickedSizeVariant.size} × ${formatMoney(
                       pickedSizePrice,
                     )} = ${formatMoney(qty * pickedSizePrice)}`
-                  : 'اختر الحجم أولاً'}
+                  : 'لا خيارات متاحة'}
               </Text>
               <AppButton
                 title={`إضافة للسلة${
@@ -5532,15 +5772,32 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.bold,
       fontSize: typography.caption,
     },
-    quickAddBtn: {
-      flexDirection: 'row',
+    /* v71 (الجولة 83 #٥): زر استرجاع الفاتورة السابقة في شريط
+       السلة الفارغة — سطر واحد بارز بنمط سرعة البيع. */
+    recallBtn: {
+      flexDirection: 'row-reverse',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 6,
-      backgroundColor: c.success,
+      gap: 7,
+      backgroundColor: c.accentSoft,
+      borderWidth: 1,
+      borderColor: c.accent,
       borderRadius: 12,
+      paddingVertical: 10,
       paddingHorizontal: 12,
-      height: 40,
+      marginTop: 6,
+    },
+    recallBtnText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    recallBtnHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: 11,
+      marginTop: 3,
+      textAlign: 'center',
     },
 
     // Full-screen scanner overlay (v7 — three-zone layout)

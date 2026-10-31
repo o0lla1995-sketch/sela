@@ -16,7 +16,7 @@
  * ٤. الإعدادات: فخ التبديل أزيل — بطاقة الجهة كانت تُبدّل حالتها
  *    بنقرة على كامل مساحتها فنقر التاجر محافظه ظاناً أنه يختارها
  *    فعطّلها. الآن مفتاح Switch حقيقي بيد التاجر لكل جهة.
- * ٥. الإصدار: 70.0.0 (78).
+ * ٥. الإصدار: 71.0.0 (79).
  */
 import {freshApp} from './helpers/app';
 
@@ -190,8 +190,9 @@ describe('v66 — ٣ الفواتير مميزة بطريقة الدفع + فل�
 
   test('الإيصال يطبع طريقة الدفع (أول طباعة وإعادة الطباعة)', () => {
     const src = read(RECEIPT);
-    expect(src).toContain('paymentMethodLabel');
-    expect(src).toContain('طريقة الدفع: ${paymentMethodLabel(');
+    // v71 (الجولة 83 #١): النوع مع الجهة — محفظة جوال باي / بنك فلسطين.
+    expect(src).toContain('paymentMethodReceiptLabel');
+    expect(src).toContain('طريقة الدفع: ${paymentMethodReceiptLabel(');
   });
 });
 
@@ -207,9 +208,9 @@ describe('v66 — ٤ الإعدادات: مفتاح Switch حقيقي (إزال�
 });
 
 describe('v66 — ٥ الإصدار', () => {
-  test('70.0.0 (78)', () => {
+  test('71.0.0 (79)', () => {
     const src = read(CONFIG);
-    expect(src).toContain("APP_VERSION = '70.0.0'");
-    expect(src).toContain('APP_BUILD_CODE = 78');
+    expect(src).toContain("APP_VERSION = '71.0.0'");
+    expect(src).toContain('APP_BUILD_CODE = 79');
   });
 });

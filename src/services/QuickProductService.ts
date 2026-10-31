@@ -12,26 +12,53 @@
  *    (=0.001 كغ) — لوحة الوزن تعرضها شريحة سريعة.
  *  • المخزون الفارغ → بلا تتبع (البيع لا يُحجب)؛ وإلا يُحوَّل
  *    لوحدة الأساس (علبة × عدد الحبات / غرام ÷ 1000).
+ *
+ * v71 (الجولة 83 #٢): خيارات بيع بالعدد (باكجات) — طلب التاجر نصاً:
+ * «نفس المنتج يباع بالقطعة الواحدة مثلاً بشيكل واحد ولكن مع خيارات
+ * أخرى تظهر عند اختيار المنتج في البيع قبل إضافته للسلة — مثلاً
+ * 3 حبات بـ2 شيكل أو 5 حبات بـ3 شيكل، مثل منتجات المطاعم
+ * والكافيهات ولكن ليس أحجاماً بل عدداً، ويميزها في الفاتورة».
+ * كل باكج يُبنى متغيرَ حجمٍ (kind='size') على المنظومة القائمة
+ * نفسها — نافذة البيع تفتح تلقائياً لمنتجات الأحجام فتعرض:
+ * «حبة» بسعرها المفرد + كل باكج بعدده وسعره المميز، والفاتورة
+ * تطبع وصف الباكج بعد الاسم (مارلبورو (3 حبات)) — تماماً كأحجام
+ * المطاعم لكن بالعدد. مخزون الباكج من مخزون المنتج نفسه (القطع
+ * المحسوبة = عدده × كميته).
  */
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {UnitRepo} from '../database/repositories/UnitRepo';
 import {CategoryRepo} from '../database/repositories/CategoryRepo';
+import {VariantRepo} from '../database/repositories/VariantRepo';
 import {useSettingsStore} from '../stores/settingsStore';
 
 export type QuickSellBy = 'piece' | 'box' | 'gram';
 
-/** v70 (الجولة 82 #٤): وحدة بيع إضافية بسعر مميّز — طلب التاجر:
- *  «لماذا في المنتج السريع لا يوجد إضافة وحدات للمنتج مثلاً
- *  للبيع بأكثر من قطعة بسعر مميّز». الكرطونة/الصينية/الكيس… كل
- *  واحدة بعدد حباتها (أو وزنها بالكيلو للمنتجات الوزنية) وبسعرها
- *  الخاص — تسير في منتقي الوحدة نفسه في سطر السلة. */
-export interface QuickExtraUnit {
-  name: string;
-  /** القطعي: عدد الحبات في الوحدة (كرتونة = 200). الوزني: الوزن
-   *  بالكيلوغرام (ربع كيلو = 0.25). */
-  perBase: number;
-  /** سعر بيع هذه الوحدة — المميّز هو جوهر الطلب. */
+/** v71 (الجولة 83 #٢): باكج بيع بالعدد — N حبة بسعر مميز. */
+export interface QuickPackage {
+  /** عدد الحبات في الباكج — صحيح ≥ 2. */
+  count: number;
+  /** سعر بيع الباكج كاملاً — المميّز هو جوهر الطلب. */
   price: number;
+}
+
+/** v71: تسمية الباكج كما تظهر في نافذة البيع والفاتورة. */
+export function quickPackageLabel(count: number): string {
+  const safe = Math.max(2, Math.round(count));
+  return `${safe} ${safe >= 3 && safe <= 10 ? 'حبات' : 'حبة'}`;
+}
+
+/**
+ * v71: استخراج عدد الباكج من تسمية متغير الحجم — «3 حبات» → 3.
+ * يعود null لأي تسمية لا تطابق نمط باكجاتنا (أحجام المطاعم
+ * «كبير/صغير» وهكذا) — فلا يتأثر مسار الأحجام الأصلي إطلاقاً.
+ */
+export function parsePackageCount(sizeLabel: string): number | null {
+  const match = /^(\d+)\s+حبات?$/.exec(sizeLabel.trim());
+  if (match == null) {
+    return null;
+  }
+  const count = Number(match[1]);
+  return Number.isInteger(count) && count >= 2 ? count : null;
 }
 
 export interface QuickProductInput {
@@ -46,14 +73,16 @@ export interface QuickProductInput {
   /** المخزون الابتدائي بوحدة الإدخال (علبة للقطعي / غرام للوزني). */
   stockInput?: number | null;
   barcode?: string | null;
-  /** v70: وحدات إضافية بأسعار خاصة (اختياري). */
-  extraUnits?: QuickExtraUnit[];
+  /** v71: خيارات بيع بالعدد (باكجات بسعر مميز) — للقطعي فقط. */
+  packages?: QuickPackage[];
 }
 
 export interface QuickProductResult {
   productId: number;
   /** وحدات البيع التي وُضعت للمنتج. */
   unitCount: number;
+  /** v71: خيارات البيع بالعدد المبنية (بما فيها خيار الحبة المفردة). */
+  packageCount: number;
   /** المخزون المخزَّن بوحدة الأساس (حبات / كغ). */
   stockBase: number;
   untracked: boolean;
@@ -77,6 +106,33 @@ export const QuickProductService = {
     }
     const perBox = Math.round(Number(input.perBox ?? 20));
     const isWeight = input.sellBy === 'gram';
+
+    // v71: تحقق الباكجات — عدداً صحيحاً ≥ 2 بلا تكرار وبسعر موجب.
+    const packages: QuickPackage[] = [];
+    if ((input.packages ?? []).length > 0) {
+      if (isWeight) {
+        throw new Error(
+          'خيارات بيع العدد متاحة للمنتجات القطعية فقط — الوزني يُباع بالوزن من لوحة الوزن',
+        );
+      }
+      const seenCounts = new Set<number>();
+      for (const pack of input.packages ?? []) {
+        const count = Math.round(Number(pack.count));
+        if (!Number.isFinite(count) || count < 2) {
+          throw new Error('عدد الحبات في خيار البيع يجب أن يكون رقماً 2 أو أكثر');
+        }
+        if (seenCounts.has(count)) {
+          throw new Error(`خيار «${count} حبة» مكرر — لكل عددٍ خيار واحد`);
+        }
+        const packPrice = Number(pack.price);
+        if (!Number.isFinite(packPrice) || packPrice <= 0) {
+          throw new Error(`سعر خيار «${count} حبة» غير صالح — أدخل رقماً أكبر من صفر`);
+        }
+        seenCounts.add(count);
+        packages.push({count, price: round2(packPrice)});
+      }
+      packages.sort((a, b) => a.count - b.count);
+    }
 
     // التصنيف الافتراضي لأصناف هذا المود (أول تصنيف موسوم به).
     const storeMode = useSettingsStore.getState().settings.storeMode;
@@ -167,94 +223,41 @@ export const QuickProductService = {
       unitCount = rows.length;
     }
 
-    // ── v70 (الجولة 82 #٤): الوحدات الإضافية بسعر مميّز ──
-    // تُدمج في نفس استدعاء replaceForProduct للمنتج (صورة واحدة
-    // نظيفة)، بعد التحقق: اسم غير فارغ ومختلف عن الوحدات الأساسية
-    // ومكرر، معامل > 0، وسعر > 0. القطعي: المعامل بالحبات؛ الوزني:
-    // بالكيلوغرام (كسور مسموحة — وقية = 0.25).
-    const extras = (input.extraUnits ?? []).filter(
-      unit => unit.name.trim().length > 0,
-    );
-    if (extras.length > 0) {
-      const baseNames = new Set(
-        ['حبة', 'علبة', 'غرام'].map(n => n.replace(/[أإآ]/g, 'ا').trim()),
+    // ── v71 (الجولة 83 #٢): خيارات بيع بالعدد (باكجات) ──
+    // تُبنى متغيرات أحجام (kind='size') على المنظومة القائمة:
+    // خيار أول «حبة» بسعرها المفرد ثم كل باكج بعدده وسعره —
+    // نافذة البيع تعرضها فور لمس المنتج، والفاتورة تميز الباكج
+    // المختار بوصفه بعد الاسم. مخزون الأحجام نفسه يبقى صفراً
+    // (المخزون على مستوى المنتج — sync=false كأحجام المطاعم).
+    if (packages.length > 0) {
+      await VariantRepo.replaceForProduct(
+        productId,
+        [
+          {
+            kind: 'size',
+            color: '',
+            size: 'حبة',
+            stock_quantity: 0,
+            retail_price: piecePrice,
+            cost_price: null,
+          },
+          ...packages.map(pack => ({
+            kind: 'size' as const,
+            color: '',
+            size: quickPackageLabel(pack.count),
+            stock_quantity: 0,
+            retail_price: pack.price,
+            cost_price: null,
+          })),
+        ],
+        false,
       );
-      const seen = new Set<string>();
-      const baseRows = isWeight
-        ? [
-            {
-              unit_id: await UnitRepo.getOrCreate(
-                'غرام',
-                'غ',
-                'weight',
-                storeMode,
-              ),
-              conversion: 0.001,
-              retail_price: piecePrice,
-              wholesale_price: null,
-            },
-          ]
-        : [
-            {
-              unit_id: await UnitRepo.getOrCreate(
-                'حبة',
-                'حبة',
-                'piece',
-                storeMode,
-              ),
-              conversion: 1,
-              retail_price: piecePrice,
-              wholesale_price: null,
-            },
-          ];
-      if (!isWeight && boxPrice != null && perBox >= 2) {
-        baseRows.push({
-          unit_id: await UnitRepo.getOrCreate('علبة', 'علبة', 'piece', storeMode),
-          conversion: perBox,
-          retail_price: boxPrice,
-          wholesale_price: null,
-        });
-      }
-      const extraRows: typeof baseRows = [];
-      for (const unit of extras) {
-        const name = unit.name.trim();
-        const normalized = name.replace(/[أإآ]/g, 'ا').trim();
-        if (baseNames.has(normalized) || seen.has(normalized)) {
-          throw new Error(
-            `اسم الوحدة «${name}» مستخدم مسبقاً — اختر اسماً مختلفاً لكل وحدة`,
-          );
-        }
-        const perBase = Number(unit.perBase);
-        if (!Number.isFinite(perBase) || perBase <= 0) {
-          throw new Error(
-            `عدد الحبات في «${name}» غير صالح — أدخل رقماً أكبر من صفر`,
-          );
-        }
-        const price = Number(unit.price);
-        if (!Number.isFinite(price) || price <= 0) {
-          throw new Error(`سعر «${name}» غير صالح — أدخل رقماً أكبر من صفر`);
-        }
-        seen.add(normalized);
-        const unitId = await UnitRepo.getOrCreate(
-          name,
-          name,
-          isWeight ? 'weight' : 'piece',
-          storeMode,
-        );
-        extraRows.push({
-          unit_id: unitId,
-          conversion: isWeight ? perBase : Math.round(perBase * 1000) / 1000,
-          retail_price: round2(price),
-          wholesale_price: null,
-        });
-      }
-      await UnitRepo.replaceForProduct(productId, [...baseRows, ...extraRows]);
-      unitCount = baseRows.length + extraRows.length;
     }
 
     return {
       productId,
       unitCount,
+      packageCount: packages.length > 0 ? packages.length + 1 : 0,
       stockBase,
       untracked: stockInput == null,
     };

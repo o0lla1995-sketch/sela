@@ -6,9 +6,9 @@
  * thank-you footer → feed & cut.
  */
 import {ReceiptBuilder} from './escpos';
-import {formatDateTime} from '../../core/format';
+import {formatDateTime, formatQty} from '../../core/format';
 import {APP_NAME, RECEIPT_WIDTH_58, RECEIPT_WIDTH_80} from '../../core/config';
-import {paymentMethodLabel} from '../../core/paymentMethods';
+import {paymentMethodReceiptLabel} from '../../core/paymentMethods';
 import type {SaleRecord, SaleItemRecord} from '../../core/types';
 
 export interface ReceiptSettings {
@@ -83,8 +83,13 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
     /* v66 (الجولة 78): طريقة الدفع على الإيصال — بنك/محفظة/نقدي
      *  باسم الجهة كما اختارها التاجر لحظة البيع (تُقرأ من سجل
      *  الفاتورة نفسه، فتنطبق على الطباعة الأولى وإعادة الطباعة
-     *  معاً). سطر عربي محاذى لليمين كأسطر أسماء الأصناف. */
-    .textLine(`طريقة الدفع: ${paymentMethodLabel(data.sale.payment_method)}`)
+     *  معاً). سطر عربي محاذى لليمين كأسطر أسماء الأصناف.
+     *  v71 (الجولة 83 #١): النوع مع الجهة — «محفظة جوال باي» /
+     *  «بنك فلسطين» / «نقدي» (طلب التاجر: طريقة الدفع سواء نقدي
+     *  أو محفظة أو بنك ونوعه). */
+    .textLine(
+      `طريقة الدفع: ${paymentMethodReceiptLabel(data.sale.payment_method)}`,
+    )
     .separator(width);
 
   // ── Items ─────────────────────────────────────────────────────
@@ -95,6 +100,8 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
       data.productNameById.get(item.product_id) ?? `#${item.product_id}`;
     // v35 (الجولة 43): وصف المتغير (لون · مقاس / حجم / ربطة) بعد
     //  الاسم — الفاتورة تميز ما بيع تحديداً من كل موديل.
+    // v71 (الجولة 83 #٢): باكجات العدد «3 حبات» تدخل هنا أيضاً —
+    //  تمييز الاختيار كما طلب التاجر نصاً.
     const variantSuffix = (item as {variant_label?: string | null})
       .variant_label
       ? ` (${(item as {variant_label?: string | null}).variant_label})`
@@ -103,6 +110,13 @@ export function buildReceiptJob(data: ReceiptData, settings: ReceiptSettings) {
       item.unit_name && item.unit_name !== 'قطعة' ? ` (${item.unit_name})` : '';
     b.truncate(`${name}${variantSuffix}${unitSuffix}`, width);
     b.qtyPriceLine(item.quantity, item.unit_price, item.total_line_price);
+    // v71 (الجولة 83 #١): تفاصيل القطع تحت سطر الأصناف متعددة
+    //  القطع — وحدة أكبر (علبتان = 40 حبة) أو باكج (باكجان من
+    //  3 حبات = 6 حبات) كي تُقرأ الفاتورة بلا لبس.
+    const baseQty = item.base_quantity ?? null;
+    if (baseQty != null && baseQty > item.quantity + 0.0001) {
+      b.textLine(`= ${formatQty(baseQty)} قطعة`);
+    }
   }
 
   // ── Totals ────────────────────────────────────────────────────

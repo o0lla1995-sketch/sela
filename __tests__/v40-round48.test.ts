@@ -459,12 +459,12 @@ describe('v40 — حرّوس المصدر: المسح الذكي والأشكا�
     expect(native).toContain('image/png');
   });
 
-  test('الإصدار: 70.0.0 (78) في الإعدادات والبناء (محدّث لـ v63)', () => {
+  test('الإصدار: 71.0.0 (79) في الإعدادات والبناء (محدّث لـ v63)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '70.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 78');
+    expect(config).toContain("APP_VERSION = '71.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 79');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 78');
-    expect(gradle).toContain('versionName "70.0.0"');
+    expect(gradle).toContain('versionCode 79');
+    expect(gradle).toContain('versionName "71.0.0"');
   });
 });

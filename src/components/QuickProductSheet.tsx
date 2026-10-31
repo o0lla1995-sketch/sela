@@ -7,17 +7,21 @@
  * الاستخدام الأولى التي طلبها التاجر: السجائر — تُباع بالحبة
  * المفردة أو بالعلبة (فيها عدد من السجائر) أو بالغرام.
  *
+ * v71 (الجولة 83 #٢/#٣): خيارات بيع بالعدد (باكجات) بدل وحدات
+ * إضافية — طلب التاجر: «يستطيع المستخدم إضافة بيع نفس الصنف بنظام
+ * الباكج... مثلاً 3 حبات بـ2 شيكل أو 5 حبات بـ3 شيكل، مثل منتجات
+ * المطاعم والكافيهات ولكن ليس أحجاماً بل عدداً» + «احذف خيار إضافة
+ * الباركود من نافذة المنتج السريع». الباكجات تُبنى متغيرات أحجام
+ * فتظهر في نافذة البيع قبل السلة وتميز في الفاتورة.
+ *
  * ما يبنيه خلف الكواليس (بالمنظومة القائمة نفسها — لا مسارات
  * جديدة):
  *  • بالحبة/بالعلبة: منتج قطعي أساسه الحبة (retail = سعر الحبة)
- *    بوحدتي «حبة» (=1) و«علبة» (= عدد الحبات) بأسعار كل منهما؛
- *    البيع الافتراضي بالحبة مباشرة من نقطة البيع، والعلبة تتاح
- *    من منتقي الوحدة في سطر السلة.
+ *    بوحدتي «حبة» (=1) و«علبة» (= عدد الحبات) بأسعار كل منهما.
  *  • بالغرام: منتج وزني (سعر الكيلو مشتق = سعر الغرام × 1000)
  *    بوحدة «غرام» (=0.001 كغ) — لوحة الوزن تعرضها شريحة سريعة.
  *  • المخزون: إن تُرك فارغاً → منتج بلا تتبع (البيع لا يُحجب
- *    أبداً — الأسرع للبسطة)؛ وإن أُدخل → يُحوَّل لوحدة الأساس
- *    (علبة × عدد الحبات، أو غرام ÷ 1000).
+ *    أبداً — الأسرع للبسطة)؛ وإن أُدخل → يُحوَّل لوحدة الأساس.
  */
 import React, {useMemo, useState} from 'react';
 import {
@@ -35,7 +39,7 @@ import {Icon} from './Icon';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {
   QuickProductService,
-  type QuickExtraUnit,
+  quickPackageLabel,
 } from '../services/QuickProductService';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useToastStore} from '../stores/toastStore';
@@ -47,14 +51,13 @@ import {
   useThemeColors,
 } from '../core/theme';
 
-/** v70: صف وحدة إضافية كحقول نص خام — التحويل لحظة الحفظ فقط. */
-interface ExtraRow {
-  name: string;
-  perBase: string;
+/** v71: صف باكج بيع بالعدد كحقول نص خام — التحويل لحظة الحفظ فقط. */
+interface PackageRow {
+  count: string;
   price: string;
 }
 
-const EMPTY_EXTRA: ExtraRow = {name: '', perBase: '', price: ''};
+const EMPTY_PACKAGE: PackageRow = {count: '', price: ''};
 
 type SellBy = 'piece' | 'box' | 'gram';
 
@@ -96,12 +99,11 @@ export function QuickProductSheet({
   const [perBox, setPerBox] = useState('20');
   const [gramPrice, setGramPrice] = useState('');
   const [stock, setStock] = useState('');
-  const [barcode, setBarcode] = useState('');
   const [busy, setBusy] = useState(false);
-  /** v70 (الجولة 82 #٤): وحدات إضافية بسعر مميّز — قابلة للطي
+  /** v71 (الجولة 83 #٢): خيارات بيع بالعدد (باكجات) — قابلة للطي
    *  حتى لا تزاحم المسار السريع الأساسي (الاسم/السعر/الإضافة). */
-  const [extrasOpen, setExtrasOpen] = useState(false);
-  const [extraRows, setExtraRows] = useState<ExtraRow[]>([]);
+  const [packagesOpen, setPackagesOpen] = useState(false);
+  const [packageRows, setPackageRows] = useState<PackageRow[]>([]);
 
   const perBoxCount = useMemo(() => {
     const parsed = parsePositiveNumber(perBox);
@@ -132,43 +134,31 @@ export function QuickProductSheet({
     setPerBox('20');
     setGramPrice('');
     setStock('');
-    setBarcode('');
-    setExtrasOpen(false);
-    setExtraRows([]);
+    setPackagesOpen(false);
+    setPackageRows([]);
   };
 
-  /** v70: تحويل صفوف الوحدات الإضافية لحظة الحفظ — الصف الفارغ
-   *  تماماً (لا اسم ولا معامل ولا سعر) يُتجاهل بصمت؛ أي صف ناقص
-   *  يوقف الحفظ برسالة تحدد الحقل الناقص بالاسم. */
-  const parseExtraRows = (): QuickExtraUnit[] => {
-    const out: QuickExtraUnit[] = [];
-    for (const row of extraRows) {
-      const trimmedName = row.name.trim();
-      const perBaseText = row.perBase.replace(',', '.').trim();
+  /** v71: تحويل صفوف الباكجات لحظة الحفظ — الصف الفارغ تماماً
+   *  يُتجاهل بصمت؛ أي صف ناقص يوقف الحفظ برسالة تحدد المشكلة. */
+  const parsePackageRows = () => {
+    const out: {count: number; price: number}[] = [];
+    for (const row of packageRows) {
+      const countText = row.count.replace(',', '.').trim();
       const priceText = row.price.replace(',', '.').trim();
-      if (
-        trimmedName.length === 0 &&
-        perBaseText.length === 0 &&
-        priceText.length === 0
-      ) {
+      if (countText.length === 0 && priceText.length === 0) {
         continue;
       }
-      if (trimmedName.length === 0) {
-        throw new Error('أدخل اسم الوحدة الإضافية (مثال: كرتونة)');
-      }
-      const perBase = Number(perBaseText);
-      if (!Number.isFinite(perBase) || perBase <= 0) {
-        throw new Error(
-          `«${trimmedName}»: أدخل ${
-            sellBy === 'gram' ? 'الوزن بالكيلو' : 'عدد الحبات'
-          } — رقماً أكبر من صفر`,
-        );
+      const count = Number(countText);
+      if (!Number.isFinite(count) || count < 2 || !Number.isInteger(count)) {
+        throw new Error('عدد الحبات في خيار البيع — رقماً صحيحاً 2 أو أكثر');
       }
       const price = Number(priceText);
       if (!Number.isFinite(price) || price <= 0) {
-        throw new Error(`«${trimmedName}»: أدخل سعرها الخاص — رقماً أكبر من صفر`);
+        throw new Error(
+          `سعر خيار «${quickPackageLabel(count)}» — أدخل رقماً أكبر من صفر`,
+        );
       }
-      out.push({name: trimmedName, perBase, price});
+      out.push({count, price});
     }
     return out;
   };
@@ -179,18 +169,12 @@ export function QuickProductSheet({
       toast('اسم المنتج مطلوب', 'error');
       return;
     }
-    let finalPiecePrice: number;
-    let finalBoxPrice: number | null = null;
     if (sellBy === 'piece') {
       const price = parsePositiveNumber(piecePrice);
       if (price == null) {
         toast('أدخل سعر الحبة', 'error');
         return;
       }
-      finalPiecePrice = price;
-      finalBoxPrice =
-        parsePositiveNumber(boxPrice) ??
-        (derivedBoxPrice != null ? derivedBoxPrice : null);
     } else if (sellBy === 'box') {
       const price = parsePositiveNumber(boxPrice);
       if (price == null) {
@@ -201,20 +185,17 @@ export function QuickProductSheet({
         toast('عدد الحبات في العلبة غير صالح', 'error');
         return;
       }
-      finalBoxPrice = price;
-      finalPiecePrice = Math.round((price / perBoxCount) * 100) / 100;
     } else {
       const price = parsePositiveNumber(gramPrice);
       if (price == null) {
         toast('أدخل سعر الغرام', 'error');
         return;
       }
-      finalPiecePrice = price; // سعر «الوحدة الصغرى» = الغرام
     }
 
     setBusy(true);
     try {
-      const extras = parseExtraRows();
+      const packages = parsePackageRows();
       const stockInput = parsePositiveNumber(stock);
       await QuickProductService.createQuickProduct({
         name: trimmed,
@@ -229,13 +210,15 @@ export function QuickProductSheet({
         boxPriceOverride:
           sellBy === 'piece' ? parsePositiveNumber(boxPrice) : null,
         stockInput,
-        barcode: barcode.trim() || null,
-        extraUnits: extras,
+        barcode: null,
+        packages,
       });
       await refreshCatalog();
       toast(
         `أُضيف «${trimmed}» — متاح في نقطة البيع فوراً${
-          extras.length > 0 ? ` بـ${extras.length + 1} وحدات بيع` : ''
+          packages.length > 0
+            ? ` بـ${packages.length + 1} خيارات بيع (حبة + ${packages.length} باكج)`
+            : ''
         }`,
         'success',
       );
@@ -263,7 +246,7 @@ export function QuickProductSheet({
       animationType="slide"
       onRequestClose={onClose}>
     <Pressable style={styles.backdrop} onPress={onClose}>
-        <Pressable style={styles.sheet} onPress={() => undefined}>
+      <Pressable style={styles.sheet} onPress={() => undefined}>
           <ScrollView
             contentContainerStyle={[
               styles.sheetContent,
@@ -381,125 +364,103 @@ export function QuickProductSheet({
               numeric
               placeholder="اختياري"
             />
-            <QuickInput
-              label="باركود (اختياري)"
-              value={barcode}
-              onChangeText={setBarcode}
-              placeholder="امسحه أو اكتبه"
-            />
 
-            {/* v70 (الجولة 82 #٤): وحدات إضافية بسعر مميّز — طلب
-                التاجر: «إضافة وحدات للمنتج مثلا للبيع بأكثر من قطعة
-                بسعر مميز». قسم مطوي افتراضياً حتى يبقى المسار
-                السريع كما هو. */}
-            <Pressable
-              style={styles.extrasToggle}
-              onPress={() => setExtrasOpen(prev => !prev)}>
-              <View style={styles.extrasToggleRow}>
-                <Icon
-                  name={extrasOpen ? 'chevronDown' : 'plus'}
-                  size={16}
-                  color={c.accent}
-                />
-                <Text style={styles.extrasToggleText}>
-                  وحدات إضافية بسعر مميّز (اختياري)
-                </Text>
-              </View>
-              {extraRows.length > 0 ? (
-                <Badge
-                  label={`${extraRows.length}`}
-                  tone="accent"
-                />
-              ) : null}
-            </Pressable>
-            {extrasOpen ? (
-              <View style={styles.extrasWrap}>
-                <Text style={styles.extrasHint}>
-                  {sellBy === 'gram'
-                    ? 'كل وحدة بوزنها بالكيلو وسعرها الخاص (مثال: ربع كيلو = 0.25)'
-                    : 'كل وحدة بعدد حباتها وسعرها الخاص (مثال: كرتونة = 200 حبة)'}
-                  — تظهر في منتقي الوحدة في سلة البيع فوراً.
-                </Text>
-                {extraRows.map((row, index) => (
-                  <View key={index} style={styles.extraRow}>
-                    <View style={styles.extraFieldName}>
-                      <Text style={styles.extraLabel}>الاسم</Text>
-                      <TextInput
-                        style={styles.extraInput}
-                        value={row.name}
-                        onChangeText={text =>
-                          setExtraRows(prev =>
-                            prev.map((r, i) =>
-                              i === index ? {...r, name: text} : r,
-                            ),
-                          )
-                        }
-                        placeholder="كرتونة"
-                        placeholderTextColor={c.textFaint}
-                        textAlign={I18nManager.isRTL ? 'right' : 'left'}
-                      />
-                    </View>
-                    <View style={styles.extraFieldCount}>
-                      <Text style={styles.extraLabel}>
-                        {sellBy === 'gram' ? 'كغ' : 'حبة/وحدة'}
-                      </Text>
-                      <TextInput
-                        style={styles.extraInput}
-                        value={row.perBase}
-                        onChangeText={text =>
-                          setExtraRows(prev =>
-                            prev.map((r, i) =>
-                              i === index
-                                ? {...r, perBase: text.replace(',', '.')}
-                                : r,
-                            ),
-                          )
-                        }
-                        keyboardType="decimal-pad"
-                        placeholder={sellBy === 'gram' ? '0.25' : '200'}
-                        placeholderTextColor={c.textFaint}
-                        textAlign="center"
-                      />
-                    </View>
-                    <View style={styles.extraFieldPrice}>
-                      <Text style={styles.extraLabel}>السعر ₪</Text>
-                      <TextInput
-                        style={styles.extraInput}
-                        value={row.price}
-                        onChangeText={text =>
-                          setExtraRows(prev =>
-                            prev.map((r, i) =>
-                              i === index
-                                ? {...r, price: text.replace(',', '.')}
-                                : r,
-                            ),
-                          )
-                        }
-                        keyboardType="decimal-pad"
-                        placeholder="150"
-                        placeholderTextColor={c.textFaint}
-                        textAlign="center"
-                      />
-                    </View>
+            {/* v71 (الجولة 83 #٢): خيارات بيع بالعدد (باكجات) — طلب
+                التاجر: بيع نفس الصنف بالباكج مثل المطاعم والكافيهات
+                لكن بعدد الحبات: 3 حبات بـ2 شيكل، 5 حبات بـ3 شيكل.
+                قسم مطوي افتراضياً حتى يبقى المسار السريع كما هو. */}
+            {sellBy !== 'gram' ? (
+              <>
+                <Pressable
+                  style={styles.extrasToggle}
+                  onPress={() => setPackagesOpen(prev => !prev)}>
+                  <View style={styles.extrasToggleRow}>
+                    <Icon
+                      name={packagesOpen ? 'chevronDown' : 'plus'}
+                      size={16}
+                      color={c.accent}
+                    />
+                    <Text style={styles.extrasToggleText}>
+                      خيارات بيع بالعدد — باكجات (اختياري)
+                    </Text>
+                  </View>
+                  {packageRows.length > 0 ? (
+                    <Badge label={`${packageRows.length}`} tone="accent" />
+                  ) : null}
+                </Pressable>
+                {packagesOpen ? (
+                  <View style={styles.extrasWrap}>
+                    <Text style={styles.extrasHint}>
+                      كل خيار = عدد حبات بسعره المميز (مثال: 3 حبات بـ2
+                      شيكل). تظهر عند لمس المنتج في البيع قبل إضافته
+                      للسلة — مع خيار الحبة المفردة دائماً — ويميزها
+                      الفاتورة بعدد الحبات.
+                    </Text>
+                    {packageRows.map((row, index) => (
+                      <View key={index} style={styles.extraRow}>
+                        <View style={styles.packageFieldCount}>
+                          <Text style={styles.extraLabel}>عدد الحبات</Text>
+                          <TextInput
+                            style={styles.extraInput}
+                            value={row.count}
+                            onChangeText={text =>
+                              setPackageRows(prev =>
+                                prev.map((r, i) =>
+                                  i === index
+                                    ? {...r, count: text.replace(',', '.')}
+                                    : r,
+                                ),
+                              )
+                            }
+                            keyboardType="number-pad"
+                            placeholder="3"
+                            placeholderTextColor={c.textFaint}
+                            textAlign="center"
+                          />
+                        </View>
+                        <View style={styles.packageFieldPrice}>
+                          <Text style={styles.extraLabel}>سعر الباكج ₪</Text>
+                          <TextInput
+                            style={styles.extraInput}
+                            value={row.price}
+                            onChangeText={text =>
+                              setPackageRows(prev =>
+                                prev.map((r, i) =>
+                                  i === index
+                                    ? {...r, price: text.replace(',', '.')}
+                                    : r,
+                                ),
+                              )
+                            }
+                            keyboardType="decimal-pad"
+                            placeholder="2"
+                            placeholderTextColor={c.textFaint}
+                            textAlign="center"
+                          />
+                        </View>
+                        <Pressable
+                          style={styles.extraRemove}
+                          onPress={() =>
+                            setPackageRows(prev =>
+                              prev.filter((_, i) => i !== index),
+                            )
+                          }
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                          <Icon name="trash" size={16} color={c.danger} />
+                        </Pressable>
+                      </View>
+                    ))}
                     <Pressable
-                      style={styles.extraRemove}
+                      style={styles.extrasAdd}
                       onPress={() =>
-                        setExtraRows(prev => prev.filter((_, i) => i !== index))
-                      }
-                      hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-                      <Icon name="trash" size={16} color={c.danger} />
+                        setPackageRows(prev => [...prev, {...EMPTY_PACKAGE}])
+                      }>
+                      <Icon name="plus" size={15} color={c.accent} />
+                      <Text style={styles.extrasAddText}>إضافة خيار آخر</Text>
                     </Pressable>
                   </View>
-                ))}
-                <Pressable
-                  style={styles.extrasAdd}
-                  onPress={() =>
-                    setExtraRows(prev => [...prev, {...EMPTY_EXTRA}])
-                  }>
-                  <Icon name="plus" size={15} color={c.accent} />
-                  <Text style={styles.extrasAddText}>إضافة وحدة أخرى</Text>
-                </Pressable>
-              </View>
+                ) : null}
+              </>
             ) : null}
 
             <View style={styles.actions}>
@@ -664,7 +625,7 @@ const useStyles = makeStyles(c =>
       gap: spacing.sm,
       marginTop: spacing.sm,
     },
-    /* v70 (الجولة 82 #٤): قسم الوحدات الإضافية. */
+    /* v71 (الجولة 83 #٢): قسم خيارات بيع بالعدد (باكجات). */
     extrasToggle: {
       flexDirection: 'row-reverse',
       alignItems: 'center',
@@ -680,6 +641,7 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row-reverse',
       alignItems: 'center',
       gap: 7,
+      flexShrink: 1,
     },
     extrasToggleText: {
       color: c.accent,
@@ -701,9 +663,8 @@ const useStyles = makeStyles(c =>
       alignItems: 'flex-end',
       gap: 6,
     },
-    extraFieldName: {flex: 3},
-    extraFieldCount: {flex: 1.4},
-    extraFieldPrice: {flex: 1.2},
+    packageFieldCount: {flex: 1.3},
+    packageFieldPrice: {flex: 1.2},
     extraLabel: {
       color: c.textDim,
       fontFamily: fonts.medium,

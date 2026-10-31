@@ -26,7 +26,7 @@
  *    على 16) فكان شريط التبويبات الثابت 62dp يُرسم خلف شريط
  *    التنقل. الحل: هوامش الأمان في MainTabs (62 + insets.bottom)
  *    + هامش سفلي لنوذج Modal + إصلاح مضاعفة inset أعلى Toaster.
- * ٦. الإصدار: 70.0.0 (78) — التوقيع بنفس مفتاح متجر Play (يُستعاد
+ * ٦. الإصدار: 71.0.0 (79) — التوقيع بنفس مفتاح متجر Play (يُستعاد
  *    من أسرار CI في كل بناء APK وAAB — بلا تغيير).
  */
 const read = (p: string) => require('fs').readFileSync(p, 'utf8') as string;
@@ -122,22 +122,25 @@ describe('v70 — ٣ زر صِلة خلف بوابة الربط', () => {
   });
 });
 
-describe('v70 — ٤ وحدات إضافية بسعر مميّز في المنتج السريع', () => {
-  test('الخدمة تقبل extraUnits وتدمجها بمنظومة الوحدات', () => {
+describe('v70 — ٤ وحدات إضافية → استُبدلت بخيارات بيع بالعدد (v71 الجولة 83)', () => {
+  test('الخدمة بنت خيارات العدد (باكجات) على منظومة متغيرات الأحجام', () => {
     const svc = read(QUICK_SERVICE);
-    expect(svc).toContain('QuickExtraUnit');
-    expect(svc).toContain('extraUnits');
-    expect(svc).toContain('replaceForProduct(productId, [...baseRows, ...extraRows])');
-    // رفض الأسماء المكررة والمحجوزة (حبة/علبة/غرام).
-    expect(svc).toContain('مستخدم مسبقاً');
+    // v71: الباكجات حلّت محل الوحدات الإضافية بطلب التاجر.
+    expect(svc).toContain('QuickPackage');
+    expect(svc).toContain('quickPackageLabel');
+    expect(svc).toContain('parsePackageCount');
+    expect(svc).toContain('packages');
+    // الوحدات الإضافية القديمة أُزيلت نهائياً.
+    expect(svc).not.toContain('extraUnits');
+    expect(svc).not.toContain('QuickExtraUnit');
   });
 
-  test('واجهة قسم مطوي بصفوف (اسم + معامل + سعر) وحذف صف', () => {
+  test('واجهة قسم مطوي بصفوف (عدد + سعر) وحذف صف', () => {
     const sheet = read(QUICK_SHEET);
-    expect(sheet).toContain('وحدات إضافية بسعر مميّز');
-    expect(sheet).toContain('إضافة وحدة أخرى');
-    expect(sheet).toContain('parseExtraRows');
-    expect(sheet).toContain('extraUnits: extras');
+    expect(sheet).toContain('خيارات بيع بالعدد');
+    expect(sheet).toContain('إضافة خيار آخر');
+    expect(sheet).toContain('parsePackageRows');
+    expect(sheet).toContain('packages');
   });
 });
 
@@ -158,13 +161,13 @@ describe('v70 — ٥ الشريط السفلي فوق أزرار النظام', 
 });
 
 describe('v70 — ٦ الإصدار والتوقيع', () => {
-  test('70.0.0 (78) في config والبناء', () => {
+  test('71.0.0 (79) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '70.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 78');
+    expect(config).toContain("APP_VERSION = '71.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 79');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 78');
-    expect(gradle).toContain('versionName "70.0.0"');
+    expect(gradle).toContain('versionCode 79');
+    expect(gradle).toContain('versionName "71.0.0"');
   });
 
   test('CI يوقّع بنفس مفتاح Play في كل بناء (بلا تغيير)', () => {

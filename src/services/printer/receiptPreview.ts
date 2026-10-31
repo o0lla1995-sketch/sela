@@ -17,8 +17,9 @@
  * الرسالة الختامية، وإظهار الربح.
  */
 import {PlatformUtilsNative} from '../../native/nativeBridge';
-import {formatDateTime, formatMoney, localNow} from '../../core/format';
+import {formatDateTime, formatMoney, formatQty, localNow} from '../../core/format';
 import {APP_NAME} from '../../core/config';
+import {paymentMethodReceiptLabel} from '../../core/paymentMethods';
 import type {ReceiptSettings} from './receipt';
 
 /** صف واحد من صفوف الفاتورة (يفهمها المولّد الأصلي). */
@@ -42,18 +43,24 @@ export interface ReceiptPreviewPayload {
   rows: ReceiptPreviewRow[];
 }
 
-/** أصناف النموذج — فاتورة بقالة واقعية بأحجام عربية. */
+/** أصناف النموذج — فاتورة بقالة واقعية: وحدة بيع، باكج عدد،
+ *  وحجم مطعم — حتى يرى التاجر شكل كل تمييز في فاتورته. */
 const SAMPLE_ITEMS: {
   name: string;
   qty: number;
   unitPrice: number;
   unitName?: string;
+  variantLabel?: string;
+  baseQty?: number;
 }[] = [
   {name: 'حليب المراعي ١ لتر', qty: 2, unitPrice: 6.5},
   {name: 'خبز عربي', qty: 3, unitPrice: 3},
   {name: 'شوكولاتة بالحليب 40 جرام', qty: 2, unitPrice: 4.5},
+  // v71: باكج عدد من المنتج السريع — 3 حبات بسعر مميز.
+  {name: 'مارلبورو', qty: 2, unitPrice: 2, variantLabel: '3 حبات', baseQty: 6},
   {name: 'عصير برتقال طبيعي', qty: 1, unitPrice: 7},
-  {name: 'مياه معدنية', qty: 6, unitPrice: 2, unitName: 'قنينة'},
+  // v71: وحدة بيع أكبر — الكمية بالوحدة والقطع تحتها.
+  {name: 'مياه معدنية', qty: 6, unitPrice: 2, unitName: 'قنينة', baseQty: 36},
 ];
 
 /**
@@ -106,16 +113,26 @@ export function buildReceiptPreviewRows(
     align: 'right',
   });
   rows.push({t: 'text', text: 'بيع مفرق', align: 'right'});
+  // v71 (الجولة 83 #٢ب): طريقة الدفع في المعاينة — يرى التاجر
+  //  شكلها في فاتورته كما ستُطبع (نقدي/بنك/محفظة بالنوع والجهة).
+  rows.push({
+    t: 'text',
+    text: `طريقة الدفع: ${paymentMethodReceiptLabel('jawwal_pay')}`,
+    align: 'right',
+  });
   rows.push({t: 'sep'});
 
-  // ── الأصناف: الاسم يميناً ثم سطر الكمية×السعر=القيمة ──
+  // ── الأصناف: الاسم يميناً ثم سطر الكمية×السعر=القيمة، وسطر
+  //  القطع للوحدات والباكجات (v71) ──
   let subtotal = 0;
   for (const item of SAMPLE_ITEMS) {
     const lineTotal = item.qty * item.unitPrice;
     subtotal += lineTotal;
     rows.push({
       t: 'text',
-      text: `${item.name}${item.unitName ? ` (${item.unitName})` : ''}`,
+      text: `${item.name}${item.variantLabel ? ` (${item.variantLabel})` : ''}${
+        item.unitName ? ` (${item.unitName})` : ''
+      }`,
       align: 'right',
     });
     rows.push({
@@ -123,6 +140,13 @@ export function buildReceiptPreviewRows(
       label: `${item.qty} × ${formatMoney(item.unitPrice)}`,
       value: formatMoney(lineTotal),
     });
+    if (item.baseQty != null && item.baseQty > item.qty) {
+      rows.push({
+        t: 'text',
+        text: `= ${formatQty(item.baseQty)} قطعة`,
+        align: 'right',
+      });
+    }
   }
 
   // ── المجاميع ──

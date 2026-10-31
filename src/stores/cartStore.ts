@@ -272,6 +272,42 @@ function toSizedLine(
   };
 }
 
+/** v71 (الجولة 83 #٢): سطر باكج بيع بالعدد — متغير حجم بعدد حبات
+ *  (3 حبات بـ2 شيكل) — السعر سعر الباكج كاملاً، وconversion =
+ *  عدد الحبات كي يُخصم المخزون بالقطع الصحيحة (2 باكج × 3 حبات =
+ *  6 قطع)، والوصف في الفاتورة بعد الاسم (مارلبورو (3 حبات)).
+ *  unitName «قطعة» عمداً — وصف الباكج يغني عن لاحقة الوحدة. */
+function toPackageLine(
+  product: Product,
+  sizeVariant: ProductVariant,
+  count: number,
+  quantity: number,
+): CartLine {
+  const price = sizeVariant.retail_price ?? product.retail_price * count;
+  const pct = Math.max(0, Math.min(95, product.discount_pct ?? 0));
+  const discounted = applyPctDiscount(price, pct);
+  return {
+    key: lineKey(product.id, null, sizeVariant.id),
+    productId: product.id,
+    name: product.name,
+    unitPrice: discounted,
+    costPrice: (sizeVariant.cost_price ?? product.cost_price) * count,
+    retailPrice: price,
+    wholesalePrice: price,
+    quantity,
+    availableStock:
+      product.stock_untracked === 1
+        ? UNTRACKED_STOCK
+        : product.stock_quantity,
+    unitId: null,
+    unitName: BASE_UNIT_NAME,
+    conversion: count,
+    variantId: sizeVariant.id,
+    variantLabel: sizeVariant.size,
+    discountPct: pct,
+  };
+}
+
 interface CartState {
   lines: CartLine[];
   pricingMode: PricingMode;
@@ -313,6 +349,21 @@ interface CartState {
     sizeVariant: ProductVariant,
     quantity: number,
   ) => {added: boolean; reason?: string};
+  /** v71 (الجولة 83 #٢): باكج بيع بالعدد (N حبة بسعر مميز) بكمية —
+   *  المخزون يُحسب بالقطع (conversion = عدد الحبات). */
+  addPackageLine: (
+    product: Product,
+    sizeVariant: ProductVariant,
+    count: number,
+    quantity: number,
+  ) => {added: boolean; reason?: string};
+  /** v71 (الجولة 83 #٥): استرجاع فاتورة سابقة للسلة — يستبدل
+   *  الأسطر كاملة بأسعار الفاتورة الأصلية (لا يعيد التسعير). */
+  restoreLines: (
+    lines: CartLine[],
+    mode: PricingMode,
+    discount: number,
+  ) => void;
   setLineUnit: (
     product: Product,
     unit: ProductUnit | null,
@@ -658,6 +709,64 @@ export const useCartStore = create<CartState>((set, get) => ({
     set({lines});
     saveDraft(lines, state.pricingMode, state.discount);
     return {added: true};
+  },
+
+  addPackageLine: (product, sizeVariant, count, quantity) => {
+    const state = get();
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return {added: false, reason: 'أدخل كمية صالحة'};
+    }
+    const safeCount = Math.max(2, Math.round(count));
+    const key = lineKey(product.id, null, sizeVariant.id);
+    const existing = state.lines.find(line => line.key === key);
+    const untracked = product.stock_untracked === 1;
+    if (!untracked) {
+      const used = baseUsed(state.lines);
+      const alreadyInCart = used.get(product.id) ?? 0;
+      if (alreadyInCart + safeCount * quantity > product.stock_quantity) {
+        return {
+          added: false,
+          reason: `المتاح من ${product.name} ${formatQtyForMessage(
+            product.stock_quantity - alreadyInCart,
+          )} حبة فقط — الباكج يحتاج ${safeCount * quantity}`,
+        };
+      }
+    }
+    if (existing) {
+      const lines = state.lines.map(line =>
+        line.key === key
+          ? {...line, quantity: line.quantity + quantity}
+          : line,
+      );
+      set({lines});
+      saveDraft(lines, state.pricingMode, state.discount);
+      return {added: true};
+    }
+    const lines = [
+      ...state.lines,
+      toPackageLine(product, sizeVariant, safeCount, quantity),
+    ];
+    set({lines});
+    saveDraft(lines, state.pricingMode, state.discount);
+    return {added: true};
+  },
+
+  restoreLines: (lines, mode, discount) => {
+    // استرجاع فاتورة سابقة — الأسطر جاهزة بأسعارها الأصلية؛
+    // التطبيع يحمي من مسودات قديمة ناقصة الحقول.
+    const restored = (lines ?? []).map(normalizeLine).filter(
+      line => line != null && line.quantity > 0,
+    );
+    set({
+      lines: restored,
+      pricingMode: mode === 'WHOLESALE' ? 'WHOLESALE' : 'RETAIL',
+      discount: Math.max(0, Number.isFinite(discount) ? discount : 0),
+    });
+    saveDraft(
+      restored,
+      mode === 'WHOLESALE' ? 'WHOLESALE' : 'RETAIL',
+      Math.max(0, Number.isFinite(discount) ? discount : 0),
+    );
   },
 
   setLineUnit: (product, unit) => {

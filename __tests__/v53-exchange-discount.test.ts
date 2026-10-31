@@ -86,12 +86,12 @@ describe('v53 — خصم الاستبدال + إصلاحات Hermes', () => {
     expect(fnBody).not.toContain('new URL');
   });
 
-  test('⑥ الإصدار: 70.0.0 (78)', () => {
+  test('⑥ الإصدار: 71.0.0 (79)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '70.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 78');
+    expect(config).toContain("APP_VERSION = '71.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 79');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "70.0.0"');
-    expect(gradle).toContain('versionCode 78');
+    expect(gradle).toContain('versionName "71.0.0"');
+    expect(gradle).toContain('versionCode 79');
   });
 });

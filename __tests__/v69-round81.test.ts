@@ -17,7 +17,7 @@
  * ٤. منع تكرار اسم المنتج والباركود عند إدخال منتج جديد —
  *    حارس في ProductRepo (إنشاء وتعديل) يفحص الاسم غير الحساس
  *    للحالة والباركود في المنتجات النشطة وباركودات وحداتها.
- * ٥. الإصدار: 70.0.0 (78).
+ * ٥. الإصدار: 71.0.0 (79).
  */
 import {freshApp} from './helpers/app';
 
@@ -184,13 +184,13 @@ describe('v69 — ٤ منع تكرار اسم المنتج والباركود', 
 });
 
 describe('v69 — ٥ الإصدار', () => {
-  test('70.0.0 (78) في config والبناء', () => {
+  test('71.0.0 (79) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '70.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 78');
+    expect(config).toContain("APP_VERSION = '71.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 79');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 78');
-    expect(gradle).toContain('versionName "70.0.0"');
+    expect(gradle).toContain('versionCode 79');
+    expect(gradle).toContain('versionName "71.0.0"');
   });
 });
 

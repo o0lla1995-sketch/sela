@@ -125,6 +125,19 @@ export function paymentMethodLabel(id: string | null | undefined): string {
   return paymentMethodById(id).label;
 }
 
+/** v71 (الجولة 83 #١): تسمية طريقة الدفع للفاتورة المطبوعة — النوع
+ *  + الجهة معاً كما طلب التاجر («طريقة الدفع سواء نقدي أو محفظة
+ *  أو بنك ونوعه»): نقدي / بنك فلسطين / محفظة جوال باي. */
+export function paymentMethodReceiptLabel(
+  id: string | null | undefined,
+): string {
+  const method = paymentMethodById(id);
+  if (method.kind === 'wallet') {
+    return `محفظة ${method.label}`;
+  }
+  return method.label;
+}
+
 /** v71 (الجولة 75 #6): عرض أي معرف طريقة دفع في التقارير —
  *  المعروف يأتي من السجل، والقيم التاريخية (card/other) تعرض
  *  «بطاقة/أخرى» بلا إسقاطها على النقدي (أرصدة السدادات القديمة). */
