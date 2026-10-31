@@ -123,6 +123,13 @@ interface PlatformUtilsNative {
     fileName: string,
     payloadJson: string,
   ): Promise<string>;
+  /** v70 (الجولة 82 #٢): تقرير ديون المتجر PDF — محرّك جدول عام
+   *  يخدم تقرير الدفتر كاملاً وكشف الحساب المفصل لزبون واحد
+   *  (الديون/السدادّات بترتيب زمني مع الرصيد الجاري). */
+  createDebtsReportPdf(
+    fileName: string,
+    payloadJson: string,
+  ): Promise<string>;
   /** v40 (الجولة 48 #4): يرسم شكل الفاتورة الحرارية كصورة PNG
    *  (صفوف JSON بنفس بنية الفاتورة → Tajawal على ورقة بيضاء
    *  بمقاس 58/80مم) ويحفظها في مجلد التنزيلات → المسار. */

@@ -1151,7 +1151,10 @@ export function Toaster() {
     <View
       style={[
         styles.toasterWrap,
-        {top: (statusBarHeight ?? 24) + insets.top + 4},
+        // v70 (الجولة 82 #٥): على أندرويد 15/16 المفروض به الحافة
+        // للحافة قد يعيد StatusBar.currentHeight نفس قيمة inset —
+        // نأخذ الأكبر بدل جمعهما كي لا تنزل الإشعارات مسافة مزدوجة.
+        {top: Math.max(statusBarHeight ?? 24, insets.top) + 4},
       ]}
       pointerEvents="box-none">
       {toasts.slice(-3).map(item => (

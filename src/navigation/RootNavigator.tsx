@@ -18,6 +18,7 @@ import {NavigationContainer} from '@react-navigation/native';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import {createBottomTabNavigator} from '@react-navigation/bottom-tabs';
 import {I18nManager, View} from 'react-native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {Icon, type IconName} from '../components/Icon';
 import {fonts, makeStyles, typography, useThemeColors} from '../core/theme';
 import {HomeScreen} from '../screens/HomeScreen';
@@ -134,6 +135,16 @@ const TAB_ITEMS: {
 
 function MainTabs() {
   const c = useThemeColors();
+  // v70 (الجولة 82 #٥): إصلاح الشريط السفلي أسفل أزرار النظام — طلب
+  // التاجر: «في بعض إصدارات الهواتف تظهر قائمة التطبيق السفلية
+  // أسفل أزرار الشاشة الخاصة بالهاتف». السبب الجذري: التطبيق يستهدف
+  // API 36، وأندرويد 15+ يفرض الرسم من الحافة للحافة (Edge-to-Edge)
+  // ويتجاهل خاصية الاعتذار windowOptOutEdgeToEdgeEnforcement على
+  // أندرويد 16 — فالشريط ثابت الارتفاع (62dp) كان يُرسم خلف شريط
+  // التنقل. الحل الصحيح عبر كل الإصدارات: هوامش الأمان — عندما لا
+  // يكون الوضع مفروضاً insets.bottom = 0 (لا شيء يتغير إطلاقاً)،
+  // وعندما يُفرض يرتفع الشريط فوق أزرار النظام/الإيماءات.
+  const insets = useSafeAreaInsets();
   return (
     <Tabs.Navigator
       screenOptions={{
@@ -142,8 +153,8 @@ function MainTabs() {
           backgroundColor: c.surface,
           borderTopWidth: 1,
           borderTopColor: c.borderSoft,
-          height: 62,
-          paddingBottom: 8,
+          height: 62 + insets.bottom,
+          paddingBottom: 8 + insets.bottom,
           paddingTop: 6,
         },
         tabBarActiveTintColor: c.accent,

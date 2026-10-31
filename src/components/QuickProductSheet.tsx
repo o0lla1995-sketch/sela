@@ -31,7 +31,12 @@ import {
   View,
 } from 'react-native';
 import {AppButton, Badge} from './ui';
-import {QuickProductService} from '../services/QuickProductService';
+import {Icon} from './Icon';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {
+  QuickProductService,
+  type QuickExtraUnit,
+} from '../services/QuickProductService';
 import {useCatalogStore} from '../stores/catalogStore';
 import {useToastStore} from '../stores/toastStore';
 import {
@@ -41,6 +46,15 @@ import {
   typography,
   useThemeColors,
 } from '../core/theme';
+
+/** v70: صف وحدة إضافية كحقول نص خام — التحويل لحظة الحفظ فقط. */
+interface ExtraRow {
+  name: string;
+  perBase: string;
+  price: string;
+}
+
+const EMPTY_EXTRA: ExtraRow = {name: '', perBase: '', price: ''};
 
 type SellBy = 'piece' | 'box' | 'gram';
 
@@ -69,6 +83,11 @@ export function QuickProductSheet({
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
   const refreshCatalog = useCatalogStore(state => state.refresh);
+  // v70 (الجولة 82 #٥): نافذة Modal تُرسم فوق كل شيء (حتى شريط
+  // التبويبات) — على أجهزة أندرويد 15/16 المفروض بها الحافة
+  // للحافة تُرسم خلف شريط التنقل، فأزرار الحفظ تحتاج هامش
+  // الأمان السفلي كي تبقى فوق أزرار النظام.
+  const insets = useSafeAreaInsets();
 
   const [name, setName] = useState('');
   const [sellBy, setSellBy] = useState<SellBy>('piece');
@@ -79,6 +98,10 @@ export function QuickProductSheet({
   const [stock, setStock] = useState('');
   const [barcode, setBarcode] = useState('');
   const [busy, setBusy] = useState(false);
+  /** v70 (الجولة 82 #٤): وحدات إضافية بسعر مميّز — قابلة للطي
+   *  حتى لا تزاحم المسار السريع الأساسي (الاسم/السعر/الإضافة). */
+  const [extrasOpen, setExtrasOpen] = useState(false);
+  const [extraRows, setExtraRows] = useState<ExtraRow[]>([]);
 
   const perBoxCount = useMemo(() => {
     const parsed = parsePositiveNumber(perBox);
@@ -110,6 +133,44 @@ export function QuickProductSheet({
     setGramPrice('');
     setStock('');
     setBarcode('');
+    setExtrasOpen(false);
+    setExtraRows([]);
+  };
+
+  /** v70: تحويل صفوف الوحدات الإضافية لحظة الحفظ — الصف الفارغ
+   *  تماماً (لا اسم ولا معامل ولا سعر) يُتجاهل بصمت؛ أي صف ناقص
+   *  يوقف الحفظ برسالة تحدد الحقل الناقص بالاسم. */
+  const parseExtraRows = (): QuickExtraUnit[] => {
+    const out: QuickExtraUnit[] = [];
+    for (const row of extraRows) {
+      const trimmedName = row.name.trim();
+      const perBaseText = row.perBase.replace(',', '.').trim();
+      const priceText = row.price.replace(',', '.').trim();
+      if (
+        trimmedName.length === 0 &&
+        perBaseText.length === 0 &&
+        priceText.length === 0
+      ) {
+        continue;
+      }
+      if (trimmedName.length === 0) {
+        throw new Error('أدخل اسم الوحدة الإضافية (مثال: كرتونة)');
+      }
+      const perBase = Number(perBaseText);
+      if (!Number.isFinite(perBase) || perBase <= 0) {
+        throw new Error(
+          `«${trimmedName}»: أدخل ${
+            sellBy === 'gram' ? 'الوزن بالكيلو' : 'عدد الحبات'
+          } — رقماً أكبر من صفر`,
+        );
+      }
+      const price = Number(priceText);
+      if (!Number.isFinite(price) || price <= 0) {
+        throw new Error(`«${trimmedName}»: أدخل سعرها الخاص — رقماً أكبر من صفر`);
+      }
+      out.push({name: trimmedName, perBase, price});
+    }
+    return out;
   };
 
   const save = async () => {
@@ -153,6 +214,7 @@ export function QuickProductSheet({
 
     setBusy(true);
     try {
+      const extras = parseExtraRows();
       const stockInput = parsePositiveNumber(stock);
       await QuickProductService.createQuickProduct({
         name: trimmed,
@@ -168,11 +230,23 @@ export function QuickProductSheet({
           sellBy === 'piece' ? parsePositiveNumber(boxPrice) : null,
         stockInput,
         barcode: barcode.trim() || null,
+        extraUnits: extras,
       });
       await refreshCatalog();
-      toast(`أُضيف «${trimmed}» — متاح في نقطة البيع فوراً`, 'success');
+      toast(
+        `أُضيف «${trimmed}» — متاح في نقطة البيع فوراً${
+          extras.length > 0 ? ` بـ${extras.length + 1} وحدات بيع` : ''
+        }`,
+        'success',
+      );
       reset();
       onClose();
+    } catch (error) {
+      toast(
+        error instanceof Error ? error.message : 'فشل إضافة المنتج',
+        'error',
+        5000,
+      );
     } finally {
       setBusy(false);
     }
@@ -191,7 +265,13 @@ export function QuickProductSheet({
     <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={styles.sheet} onPress={() => undefined}>
           <ScrollView
-            contentContainerStyle={styles.sheetContent}
+            contentContainerStyle={[
+              styles.sheetContent,
+              // v70: هامش الأمان السفلي ديناميكياً (خارج كاش makeStyles
+              // الذي يُبنى مرة لكل سمة) — Modal يُرسم فوق شريط التنقل
+              // على أجهزة الحافة-للحافة.
+              {paddingBottom: spacing.xxl + insets.bottom},
+            ]}
             keyboardShouldPersistTaps="handled">
             <Text style={styles.title}>إضافة منتج سريع</Text>
             <Text style={styles.subtitle}>
@@ -307,6 +387,120 @@ export function QuickProductSheet({
               onChangeText={setBarcode}
               placeholder="امسحه أو اكتبه"
             />
+
+            {/* v70 (الجولة 82 #٤): وحدات إضافية بسعر مميّز — طلب
+                التاجر: «إضافة وحدات للمنتج مثلا للبيع بأكثر من قطعة
+                بسعر مميز». قسم مطوي افتراضياً حتى يبقى المسار
+                السريع كما هو. */}
+            <Pressable
+              style={styles.extrasToggle}
+              onPress={() => setExtrasOpen(prev => !prev)}>
+              <View style={styles.extrasToggleRow}>
+                <Icon
+                  name={extrasOpen ? 'chevronDown' : 'plus'}
+                  size={16}
+                  color={c.accent}
+                />
+                <Text style={styles.extrasToggleText}>
+                  وحدات إضافية بسعر مميّز (اختياري)
+                </Text>
+              </View>
+              {extraRows.length > 0 ? (
+                <Badge
+                  label={`${extraRows.length}`}
+                  tone="accent"
+                />
+              ) : null}
+            </Pressable>
+            {extrasOpen ? (
+              <View style={styles.extrasWrap}>
+                <Text style={styles.extrasHint}>
+                  {sellBy === 'gram'
+                    ? 'كل وحدة بوزنها بالكيلو وسعرها الخاص (مثال: ربع كيلو = 0.25)'
+                    : 'كل وحدة بعدد حباتها وسعرها الخاص (مثال: كرتونة = 200 حبة)'}
+                  — تظهر في منتقي الوحدة في سلة البيع فوراً.
+                </Text>
+                {extraRows.map((row, index) => (
+                  <View key={index} style={styles.extraRow}>
+                    <View style={styles.extraFieldName}>
+                      <Text style={styles.extraLabel}>الاسم</Text>
+                      <TextInput
+                        style={styles.extraInput}
+                        value={row.name}
+                        onChangeText={text =>
+                          setExtraRows(prev =>
+                            prev.map((r, i) =>
+                              i === index ? {...r, name: text} : r,
+                            ),
+                          )
+                        }
+                        placeholder="كرتونة"
+                        placeholderTextColor={c.textFaint}
+                        textAlign={I18nManager.isRTL ? 'right' : 'left'}
+                      />
+                    </View>
+                    <View style={styles.extraFieldCount}>
+                      <Text style={styles.extraLabel}>
+                        {sellBy === 'gram' ? 'كغ' : 'حبة/وحدة'}
+                      </Text>
+                      <TextInput
+                        style={styles.extraInput}
+                        value={row.perBase}
+                        onChangeText={text =>
+                          setExtraRows(prev =>
+                            prev.map((r, i) =>
+                              i === index
+                                ? {...r, perBase: text.replace(',', '.')}
+                                : r,
+                            ),
+                          )
+                        }
+                        keyboardType="decimal-pad"
+                        placeholder={sellBy === 'gram' ? '0.25' : '200'}
+                        placeholderTextColor={c.textFaint}
+                        textAlign="center"
+                      />
+                    </View>
+                    <View style={styles.extraFieldPrice}>
+                      <Text style={styles.extraLabel}>السعر ₪</Text>
+                      <TextInput
+                        style={styles.extraInput}
+                        value={row.price}
+                        onChangeText={text =>
+                          setExtraRows(prev =>
+                            prev.map((r, i) =>
+                              i === index
+                                ? {...r, price: text.replace(',', '.')}
+                                : r,
+                            ),
+                          )
+                        }
+                        keyboardType="decimal-pad"
+                        placeholder="150"
+                        placeholderTextColor={c.textFaint}
+                        textAlign="center"
+                      />
+                    </View>
+                    <Pressable
+                      style={styles.extraRemove}
+                      onPress={() =>
+                        setExtraRows(prev => prev.filter((_, i) => i !== index))
+                      }
+                      hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                      <Icon name="trash" size={16} color={c.danger} />
+                    </Pressable>
+                  </View>
+                ))}
+                <Pressable
+                  style={styles.extrasAdd}
+                  onPress={() =>
+                    setExtraRows(prev => [...prev, {...EMPTY_EXTRA}])
+                  }>
+                  <Icon name="plus" size={15} color={c.accent} />
+                  <Text style={styles.extrasAddText}>إضافة وحدة أخرى</Text>
+                </Pressable>
+              </View>
+            ) : null}
 
             <View style={styles.actions}>
               <AppButton
@@ -469,6 +663,84 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row-reverse',
       gap: spacing.sm,
       marginTop: spacing.sm,
+    },
+    /* v70 (الجولة 82 #٤): قسم الوحدات الإضافية. */
+    extrasToggle: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+    },
+    extrasToggleRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 7,
+    },
+    extrasToggleText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    extrasWrap: {
+      gap: spacing.sm,
+    },
+    extrasHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: 11,
+      lineHeight: 16,
+      textAlign: 'right',
+    },
+    extraRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'flex-end',
+      gap: 6,
+    },
+    extraFieldName: {flex: 3},
+    extraFieldCount: {flex: 1.4},
+    extraFieldPrice: {flex: 1.2},
+    extraLabel: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: 10.5,
+      marginBottom: 3,
+      textAlign: 'right',
+    },
+    extraInput: {
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: 13,
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: 8,
+      paddingHorizontal: 8,
+      paddingVertical: 8,
+    },
+    extraRemove: {
+      paddingVertical: 10,
+      paddingHorizontal: 4,
+    },
+    extrasAdd: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      borderWidth: 1,
+      borderColor: c.accent,
+      borderStyle: 'dashed',
+      borderRadius: 10,
+      paddingVertical: 9,
+    },
+    extrasAddText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
   }),
 );

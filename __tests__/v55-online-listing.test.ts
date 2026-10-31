@@ -18,7 +18,7 @@
  *    سبب شكوى «الخصم لا يحفظ بالمنتج»؛ أُضيف مع online_listed.
  * ⑥ الواجهات: شاشة منتجات متجري أونلاين + تسجيلها في التنقل +
  *    بوابة الدخول من شاشة البيع أونلاين + مفتاح النموذج.
- * ⑦ الإصدار: 69.0.0 (76).
+ * ⑦ الإصدار: 70.0.0 (78).
  */
 import {freshApp} from './helpers/app';
 
@@ -213,12 +213,12 @@ describe('v55 — الإدراج الانتقائي للبيع أونلاين', 
     expect(ordersScreen).toContain('معروض في متجر سيلا:');
   });
 
-  test('⑦ الإصدار: 69.0.0 (76) في config والبناء', () => {
+  test('⑦ الإصدار: 70.0.0 (78) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '69.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 77');
+    expect(config).toContain("APP_VERSION = '70.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 78');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 77');
-    expect(gradle).toContain('versionName "69.0.0"');
+    expect(gradle).toContain('versionCode 78');
+    expect(gradle).toContain('versionName "70.0.0"');
   });
 });

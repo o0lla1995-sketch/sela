@@ -44,6 +44,8 @@ import {
   paymentMethodById,
 } from '../../core/paymentMethods';
 import {useSettingsStore} from '../../stores/settingsStore';
+import {useSilaStore} from '../../stores/silaStore';
+import {DebtsPdfService} from '../../services/DebtsPdfService';
 import {
   LocalDebtsRepo,
   isValidIdNumber,
@@ -88,6 +90,12 @@ export function LocalDebtsScreen() {
   const c = useThemeColors();
   const styles = useStyles();
   const toast = useToastStore(state => state.show);
+  /** v70 (الجولة 82 #٣): زر «ربط وترحيل إلى صِلة» يظهر فقط عندما
+   *  يكون تطبيق صِلة مفعّلاً ومربوطاً بحساب التاجر — طلب التاجر:
+   *  «لماذا زر الربط والترحيل ظاهر ما لم يتم تفعيل تطبيق صِلة
+   *  وربطه؟». بلا ربط لا معنى للترحيل أصلاً (لا طابور مزامنة
+   *  ولا مفتاح تاجر). */
+  const silaPaired = useSilaStore(state => state.pairing != null);
 
   const [balances, setBalances] = useState<LocalCustomerBalance[]>([]);
   const [query, setQuery] = useState('');
@@ -108,6 +116,20 @@ export function LocalDebtsScreen() {
   const idFieldRef = useRef<FieldHandle>(null);
   const nameFieldRef = useRef<FieldHandle>(null);
   const phoneFieldRef = useRef<FieldHandle>(null);
+  /** v70 (الجولة 82 #١): دين مباشر على الحساب بلا بيع — طلب
+   *  التاجر: «لماذا لا يوجد إضافة دين مباشر إلى حساب الزبون
+   *  بدون بيع؟». نفس سلسلة INV-L ونفس المسار المحاسبي، بوصف
+   *  حر يطبع في كشف الحساب PDF وتاريخ الزبون. */
+  const [debtOpen, setDebtOpen] = useState(false);
+  const [debtAmount, setDebtAmount] = useState('');
+  const [debtNote, setDebtNote] = useState('');
+  const [debtBusy, setDebtBusy] = useState(false);
+  /** v70 (الجولة 82 #٢): تقارير PDF — الدفتر كاملاً + كشف الحساب
+   *  المفصل لكل زبون (تصدير ثم مشاركة/طباعة A4). */
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [bookPdfReady, setBookPdfReady] = useState(false);
+  const [custPdfBusy, setCustPdfBusy] = useState(false);
+  const [custPdfReady, setCustPdfReady] = useState(false);
   /** The open customer profile (detail sheet). */
   const [detail, setDetail] = useState<LocalCustomerBalance | null>(null);
   const [detailDebts, setDetailDebts] = useState<LocalDebt[]>([]);
@@ -169,6 +191,9 @@ export function LocalDebtsScreen() {
   const openDetail = useCallback(
     async (entry: LocalCustomerBalance) => {
       setDetail(entry);
+      // v70: كشف الـ PDF المفصل يُبنى لكل زبون باسمه — زرّا
+      // المشاركة/الطباعة يخصّان آخر زبون صُدّر له كشف فقط.
+      setCustPdfReady(false);
       const [debts, pays] = await Promise.all([
         LocalDebtsRepo.listDebts(entry.customer.id),
         LocalDebtsRepo.listPayments(entry.customer.id),
@@ -642,6 +667,96 @@ export function LocalDebtsScreen() {
     }
   }, [detail, linkBusy, reload, toast]);
 
+  /** v70 (الجولة 82 #١): تسجيل دين مباشر — بلا فاتورة بيع. الحد
+   *  الأقصى نفسه كتسجيل السداد (مليون شيكل) والوصف اختياري
+   *  لكنه يظهر في سجل الحساب وكشف الـ PDF (التاريخ المحاسبي
+   *  الكامل: لماذا نشأ الدين). */
+  const addDirectDebt = useCallback(async () => {
+    if (detail == null || debtBusy) {
+      return;
+    }
+    const amount = Number(debtAmount.replace(',', '.'));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      Alert.alert('مبلغ غير صالح', 'أدخل مبلغ الدين');
+      return;
+    }
+    if (amount > 1000000) {
+      Alert.alert('مبلغ غير منطقي', 'أقصى مبلغ مسموح 1,000,000 ₪');
+      return;
+    }
+    setDebtBusy(true);
+    try {
+      const note = debtNote.trim();
+      await LocalDebtsRepo.addDebt({
+        localCustomerId: detail.customer.id,
+        amountMinor: Math.round(amount * 100),
+        description: note.length > 0 ? note : 'دين مباشر (بلا فاتورة بيع)',
+      });
+      const customerId = detail.customer.id;
+      const customerName = detail.customer.name;
+      setDebtAmount('');
+      setDebtNote('');
+      setDebtOpen(false);
+      await refreshDetail(customerId);
+      toast(
+        `سُجّل دين ${formatMoney(amount)} على ${customerName} — الرصيد القائم الآن ${formatMoney(
+          (detail.outstandingMinor + Math.round(amount * 100)) / 100,
+        )}`,
+        'success',
+        5000,
+      );
+    } catch (error) {
+      Alert.alert(
+        'فشل تسجيل الدين',
+        error instanceof Error ? error.message : 'خطأ غير متوقع',
+      );
+    } finally {
+      setDebtBusy(false);
+    }
+  }, [debtAmount, debtBusy, debtNote, detail, refreshDetail, toast]);
+
+  /** v70 (الجولة 82 #٢): تصدير تقرير الدفتر كاملاً PDF. */
+  const exportBookPdf = useCallback(async () => {
+    if (pdfBusy) {
+      return;
+    }
+    setPdfBusy(true);
+    try {
+      const location = await DebtsPdfService.exportBookPdf();
+      setBookPdfReady(true);
+      toast(`أُنشئ تقرير الديون PDF: ${location}`, 'success', 6000);
+    } catch (error) {
+      Alert.alert(
+        'فشل إنشاء التقرير',
+        error instanceof Error ? error.message : 'خطأ غير متوقع',
+      );
+    } finally {
+      setPdfBusy(false);
+    }
+  }, [pdfBusy, toast]);
+
+  /** v70: تصدير كشف الحساب المفصل للزبون المفتوح. */
+  const exportCustomerPdf = useCallback(async () => {
+    if (detail == null || custPdfBusy) {
+      return;
+    }
+    setCustPdfBusy(true);
+    try {
+      const location = await DebtsPdfService.exportCustomerPdf(
+        detail.customer.id,
+      );
+      setCustPdfReady(true);
+      toast(`أُنشئ كشف الحساب PDF: ${location}`, 'success', 6000);
+    } catch (error) {
+      Alert.alert(
+        'فشل إنشاء كشف الحساب',
+        error instanceof Error ? error.message : 'خطأ غير متوقع',
+      );
+    } finally {
+      setCustPdfBusy(false);
+    }
+  }, [custPdfBusy, detail, toast]);
+
   const totals = useMemo(() => {
     const outstanding = balances.reduce(
       (sum, row) => sum + row.outstandingMinor,
@@ -693,6 +808,65 @@ export function LocalDebtsScreen() {
             tone="success"
             icon="wallet"
           />
+        </View>
+
+        {/* v70 (الجولة 82 #٢): تقرير الدفتر كاملاً PDF — بطل التاجر:
+            «زر في صفحة الدين لتحميل تقرير pdf احترافي بالديون». */}
+        <View style={styles.pdfCard}>
+          <View style={styles.pdfRow}>
+            <AppButton
+              title="تقرير الديون PDF"
+              icon="download"
+              small
+              onPress={() => void exportBookPdf()}
+              loading={pdfBusy}
+              style={{flex: 1}}
+            />
+            {bookPdfReady ? (
+              <>
+                <AppButton
+                  title="مشاركة"
+                  icon="send"
+                  variant="secondary"
+                  small
+                  onPress={() =>
+                    void DebtsPdfService.shareBookPdf().catch(error =>
+                      Alert.alert(
+                        'تعذّرت المشاركة',
+                        error instanceof Error
+                          ? error.message
+                          : 'خطأ غير متوقع',
+                      ),
+                    )
+                  }
+                  style={{flex: 1}}
+                />
+                <AppButton
+                  title="طباعة A4"
+                  icon="printer"
+                  variant="secondary"
+                  small
+                  onPress={() =>
+                    void DebtsPdfService.printBookPdf().catch(error =>
+                      Alert.alert(
+                        'تعذّرت الطباعة',
+                        error instanceof Error
+                          ? error.message
+                          : 'خطأ غير متوقع',
+                      ),
+                    )
+                  }
+                  style={{flex: 1}}
+                />
+              </>
+            ) : null}
+          </View>
+          <Text style={styles.pdfHint}>
+            تقرير احترافي A4 لكل حسابات الدفتر (الديون والمسدّد والقائم)
+            — يُحفظ في مجلد التنزيلات، وبعد إنشائه شاركه واتساب/إيميل أو
+            اطبعه على أي طابعة. كشف الحساب المفصل لكل زبون يُنشأ من
+            نافذة الزبون نفسها.
+          </Text>
         </View>
 
         <SectionTitle
@@ -964,39 +1138,119 @@ export function LocalDebtsScreen() {
             <View style={styles.actionsRow}>
               <View style={{flex: 1}}>
                 <AppButton
-                  title="تسجيل سداد"
-                  icon="wallet"
+                  title="دين مباشر"
+                  icon="plus"
                   small
-                  onPress={() => setPayOpen(true)}
+                  onPress={() => {
+                    setDebtAmount('');
+                    setDebtNote('');
+                    setDebtOpen(true);
+                  }}
                 />
               </View>
               <View style={{flex: 1}}>
-                {detail.customer.sila_customer_id == null ? (
-                  <AppButton
-                    title="ربط وترحيل إلى صِلة"
-                    icon="qrFrame"
-                    small
-                    variant="secondary"
-                    loading={linkBusy}
-                    onPress={() => void linkSilaByScan()}
-                  />
-                ) : (
-                  // v17 (round-23 #8): unreachable in the new flow —
-                  // linking deletes the account — kept purely as a
-                  // healing path for accounts linked by v16 that
-                  // never migrated (their balance still migrates
-                  // through the same one-shot flow after a re-scan).
-                  <AppButton
-                    title="إعادة مسح رمز صِلة للترحيل"
-                    icon="link"
-                    small
-                    variant="secondary"
-                    loading={linkBusy}
-                    onPress={() => void linkSilaByScan()}
-                  />
-                )}
+                <AppButton
+                  title="تسجيل سداد"
+                  icon="wallet"
+                  small
+                  variant="secondary"
+                  onPress={() => setPayOpen(true)}
+                />
               </View>
             </View>
+
+            {/* v70 (الجولة 82 #٣): أزرار صِلة تظهر فقط عند تفعيل الربط
+                — بلا حساب تاجر مربوط لا يوجد مفتاح ولا طابور مزامنة،
+                فالزر كان يفتح مساراً مستحيل الاكتمال. */}
+            {silaPaired ? (
+              <View style={styles.actionsRow}>
+                <View style={{flex: 1}}>
+                  {detail.customer.sila_customer_id == null ? (
+                    <AppButton
+                      title="ربط وترحيل إلى صِلة"
+                      icon="qrFrame"
+                      small
+                      variant="secondary"
+                      loading={linkBusy}
+                      onPress={() => void linkSilaByScan()}
+                    />
+                  ) : (
+                    // v17 (round-23 #8): unreachable in the new flow —
+                    // linking deletes the account — kept purely as a
+                    // healing path for accounts linked by v16 that
+                    // never migrated (their balance still migrates
+                    // through the same one-shot flow after a re-scan).
+                    <AppButton
+                      title="إعادة مسح رمز صِلة للترحيل"
+                      icon="link"
+                      small
+                      variant="secondary"
+                      loading={linkBusy}
+                      onPress={() => void linkSilaByScan()}
+                    />
+                  )}
+                </View>
+              </View>
+            ) : null}
+
+            {/* v70 (الجولة 82 #٢): كشف الحساب المفصل PDF — طلب التاجر:
+                «والتقرير المفصل الخاص بالديون». */}
+            <View style={styles.actionsRow}>
+              <View style={{flex: 1}}>
+                <AppButton
+                  title="كشف حساب PDF مفصل"
+                  icon="download"
+                  small
+                  variant="secondary"
+                  loading={custPdfBusy}
+                  onPress={() => void exportCustomerPdf()}
+                />
+              </View>
+            </View>
+            {custPdfReady ? (
+              <View style={styles.actionsRow}>
+                <View style={{flex: 1}}>
+                  <AppButton
+                    title="مشاركة الكشف"
+                    icon="send"
+                    small
+                    variant="ghost"
+                    onPress={() =>
+                      void DebtsPdfService.shareCustomerPdf(
+                        detail.customer.id,
+                      ).catch(error =>
+                        Alert.alert(
+                          'تعذّرت المشاركة',
+                          error instanceof Error
+                            ? error.message
+                            : 'خطأ غير متوقع',
+                        ),
+                      )
+                    }
+                  />
+                </View>
+                <View style={{flex: 1}}>
+                  <AppButton
+                    title="طباعة الكشف (A4)"
+                    icon="printer"
+                    small
+                    variant="ghost"
+                    onPress={() =>
+                      void DebtsPdfService.printCustomerPdf(
+                        detail.customer.id,
+                      ).catch(error =>
+                        Alert.alert(
+                          'تعذّرت الطباعة',
+                          error instanceof Error
+                            ? error.message
+                            : 'خطأ غير متوقع',
+                        ),
+                      )
+                    }
+                  />
+                </View>
+              </View>
+            ) : null}
 
             <SectionTitle title="سجل العمليات" />
             <ScrollView style={styles.historyList}>
@@ -1007,6 +1261,11 @@ export function LocalDebtsScreen() {
                       {debt.invoice_ref}
                       {debt.migrated === 1 ? ' (مُرحّل إلى صِلة)' : ''}
                     </Text>
+                    {debt.description ? (
+                      <Text style={styles.historyNote} numberOfLines={1}>
+                        {debt.description}
+                      </Text>
+                    ) : null}
                     <Text style={styles.historyMeta}>
                       {formatDateTime(
                         debt.created_at.replace('T', ' ').slice(0, 19),
@@ -1022,6 +1281,11 @@ export function LocalDebtsScreen() {
                 <View key={`p${pay.id}`} style={styles.historyRow}>
                   <View style={{flex: 1}}>
                     <Text style={styles.historyRef}>{pay.receipt_ref}</Text>
+                    {pay.note ? (
+                      <Text style={styles.historyNote} numberOfLines={1}>
+                        {pay.note}
+                      </Text>
+                    ) : null}
                     <Text style={styles.historyMeta}>
                       {formatDateTime(
                         pay.created_at.replace('T', ' ').slice(0, 19),
@@ -1259,6 +1523,89 @@ export function LocalDebtsScreen() {
               title="إلغاء"
               variant="secondary"
               onPress={() => setPayOpen(false)}
+            />
+          </View>
+        </View>
+      ) : null}
+
+      {/* ── v70 (الجولة 82 #١): نافذة الدين المباشر (بلا فاتورة بيع) ── */}
+      {debtOpen && detail != null ? (
+        <View style={styles.overlay}>
+          <TouchableOpacity
+            style={styles.overlayDim}
+            activeOpacity={1}
+            onPress={() => setDebtOpen(false)}
+          />
+          <BackHandlerCloser
+            active={debtOpen}
+            onClose={() => setDebtOpen(false)}
+          />
+          <View style={styles.sheet}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>
+              دين مباشر — {detail.customer.name}
+            </Text>
+            <Text style={styles.payBalanceText}>
+              الرصيد القائم حالياً:{' '}
+              {detail.outstandingMinor > 0
+                ? formatMoney(detail.outstandingMinor / 100)
+                : detail.outstandingMinor === 0
+                ? 'لا دين'
+                : `رصيد دائن ${formatMoney(
+                    Math.abs(detail.outstandingMinor) / 100,
+                  )}`}
+            </Text>
+            <Field
+              label="مبلغ الدين (₪) *"
+              value={debtAmount}
+              onChangeText={setDebtAmount}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              returnKeyType="next"
+            />
+            <Field
+              label="البيان / السبب (اختياري)"
+              value={debtNote}
+              onChangeText={setDebtNote}
+              placeholder="مثال: دين سابق قبل التطبيق · خدمة · بضاعة خارج النظام"
+              returnKeyType="done"
+              onSubmitEditing={() => {
+                Keyboard.dismiss();
+                void addDirectDebt();
+              }}
+            />
+            {Number(debtAmount.replace(',', '.')) > 0 &&
+            Number.isFinite(Number(debtAmount.replace(',', '.'))) ? (
+              <Text style={styles.debtPreviewText}>
+                الرصيد القائم بعد التسجيل:{' '}
+                {formatMoney(
+                  (detail.outstandingMinor +
+                    Math.round(
+                      Number(debtAmount.replace(',', '.')) * 100,
+                    )) /
+                    100,
+                )}
+              </Text>
+            ) : null}
+            <Text style={styles.sheetHint}>
+              يُسجّل الدين في دفتر المتجر بسلسلة INV-L نفسها (بلا فاتورة بيع
+              ولا حركة مخزون) — يظهر في سجل الحساب وفي كشف الـ PDF المفصل.
+              للديون الناشئة عن بيع استخدم نقطة البيع حتى يُخصم المخزون
+              وتُنشأ الفاتورة الصحيحة.
+            </Text>
+            <AppButton
+              title="تأكيد تسجيل الدين"
+              icon="plus"
+              onPress={() => {
+                Keyboard.dismiss();
+                void addDirectDebt();
+              }}
+              loading={debtBusy}
+            />
+            <AppButton
+              title="إلغاء"
+              variant="secondary"
+              onPress={() => setDebtOpen(false)}
             />
           </View>
         </View>
@@ -1542,6 +1889,38 @@ const useStyles = makeStyles(c =>
       fontSize: 12,
       textAlign: 'center',
       paddingVertical: spacing.lg,
+    },
+    /* v70 (الجولة 82 #٢): بطاقة تقرير الديون PDF في رأس الصفحة. */
+    pdfCard: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: 14,
+      padding: spacing.md,
+      gap: spacing.sm,
+    },
+    pdfRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    pdfHint: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: 11,
+      lineHeight: 16,
+    },
+    /* v70 (الجولة 82 #١): بيان العملية داخل سجل الحساب + معاينة
+       الرصيد في نافذة الدين المباشر. */
+    historyNote: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: 11,
+      marginTop: 1,
+    },
+    debtPreviewText: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: 13,
     },
   }),
 );

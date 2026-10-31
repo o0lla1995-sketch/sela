@@ -16,7 +16,7 @@
  * ٤. الإعدادات: فخ التبديل أزيل — بطاقة الجهة كانت تُبدّل حالتها
  *    بنقرة على كامل مساحتها فنقر التاجر محافظه ظاناً أنه يختارها
  *    فعطّلها. الآن مفتاح Switch حقيقي بيد التاجر لكل جهة.
- * ٥. الإصدار: 69.0.0 (76).
+ * ٥. الإصدار: 70.0.0 (78).
  */
 import {freshApp} from './helpers/app';
 
@@ -207,9 +207,9 @@ describe('v66 — ٤ الإعدادات: مفتاح Switch حقيقي (إزال�
 });
 
 describe('v66 — ٥ الإصدار', () => {
-  test('69.0.0 (76)', () => {
+  test('70.0.0 (78)', () => {
     const src = read(CONFIG);
-    expect(src).toContain("APP_VERSION = '69.0.0'");
-    expect(src).toContain('APP_BUILD_CODE = 77');
+    expect(src).toContain("APP_VERSION = '70.0.0'");
+    expect(src).toContain('APP_BUILD_CODE = 78');
   });
 });

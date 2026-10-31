@@ -20,6 +20,20 @@ import {useSettingsStore} from '../stores/settingsStore';
 
 export type QuickSellBy = 'piece' | 'box' | 'gram';
 
+/** v70 (الجولة 82 #٤): وحدة بيع إضافية بسعر مميّز — طلب التاجر:
+ *  «لماذا في المنتج السريع لا يوجد إضافة وحدات للمنتج مثلاً
+ *  للبيع بأكثر من قطعة بسعر مميّز». الكرطونة/الصينية/الكيس… كل
+ *  واحدة بعدد حباتها (أو وزنها بالكيلو للمنتجات الوزنية) وبسعرها
+ *  الخاص — تسير في منتقي الوحدة نفسه في سطر السلة. */
+export interface QuickExtraUnit {
+  name: string;
+  /** القطعي: عدد الحبات في الوحدة (كرتونة = 200). الوزني: الوزن
+   *  بالكيلوغرام (ربع كيلو = 0.25). */
+  perBase: number;
+  /** سعر بيع هذه الوحدة — المميّز هو جوهر الطلب. */
+  price: number;
+}
+
 export interface QuickProductInput {
   name: string;
   sellBy: QuickSellBy;
@@ -32,6 +46,8 @@ export interface QuickProductInput {
   /** المخزون الابتدائي بوحدة الإدخال (علبة للقطعي / غرام للوزني). */
   stockInput?: number | null;
   barcode?: string | null;
+  /** v70: وحدات إضافية بأسعار خاصة (اختياري). */
+  extraUnits?: QuickExtraUnit[];
 }
 
 export interface QuickProductResult {
@@ -149,6 +165,91 @@ export const QuickProductService = {
       }
       await UnitRepo.replaceForProduct(productId, rows);
       unitCount = rows.length;
+    }
+
+    // ── v70 (الجولة 82 #٤): الوحدات الإضافية بسعر مميّز ──
+    // تُدمج في نفس استدعاء replaceForProduct للمنتج (صورة واحدة
+    // نظيفة)، بعد التحقق: اسم غير فارغ ومختلف عن الوحدات الأساسية
+    // ومكرر، معامل > 0، وسعر > 0. القطعي: المعامل بالحبات؛ الوزني:
+    // بالكيلوغرام (كسور مسموحة — وقية = 0.25).
+    const extras = (input.extraUnits ?? []).filter(
+      unit => unit.name.trim().length > 0,
+    );
+    if (extras.length > 0) {
+      const baseNames = new Set(
+        ['حبة', 'علبة', 'غرام'].map(n => n.replace(/[أإآ]/g, 'ا').trim()),
+      );
+      const seen = new Set<string>();
+      const baseRows = isWeight
+        ? [
+            {
+              unit_id: await UnitRepo.getOrCreate(
+                'غرام',
+                'غ',
+                'weight',
+                storeMode,
+              ),
+              conversion: 0.001,
+              retail_price: piecePrice,
+              wholesale_price: null,
+            },
+          ]
+        : [
+            {
+              unit_id: await UnitRepo.getOrCreate(
+                'حبة',
+                'حبة',
+                'piece',
+                storeMode,
+              ),
+              conversion: 1,
+              retail_price: piecePrice,
+              wholesale_price: null,
+            },
+          ];
+      if (!isWeight && boxPrice != null && perBox >= 2) {
+        baseRows.push({
+          unit_id: await UnitRepo.getOrCreate('علبة', 'علبة', 'piece', storeMode),
+          conversion: perBox,
+          retail_price: boxPrice,
+          wholesale_price: null,
+        });
+      }
+      const extraRows: typeof baseRows = [];
+      for (const unit of extras) {
+        const name = unit.name.trim();
+        const normalized = name.replace(/[أإآ]/g, 'ا').trim();
+        if (baseNames.has(normalized) || seen.has(normalized)) {
+          throw new Error(
+            `اسم الوحدة «${name}» مستخدم مسبقاً — اختر اسماً مختلفاً لكل وحدة`,
+          );
+        }
+        const perBase = Number(unit.perBase);
+        if (!Number.isFinite(perBase) || perBase <= 0) {
+          throw new Error(
+            `عدد الحبات في «${name}» غير صالح — أدخل رقماً أكبر من صفر`,
+          );
+        }
+        const price = Number(unit.price);
+        if (!Number.isFinite(price) || price <= 0) {
+          throw new Error(`سعر «${name}» غير صالح — أدخل رقماً أكبر من صفر`);
+        }
+        seen.add(normalized);
+        const unitId = await UnitRepo.getOrCreate(
+          name,
+          name,
+          isWeight ? 'weight' : 'piece',
+          storeMode,
+        );
+        extraRows.push({
+          unit_id: unitId,
+          conversion: isWeight ? perBase : Math.round(perBase * 1000) / 1000,
+          retail_price: round2(price),
+          wholesale_price: null,
+        });
+      }
+      await UnitRepo.replaceForProduct(productId, [...baseRows, ...extraRows]);
+      unitCount = baseRows.length + extraRows.length;
     }
 
     return {

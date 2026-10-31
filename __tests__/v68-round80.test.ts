@@ -14,7 +14,7 @@
  * ٤ب. تنظيم صفحة التقارير بتبويبات: أربع مناطق محاسبية مستقلة
  *    بدل التمرير الطويل — وفواتير الدين والقسائم الشرائية نُقلت
  *    من بطاقة النقد إلى تبويبها المستقل.
- * ٥. الإصدار: 69.0.0 (76).
+ * ٥. الإصدار: 70.0.0 (78).
  */
 import {freshApp} from './helpers/app';
 
@@ -149,12 +149,12 @@ describe('v68 — ٤ب صفحة التقارير بتبويبات', () => {
 });
 
 describe('v68 — ٥ الإصدار', () => {
-  test('69.0.0 (76) في config والبناء', () => {
+  test('70.0.0 (78) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '69.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 77');
+    expect(config).toContain("APP_VERSION = '70.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 78');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "69.0.0"');
-    expect(gradle).toContain('versionCode 77');
+    expect(gradle).toContain('versionName "70.0.0"');
+    expect(gradle).toContain('versionCode 78');
   });
 });

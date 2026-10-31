@@ -14,7 +14,7 @@
  *    للتجاوز حتى يحدّث.
  * ⑤ نافذة إضافة كاشير: «التالي» بين الحقول، إظهار كلمة المرور،
  *    أخطاء داخلية لكل حقل، تمرير داخلي، و«إنشاء وإضافة التالي».
- * ⑥ الإصدار: 69.0.0 (76).
+ * ⑥ الإصدار: 70.0.0 (78).
  */
 import {
   isVersionBelow,
@@ -58,19 +58,19 @@ describe('v62 — ④ التحديث الإجباري: مقارنة الإصدا
     storage.delete(KEYS.updateRequirement);
     // بلا توجيه: لا إجبار.
     expect(getUpdateRequirement().required).toBe(false);
-    // توجيه بحد أدنى أعلى من إصدار البناء (69.0.0): 70.0.0: إجبار + رابط.
-    adoptUpdateInfoIfProvided({minAppVersion: '70.0.0', updateUrl: 'https://play.google.com/x'});
+    // توجيه بحد أدنى أعلى من إصدار البناء (70.0.0): 71.0.0: إجبار + رابط. (v70: الإصدار الجديد يقلب المقارنة — الحارس يُحرَّض للأعلى دائماً)
+    adoptUpdateInfoIfProvided({minAppVersion: '71.0.0', updateUrl: 'https://play.google.com/x'});
     const req = getUpdateRequirement();
     expect(req.required).toBe(true);
-    expect(req.minVersion).toBe('70.0.0');
+    expect(req.minVersion).toBe('71.0.0');
     expect(req.updateUrl).toBe('https://play.google.com/x');
-    expect(req.currentVersion).toBe('69.0.0');
+    expect(req.currentVersion).toBe('70.0.0');
     // إفراغ الخادم يلغي الإجبار.
     adoptUpdateInfoIfProvided({minAppVersion: '', updateUrl: ''});
     expect(getUpdateRequirement().required).toBe(false);
     // رد بلا الحقل إطلاقاً (خادم قديم) لا يمس الكاش.
     storage.delete(KEYS.updateRequirement);
-    adoptUpdateInfoIfProvided({minAppVersion: '70.0.0', updateUrl: ''});
+    adoptUpdateInfoIfProvided({minAppVersion: '71.0.0', updateUrl: ''});
     adoptUpdateInfoIfProvided({somethingElse: 1});
     expect(getUpdateRequirement().required).toBe(true);
   });
@@ -214,12 +214,12 @@ describe('v62 — حرّوس المصدر للجولة كاملة', () => {
     expect(screen).toContain('keyboardShouldPersistTaps="handled"');
   });
 
-  test('⑥ الإصدار: 69.0.0 (76)', () => {
+  test('⑥ الإصدار: 70.0.0 (78)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '69.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 77');
+    expect(config).toContain("APP_VERSION = '70.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 78');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "69.0.0"');
-    expect(gradle).toContain('versionCode 77');
+    expect(gradle).toContain('versionName "70.0.0"');
+    expect(gradle).toContain('versionCode 78');
   });
 });
