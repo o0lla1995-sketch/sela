@@ -119,6 +119,7 @@ import {formatMoney, formatQty, parseNumber} from '../core/format';
 import {baseUnitLabelOf, isWeightProduct, stockStateOf} from '../core/types';
 import type {
   CartLine,
+  InvoiceEditSession,
   Product,
   ProductUnit,
   ProductVariant,
@@ -306,7 +307,10 @@ type BarcodeOutcome =
   | {status: 'added'; name: string; product: Product; unitPrice: number}
   | {status: 'queued'; name: string}
   | {status: 'unknown'}
-  | {status: 'error'; name?: string; reason?: string};
+  | {status: 'error'; name?: string; reason?: string}
+  /** v73 (الجولة 85 #٢): باركود فاتورة — تُفتح للتعديل/الإرجاع
+   *  والاستبدال من نقطة البيع (يُغلق الماسح أولاً). */
+  | {status: 'invoice-open'; saleId: number};
 
 /** v31 (round-39 #3): topGap — عند تشغيل الشاشة داخل «وضع البيع
  *  السريع» فوق شاشة القفل يتعيّن استبدال حشوة شريط الحالة
@@ -333,6 +337,12 @@ export function PosScreen({
   const addSizedLine = useCartStore(state => state.addSizedLine);
   const addPackageLine = useCartStore(state => state.addPackageLine);
   const restoreLines = useCartStore(state => state.restoreLines);
+  const beginEdit = useCartStore(state => state.beginEdit);
+  const cancelEdit = useCartStore(state => state.cancelEdit);
+  /** v73 (الجولة 85): جلسة تعديل فاتورة مفتوحة — السلة تمثل النسخة
+   *  المعدلة، وشريط التعديل وإتمام التعديل يحلان محل البيع العادي
+   *  حتى الإتمام (استبدال الفاتورة الأصلية) أو الإلغاء. */
+  const editSession = useCartStore(state => state.editSession);
   const setLineUnit = useCartStore(state => state.setLineUnit);
   const increment = useCartStore(state => state.increment);
   const decrement = useCartStore(state => state.decrement);
@@ -428,6 +438,11 @@ export function PosScreen({
   const [paySheet, setPaySheet] = useState<'method' | 'pay' | null>(null);
   const [payMethodId, setPayMethodId] = useState<string>('cash');
   const [payAmountText, setPayAmountText] = useState('');
+  /** v73 (الجولة 85): نافذة إتمام التعديل — ملخص الفرق + قناة
+   *  التسوية (نقدي/محفظة/بنك) لتحصيل الفرق أو رده، أو تعديل الدين
+   *  تلقائياً لفواتير الدفاتر. */
+  const [editSettleOpen, setEditSettleOpen] = useState(false);
+  const [editSettleMethod, setEditSettleMethod] = useState<string>('cash');
   const [unitPickerLine, setUnitPickerLine] = useState<CartLine | null>(null);
   const [unitPickerRows, setUnitPickerRows] = useState<ProductUnit[] | null>(
     null,
@@ -795,44 +810,50 @@ export function PosScreen({
     }
   }, [settings.soundEnabled]);
 
-  /** v71 (الجولة 83 #٥): الرجوع للفاتورة السابقة — يعيد بنود آخر
-   *  فاتورة إلى السلة بأسعارها الأصلية (المسودة تُستبدل كاملة):
-   *  للتتميم عليها ببيع جديد أو لمراجعتها سريعاً. الفاتورة
-   *  الأصلية تبقى مسجلة كما هي؛ إن أراد التاجر إلغاءها فمن مركز
-   *  الفواتير (مرتجع). */
+  /** v71 (الجولة 83 #٥) → v73 (الجولة 85 #١): الرجوع للفاتورة
+   *  السابقة — بطلب التاجر الجديد نصاً: «يتم إلغاء الفاتورة
+   *  السابقة ويسجلها من جديد بعد إجراء التعديلات المطلوبة». زر
+   *  الرجوع يفتح الآن خيارين واضحين:
+   *  • تعديل الفاتورة الأصلية — تُفتح في السلة كأنها لم تسجل بعد،
+   *    وعند الإتمام تُستبدل الفاتورة الأصلية بالنسخة المعدلة (نفس
+   *    الرقم، بلا فاتورة جديدة تداخلها) ويسوّى الفرق.
+   *  • نسخها كسلة جديدة — السلوك القديم: نفس الأصناف لزبون جديد.
+   * حارس أساسي: آخر صف قد يكون إشعار مرتجع (RET-) أو فاتورة
+   *  قسيمة (INV-V-) — يُتخطى لأقرب فاتورة قابلة للتعديل. */
   const recallLastInvoice = useCallback(async () => {
     try {
-      const rows = await SaleRepo.listRecent(1);
-      const sale = rows[0] ?? null;
+      const rows = await SaleRepo.listRecent(20);
+      const sale =
+        rows.find(
+          row =>
+            row.return_kind == null &&
+            !row.invoice_number.startsWith('INV-V-'),
+        ) ?? null;
       if (sale == null) {
         toast('لا توجد فواتير سابقة بعد', 'info');
         return;
       }
-      const items = await SaleRepo.getItemsForSale(sale.id);
-      const {lines: restored, missing} = await buildRecallLines(
-        items,
-        useCatalogStore.getState().products,
-      );
-      if (restored.length === 0) {
-        toast(
-          'تعذر استرجاع الفاتورة — منتجاتها لم تعد موجودة في المخزون',
-          'error',
-        );
-        return;
-      }
-      restoreLines(
-        restored,
-        sale.payment_type === 'WHOLESALE' ? 'WHOLESALE' : 'RETAIL',
-        sale.discount,
-      );
-      setDiscountText(sale.discount > 0 ? String(sale.discount) : '');
-      beep();
-      toast(
-        `استُرجعت الفاتورة ${sale.invoice_number} — ${restored.length} صنف في السلة${
-          missing > 0 ? ` (تخطي ${missing} صنف لم يعد موجوداً)` : ''
-        }`,
-        'success',
-        4500,
+      Alert.alert(
+        'الرجوع للفاتورة السابقة',
+        `ماذا تريد بفاتورة ${sale.invoice_number} (${formatMoney(
+          sale.total_amount,
+        )})؟`,
+        [
+          {text: 'تراجع', style: 'cancel'},
+          {
+            text: 'نسخها كسلة جديدة',
+            onPress: () => {
+              void duplicateInvoiceAsCart(sale.id);
+            },
+          },
+          {
+            text: 'تعديل الفاتورة الأصلية',
+            style: 'default',
+            onPress: () => {
+              void openInvoiceEdit(sale.id, {confirmClearCart: true});
+            },
+          },
+        ],
       );
     } catch (error) {
       toast(
@@ -842,7 +863,129 @@ export function PosScreen({
         'error',
       );
     }
-  }, [restoreLines, toast, beep]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toast]);
+
+  /** v73 (الجولة 85): النسخ كسلة جديدة — السلوك القديم للرجوع
+   *  للفاتورة (نفس الأصناف بأسعارها لبيع جديد مستقل). */
+  const duplicateInvoiceAsCart = useCallback(
+    async (saleId: number) => {
+      try {
+        const sale = await SaleRepo.getById(saleId);
+        if (sale == null) {
+          toast('الفاتورة غير موجودة', 'error');
+          return;
+        }
+        const items = await SaleRepo.getItemsForSale(saleId);
+        const {lines: restored, missing} = await buildRecallLines(
+          items,
+          useCatalogStore.getState().products,
+        );
+        if (restored.length === 0) {
+          toast(
+            'تعذر نسخ الفاتورة — منتجاتها لم تعد موجودة في المخزون',
+            'error',
+          );
+          return;
+        }
+        restoreLines(
+          restored,
+          sale.payment_type === 'WHOLESALE' ? 'WHOLESALE' : 'RETAIL',
+          sale.discount,
+        );
+        setDiscountText(sale.discount > 0 ? String(sale.discount) : '');
+        beep();
+        toast(
+          `نُسخت الفاتورة ${sale.invoice_number} كسلة جديدة — ${restored.length} صنف${
+            missing > 0 ? ` (تخطي ${missing} صنف لم يعد موجوداً)` : ''
+          }`,
+          'success',
+          4500,
+        );
+      } catch (error) {
+        toast(
+          error instanceof Error ? error.message : 'تعذر نسخ الفاتورة',
+          'error',
+        );
+      }
+    },
+    [restoreLines, toast, beep],
+  );
+
+  /** v73 (الجولة 85 #٢): فتح فاتورة للتعديل من نقطة البيع — من زر
+   *  الرجوع، أو بمسح باركود الفاتورة نفسها، أو من صفحة الفواتير
+   *  (زر الإرجاع/الاستبدال). السلة تُفرَّغ أولاً إن كان فيها شيء
+   *  (بتأكيد صريح)، ثم تُبنى من الكميات المتبقية بأسعار الفاتورة
+   *  الأصلية، ويظهر شريط التعديل حتى الإتمام أو الإلغاء. */
+  const openInvoiceEdit = useCallback(
+    async (
+      saleId: number,
+      opts?: {confirmClearCart?: boolean},
+    ): Promise<void> => {
+      const proceed = async () => {
+        try {
+          const prep = await InvoiceService.prepareInvoiceEdit(saleId);
+          beginEdit(
+            prep.lines,
+            prep.session.originalPricingMode,
+            prep.session.originalDiscount,
+            prep.session,
+          );
+          setDiscountText(
+            prep.session.originalDiscount > 0
+              ? String(prep.session.originalDiscount)
+              : '',
+          );
+          beep();
+          const bookLabel =
+            prep.session.book === 'local'
+              ? 'دين دفتر المتجر'
+              : prep.session.book === 'sila'
+              ? 'دين صِلة'
+              : prep.session.book === 'online'
+              ? 'طلب أونلاين'
+              : 'نقدية';
+          toast(
+            `فُتحت الفاتورة ${prep.session.invoiceNumber} للتعديل (${bookLabel}) — عدّل ما تشاء ثم أتم التعديل لتُستبدل الأصلية بالنسخة المعدلة`,
+            'success',
+            6000,
+          );
+        } catch (error) {
+          toast(
+            error instanceof Error
+              ? error.message
+              : 'تعذر فتح الفاتورة للتعديل',
+            'error',
+            5000,
+          );
+        }
+      };
+      const cart = useCartStore.getState();
+      if (
+        opts?.confirmClearCart &&
+        cart.lines.length > 0 &&
+        cart.editSession == null
+      ) {
+        Alert.alert(
+          'إفراغ السلة الحالية؟',
+          'السلة الحالية فيها أصناف لم تُتم — ستُفرَّغ لفتح الفاتورة للتعديل (لا يُسجَّل أي بيع).',
+          [
+            {text: 'تراجع', style: 'cancel'},
+            {
+              text: 'إفراغ وفتح التعديل',
+              style: 'destructive',
+              onPress: () => {
+                void proceed();
+              },
+            },
+          ],
+        );
+        return;
+      }
+      await proceed();
+    },
+    [beginEdit, toast, beep],
+  );
 
   /** v8.3: opens the weight pad for a product (loads its sellable
    *  sub-units — وقية و غيرها — for the quick-add rows). */
@@ -1478,6 +1621,39 @@ export function PosScreen({
   const handleBarcode = useCallback(
     async (code: string): Promise<BarcodeOutcome | void> => {
       try {
+        // 0. v73 (الجولة 85 #٢): باركود فاتورة — إيصالات هذا المتجر
+        //    تحمل رقم الفاتورة CODE128 (v25 round-32 #4). مسحه يفتح
+        //    الفاتورة نفسها للتعديل/الإرجاع والاستبدال من نقطة البيع
+        //    مباشرة (طلب التاجر نصاً: «عند مسح رمز الفاتورة بالباركود
+        //    الخاص بها أن يفتح الفاتورة بعد طبعاً تنظيفها إذا كانت
+        //    تحتوي السلة على شئ مع إمكانية الارجاع والاستبدال بكل
+        //    سهولة»). صيغة الأرقام صارمة: INV-/INV-D-/INV-L-/INV-V-/
+        //    INV-O-/RET- + تاريخ + تسلسل.
+        if (/^(INV(-[A-Z])?|RET)-\d{8}-\d{4}$/.test(code.trim())) {
+          const sale = await SaleRepo.byInvoiceNumber(code.trim());
+          if (sale != null) {
+            if (sale.return_kind != null) {
+              return {
+                status: 'error',
+                name: sale.invoice_number,
+                reason: 'هذا إشعار مرتجع (RET) — لا يُفتح للتعديل',
+              };
+            }
+            if (sale.invoice_number.startsWith('INV-V-')) {
+              return {
+                status: 'error',
+                name: sale.invoice_number,
+                reason:
+                  'فواتير القسائم تُسوّى من صفحة القسائم — لا تُعدَّل هنا',
+              };
+            }
+            return {status: 'invoice-open', saleId: sale.id};
+          }
+          return {
+            status: 'error',
+            reason: `لا توجد فاتورة بهذا الباركود (${code})`,
+          };
+        }
         // 1. Base product barcode.
         // v41 (الجولة 49 #4): جذر «الماسح لا يفتح نافذة البيع» —
         //  findByBarcode يعيد صف المنتج الخام من قاعدة البيانات بلا
@@ -1624,6 +1800,9 @@ export function PosScreen({
     }
     setScanBusy(true);
     const session = makeScanSession();
+    // v73 (الجولة 85 #٢): باركود فاتورة داخل الجلسة — يُفتح بعد
+    // إغلاق الماسح (المتجر الأصلي يغلق نافذته أولاً).
+    let invoiceScanHit: number | null = null;
     // Serializes DB lookups: reads can stream in faster than the
     // lookups resolve; each is still processed exactly once.
     const queue: string[] = [];
@@ -1666,6 +1845,16 @@ export function PosScreen({
             // v10 (round-16 #3): stock-out / lookup failures show IN
             // the scanner window (the RN toast is behind it).
             await notifyScanResult(false, outcome.reason);
+          } else if (outcome.status === 'invoice-open') {
+            // v73 (الجولة 85 #٢): باركود فاتورة — أغلق الماسح وافتح
+            // الفاتورة للتعديل (تفرّغ السلة أولاً بتأكيد إن لزم).
+            session.confirmed++;
+            await notifyScanResult(
+              true,
+              'فاتورة — ستُفتح للتعديل والإرجاع والاستبدال',
+            );
+            invoiceScanHit = outcome.saleId;
+            break;
           }
           // v9.2 (round-15 #2): 'unknown' stays SILENT — the read is
           // simply not confirmed. No banner, no counter, no prompts.
@@ -1699,8 +1888,13 @@ export function PosScreen({
           'success',
         );
       }
+      // v73 (الجولة 85 #٢): فاتورة ماسوحة — تُفتح للتعديل بعد إغلاق
+      // الماسح (تفرّغ السلة أولاً بتأكيد إن كان فيها شيء).
+      if (invoiceScanHit != null) {
+        void openInvoiceEdit(invoiceScanHit, {confirmClearCart: true});
+      }
     }
-  }, [scanBusy, handleBarcode, toast, guardCameraPermission]);
+  }, [scanBusy, handleBarcode, toast, guardCameraPermission, openInvoiceEdit]);
 
   /**
    * v9.2 (round-15 #5) COMBINED session — "both" mode is now ONE
@@ -1733,6 +1927,8 @@ export function PosScreen({
     setScanBusy(true);
     setVisionMatches(null);
     const session = makeScanSession();
+    // v73 (الجولة 85 #٢): باركود فاتورة داخل الجلسة المدمجة.
+    let invoiceScanHit: number | null = null;
     // Two INDEPENDENT queues — barcode lookups are quick DB reads
     // while photo recognition is the heavy 4-crop ensemble; neither
     // ever blocks the other, whichever engine is active.
@@ -1774,6 +1970,16 @@ export function PosScreen({
             // v10 (round-16 #3): stock-out / lookup failures show IN
             // the scanner window (the RN toast is behind it).
             await notifyScanResult(false, outcome.reason);
+          } else if (outcome.status === 'invoice-open') {
+            // v73 (الجولة 85 #٢): باركود فاتورة — أغلق الماسح وافتح
+            // الفاتورة للتعديل (تفرّغ السلة أولاً بتأكيد إن لزم).
+            session.confirmed++;
+            await notifyScanResult(
+              true,
+              'فاتورة — ستُفتح للتعديل والإرجاع والاستبدال',
+            );
+            invoiceScanHit = outcome.saleId;
+            break;
           }
           // Unknown → SILENT (round-15 #2).
         }
@@ -1819,6 +2025,11 @@ export function PosScreen({
       await Promise.allSettled([codeDrain, photoDrain]);
       setScanBusy(false);
       settleScanSession(session, 'المسح');
+      // v73 (الجولة 85 #٢): فاتورة ماسوحة — تُفتح للتعديل بعد
+      // إغلاق نافذة المسح المدمجة.
+      if (invoiceScanHit != null) {
+        void openInvoiceEdit(invoiceScanHit, {confirmClearCart: true});
+      }
     }
   }, [
     scanBusy,
@@ -1827,6 +2038,7 @@ export function PosScreen({
     processVisionPhoto,
     settleScanSession,
     guardCameraPermission,
+    openInvoiceEdit,
   ]);
 
   const filteredProducts = useMemo(() => {
@@ -1990,6 +2202,99 @@ export function PosScreen({
     ],
   );
 
+  /** v73 (الجولة 85): إتمام تعديل الفاتورة — يستبدل الفاتورة
+   *  الأصلية بالنسخة المعدلة (نفس الرقم) ويسوّي الفرق حسب الدفتر:
+   *  نقدي → تحصيل/رد عبر القناة المختارة؛ دفتر المتجر/صِلة →
+   *  الفرق يعدّل صف الدين تلقائياً؛ أونلاين → إرجاع الناقص + بيع
+   *  الإضافي. سلة فارغة = إرجاع كامل للفاتورة. */
+  const settleEdit = useCallback(
+    async (settleMethod: string) => {
+      if (editSession == null || busy) {
+        return;
+      }
+      setBusy(true);
+      Keyboard.dismiss();
+      try {
+        const result = await InvoiceService.settleInvoiceEdit({
+          session: editSession,
+          lines,
+          discount,
+          paymentType: pricingMode,
+          paymentMethod: settleMethod,
+          print: printerStatus === 'connected',
+          receiptSettings: {
+            storeName: settings.storeName,
+            storePhone: settings.storePhone,
+            footerMessage: settings.footerMessage,
+            storeLogoPath: settings.storeLogoPath,
+            paperWidth: settings.paperWidth,
+            codepage: settings.codepage,
+            showProfit: settings.showProfitOnReceipt,
+          },
+          onPrintError: message =>
+            toast(`التعديل حُفظ لكن الطباعة فشلت: ${message}`, 'error'),
+        });
+        clear();
+        setDiscountText('');
+        void refreshCatalog();
+        void useSilaStore.getState().refreshActiveCampaigns();
+        const delta = result.deltaMinor / 100;
+        if (result.mode === 'full-return') {
+          toast(
+            'أُرجعت كل أصناف الفاتورة — سُجّل إشعار مرتجع كامل',
+            'success',
+            6000,
+          );
+        } else if (result.mode === 'online-composed') {
+          toast(
+            'عُدّلت فاتورة الطلب الأونلاين — الناقص أُرجع والإضافي سُجّل بيعاً جديداً',
+            'success',
+            6000,
+          );
+        } else if (Math.abs(delta) < 0.005) {
+          toast(
+            `عُدّلت الفاتورة ${editSession.invoiceNumber} — لا فرق مالي`,
+            'success',
+          );
+        } else if (delta > 0) {
+          toast(
+            `عُدّلت الفاتورة ${editSession.invoiceNumber} — يُحصَّل من الزبون ${formatMoney(
+              delta,
+            )} عبر ${paymentMethodById(settleMethod).label}`,
+            'success',
+            6000,
+          );
+        } else {
+          toast(
+            `عُدّلت الفاتورة ${editSession.invoiceNumber} — يُرَد للزبون ${formatMoney(
+              -delta,
+            )} عبر ${paymentMethodById(settleMethod).label}`,
+            'success',
+            6000,
+          );
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        toast(message, 'error', 6000);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [
+      editSession,
+      busy,
+      lines,
+      discount,
+      pricingMode,
+      printerStatus,
+      settings,
+      clear,
+      refreshCatalog,
+      toast,
+    ],
+  );
+
   /** v63→v66 (الجولة 78 — أندرويد #١): فتح نافذة الدفع — خطوة
    *  اختيار الطريقة أولاً دائماً. كانت تُتخطى عند تفعيل النقدي
    *  وحده، فإذا عطّل التاجر البنوك والمحافظ من الإعدادات (بغلطة
@@ -1997,6 +2302,22 @@ export function PosScreen({
    *  معطوبة — شكوى التاجر نصاً مرتين. الآن النافذة تظهر دائماً:
    *  المفعّل كبطاقات + رقائق تفعيل فوري للمعطّل داخلها نفسها. */
   const openPaySheet = useCallback(() => {
+    // v73 (الجولة 85): جلسة تعديل مفتوحة → نافذة إتمام التعديل
+    // (تُظهر الفرق وتخيّر قناة التسوية) بدل نافذة الدفع العادية —
+    // والسلة الفارغة مسموحة (إرجاع كامل للفاتورة).
+    if (editSession != null) {
+      if (busy) {
+        return;
+      }
+      setEditSettleMethod(
+        editSession.originalPaymentMethod &&
+          editSession.originalPaymentMethod !== ''
+          ? editSession.originalPaymentMethod
+          : 'cash',
+      );
+      setEditSettleOpen(true);
+      return;
+    }
     if (lines.length === 0) {
       toast('السلة فارغة — أضف منتجات أولاً', 'error');
       return;
@@ -2007,13 +2328,24 @@ export function PosScreen({
     setPayMethodId('cash');
     setPayAmountText('');
     setPaySheet('method');
-  }, [lines.length, busy, toast]);
+  }, [editSession, lines.length, busy, toast]);
 
   /** v11 (SILA §9.2): بيع بالدين — v15 (round-21 #5) opens a
    *  CHOOSER first: scan the customer's SILA QR (identity card or
    *  signed offline code) OR pick a known صِلة customer from the
    *  cached list and charge the debt directly on them. */
   const startDebtSale = useCallback(() => {
+    // v73 (الجولة 85): أثناء تعديل فاتورة لا يُنشأ دين جديد —
+    // التعديل يبقى على دفتر الفاتورة الأصلية (طلب التاجر: تعديل
+    // الأصناف وطريقة الدفع والخصم، لا تحويل الدفتر).
+    if (editSession != null) {
+      toast(
+        'أثناء تعديل الفاتورة لا يُسجَّل دين جديد — أتم التعديل بنفس دفتر الفاتورة أو ألغِ التعديل',
+        'info',
+        4500,
+      );
+      return;
+    }
     if (lines.length === 0) {
       toast('السلة فارغة — أضف منتجات أولاً', 'error');
       return;
@@ -2025,7 +2357,7 @@ export function PosScreen({
     // the LOCAL debt book (دفتر المتجر) is standalone. The صِلة
     // paths inside keep their pairing guards + guidance.
     setDebtChooser(true);
-  }, [lines.length, busy, debtBusy, toast]);
+  }, [editSession, lines.length, busy, debtBusy, toast]);
 
   /** v16 (round-22 #4): the cross-system dedupe guard — a scanned
    *  صِلة QR whose cid is LINKED to a local account means this
@@ -2511,6 +2843,27 @@ export function PosScreen({
     if (lines.length === 0) {
       return;
     }
+    // v73 (الجولة 85): تفريغ أثناء تعديل فاتورة = إلغاء التعديل —
+    // يقال صراحة كي لا يظن التاجر أن الفاتورة تغيّرت.
+    if (editSession != null) {
+      Alert.alert(
+        'إلغاء تعديل الفاتورة',
+        `سيُلغى تعديل الفاتورة ${editSession.invoiceNumber} وتُفرَّغ السلة — الفاتورة الأصلية تبقى كما هي لم تُمس.`,
+        [
+          {text: 'تراجع', style: 'cancel'},
+          {
+            text: 'إلغاء التعديل',
+            style: 'destructive',
+            onPress: () => {
+              cancelEdit();
+              setDiscountText('');
+              toast('أُلغي تعديل الفاتورة — الأصلية لم تتغير', 'info');
+            },
+          },
+        ],
+      );
+      return;
+    }
     Alert.alert(
       'تفريغ سلة البيع',
       `سيتم إلغاء ${totals.itemsCount} قطعة من السلة — لا يتم أي بيع ولا يُخصم شيء من المخزون.`,
@@ -2527,7 +2880,7 @@ export function PosScreen({
         },
       ],
     );
-  }, [clear, lines.length, toast, totals.itemsCount]);
+  }, [clear, cancelEdit, editSession, lines.length, toast, totals.itemsCount]);
 
   const scannerLabel =
     scannerMode === 'barcode'
@@ -3148,7 +3501,9 @@ export function PosScreen({
             ولمسته تعيدها كاملة (مع إسدال لوحة المفاتيح إن
             كانت مفتوحة). */}
         {(searchFocused || cartMinimized) && !cartExpanded ? (
-          lines.length === 0 ? null : (
+          // v73 (الجولة 85): أثناء تعديل فاتورة يبقى الشريط ظاهراً ولو
+          //  فارغت السلة — لمسه يفتح شريط التعديل (إتمام/إلغاء).
+          lines.length === 0 && editSession == null ? null : (
             <TouchableOpacity
               style={styles.cartPeekRow}
               activeOpacity={0.8}
@@ -3157,17 +3512,97 @@ export function PosScreen({
                 // v42 (الجولة 50 #5): إعادة فتح السلة المطوية.
                 setCartMinimized(false);
               }}>
-              <Icon name="cart" size={15} color={c.accent} />
+              <Icon
+                name={editSession != null ? 'edit' : 'cart'}
+                size={15}
+                color={editSession != null ? c.info : c.accent}
+              />
               <Text style={styles.cartPeekText} numberOfLines={1}>
-                السلة: {formatQty(totals.itemsCount, 2)} وحدة ·{' '}
-                {formatMoney(totals.total)}
+                {editSession != null
+                  ? `تعديل ${editSession.invoiceNumber} · ${formatMoney(
+                      totals.total,
+                    )}`
+                  : `السلة: ${formatQty(totals.itemsCount, 2)} وحدة · ${formatMoney(
+                      totals.total,
+                    )}`}
               </Text>
-              <Text style={styles.cartPeekHint}>إظهار السلة</Text>
+              <Text style={styles.cartPeekHint}>
+                {editSession != null ? 'إظهار التعديل' : 'إظهار السلة'}
+              </Text>
             </TouchableOpacity>
           )
         ) : (
           <View
             style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
+            {/* ── v73 (الجولة 85): شريط تعديل الفاتورة — يظهر في كل
+                حالات السلة (فارغة أو ممتلئة) حتى الإتمام أو الإلغاء:
+                رقم الفاتورة الأصلية، الأصل مقابل الجديد، الفرق الحي،
+                وأزرار الإتمام/الإلغاء. عند الإتمام تُستبدل الفاتورة
+                الأصلية بهذه النسخة المعدلة (نفس الرقم) ويسوّى الفرق. */}
+            {editSession != null ? (
+              <View style={styles.editBanner}>
+                <View style={styles.editBannerHead}>
+                  <Icon name="edit" size={15} color={c.info} />
+                  <Text style={styles.editBannerTitle} numberOfLines={1}>
+                    تعديل الفاتورة {editSession.invoiceNumber}
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.editCancelBtn}
+                    onPress={() => confirmClearCart()}
+                    activeOpacity={0.7}
+                    hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
+                    <Text style={styles.editCancelBtnText}>إلغاء</Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.editBannerRow}>
+                  <Text style={styles.editBannerMeta}>
+                    الأصل:{' '}
+                    {formatMoney(
+                      (editSession.originalTotalMinor -
+                        editSession.priorRefundedMinor) /
+                        100,
+                    )}
+                  </Text>
+                  <Text style={styles.editBannerMeta}>
+                    الجديد: {formatMoney(totals.total)}
+                  </Text>
+                  {(() => {
+                    const delta =
+                      Math.round(totals.total * 100) -
+                      (editSession.originalTotalMinor -
+                        editSession.priorRefundedMinor);
+                    if (Math.abs(delta) < 1) {
+                      return (
+                        <Text style={[styles.editDeltaChip, {color: c.textDim}]}>
+                          بلا فرق
+                        </Text>
+                      );
+                    }
+                    return delta > 0 ? (
+                      <Text style={[styles.editDeltaChip, {color: c.danger}]}>
+                        على الزبون +{formatMoney(delta / 100)}
+                      </Text>
+                    ) : (
+                      <Text style={[styles.editDeltaChip, {color: c.success}]}>
+                        يُرَد للزبون {formatMoney(-delta / 100)}
+                      </Text>
+                    );
+                  })()}
+                </View>
+                <TouchableOpacity
+                  style={styles.editSettleBtn}
+                  activeOpacity={0.8}
+                  onPress={openPaySheet}
+                  disabled={busy}>
+                  <Icon name="check" size={15} color={c.onAccent} />
+                  <Text style={styles.editSettleBtnText}>
+                    {lines.length === 0
+                      ? 'إتمام التعديل (إرجاع كامل)'
+                      : 'إتمام التعديل'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
             {lines.length === 0 ? (
               <>
                 {/* v17 (round-23 #4): tappable with a SPOKEN hint — the
@@ -3202,8 +3637,9 @@ export function PosScreen({
                 </TouchableOpacity>
                 {/* v71 (الجولة 83 #٥): الرجوع للفاتورة السابقة من
                     السلة الفارغة بلمسة واحدة — آخر فاتورة برقمها
-                    وإجماليها. */}
-                {lastSale != null ? (
+                    وإجماليها. v73 (الجولة 85): يختفي أثناء جلسة
+                    التعديل (شريط التعديل بديله). */}
+                {lastSale != null && editSession == null ? (
                   <TouchableOpacity
                     style={styles.recallBtn}
                     activeOpacity={0.8}
@@ -3770,6 +4206,41 @@ export function PosScreen({
             methodId,
             paidMinor,
           );
+        }}
+      />
+
+      {/* ── v73 (الجولة 85): نافذة إتمام تعديل الفاتورة — ملخص
+          الفرق + قناة التسوية، ثم settleInvoiceEdit (استبدال
+          الفاتورة الأصلية بالنسخة المعدلة داخل معاملة واحدة). */}
+      <EditSettleSheet
+        visible={editSettleOpen && editSession != null}
+        session={editSession}
+        newTotal={totals.total}
+        methods={activePaymentMethods(settings.paymentMethodsEnabled)}
+        disabledMethods={PAYMENT_METHODS.filter(
+          m =>
+            !m.locked && settings.paymentMethodsEnabled?.[m.id] === false,
+        )}
+        onEnableMethod={id => {
+          updateSettings({
+            paymentMethodsEnabled: {
+              ...settings.paymentMethodsEnabled,
+              [id]: true,
+            },
+          });
+          toast(
+            `فُعّلت ${paymentMethodById(id).label} — أصبحت متاحة للتسوية`,
+            'success',
+          );
+        }}
+        selectedId={editSettleMethod}
+        onSelectMethod={setEditSettleMethod}
+        busy={busy}
+        printerConnected={printerStatus === 'connected'}
+        onClose={() => setEditSettleOpen(false)}
+        onConfirm={methodId => {
+          setEditSettleOpen(false);
+          void settleEdit(methodId);
         }}
       />
 
@@ -4576,6 +5047,210 @@ function WeightSheet({
  *
  * INLINE absolute overlay — نفس درس روم الجهاز (لا Modal أبداً).
  */
+/**
+ * v73 (الجولة 85): نافذة إتمام تعديل الفاتورة — ملخص واضح قبل
+ * الاستبدال: الأصل مقابل الجديد والفرق، وقناة تسوية الفرق للفواتير
+ * النقدية (تحصيل أو رد عبر نقدي/محفظة/بنك)، بينما فواتير الدفاتر
+ * (دفتر المتجر/صِلة) يُعدَّل الدين تلقائياً بلا حركة نقد. سلة فارغة
+ * = إرجاع كامل بإشعار مرتجع. INLINE overlay — نفس درس روم الجهاز.
+ */
+function EditSettleSheet({
+  visible,
+  session,
+  newTotal,
+  methods,
+  disabledMethods,
+  onEnableMethod,
+  selectedId,
+  onSelectMethod,
+  busy,
+  printerConnected,
+  onClose,
+  onConfirm,
+}: {
+  visible: boolean;
+  session: InvoiceEditSession | null;
+  newTotal: number;
+  methods: PaymentMethod[];
+  disabledMethods: PaymentMethod[];
+  onEnableMethod: (id: string) => void;
+  selectedId: string;
+  onSelectMethod: (id: string) => void;
+  busy: boolean;
+  printerConnected: boolean;
+  onClose: () => void;
+  onConfirm: (methodId: string) => void;
+}) {
+  const c = useThemeColors();
+  const styles = useStyles();
+  if (!visible || session == null) {
+    return null;
+  }
+  const oldNetMinor =
+    session.originalTotalMinor - session.priorRefundedMinor;
+  const deltaMinor = Math.round(newTotal * 100) - oldNetMinor;
+  const debtBook = session.book === 'local' || session.book === 'sila';
+  const fullReturn = newTotal <= 0.005;
+  // الفروق النقدية (والأونلاين) تحتاج قناة؛ فواتير الدفاتر لا.
+  const needsChannel = !debtBook;
+
+  return (
+    <View style={styles.inlineOverlay}>
+      <TouchableOpacity
+        style={styles.inlineOverlayDim}
+        activeOpacity={1}
+        onPress={onClose}
+      />
+      <BackHandlerCloser active={visible} onClose={onClose} />
+      <View style={styles.paySheet}>
+        <View style={styles.unitModalHandle} />
+        <View style={styles.payHeadRow}>
+          <View style={{flex: 1}}>
+            <Text style={styles.paySheetTitle}>
+              إتمام تعديل الفاتورة
+            </Text>
+            <Text style={styles.payTotalText} numberOfLines={1}>
+              {session.invoiceNumber} — تُستبدل الأصلية بالنسخة المعدلة
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.weightClearChip}
+            onPress={onClose}
+            activeOpacity={0.75}>
+            <Icon name="x" size={16} color={c.textFaint} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.editSummaryCard}>
+          <View style={styles.editSummaryRow}>
+            <Text style={styles.editSummaryLabel}>قيمة الفاتورة الحالية</Text>
+            <Text style={styles.editSummaryValue}>
+              {formatMoney(oldNetMinor / 100)}
+            </Text>
+          </View>
+          <View style={styles.editSummaryRow}>
+            <Text style={styles.editSummaryLabel}>قيمة النسخة المعدلة</Text>
+            <Text style={styles.editSummaryValue}>{formatMoney(newTotal)}</Text>
+          </View>
+          <View style={[styles.editSummaryRow, styles.editSummaryRowLast]}>
+            <Text style={styles.editSummaryLabel}>الفرق</Text>
+            {fullReturn ? (
+              <Text style={[styles.editSummaryValue, {color: c.warning}]}>
+                إرجاع كامل — {formatMoney(oldNetMinor / 100)}
+              </Text>
+            ) : Math.abs(deltaMinor) < 1 ? (
+              <Text style={[styles.editSummaryValue, {color: c.textDim}]}>
+                بلا فرق
+              </Text>
+            ) : deltaMinor > 0 ? (
+              <Text style={[styles.editSummaryValue, {color: c.danger}]}>
+                على الزبون +{formatMoney(deltaMinor / 100)}
+              </Text>
+            ) : (
+              <Text style={[styles.editSummaryValue, {color: c.success}]}>
+                يُرَد للزبون {formatMoney(-deltaMinor / 100)}
+              </Text>
+            )}
+          </View>
+        </View>
+
+        {/* شرح التسوية حسب الدفتر */}
+        <Text style={styles.editSettleHint}>
+          {fullReturn
+            ? 'ستُرجع كل الأصناف المتبقية بإشعار مرتجع كامل ويعود كل شيء للمخزون.'
+            : debtBook
+            ? session.book === 'local'
+              ? 'الفرق يُعدَّل تلقائياً على دين الزبون في دفتر المتجر — بلا حركة نقد.'
+              : 'الفرق يُعدَّل تلقائياً على دين الزبون في صِلة — بلا حركة نقد.'
+            : session.book === 'online'
+            ? 'الناقص يُرجع بإشعار مرتجع والإضافي يُسجَّل بيعاً جديداً — الفرق نقداً بالاتجاهين.'
+            : deltaMinor > 0
+            ? 'يُحصَّل الفرق من الزبون عبر:'
+            : 'يُرَد الفرق للزبون عبر:'}
+        </Text>
+
+        {needsChannel ? (
+          <ScrollView
+            style={styles.payScrollArea}
+            contentContainerStyle={styles.payMethodsGrid}
+            showsVerticalScrollIndicator={false}>
+            {methods.map(method => {
+              const isSelected = method.id === selectedId;
+              return (
+                <TouchableOpacity
+                  key={method.id}
+                  style={[
+                    styles.payMethodCard,
+                    isSelected
+                      ? {borderColor: c.accent, backgroundColor: c.surfaceHi}
+                      : null,
+                  ]}
+                  activeOpacity={0.7}
+                  onPress={() => onSelectMethod(method.id)}>
+                  <PaymentMethodIcon method={method} size={54} />
+                  <Text style={styles.payMethodName} numberOfLines={1}>
+                    {method.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+            {disabledMethods.length > 0 ? (
+              <View style={styles.payQuickEnableWrap}>
+                <Text style={styles.payQuickEnableTitle}>
+                  طرق دفع أخرى — فعّل ما تستخدمه بنقرة:
+                </Text>
+                <View style={styles.payQuickEnableRow}>
+                  {disabledMethods.map(method => (
+                    <TouchableOpacity
+                      key={method.id}
+                      style={styles.payQuickEnableChip}
+                      activeOpacity={0.7}
+                      onPress={() => onEnableMethod(method.id)}>
+                      <PaymentMethodIcon method={method} size={28} />
+                      <Text
+                        style={styles.payQuickEnableText}
+                        numberOfLines={1}>
+                        {method.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            ) : null}
+          </ScrollView>
+        ) : null}
+
+        <TouchableOpacity
+          style={[styles.editConfirmBtn, busy ? {opacity: 0.6} : null]}
+          activeOpacity={0.8}
+          disabled={busy}
+          onPress={() => onConfirm(selectedId)}>
+          <Icon
+            name={printerConnected ? 'printer' : 'check'}
+            size={16}
+            color={c.onAccent}
+          />
+          <Text style={styles.editConfirmBtnText}>
+            {busy
+              ? 'جارٍ حفظ التعديل…'
+              : fullReturn
+              ? 'تأكيد الإرجاع الكامل'
+              : 'تأكيد التعديل واستبدال الفاتورة'}
+          </Text>
+        </TouchableOpacity>
+        <Text style={styles.editSettleNote}>
+          {printerConnected
+            ? 'ستُطبع نسخة الفاتورة المعدلة فور الحفظ.'
+            : 'لا طابعة متصلة — الحفظ بلا طباعة.'}
+          {'\n'}
+          إن غيّرت طريقة الدفع تُحتسب الفاتورة كلها على الطريقة الجديدة —
+          أعد المبلغ القديم لقناته وقبض الجديد من الطريقة المختارة.
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 function PaySheet({
   step,
   methods,
@@ -5800,6 +6475,134 @@ const useStyles = makeStyles(c =>
       fontSize: 11,
       marginTop: 3,
       textAlign: 'center',
+    },
+
+    /* ── v73 (الجولة 85): شريط تعديل الفاتورة في لوحة السلة ── */
+    editBanner: {
+      backgroundColor: c.infoSoft,
+      borderWidth: 1,
+      borderColor: c.info,
+      borderRadius: 12,
+      padding: 10,
+      marginBottom: 6,
+      gap: 7,
+    },
+    editBannerHead: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 7,
+    },
+    editBannerTitle: {
+      flex: 1,
+      color: c.info,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    editCancelBtn: {
+      backgroundColor: c.surfaceHi,
+      borderRadius: 8,
+      paddingVertical: 4,
+      paddingHorizontal: 10,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+    },
+    editCancelBtnText: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: 11.5,
+    },
+    editBannerRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 8,
+      flexWrap: 'wrap',
+    },
+    editBannerMeta: {
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    editDeltaChip: {
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    editSettleBtn: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      backgroundColor: c.info,
+      borderRadius: 10,
+      paddingVertical: 9,
+      paddingHorizontal: 12,
+    },
+    editSettleBtnText: {
+      color: c.onAccent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    /* ── v73: نافذة إتمام التعديل ── */
+    editSummaryCard: {
+      backgroundColor: c.surfaceAlt,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      paddingVertical: 4,
+      paddingHorizontal: 12,
+      marginTop: 6,
+    },
+    editSummaryRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: 7,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    editSummaryRowLast: {
+      borderBottomWidth: 0,
+    },
+    editSummaryLabel: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+    },
+    editSummaryValue: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      fontVariant: ['tabular-nums'],
+    },
+    editSettleHint: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: 12.5,
+      marginTop: 10,
+      textAlign: 'right',
+    },
+    editConfirmBtn: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      backgroundColor: c.accent,
+      borderRadius: 12,
+      paddingVertical: 12,
+      marginTop: 12,
+    },
+    editConfirmBtnText: {
+      color: c.onAccent,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    editSettleNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: 11.5,
+      textAlign: 'center',
+      marginTop: 7,
     },
 
     // Full-screen scanner overlay (v7 — three-zone layout)

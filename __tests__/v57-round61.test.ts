@@ -55,10 +55,10 @@ describe('v57 — الجولة 61: إصلاح الإرسال المباشر + ش
 
   test('③ الإصدار: 71.0.0 (79)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '72.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 80');
+    expect(config).toContain("APP_VERSION = '73.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 81');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "72.0.0"');
-    expect(gradle).toContain('versionCode 80');
+    expect(gradle).toContain('versionName "73.0.0"');
+    expect(gradle).toContain('versionCode 81');
   });
 });

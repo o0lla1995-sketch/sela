@@ -145,7 +145,12 @@ const DDL_STATEMENTS: string[] = [
     client_ref TEXT,
     -- v63 (الجولة 75): طريقة الدفع — بنك/محفظة/نقدي (تتبع الأرصدة
     -- الواردة). 'cash' افتراضياً؛ القديم قبل الترحيل v30 كذلك.
-    payment_method TEXT NOT NULL DEFAULT 'cash'
+    payment_method TEXT NOT NULL DEFAULT 'cash',
+    -- v73 (الجولة 85): تعديل الفاتورة عبر نقطة البيع — كم مرة
+    -- عُدّلت (0 = أبداً) ووقت آخر تعديل. التعديل يستبدل محتوى
+    -- الفاتورة نفسها داخل معاملة واحدة ويسوّي الفرق.
+    edit_count INTEGER NOT NULL DEFAULT 0,
+    edited_at TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS sale_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -216,6 +221,20 @@ const DDL_STATEMENTS: string[] = [
   'CREATE INDEX IF NOT EXISTS idx_sri_return ON sale_return_items(return_id)',
   'CREATE INDEX IF NOT EXISTS idx_sri_sale_item ON sale_return_items(sale_item_id)',
   'CREATE INDEX IF NOT EXISTS idx_srex_return ON sale_return_exchanges(return_id)',
+  // ── v73 (الجولة 85): سجل تعديل الفواتير عبر نقطة البيع ──────
+  // لقطة كاملة (JSON) قبل التعديل وبعده لكل عملية — المرتجعات
+  // السابقة التي طُوَت داخل التعديل تُحفظ هنا (حذفها من جداولها
+  // الحية ضروري لمعادلة الخزينة، والتاريخ يبقى للمحاسب).
+  `CREATE TABLE IF NOT EXISTS sale_edits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+    edited_at TEXT NOT NULL,
+    before_json TEXT NOT NULL,
+    after_json TEXT NOT NULL,
+    delta_minor INTEGER NOT NULL DEFAULT 0,
+    note TEXT
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_sale_edits_sale ON sale_edits(sale_id)',
   // v23.0.1 FIX: idx_sales_return_kind was created HERE — before
   // migrations — so upgrading any pre-v23 database (whose sales
   // table lacks return_kind until migration v15 ALTERs it in)
@@ -2084,6 +2103,40 @@ async function applyMigrations(database: DB): Promise<void> {
     );
     logDiag('db', 'ترحيل v33: أصل الدين المحلي (بيع/مباشر) — إصلاح الخزينة');
     version = 33;
+  }
+
+  if (version < 34) {
+    // ── v73 (الجولة 85): تعديل الفاتورة عبر نقطة البيع — طلب التاجر
+    //    نصاً: «عند الرجوع للفاتورة السابقة وتعديلها وإتمام البيع
+    //    تُستبدل الفاتورة الأصلية بالنسخة المعدلة (إلغاء القديمة
+    //    وتسجيلها من جديد بعد التعديلات) بدل إنشاء فاتورة جديدة
+    //    تداخلها»، والإرجاع/الاستبدال يتمان من نقطة البيع نفسها.
+    //    العمودان على sales + جدول تدقيق sale_edits بلقطة قبل/بعد
+    //    (المرتجعات السابقة المطوية تُحفظ فيه للمحاسب).
+    const editCols = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('sales') WHERE name = 'edit_count'",
+    );
+    const editRows = (editCols.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(editRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        'ALTER TABLE sales ADD COLUMN edit_count INTEGER NOT NULL DEFAULT 0',
+      );
+      await database.execute('ALTER TABLE sales ADD COLUMN edited_at TEXT');
+    }
+    await database.execute(`CREATE TABLE IF NOT EXISTS sale_edits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+      edited_at TEXT NOT NULL,
+      before_json TEXT NOT NULL,
+      after_json TEXT NOT NULL,
+      delta_minor INTEGER NOT NULL DEFAULT 0,
+      note TEXT
+    )`);
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sale_edits_sale ON sale_edits(sale_id)',
+    );
+    logDiag('db', 'ترحيل v34: تعديل الفواتير عبر نقطة البيع + سجل التدقيق');
+    version = 34;
   }
 
   if (version !== storedVersion) {

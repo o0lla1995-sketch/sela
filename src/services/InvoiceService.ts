@@ -24,10 +24,16 @@ import {VoucherService} from './VoucherService';
 import {LocalDebtsRepo} from '../database/repositories/LocalDebtsRepo';
 import {OnlineRepo} from '../database/repositories/OnlineRepo';
 import {uuidV4} from './sila/qr';
+import {BASE_UNIT_NAME} from '../core/config';
+import {baseUnitLabelOf} from '../core/types';
+import {UNTRACKED_STOCK} from '../stores/cartStore';
 import type {
   CartLine,
   ExchangeLineInput,
+  InvoiceEditSession,
   PricingMode,
+  Product,
+  ProductUnit,
   ReturnBook,
   ReturnLineInput,
   SaleItemRecord,
@@ -1438,6 +1444,321 @@ export const InvoiceService = {
 
     return result;
   },
+
+  /** v73 (الجولة 85): تحضير جلسة تعديل فاتورة عبر نقطة البيع —
+   *  الفحوصات نفسها للإرجاع (RET/قسائم/مسح كل الكميات/دين صلة
+   *  قيد الرفع) ثم بناء أسطر السلة من الكميات المتبقية بأسعار
+   *  الفاتورة الأصلية + لقطة الجلسة (الدفتر/الإجمالي/الخصم/طريقة
+   *  الدفع/المرتجعات السابقة). المتجر أونلاين (INV-O) مسموح —
+   *  تسويته مركبة (إرجاع + بيع إضافي). */
+  async prepareInvoiceEdit(saleId: number): Promise<{
+    session: InvoiceEditSession;
+    lines: CartLine[];
+    /** أصناف سقطت (منتجاتها حُذفت نهائياً — لا تُعدّل). */
+    missing: number;
+    debtLabel: string | null;
+  }> {
+    const prep = await this.prepareReturn(saleId);
+    const sale = prep.sale;
+
+    const {lines, missing} = await buildInvoiceEditLines(prep.lines);
+    if (lines.length === 0) {
+      throw new Error(
+        'تعذر فتح الفاتورة للتعديل — منتجاتها لم تعد موجودة في المخزون',
+      );
+    }
+
+    // INV-L: هوية زبون الدفتر (لإعادة إنشاء صف الدين إن استُهلك).
+    let localCustomerId: number | null = null;
+    let localCustomerName: string | null = null;
+    if (prep.book === 'local') {
+      try {
+        const row = await getDb().execute(
+          `SELECT d.local_customer_id AS cid, c.name AS cname
+             FROM local_debts d
+             JOIN local_customers c ON c.id = d.local_customer_id
+            WHERE d.invoice_ref = ? AND d.migrated = 0
+            LIMIT 1`,
+          [sale.invoice_number],
+        );
+        const hit = ((row.rows ?? []) as {cid?: number; cname?: string}[])[0];
+        localCustomerId = hit != null ? Number(hit.cid) : null;
+        localCustomerName = hit?.cname ?? null;
+      } catch {
+        localCustomerId = null;
+      }
+      if (localCustomerId == null) {
+        throw new Error(
+          'دين هذه الفاتورة مسدَّد/محذوف من الدفتر — لا يمكن تعديلها كفاتورة دين؛ راجع دفتر الزبائن',
+        );
+      }
+    }
+
+    const session: InvoiceEditSession = {
+      saleId: sale.id,
+      invoiceNumber: sale.invoice_number,
+      book: prep.book,
+      originalTotalMinor: Math.round(sale.total_amount * 100),
+      originalDiscount: sale.discount,
+      originalPaymentMethod: sale.payment_method ?? null,
+      originalPricingMode:
+        sale.payment_type === 'WHOLESALE' ? 'WHOLESALE' : 'RETAIL',
+      priorReturnsCount: prep.returnsSoFar.length,
+      priorRefundedMinor: prep.returnsSoFar.reduce(
+        (sum, r) => sum + r.refund_minor,
+        0,
+      ),
+      localCustomerId,
+      localCustomerName,
+    };
+    return {
+      session,
+      lines,
+      missing,
+      debtLabel: prep.debtLabel,
+    };
+  },
+
+  /** v73 (الجولة 85): إتمام تعديل الفاتورة — استبدال الفاتورة
+   *  الأصلية بالنسخة المعدلة:
+   *  • سلة فارغة → إرجاع كامل عبر محرك المرتجعات القائم (فاتورة
+   *    الأصل تبقى مميزة «أُرجعت كل أصنافها») — أضمن مسار محاسبي.
+   *  • دفتر أونلاين (INV-O) → تسوية مركبة: إرجاع الناقص (محرك
+   *    المرتجعات الأونلاين) + بيع جديد للإضافي — الطلب على الخادم
+   *    لا يُعاد كتابته.
+   *  • نقدي/دفتر المتجر/صِلة → SaleRepo.rewriteSale داخل معاملة
+   *    واحدة: طيّ المرتجعات السابقة + فرق المخزون + إعادة كتابة
+   *    الصف والبنود + تسوية الدفتر + لقطة تدقيق كاملة.
+   *  الفرق المالي (الجديد − (الأصل − المسترد سابقاً)): نقدي يُحصَّل
+   *  أو يُرد عبر القناة المختارة، والدين يعدّل صفه تلقائياً. */
+  async settleInvoiceEdit(input: {
+    session: InvoiceEditSession;
+    lines: CartLine[];
+    discount: number;
+    paymentType: PricingMode;
+    paymentMethod: string | null;
+    print: boolean;
+    receiptSettings: ReceiptSettings;
+    onPrintError?: (message: string) => void;
+    note?: string | null;
+  }): Promise<{
+    mode: 'rewrite' | 'full-return' | 'online-composed';
+    sale: SaleRecord | null;
+    deltaMinor: number;
+  }> {
+    const session = input.session;
+    // حالة طازجة — الجلسة قد تكون قديمة (شاشة مفتوحة منذ ساعات).
+    const prep = await this.prepareReturn(session.saleId);
+    if (prep.sale.invoice_number !== session.invoiceNumber) {
+      throw new Error('الفاتورة تغيّرت — أعد فتح التعديل من جديد');
+    }
+    if (prep.returnsSoFar.length !== session.priorReturnsCount) {
+      throw new Error(
+        'سُجّلت مرتجعات جديدة على الفاتورة أثناء التعديل — أعد فتح تعديل الفاتورة من جديد',
+      );
+    }
+    const priorRefundedMinor = prep.returnsSoFar.reduce(
+      (sum, r) => sum + r.refund_minor,
+      0,
+    );
+    const oldTotalMinor = Math.round(prep.sale.total_amount * 100);
+
+    const subtotal = input.lines.reduce(
+      (sum, line) => sum + line.unitPrice * line.quantity,
+      0,
+    );
+    const discount = Math.min(Math.max(input.discount, 0), subtotal);
+    const newTotalMinor = Math.round((subtotal - discount) * 100);
+    const deltaMinor = newTotalMinor - (oldTotalMinor - priorRefundedMinor);
+
+    // ── سلة فارغة: إرجاع كامل عبر المحرك القائم ──
+    if (input.lines.length === 0) {
+      const allLines: ReturnLineInput[] = prep.lines.map(line => ({
+        saleItemId: line.item.id,
+        productId: line.item.product_id,
+        productName: line.productName,
+        quantity: line.remaining,
+        unitPrice: line.item.unit_price,
+        costPrice: line.item.cost_price,
+        unitName: line.item.unit_name ?? null,
+        basePerUnit:
+          line.item.quantity > 0
+            ? (line.item.base_quantity ?? line.item.quantity) /
+              line.item.quantity
+            : 1,
+        variantId: line.item.variant_id ?? null,
+        variantColor: line.item.variant_color ?? null,
+        variantLabel: line.item.variant_label ?? null,
+      }));
+      const debtBook = prep.book === 'local' || prep.book === 'sila';
+      await this.createReturn({
+        saleId: session.saleId,
+        lines: allLines,
+        refundMethod: debtBook ? 'none' : 'cash',
+        refundChannel: debtBook || input.paymentMethod === 'cash' ? null : input.paymentMethod,
+        note: input.note ?? `إرجاع كامل عبر تعديل الفاتورة ${session.invoiceNumber}`,
+        print: input.print,
+        receiptSettings: input.receiptSettings,
+        onPrintError: input.onPrintError,
+      });
+      logDiag(
+        'sale',
+        `إرجاع كامل عبر تعديل الفاتورة ${session.invoiceNumber} — قيمة ${(
+          (oldTotalMinor - priorRefundedMinor) / 100
+        ).toFixed(2)} ₪`,
+      );
+      return {
+        mode: 'full-return',
+        sale: prep.sale,
+        deltaMinor,
+      };
+    }
+
+    // ── دفتر أونلاين: تسوية مركبة (إرجاع الناقص + بيع الإضافي) ──
+    if (prep.book === 'online') {
+      const {removals, additions} = diffCartVsInvoice(prep.lines, input.lines);
+      let retNumber: string | null = null;
+      if (removals.length > 0) {
+        const ret = await this.createReturn({
+          saleId: session.saleId,
+          lines: removals.map(r => ({
+            saleItemId: r.saleItemId,
+            productId: r.productId,
+            productName: r.productName,
+            quantity: r.quantity,
+            unitPrice: r.unitPrice,
+            costPrice: r.costPrice,
+            unitName: r.unitName,
+            basePerUnit: r.basePerUnit,
+            variantId: r.variantId,
+            variantColor: r.variantColor,
+            variantLabel: r.variantLabel,
+          })),
+          refundMethod: 'cash',
+          refundChannel:
+            input.paymentMethod != null && input.paymentMethod !== 'cash'
+              ? input.paymentMethod
+              : null,
+          note: input.note ?? `إرجاع عبر تعديل الفاتورة ${session.invoiceNumber}`,
+          print: false,
+          receiptSettings: input.receiptSettings,
+        });
+        retNumber = ret.return_number;
+      }
+      let newSale: SaleWithItems | null = null;
+      if (additions.length > 0) {
+        newSale = await this.completeSale({
+          lines: additions,
+          discount: 0,
+          paymentType: input.paymentType,
+          paymentMethod: input.paymentMethod,
+          print: false,
+          receiptSettings: input.receiptSettings,
+          productNames: new Map(
+            additions.map(line => [line.productId, line.name]),
+          ),
+        });
+      }
+      logDiag(
+        'sale',
+        `تعديل فاتورة أونلاين ${session.invoiceNumber}: ${removals.length} صنف مُرجع${
+          retNumber ? ` (${retNumber})` : ''
+        } + ${additions.length} صنف إضافي${newSale ? ` (${newSale.sale.invoice_number})` : ''}`,
+      );
+      if (input.print) {
+        try {
+          await this.reprintInvoice(session.saleId, input.receiptSettings);
+        } catch (error) {
+          input.onPrintError?.(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+      return {
+        mode: 'online-composed',
+        sale: newSale?.sale ?? prep.sale,
+        deltaMinor,
+      };
+    }
+
+    // ── نقدي/دفتر المتجر/صِلة: إعادة كتابة الفاتورة نفسها ──
+    // حجوزات صِلة خارج المعاملة (المرجع يقرأ MMKV) — تُمرّر وتُستخدم
+    //   فقط إن كان الدين متزامناً وتطلّب التسوية ذلك.
+    // المفاتيح فقط تُحجز هنا — مرجع سند العكس بنيوي داخل المعاملة
+    //   (`رقم الفاتورة-RVS<N>`) كي تحسبه التعديلات التالية ضمن عكوس
+    //   الفاتورة (تصحيح جولة 85: التعديلات المتتالية على دين متزامن).
+    let silaReversal: {
+      idempotencyKey: string;
+      posReceiptRef: string;
+    } | null = null;
+    let silaDebtIncrease: {idempotencyKey: string} | null = null;
+    if (prep.book === 'sila' && prep.debtState.kind === 'sila-synced') {
+      silaReversal = {
+        idempotencyKey: uuidV4(),
+        posReceiptRef: '',
+      };
+      silaDebtIncrease = {idempotencyKey: uuidV4()};
+    }
+
+    const result = await SaleRepo.rewriteSale({
+      saleId: session.saleId,
+      lines: input.lines,
+      discount: input.discount,
+      paymentType: input.paymentType,
+      paymentMethod: input.paymentMethod,
+      book: prep.book,
+      expectedPriorReturnsCount: session.priorReturnsCount,
+      localCustomerId: session.localCustomerId,
+      localCustomerName: session.localCustomerName,
+      silaReversal,
+      silaDebtIncrease,
+      note:
+        input.note ??
+        `تعديل عبر نقطة البيع — الفرق ${deltaMinor >= 0 ? '+' : ''}${(
+          deltaMinor / 100
+        ).toFixed(2)} ₪`,
+    });
+
+    logDiag(
+      'sale',
+      `عُدّلت الفاتورة ${session.invoiceNumber} عبر نقطة البيع (${result.items.length} صنف، الإجمالي ${result.sale.total_amount.toFixed(
+        2,
+      )} ₪، الفرق ${(deltaMinor / 100).toFixed(2)} ₪)`,
+    );
+
+    // صِلة متزامن: الدفع بالعكس/الزيادة في الطابور — دفع فوري.
+    if (silaReversal != null || silaDebtIncrease != null) {
+      try {
+        const {SilaSync} = require('./sila/SilaSync') as typeof import(
+          './sila/SilaSync'
+        );
+        void SilaSync.syncNow().catch(() => undefined);
+      } catch {
+        // الطابور يحتفظ بالصف — الدورة الدورية ترفعه.
+      }
+    }
+
+    if (input.print) {
+      try {
+        await this.reprintInvoice(session.saleId, input.receiptSettings);
+      } catch (error) {
+        // التعديل محفوظ — فشل الطباعة لا يلغيه أبداً.
+        const message = error instanceof Error ? error.message : String(error);
+        logDiag('sale', `التعديل حُفظ لكن الطباعة فشلت: ${message}`, 'warn');
+        input.onPrintError?.(message);
+      }
+    }
+
+    try {
+      const {notifyCatalogChanged} = require('./online/OnlineStoreService') as
+        typeof import('./online/OnlineStoreService');
+      notifyCatalogChanged();
+    } catch {
+      // Best effort.
+    }
+
+    return {mode: 'rewrite', sale: result.sale, deltaMinor};
+  },
 };
 
 /** v48 (الجولة 56): حجز مرجع سند خزينة للسداد النقدي للتسويات
@@ -1450,4 +1771,280 @@ async function reserveOnlineCashRef(
     '../database/repositories/CashRepo'
   );
   return cashModule.reserveRef(kind);
+}
+
+/** v73 (الجولة 85): بناء أسطر سلة «تعديل فاتورة» من بنود الفاتورة
+ *  المتبقية (الأصل − المرتجع) — نفس منطق buildRecallLines في شاشة
+ *  البيع لكن من قاعدة البيانات مباشرة (يشمل المؤرشف الذي لا يظهر
+ *  في الكتالوج الحي): الأسعار من الفاتورة نفسها، والوحدة/المتغير
+ *  الحيان يحلان سياق السطر، وإن ضاع السياق يتحول لوحدة الأساس
+ *  بالقطع مع حفظ قيمة السطر كاملة. */
+async function buildInvoiceEditLines(
+  prepLines: {
+    item: SaleItemRecord;
+    productName: string;
+    remaining: number;
+  }[],
+): Promise<{lines: CartLine[]; missing: number}> {
+  const {VariantRepo} = require('../database/repositories/VariantRepo') as
+    typeof import('../database/repositories/VariantRepo');
+  const {UnitRepo} = require('../database/repositories/UnitRepo') as typeof import(
+    '../database/repositories/UnitRepo'
+  );
+  const productCache = new Map<number, Product | null>();
+  const out: CartLine[] = [];
+  let missing = 0;
+
+  const pushLine = (line: CartLine) => {
+    const existing = out.find(entry => entry.key === line.key);
+    if (existing != null) {
+      existing.quantity += line.quantity;
+      return;
+    }
+    out.push(line);
+  };
+
+  for (const {item, remaining} of prepLines) {
+    let product: Product | null | undefined = productCache.get(item.product_id);
+    if (product === undefined) {
+      product = await ProductRepo.getById(item.product_id);
+      productCache.set(item.product_id, product);
+    }
+    if (product == null) {
+      missing += 1;
+      continue;
+    }
+    const qty =
+      remaining > 0
+        ? Math.round(remaining * 1000) / 1000
+        : item.quantity > 0
+        ? item.quantity
+        : 1;
+    const origQty = item.quantity > 0 ? item.quantity : 1;
+    const origBase =
+      item.base_quantity != null && item.base_quantity > 0
+        ? item.base_quantity
+        : origQty;
+
+    // المتغير الحي — إن حُذف يبقى وصفه وسعره كما بيعا.
+    let variants = product.variants ?? [];
+    if (
+      item.variant_id != null &&
+      !variants.some(v => v.id === item.variant_id)
+    ) {
+      try {
+        variants = await VariantRepo.listByProduct(product.id);
+      } catch {
+        variants = [];
+      }
+    }
+    const variant =
+      item.variant_id != null
+        ? variants.find(v => v.id === item.variant_id) ?? null
+        : null;
+
+    // وحدة البيع بالاسم (لأسطر الوحدات فقط — لا المتغيرات/الربط).
+    let unit: ProductUnit | null = null;
+    if (
+      variant == null &&
+      item.variant_color == null &&
+      item.unit_name != null &&
+      item.unit_name !== '' &&
+      item.unit_name !== 'قطعة'
+    ) {
+      try {
+        const rows = await UnitRepo.listForProduct(product.id);
+        unit = rows.find(row => row.unitName === item.unit_name) ?? null;
+      } catch {
+        unit = null;
+      }
+    }
+
+    // القطع الأساسية للكمية المتبقية (تناسباً من أصل البند).
+    const remainingBase = (origBase / origQty) * qty;
+    const conversion =
+      unit != null
+        ? unit.conversion
+        : qty > 0 && remainingBase > qty + 0.0001
+        ? Math.round((remainingBase / qty) * 1000) / 1000
+        : 1;
+
+    const untracked = product.stock_untracked === 1;
+    let availableStock = untracked ? UNTRACKED_STOCK : product.stock_quantity;
+    if (!untracked) {
+      if (item.variant_color != null && conversion > 0) {
+        availableStock = Math.floor(product.stock_quantity / conversion);
+      } else if (
+        variant != null &&
+        variant.kind === 'variant' &&
+        variant.stock_quantity > 0
+      ) {
+        availableStock = variant.stock_quantity;
+      }
+    }
+
+    pushLine({
+      key: `${product.id}:${unit?.unit_id ?? 0}:${item.variant_id ?? 0}`,
+      productId: product.id,
+      name: product.name,
+      unitPrice: item.unit_price,
+      costPrice: item.cost_price,
+      retailPrice: item.unit_price,
+      wholesalePrice: item.unit_price,
+      quantity: qty,
+      availableStock,
+      unitId: unit?.unit_id ?? null,
+      unitName:
+        item.unit_name && item.unit_name !== ''
+          ? item.unit_name
+          : baseUnitLabelOf(product, product.base_unit_name ?? BASE_UNIT_NAME),
+      conversion,
+      byWeight: product.sold_by_weight === 1,
+      variantId: item.variant_id ?? null,
+      variantLabel: item.variant_label ?? null,
+      bundleColor: item.variant_color ?? null,
+      discountPct: 0,
+    });
+  }
+  return {lines: out, missing};
+}
+
+/** v73 (الجولة 85): فرق السلة عن الفاتورة (للتسوية المركبة
+ *  الأونلاين): لكل (منتج:متغير:لون ربطة) بالقطع الأساسية —
+ *  الناقص يُرجع (بأسطر إرجاع لكل بند أصلي) والزيادة تُباع
+ *  (بأسطر سلة إضافية). */
+function diffCartVsInvoice(
+  prepLines: {
+    item: SaleItemRecord;
+    productName: string;
+    remaining: number;
+  }[],
+  cartLines: CartLine[],
+): {
+  removals: {
+    saleItemId: number;
+    productId: number;
+    productName: string;
+    quantity: number;
+    unitPrice: number;
+    costPrice: number;
+    unitName: string | null;
+    basePerUnit: number;
+    variantId: number | null;
+    variantColor: string | null;
+    variantLabel: string | null;
+  }[];
+  additions: CartLine[];
+} {
+  const keyOf = (productId: number, variantId: number | null, color: string | null) =>
+    `${productId}:${variantId ?? 0}:${color ?? ''}`;
+  // الأساس المتبقي لكل مفتاح + بنوده الأصلية.
+  const oldKeys = new Map<
+    string,
+    {
+      prep: {item: SaleItemRecord; productName: string; remaining: number}[];
+      base: number;
+    }
+  >();
+  for (const prep of prepLines) {
+    const perUnit =
+      prep.item.quantity > 0
+        ? (prep.item.base_quantity ?? prep.item.quantity) /
+          prep.item.quantity
+        : 1;
+    const key = keyOf(
+      prep.item.product_id,
+      prep.item.variant_id ?? null,
+      prep.item.variant_color ?? null,
+    );
+    const entry = oldKeys.get(key) ?? {prep: [], base: 0};
+    entry.prep.push(prep);
+    entry.base += prep.remaining * perUnit;
+    oldKeys.set(key, entry);
+  }
+  // أساس السلة الجديدة لكل مفتاح.
+  const newKeys = new Map<
+    string,
+    {lines: CartLine[]; base: number}
+  >();
+  for (const line of cartLines) {
+    const key = keyOf(line.productId, line.variantId ?? null, line.bundleColor ?? null);
+    const entry = newKeys.get(key) ?? {lines: [], base: 0};
+    entry.lines.push(line);
+    entry.base += line.quantity * (line.conversion ?? 1);
+    newKeys.set(key, entry);
+  }
+
+  const removals: {
+    saleItemId: number;
+    productId: number;
+    productName: string;
+    quantity: number;
+    unitPrice: number;
+    costPrice: number;
+    unitName: string | null;
+    basePerUnit: number;
+    variantId: number | null;
+    variantColor: string | null;
+    variantLabel: string | null;
+  }[] = [];
+  const additions: CartLine[] = [];
+
+  for (const [key, old] of oldKeys) {
+    const neu = newKeys.get(key);
+    const newBase = neu?.base ?? 0;
+    if (newBase < old.base - 0.0001) {
+      // ناقص: يُوزع على البنود الأصلية بالمتر.
+      let removedBase = old.base - newBase;
+      for (const prep of old.prep) {
+        if (removedBase <= 0.0001) {
+          break;
+        }
+        const perUnit =
+          prep.item.quantity > 0
+            ? (prep.item.base_quantity ?? prep.item.quantity) /
+              prep.item.quantity
+            : 1;
+        const lineBase = prep.remaining * perUnit;
+        if (lineBase <= 0.0001) {
+          continue;
+        }
+        const take = Math.min(lineBase, removedBase);
+        removedBase -= take;
+        const qty = Math.round((take / perUnit) * 1000) / 1000;
+        if (qty > 0) {
+          removals.push({
+            saleItemId: prep.item.id,
+            productId: prep.item.product_id,
+            productName: prep.productName,
+            quantity: qty,
+            unitPrice: prep.item.unit_price,
+            costPrice: prep.item.cost_price,
+            unitName: prep.item.unit_name ?? null,
+            basePerUnit: perUnit,
+            variantId: prep.item.variant_id ?? null,
+            variantColor: prep.item.variant_color ?? null,
+            variantLabel: prep.item.variant_label ?? null,
+          });
+        }
+      }
+    } else if (newBase > old.base + 0.0001 && neu != null) {
+      // زيادة: سطر إضافي بأول خط سلة للمفتاح.
+      const extraBase = newBase - old.base;
+      const first = neu.lines[0];
+      const conversion = first.conversion ?? 1;
+      const qty = Math.round((extraBase / conversion) * 1000) / 1000;
+      if (qty > 0) {
+        additions.push({...first, quantity: qty});
+      }
+    }
+    newKeys.delete(key);
+  }
+  // مفاتيح جديدة كلية — إضافات كاملة.
+  for (const [, neu] of newKeys) {
+    for (const line of neu.lines) {
+      additions.push(line);
+    }
+  }
+  return {removals, additions};
 }

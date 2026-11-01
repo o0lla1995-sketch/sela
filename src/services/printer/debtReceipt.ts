@@ -126,8 +126,17 @@ export function buildDebtReceiptJob(
     .align(2)
     .bold(true)
     .textLine(`${LABELS.invoice}: ${data.sale.invoice_number}`)
-    .bold(false)
-    .textLine(`${LABELS.date}: ${formatDateTime(data.sale.created_at)}`)
+    .bold(false);
+  /* v73 (الجولة 85): فاتورة دين معدلة عبر نقطة البيع — تمييز
+   *  النسخة المعدلة على الإيصال (الرقم ثابت والمحتوى الجديد). */
+  if ((data.sale.edit_count ?? 0) > 0) {
+    b.textLine(
+      `*** نسخة معدلة${
+        data.sale.edited_at ? ` — ${formatDateTime(data.sale.edited_at)}` : ''
+      } ***`,
+    );
+  }
+  b.textLine(`${LABELS.date}: ${formatDateTime(data.sale.created_at)}`)
     .separator(width);
 
   // ── Customer block (the whole point of a debt receipt) ──

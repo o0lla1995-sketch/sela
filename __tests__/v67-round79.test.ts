@@ -36,7 +36,9 @@ describe('v67 ① — جذر اختفاء طرق الدفع من نافذة ال
   test('خطوات النافذة الثلاث تستعمل payScrollArea (flexShrink)', () => {
     const pos = read(POS);
     const uses = pos.split('style={styles.payScrollArea}').length - 1;
-    expect(uses).toBe(3);
+    // v73 (الجولة 85): الرابعة لنافذة إتمام تعديل الفاتورة — نفس
+    // درس الانهيار (flexShrink) طُبّق عليها من اليوم الأول.
+    expect(uses).toBe(4);
     expect(pos).toContain('payScrollArea: {');
     expect(pos).toContain('flexShrink: 1,');
   });

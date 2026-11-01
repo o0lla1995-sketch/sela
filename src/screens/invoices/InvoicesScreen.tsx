@@ -46,6 +46,7 @@ import {Icon} from '../../components/Icon';
 import {SaleRepo} from '../../database/repositories/SaleRepo';
 import {ProductRepo} from '../../database/repositories/ProductRepo';
 import {InvoiceService} from '../../services/InvoiceService';
+import {useCartStore} from '../../stores/cartStore';
 import {SilaRepo} from '../../services/sila/SilaRepo';
 import {VouchersRepo} from '../../services/sila/VouchersRepo';
 import type {VoucherRedemptionRow, ReturnBook} from '../../core/types';
@@ -904,6 +905,7 @@ export function InvoiceDetailScreen() {
   const c = useThemeColors();
   const styles = useStyles();
   const route = useRoute<any>();
+  const navigation = useNavigation<any>();
   const saleId: number | undefined = route.params?.saleId;
   const toast = useToastStore(state => state.show);
   const settings = useSettingsStore(state => state.settings);
@@ -1047,6 +1049,41 @@ export function InvoiceDetailScreen() {
     };
   }, [saleId, toast]);
 
+  /** v73 (الجولة 85 #٢): فتح هذه الفاتورة في نقطة البيع للإرجاع
+   *  والاستبدال بالتعديل السهل — تُبنى السلة من الكميات المتبقية
+   *  بأسعارها الأصلية ويُنتقل لتبويب نقطة البيع حيث شريط التعديل:
+   *  حذف/تقليل كمية = إرجاع، إضافة أو تبديل = استبدال، وعند إتمام
+   *  التعديل تُستبدل الفاتورة الأصلية بالنسخة المعدلة ويسوّى الفرق
+   *  (نفس منطق الخصم والرجوع للمخزون — بطلب التاجر نصاً). */
+  const openInvoiceEditFromInvoices = useCallback(
+    async (targetSaleId: number) => {
+      try {
+        const prep = await InvoiceService.prepareInvoiceEdit(targetSaleId);
+        useCartStore.getState().beginEdit(
+          prep.lines,
+          prep.session.originalPricingMode,
+          prep.session.originalDiscount,
+          prep.session,
+        );
+        navigation.navigate('Pos');
+        toast(
+          `فُتحت ${prep.session.invoiceNumber} في نقطة البيع — عدّل الأصناف كما تشاء ثم أتم التعديل`,
+          'success',
+          5500,
+        );
+      } catch (error) {
+        toast(
+          error instanceof Error
+            ? error.message
+            : 'تعذر فتح الفاتورة في نقطة البيع',
+          'error',
+          5000,
+        );
+      }
+    },
+    [navigation, toast],
+  );
+
   const reprint = useCallback(async () => {
     if (sale == null || saleId == null) {
       return;
@@ -1137,10 +1174,17 @@ export function InvoiceDetailScreen() {
             {canReturn ? (
               <TouchableOpacity
                 style={styles.retChip}
-                onPress={() => setReturnOpen(true)}
+                /* v73 (الجولة 85 #٢): الإرجاع/الاستبدال من نقطة البيع
+                   مباشرة — تُفتح الفاتورة في السلة للتعديل (حذف/تقليل
+                   = إرجاع، إضافة/تبديل = استبدال) وعند الإتمام تُستبدل
+                   الفاتورة الأصلية بالنسخة المعدلة ويسوّى الفرق — طلب
+                   التاجر نصاً بدل نافذة الإرجاع والاستبدال القديمة
+                   («أريدها بكل سهولة من نقطة البيع وليس من نافذة
+                   الإرجاع والاستبدال الحالية لأنها ليست سهلة»). */
+                onPress={() => void openInvoiceEditFromInvoices(sale.id)}
                 activeOpacity={0.7}>
                 <Icon name="undo" size={14} color={c.warning} />
-                <Text style={styles.retChipText}>إرجاع</Text>
+                <Text style={styles.retChipText}>إرجاع/استبدال</Text>
               </TouchableOpacity>
             ) : null}
             <AppButton
@@ -1174,6 +1218,12 @@ export function InvoiceDetailScreen() {
                 label={sale.payment_type === 'WHOLESALE' ? 'جملة' : 'مفرق'}
                 tone={sale.payment_type === 'WHOLESALE' ? 'info' : 'neutral'}
               />
+              {/* v73 (الجولة 85): فاتورة معدلة عبر نقطة البيع — وسم
+                  دائم بعدد مرات التعديل (المحتوى الحالي هو النسخة
+                  الأخيرة، والتاريخ الكامل في سجل التدقيق). */}
+              {(sale.edit_count ?? 0) > 0 ? (
+                <Badge label={`معدلة ×${sale.edit_count}`} tone="warning" />
+              ) : null}
               {/* v66 (الجولة 78 — أندرويد #2): طريقة الدفع في تفصيل
                   الفاتورة — الشعار الرسمي + الاسم بلون العلامة،
                   فتتطابق القائمة والتفصيل والتقرير (طلب التاجر). */}

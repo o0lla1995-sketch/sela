@@ -273,6 +273,12 @@ export interface SaleRecord {
   /** v63 (الجولة 75): طريقة الدفع — بنك/محفظة/نقدي؛ غائب = نقدي
    *  (توافق السجلات قبل الترحيل v30). */
   payment_method?: string | null;
+  /** v73 (الجولة 85): كم مرة عُدّلت هذه الفاتورة عبر نقطة البيع
+   *  (جلسة تعديل الفاتورة) — 0/غائب = لم تُعدّل أبداً. التعديل
+   *  يستبدل محتوى الفاتورة نفسها (رقمها ثابت) ويسوّي الفرق. */
+  edit_count?: number;
+  /** v73: وقت آخر تعديل (وقت محلي). */
+  edited_at?: string | null;
 }
 
 export interface SaleItemRecord {
@@ -407,6 +413,36 @@ export interface SaleReturnExchange {
 export interface SaleWithItems {
   sale: SaleRecord;
   items: SaleItemRecord[];
+}
+
+/** v73 (الجولة 85): جلسة تعديل فاتورة عبر نقطة البيع — طلب التاجر
+ *  نصاً: «عند الرجوع للفاتورة السابقة أو فتح فاتورة للإرجاع
+ *  والاستبدال من نقطة البيع، تُعدَّل الفاتورة الأصلية نفسها
+ *  (تُستبدل بالنسخة المعدلة عند الإتمام) بدل إنشاء فاتورة جديدة
+ *  تداخلها». الحقول لقطة لحظة الفتح — تُستخدم للعرض الحي للفرق
+ *  ولحرس تغيّر المرتجعات أثناء الجلسة. */
+export interface InvoiceEditSession {
+  saleId: number;
+  invoiceNumber: string;
+  /** دفتر الفاتورة الأصلية — يحدد كيف تُسوّى الفروق. */
+  book: 'cash' | 'sila' | 'local' | 'online';
+  /** إجمالي الفاتورة الأصلية (أغورة). */
+  originalTotalMinor: number;
+  /** الخصم الأصلي (₪) — يُعاد تحميله على السلة. */
+  originalDiscount: number;
+  /** طريقة الدفع الأصلية (نقدي/محفظة/بنك) — تُعاد اختيارها. */
+  originalPaymentMethod: string | null;
+  /** مفرق/جملة الأصلية. */
+  originalPricingMode: PricingMode;
+  /** عدد مرتجعات الفاتورة لحظة الفتح — إن سُجّل مرتجع جديد أثناء
+   *  التعديل يُرفض الإتمام (المعادلة تغيّرت خلف الجلسة). */
+  priorReturnsCount: number;
+  /** إجمالي ما استُرد سابقاً (أغورة) — لدقة عرض الفرق الحي. */
+  priorRefundedMinor: number;
+  /** INV-L فقط: زبون الدفتر — لإعادة إنشاء صف الدين إن كان قد
+   *  استُهلك بمرتجع سابق. null لبقية الدفاتر. */
+  localCustomerId: number | null;
+  localCustomerName: string | null;
 }
 
 // ────────────────────────────────────────────────────────────────

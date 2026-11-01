@@ -78,6 +78,34 @@ export interface CreateSaleInput {
   };
 }
 
+/** v73 (الجولة 85): مدخلات إعادة كتابة الفاتورة (تعديلها عبر نقطة
+ *  البيع) — انظر SaleRepo.rewriteSale للمسار المحاسبي الكامل. */
+export interface RewriteSaleInput {
+  saleId: number;
+  lines: CartLine[];
+  discount: number;
+  paymentType: PricingMode;
+  paymentMethod: string | null;
+  /** دفتر الفاتورة الأصلية — online لا يمر من هنا (تسوية مركبة). */
+  book: 'cash' | 'local' | 'sila';
+  /** حرس الجلسة: عدد المرتجعات المتوقع لحظة فتح التعديل. */
+  expectedPriorReturnsCount: number;
+  /** INV-L: زبون الدفتر (إعادة إنشاء صف الدين إن استُهلك سابقاً). */
+  localCustomerId: number | null;
+  localCustomerName: string | null;
+  /** صِلة متزامن (إن لزم): مفتاح تكرار سند العكس + مرجع السند —
+   *  يُحجزان خارج المعاملة (المرجع يقرأ MMKV). */
+  silaReversal: {
+    idempotencyKey: string;
+    posReceiptRef: string;
+  } | null;
+  /** صِلة متزامن (إن لزم): مفتاح تكرار صف دين الزيادة. */
+  silaDebtIncrease: {
+    idempotencyKey: string;
+  } | null;
+  note?: string | null;
+}
+
 function rowToSale(row: Record<string, unknown>): SaleRecord {
   return {
     id: Number(row.id),
@@ -105,6 +133,12 @@ function rowToSale(row: Record<string, unknown>): SaleRecord {
       row.payment_method == null || row.payment_method === undefined
         ? null
         : String(row.payment_method),
+    // v73 (الجولة 85): تعديل الفاتورة عبر نقطة البيع — العدد والوقت.
+    edit_count: Number(row.edit_count ?? 0),
+    edited_at:
+      row.edited_at == null || row.edited_at === undefined
+        ? null
+        : String(row.edited_at),
   };
 }
 
@@ -1107,6 +1141,546 @@ export const SaleRepo = {
       returnId,
     ]);
     return rowToReturn(result.rows?.[0] ?? {});
+  },
+
+  /** v73 (الجولة 85): تعديل الفاتورة عبر نقطة البيع — استبدال محتوى
+   *  الفاتورة الأصلية بالنسخة المعدلة داخل معاملة واحدة، بلا فاتورة
+   *  جديدة تداخلها (طلب التاجر نصاً). المسار المحاسبي:
+   *  ١. طيّ المرتجعات السابقة: صفوف RET (sales/sale_items) و
+   *     sale_returns/* تُحذف — آثارها المخزونية باقية فعلياً
+   *     (أُعيدت للأرفف لحظتها) وآثارها المالية تمتصها إعادة كتابة
+   *     الفاتورة نفسها، فتبقى معادلة الخزينة متوازنة:
+   *     Δالدرج = (الجديد − القديم) + المسترد سابقاً = ما يُسلَّم
+   *     للزبون الآن فعلياً.
+   *  ٢. فرق المخزون لكل (منتج/متغير/لون ربطة) بين الكميات الجديدة
+   *     والصافي المتبقي (الأصل − المرتجع): زيادة تُخصم بشرط توفر،
+   *     ونقص يعود للأرفف.
+   *  ٣. إعادة كتابة الصف والبنود + edit_count/edited_at + تصفير
+   *     returned_minor.
+   *  ٤. تسوية الدفتر: نقدي → طريقة الدفع على الصف؛ دفتر المتجر →
+   *     صف الدين = الإجمالي الجديد؛ صِلة معلق → صف الطابور =
+   *     الإجمالي الجديد؛ صِلة متزامن → سند عكس (نقص) أو صف دين
+   *     زيادة (زيادة) بالفرق الصحيح مقابل الرصيد القائم على
+   *     الخادم.
+   *  ٥. لقطة قبل/بعد كاملة في sale_edits — المحاسب يرى التاريخ
+   *     كاملاً رغم حذف صفوف RET المطوية. */
+  async rewriteSale(input: RewriteSaleInput): Promise<SaleWithItems> {
+    const db = getDb();
+
+    const subtotal = input.lines.reduce(
+      (sum, line) => sum + line.unitPrice * line.quantity,
+      0,
+    );
+    const discount = Math.min(Math.max(input.discount, 0), subtotal);
+    const totalAmount = subtotal - discount;
+    const totalCost = input.lines.reduce(
+      (sum, line) => sum + line.costPrice * line.quantity,
+      0,
+    );
+    const totalProfit = totalAmount - totalCost;
+    const totalMinor = Math.round(totalAmount * 100);
+    const editedAt = localNow();
+    let editCountAfter = 1;
+
+    await db.transaction(async tx => {
+      const saleRow = await tx.execute('SELECT * FROM sales WHERE id = ?', [
+        input.saleId,
+      ]);
+      const sale = ((saleRow.rows ?? []) as Record<string, unknown>[])[0];
+      if (sale == null) {
+        throw new Error('الفاتورة غير موجودة');
+      }
+      const oldTotalMinor = Math.round(Number(sale.total_amount ?? 0) * 100);
+      editCountAfter = Number(sale.edit_count ?? 0) + 1;
+      const invoiceNumber = String(sale.invoice_number ?? '');
+
+      // ── ١) طيّ المرتجعات السابقة (مع حرس الجلسة) ──
+      const priorRows = await tx.execute(
+        'SELECT * FROM sale_returns WHERE sale_id = ? ORDER BY id ASC',
+        [input.saleId],
+      );
+      const priorReturns = (priorRows.rows ?? []) as Record<
+        string,
+        unknown
+      >[];
+      if (priorReturns.length !== input.expectedPriorReturnsCount) {
+        throw new Error(
+          'سُجّلت مرتجعات جديدة على الفاتورة أثناء التعديل — أعد فتح تعديل الفاتورة من جديد',
+        );
+      }
+      let priorRefundedMinor = 0;
+      let priorSilaReversalMinor = 0;
+      // لقطة «قبل» كاملة (الفاتورة + بنودها + مرتجعاتها المطوية).
+      const beforeItems: Record<string, unknown>[] = [];
+      const itemsRows = await tx.execute(
+        'SELECT * FROM sale_items WHERE sale_id = ? ORDER BY id ASC',
+        [input.saleId],
+      );
+      const oldItems = (itemsRows.rows ?? []) as Record<string, unknown>[];
+      const returnedMap = new Map<number, number>();
+      for (const ret of priorReturns) {
+        priorRefundedMinor += Number(ret.refund_minor ?? 0);
+        if (String(ret.book ?? '') === 'sila') {
+          priorSilaReversalMinor += Number(ret.debt_adjusted_minor ?? 0);
+        }
+        const retId = Number(ret.id);
+        const riRows = await tx.execute(
+          'SELECT * FROM sale_return_items WHERE return_id = ?',
+          [retId],
+        );
+        const reRows = await tx.execute(
+          'SELECT * FROM sale_return_exchanges WHERE return_id = ?',
+          [retId],
+        );
+        for (const ri of (riRows.rows ?? []) as Record<string, unknown>[]) {
+          const sid = Number(ri.sale_item_id);
+          returnedMap.set(sid, (returnedMap.get(sid) ?? 0) + Number(ri.quantity ?? 0));
+        }
+        // اللقطة قبل أي حذف.
+        (ret as Record<string, unknown>)._items = riRows.rows ?? [];
+        (ret as Record<string, unknown>)._exchanges = reRows.rows ?? [];
+        // الحذف المطوي: إيصال المرتجع + صوره + صف RET السالب
+        //   (sales + sale_items) — المخزون لا يُمس (أثره الفعلي تم
+        //   لحظة الإرجاع) والمال تمتصه إعادة الكتابة.
+        await tx.execute('DELETE FROM sale_return_items WHERE return_id = ?', [
+          retId,
+        ]);
+        await tx.execute(
+          'DELETE FROM sale_return_exchanges WHERE return_id = ?',
+          [retId],
+        );
+        await tx.execute('DELETE FROM sale_returns WHERE id = ?', [retId]);
+        const retNumber = String(ret.return_number ?? '');
+        await tx.execute(
+          `DELETE FROM sale_items
+            WHERE sale_id IN (
+              SELECT id FROM sales WHERE invoice_number = ? AND return_kind IS NOT NULL
+            )`,
+          [retNumber],
+        );
+        await tx.execute(
+          'DELETE FROM sales WHERE invoice_number = ? AND return_kind IS NOT NULL',
+          [retNumber],
+        );
+      }
+      for (const item of oldItems) {
+        beforeItems.push({...item});
+      }
+
+      // ── ٢) فرق المخزون بين الجديد والصافي المتبقي ──
+      // تجميع بمفتاح (منتج : متغير : لون ربطة) — القطع الأساسية
+      // للمستوى الأدنى (المنتج/المتغير) وعدد الربط لمتغيرات اللون.
+      type Agg = {
+        productId: number;
+        variantId: number | null;
+        color: string | null;
+        pieces: number;
+        bundles: number;
+      };
+      const oldAgg = new Map<string, Agg>();
+      const newAgg = new Map<string, Agg>();
+      const aggOf = (
+        map: Map<string, Agg>,
+        productId: number,
+        variantId: number | null,
+        color: string | null,
+      ) => {
+        const key = `${productId}:${variantId ?? 0}:${color ?? ''}`;
+        let agg = map.get(key);
+        if (agg == null) {
+          agg = {productId, variantId, color, pieces: 0, bundles: 0};
+          map.set(key, agg);
+        }
+        return agg;
+      };
+      for (const item of oldItems) {
+        const qty = Number(item.quantity ?? 0);
+        const returned = returnedMap.get(Number(item.id)) ?? 0;
+        const remaining = qty - returned;
+        if (remaining <= 0.0001) {
+          continue;
+        }
+        const baseQty = Number(item.base_quantity ?? qty);
+        const perUnit = qty > 0 ? baseQty / qty : 1;
+        const variantId =
+          item.variant_id == null ? null : Number(item.variant_id);
+        const color =
+          item.variant_color == null || String(item.variant_color).length === 0
+            ? null
+            : String(item.variant_color);
+        const agg = aggOf(oldAgg, Number(item.product_id), variantId, color);
+        agg.pieces += remaining * perUnit;
+        if (color != null) {
+          agg.bundles += remaining;
+        }
+      }
+      for (const line of input.lines) {
+        const agg = aggOf(
+          newAgg,
+          line.productId,
+          line.variantId ?? null,
+          line.bundleColor ?? null,
+        );
+        agg.pieces += line.quantity * (line.conversion ?? 1);
+        if (line.bundleColor != null) {
+          agg.bundles += line.quantity;
+        }
+      }
+      const untrackedSet = new Set<number>();
+      for (const key of new Set([...oldAgg.keys(), ...newAgg.keys()])) {
+        const oldA = oldAgg.get(key);
+        const newA = newAgg.get(key);
+        const productId = (oldA ?? newA)!.productId;
+        if (!untrackedSet.has(productId)) {
+          const prodRow = await tx.execute(
+            'SELECT stock_untracked FROM products WHERE id = ?',
+            [productId],
+          );
+          const prod = ((prodRow.rows ?? []) as {stock_untracked?: number}[])[0];
+          if (prod == null) {
+            throw new Error('منتج في الفاتورة لم يعد موجوداً في المخزون');
+          }
+          if (Number(prod.stock_untracked ?? 0) === 1) {
+            untrackedSet.add(productId);
+          }
+        }
+        const untracked = untrackedSet.has(productId);
+        const deltaPieces =
+          (newA?.pieces ?? 0) - (oldA?.pieces ?? 0);
+        const deltaBundles =
+          (newA?.bundles ?? 0) - (oldA?.bundles ?? 0);
+        // المنتج (قطع أساسية) — الزيادة بشرط توفر، والنقص إعادة
+        //   للأرفف (بلا تتبع → لا يُمس إطلاقاً كما في البيع).
+        if (!untracked && Math.abs(deltaPieces) > 0.0001) {
+          if (deltaPieces > 0) {
+            const upd = await tx.execute(
+              'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+              [deltaPieces, productId, deltaPieces],
+            );
+            if (upd.rowsAffected !== 1) {
+              throw new Error(
+                `الكمية المتوفرة لا تكفي للزيادة في «${
+                  input.lines.find(l => l.productId === productId)?.name ??
+                  `#${productId}`
+                }»`,
+              );
+            }
+          } else {
+            await tx.execute(
+              'UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?',
+              [-deltaPieces, productId],
+            );
+          }
+        }
+        // المتغير تحديداً (ملابس لون×مقاس) — نفس القطع.
+        const variantId = (oldA ?? newA)!.variantId;
+        if (variantId != null && Math.abs(deltaPieces) > 0.0001) {
+          const kindRow = await tx.execute(
+            'SELECT kind FROM product_variants WHERE id = ?',
+            [variantId],
+          );
+          const kind = ((kindRow.rows ?? []) as {kind?: string}[])[0]
+            ?.kind;
+          if (kind === 'variant') {
+            if (deltaPieces > 0) {
+              const upd = await tx.execute(
+                'UPDATE product_variants SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+                [deltaPieces, variantId, deltaPieces],
+              );
+              if (upd.rowsAffected !== 1) {
+                throw new Error(
+                  'كمية المتغير المطلوبة غير متوفرة لهذه الزيادة',
+                );
+              }
+            } else {
+              await tx.execute(
+                'UPDATE product_variants SET stock_quantity = stock_quantity + ? WHERE id = ?',
+                [-deltaPieces, variantId],
+              );
+            }
+          }
+        }
+        // ربطة اللون — القطع من كل مقاس بعدد الربط.
+        const color = (oldA ?? newA)!.color;
+        if (color != null && Math.abs(deltaBundles) > 0.0001) {
+          const colorRows = await tx.execute(
+            `SELECT id FROM product_variants
+              WHERE product_id = ? AND kind = 'variant' AND color = ?`,
+            [productId, color],
+          );
+          for (const vRow of (colorRows.rows ?? []) as {id: number}[]) {
+            if (deltaBundles > 0) {
+              const upd = await tx.execute(
+                'UPDATE product_variants SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?',
+                [deltaBundles, vRow.id, deltaBundles],
+              );
+              if (upd.rowsAffected !== 1) {
+                throw new Error(
+                  `مقاس من لون ${color} لا يكفي لعدد الربط المطلوب`,
+                );
+              }
+            } else {
+              await tx.execute(
+                'UPDATE product_variants SET stock_quantity = stock_quantity + ? WHERE id = ?',
+                [-deltaBundles, vRow.id],
+              );
+            }
+          }
+        }
+      }
+
+      // ── ٣) إعادة كتابة البنود والصف ──
+      await tx.execute('DELETE FROM sale_items WHERE sale_id = ?', [
+        input.saleId,
+      ]);
+      for (const line of input.lines) {
+        await tx.execute(
+          `INSERT INTO sale_items
+            (sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity, variant_label, variant_id, variant_color)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            input.saleId,
+            line.productId,
+            line.quantity,
+            line.unitPrice,
+            line.costPrice,
+            line.unitPrice * line.quantity,
+            line.unitName ?? null,
+            line.quantity * (line.conversion ?? 1),
+            line.variantLabel ?? null,
+            line.variantId ?? null,
+            line.bundleColor ?? null,
+          ],
+        );
+      }
+      await tx.execute(
+        `UPDATE sales
+           SET total_amount = ?, total_cost = ?, total_profit = ?, discount = ?,
+               payment_type = ?, payment_method = ?,
+               edit_count = ?, edited_at = ?, returned_minor = 0
+         WHERE id = ?`,
+        [
+          totalAmount,
+          totalCost,
+          totalProfit,
+          discount,
+          input.paymentType,
+          input.paymentMethod || 'cash',
+          editCountAfter,
+          editedAt,
+          input.saleId,
+        ],
+      );
+
+      // ── ٤) تسوية الدفتر ──
+      if (input.book === 'local') {
+        // صف الدين = الإجمالي الجديد (السدادات على مستوى الزبون تبقى
+        //   كما هي — الرصيد القائم يعدّل نفسه). صفر → حذف الصف.
+        const debtRow = await tx.execute(
+          'SELECT id FROM local_debts WHERE invoice_ref = ? AND migrated = 0',
+          [invoiceNumber],
+        );
+        const debtId = ((debtRow.rows ?? []) as {id?: number}[])[0]?.id;
+        if (totalMinor <= 0) {
+          if (debtId != null) {
+            await tx.execute('DELETE FROM local_debts WHERE id = ?', [debtId]);
+          }
+        } else if (debtId != null) {
+          await tx.execute(
+            'UPDATE local_debts SET amount_minor = ? WHERE id = ?',
+            [totalMinor, debtId],
+          );
+        } else if (input.localCustomerId != null) {
+          // استُهلك الدين بمرتجع سابق (حُذف صفه) والتعديل أعاده ديناً
+          //   — يُعاد إنشاؤه لنفس الزبون (اللقطة في sale_edits تحفظ
+          //   القصة كاملة).
+          await tx.execute(
+            `INSERT INTO local_debts (
+               local_customer_id, invoice_ref, amount_minor, description, origin
+             ) VALUES (?, ?, ?, ?, 'sale')`,
+            [
+              input.localCustomerId,
+              invoiceNumber,
+              totalMinor,
+              `بيع بالدين (دفتر المتجر) — فاتورة ${invoiceNumber} (أُعيد بعد تعديل الفاتورة)`,
+            ],
+          );
+        } else {
+          throw new Error(
+            'دين هذه الفاتورة غير موجود وزبونه مجهول — لا يمكن إعادة إنشائه؛ أبقِ الفاتورة نقدية أو سجّل الدين يدوياً من الدفتر',
+          );
+        }
+      } else if (input.book === 'sila') {
+        const queueRow = await tx.execute(
+          `SELECT local_id, state, amount_minor, customer_id, customer_name,
+                  customer_phone_last4, credit_covered_minor
+             FROM sila_debt_queue WHERE pos_invoice_ref = ?`,
+          [invoiceNumber],
+        );
+        const debt = ((queueRow.rows ?? []) as {
+          local_id?: number;
+          state?: string;
+          amount_minor?: number;
+          customer_id?: string | null;
+          customer_name?: string | null;
+          customer_phone_last4?: string | null;
+          credit_covered_minor?: number | null;
+        }[])[0];
+        if (debt == null) {
+          throw new Error(
+            'صف دين صِلة لهذه الفاتورة غير موجود في الطابور — لا يمكن تعديل الفاتورة',
+          );
+        }
+        if (debt.state === 'synced') {
+          // المتزامن: الخادم يعرف (الأصل − العكوس السابقة − السدادّات).
+          //   الواجب الوصول إليه = الإجمالي الجديد (السدادّات تبقى
+          //   قائمة كجزء مسدد) → تسوية بالفرق:
+          //   adjustment = الجديد − الأصل + كل عكوس هذه الفاتورة
+          //   (من مرتجعات سابقة طُوَت + من تعديلات سابقة — سندها
+          //   يحمل مرجعاً بنيوياً `${رقم الفاتورة}-RVS…` فيُجمع بدقة).
+          const origMinor = Number(debt.amount_minor ?? 0);
+          const editsReversalRows = await tx.execute(
+            `SELECT COALESCE(SUM(amount_minor), 0) AS minor
+               FROM sila_payment_queue
+              WHERE kind = 'return_reversal'
+                AND pos_receipt_ref LIKE ?`,
+            [`${invoiceNumber}-RVS%`],
+          );
+          const priorEditsReversalMinor = Number(
+            ((editsReversalRows.rows ?? []) as {minor?: number}[])[0]
+              ?.minor ?? 0,
+          );
+          const adjustment =
+            totalMinor -
+            origMinor +
+            priorSilaReversalMinor +
+            priorEditsReversalMinor;
+          if (adjustment < 0) {
+            if (input.silaReversal == null) {
+              throw new Error(
+                'تعديل ينقص دين صِلة المتزامن — تعذر تجهيز سند العكس',
+              );
+            }
+            await tx.execute(
+              `INSERT INTO sila_payment_queue (
+                idempotency_key, customer_id, customer_name, customer_phone_last4,
+                amount_minor, payment_method, pos_receipt_ref, description,
+                paid_at, state, kind
+              ) VALUES (?, ?, ?, ?, ?, 'other', ?, ?, ?, 'pending', 'return_reversal')`,
+              [
+                input.silaReversal.idempotencyKey,
+                debt.customer_id ?? null,
+                debt.customer_name ?? null,
+                debt.customer_phone_last4 ?? null,
+                -adjustment,
+                // مرجع بنيوي فريد لكل تعديل — التعديلات التالية تحسبه
+                //   ضمن عكوس الفاتورة (المعادلة أعلاه).
+                `${invoiceNumber}-RVS${editCountAfter}`,
+                `عكس فرق تعديل فاتورة — ${invoiceNumber} (التعديل رقم ${editCountAfter})`,
+                editedAt,
+              ],
+            );
+          } else if (adjustment > 0) {
+            if (input.silaDebtIncrease == null) {
+              throw new Error(
+                'تعديل يزيد دين صِلة المتزامن — تعذر تجهيز صف الزيادة',
+              );
+            }
+            await tx.execute(
+              `INSERT INTO sila_debt_queue (
+                idempotency_key, customer_id, customer_name, customer_phone_last4,
+                amount_minor, currency, pos_invoice_ref, description,
+                scanned_at, state
+              ) VALUES (?, ?, ?, ?, ?, 'ILS', ?, ?, ?, 'pending')`,
+              [
+                input.silaDebtIncrease.idempotencyKey,
+                debt.customer_id ?? null,
+                debt.customer_name ?? null,
+                debt.customer_phone_last4 ?? null,
+                adjustment,
+                `${invoiceNumber}-ED${editCountAfter}`,
+                `فرق تعديل فاتورة — ${invoiceNumber} (التعديل رقم ${editCountAfter})`,
+                editedAt,
+              ],
+            );
+          }
+        } else {
+          // معلق/فاشل: الخادم لم يعرف الأرقام قط → يُعدَّل الصف نفسه.
+          if (totalMinor <= 0) {
+            await tx.execute(
+              'DELETE FROM sila_debt_queue WHERE pos_invoice_ref = ?',
+              [invoiceNumber],
+            );
+          } else {
+            await tx.execute(
+              `UPDATE sila_debt_queue
+                 SET amount_minor = ?,
+                     credit_covered_minor = MIN(COALESCE(credit_covered_minor, 0), ?)
+               WHERE pos_invoice_ref = ?`,
+              [totalMinor, totalMinor, invoiceNumber],
+            );
+          }
+        }
+      }
+
+      // ── ٥) سجل التدقيق — لقطة كاملة قبل/بعد ──
+      const afterSale = {
+        ...sale,
+        total_amount: totalAmount,
+        total_cost: totalCost,
+        total_profit: totalProfit,
+        discount,
+        payment_type: input.paymentType,
+        payment_method: input.paymentMethod || 'cash',
+        edit_count: editCountAfter,
+        edited_at: editedAt,
+        returned_minor: 0,
+      };
+      await tx.execute(
+        `INSERT INTO sale_edits (
+           sale_id, edited_at, before_json, after_json, delta_minor, note
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          input.saleId,
+          editedAt,
+          JSON.stringify({
+            sale: {...sale},
+            items: beforeItems,
+            returns: priorReturns,
+          }),
+          JSON.stringify({
+            sale: afterSale,
+            items: input.lines.map(line => ({
+              product_id: line.productId,
+              quantity: line.quantity,
+              unit_price: line.unitPrice,
+              unit_name: line.unitName ?? null,
+              base_quantity: line.quantity * (line.conversion ?? 1),
+              variant_id: line.variantId ?? null,
+              variant_color: line.bundleColor ?? null,
+              variant_label: line.variantLabel ?? null,
+            })),
+          }),
+          totalMinor - (oldTotalMinor - priorRefundedMinor),
+          input.note ?? null,
+        ],
+      );
+    });
+
+    const saleResult = await db.execute(
+      'SELECT * FROM sales WHERE id = ?',
+      [input.saleId],
+    );
+    const itemsResult = await db.execute(
+      'SELECT * FROM sale_items WHERE sale_id = ? ORDER BY id ASC',
+      [input.saleId],
+    );
+    return {
+      sale: rowToSale(((saleResult.rows ?? []) as Record<string, unknown>[])[0] ?? {}),
+      items: ((itemsResult.rows ?? []) as Record<string, unknown>[]).map(
+        rowToItem,
+      ),
+    };
   },
 
   async listRecent(limit = 20): Promise<SaleRecord[]> {
