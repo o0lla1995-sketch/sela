@@ -3174,20 +3174,22 @@ export function PosScreen({
                 empty-cart strip NEVER opens the product scanner by
                 itself; a press just reminds the merchant where the
                 products come from (grid tap / the scan button up
-                top — his explicit choice, never an auto-launch). */}
+                top — his explicit choice, never an auto-launch).
+                v72 (الجولة 84 #٢): حُذفت عبارة «السلة فارغة» من
+                الشريط بطلب التاجر — يبقى الإرشاد العملي فقط. */}
                 <TouchableOpacity
                   style={styles.cartEmptyRow}
                   activeOpacity={0.75}
                   onPress={() =>
                     toast(
-                      'السلة فارغة — المس منتجاً من الشبكة بالأعلى، أو استخدم زر المسح بجانب البحث',
+                      'المس منتجاً من الشبكة بالأعلى، أو استخدم زر المسح بجانب البحث',
                       'info',
                       3500,
                     )
                   }>
                   <Icon name="cart" size={18} color={c.textFaint} />
                   <Text style={styles.cartEmptyText}>
-                    السلة فارغة — المس منتجاً من الشبكة أو امسحه
+                    المس منتجاً من الشبكة بالأعلى أو امسحه
                     {barcodeActive ? ' بالباركود' : ''}
                     {barcodeActive && visualActive ? ' أو ' : ''}
                     {visualActive ? 'بالكاميرا' : ''}

@@ -334,6 +334,10 @@ export interface BackupFile {
     invoice_ref: string;
     amount_minor: number;
     description: string | null;
+    /** v72 (الجولة 84 #١): 'direct' دين مباشر بلا بيع / 'sale' دين
+     *  بيع INV-L. غائب في النسخ القديمة — يُستنتج عند الاستعادة من
+     *  وجود فاتورة مقابلة بنفس الرقم في sales. */
+    origin?: 'sale' | 'direct';
     migrated: number;
     migrated_ref: string | null;
     created_at: string;
@@ -551,7 +555,7 @@ export const BackupService = {
       db
         .execute(
           `SELECT local_customer_id, invoice_ref, amount_minor, description,
-                migrated, migrated_ref, created_at
+                origin, migrated, migrated_ref, created_at
          FROM local_debts`,
         )
         .catch(() => ({rows: []})),
@@ -912,6 +916,8 @@ export const BackupService = {
         invoice_ref: String(row.invoice_ref ?? ''),
         amount_minor: Number(row.amount_minor ?? 0),
         description: row.description == null ? null : String(row.description),
+        // v72 (الجولة 84 #١): أصل الدين يُحفظ في النسخة الاحتياطية.
+        origin: row.origin === 'direct' ? 'direct' : 'sale',
         migrated: Number(row.migrated ?? 0),
         migrated_ref:
           row.migrated_ref == null ? null : String(row.migrated_ref),
@@ -1749,13 +1755,27 @@ export const BackupService = {
         try {
           await tx.execute(
             `INSERT INTO local_debts
-              (local_customer_id, invoice_ref, amount_minor, description, migrated, migrated_ref, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              (local_customer_id, invoice_ref, amount_minor, description,
+               origin, migrated, migrated_ref, created_at)
+             VALUES (?, ?, ?, ?,
+               COALESCE(?, CASE WHEN EXISTS (
+                 SELECT 1 FROM sales s WHERE s.invoice_number = ?
+               ) THEN 'sale' ELSE 'direct' END),
+               ?, ?, ?, ?)`,
             [
               mappedId,
               debt.invoice_ref,
               Number(debt.amount_minor ?? 0),
               debt.description ?? null,
+              // v72 (الجولة 84 #١): أصل الدين من النسخة إن وُجد؛ وإلا
+              // يُستنتج: دين له فاتورة مقابلة في sales = بيع، وإلا
+              // مباشر — كي لا تعود نسخة قديمة فتخصم المباشر من الخزينة.
+              debt.origin === 'direct'
+                ? 'direct'
+                : debt.origin === 'sale'
+                ? 'sale'
+                : null,
+              debt.invoice_ref,
               Number(debt.migrated ?? 0),
               debt.migrated_ref ?? null,
               debt.created_at || nowLocal(),

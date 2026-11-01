@@ -58,19 +58,19 @@ describe('v62 — ④ التحديث الإجباري: مقارنة الإصدا
     storage.delete(KEYS.updateRequirement);
     // بلا توجيه: لا إجبار.
     expect(getUpdateRequirement().required).toBe(false);
-    // توجيه بحد أدنى أعلى من إصدار البناء (71.0.0): 72.0.0: إجبار + رابط. (v70: الإصدار الجديد يقلب المقارنة — الحارس يُحرَّض للأعلى دائماً)
-    adoptUpdateInfoIfProvided({minAppVersion: '72.0.0', updateUrl: 'https://play.google.com/x'});
+    // توجيه بحد أدنى أعلى من إصدار البناء (72.0.0): 73.0.0: إجبار + رابط. (v70: الإصدار الجديد يقلب المقارنة — الحارس يُحرَّض للأعلى دائماً)
+    adoptUpdateInfoIfProvided({minAppVersion: '73.0.0', updateUrl: 'https://play.google.com/x'});
     const req = getUpdateRequirement();
     expect(req.required).toBe(true);
-    expect(req.minVersion).toBe('72.0.0');
+    expect(req.minVersion).toBe('73.0.0');
     expect(req.updateUrl).toBe('https://play.google.com/x');
-    expect(req.currentVersion).toBe('71.0.0');
+    expect(req.currentVersion).toBe('72.0.0');
     // إفراغ الخادم يلغي الإجبار.
     adoptUpdateInfoIfProvided({minAppVersion: '', updateUrl: ''});
     expect(getUpdateRequirement().required).toBe(false);
     // رد بلا الحقل إطلاقاً (خادم قديم) لا يمس الكاش.
     storage.delete(KEYS.updateRequirement);
-    adoptUpdateInfoIfProvided({minAppVersion: '72.0.0', updateUrl: ''});
+    adoptUpdateInfoIfProvided({minAppVersion: '73.0.0', updateUrl: ''});
     adoptUpdateInfoIfProvided({somethingElse: 1});
     expect(getUpdateRequirement().required).toBe(true);
   });
@@ -216,10 +216,10 @@ describe('v62 — حرّوس المصدر للجولة كاملة', () => {
 
   test('⑥ الإصدار: 71.0.0 (79)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '71.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 79');
+    expect(config).toContain("APP_VERSION = '72.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 80');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "71.0.0"');
-    expect(gradle).toContain('versionCode 79');
+    expect(gradle).toContain('versionName "72.0.0"');
+    expect(gradle).toContain('versionCode 80');
   });
 });

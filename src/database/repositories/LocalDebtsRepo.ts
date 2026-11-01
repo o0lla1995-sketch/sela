@@ -56,6 +56,9 @@ function rowToDebt(row: Record<string, unknown>): LocalDebt {
     invoice_ref: String(row.invoice_ref ?? ''),
     amount_minor: Number(row.amount_minor ?? 0),
     description: (row.description as string) ?? null,
+    // v72 (الجولة 84 #١): أصل الدين — كل قيمة غير 'direct' تُقرأ
+    // 'sale' (توافق قواعد ما قبل العمود).
+    origin: row.origin === 'direct' ? 'direct' : 'sale',
     migrated: Number(row.migrated ?? 0),
     migrated_ref: (row.migrated_ref as string) ?? null,
     created_at: String(row.created_at ?? ''),
@@ -399,7 +402,11 @@ export const LocalDebtsRepo = {
 
   // ── debts & payments ──────────────────────────────────────────
 
-  /** Records a debt on a local account (INV-L series). */
+  /** Records a debt on a local account (INV-L series).
+   *  v72 (الجولة 84 #١): هذا مسار الدين المباشر (بلا فاتورة بيع)
+   *  — يُوسم origin='direct' فلا يلمس معادلة «النقد بالخزينة»
+   *  إطلاقاً (لا خصم، لا قيمة سالبة): يُحتسب في الدين القائم
+   *  فقط، والسداد وحده يُغذّي قناة الدفع التي دُفع بها. */
   async addDebt(input: {
     localCustomerId: number;
     amountMinor: number;
@@ -410,8 +417,8 @@ export const LocalDebtsRepo = {
     }
     const invoiceRef = await this.reserveLocalDebtRef();
     await getDb().execute(
-      `INSERT INTO local_debts (local_customer_id, invoice_ref, amount_minor, description)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO local_debts (local_customer_id, invoice_ref, amount_minor, description, origin)
+       VALUES (?, ?, ?, ?, 'direct')`,
       [
         input.localCustomerId,
         invoiceRef,
@@ -611,10 +618,16 @@ export const LocalDebtsRepo = {
 
   // ── totals (dashboard + reports) ──────────────────────────────
 
-  /** Store-wide local book totals. */
+  /** Store-wide local book totals.
+   *  v72 (الجولة 84 #١): debtsMinor = ديون البيع (INV-L لها فاتورة
+   *  مقابلة) فقط — هي التي تُطرح من الإيراد في معادلة الخزينة.
+   *  directDebtsMinor = الديون المباشرة (بلا بيع) — لا تدخل معادلة
+   *  الخزينة أبداً (طلب التاجر: لا قيمة سالبة بالخزينة)، لكنها ضمن
+   *  outstandingMinor (الدين القائم) وعدد المدينين. */
   async totals(): Promise<{
     outstandingMinor: number;
     debtsMinor: number;
+    directDebtsMinor: number;
     paymentsMinor: number;
     customersCount: number;
     debtorsCount: number;
@@ -622,7 +635,8 @@ export const LocalDebtsRepo = {
     try {
       const result = await getDb().execute(
         `SELECT
-           COALESCE((SELECT SUM(amount_minor) FROM local_debts WHERE migrated = 0), 0) AS debts_minor,
+           COALESCE((SELECT SUM(amount_minor) FROM local_debts WHERE migrated = 0 AND COALESCE(origin, 'sale') = 'sale'), 0) AS debts_minor,
+           COALESCE((SELECT SUM(amount_minor) FROM local_debts WHERE migrated = 0 AND origin = 'direct'), 0) AS direct_minor,
            COALESCE((SELECT SUM(amount_minor) FROM local_payments), 0) AS pays_minor,
            (SELECT COUNT(*) FROM local_customers) AS customers,
            (SELECT COUNT(*) FROM (
@@ -634,16 +648,25 @@ export const LocalDebtsRepo = {
       );
       const row = (result.rows?.[0] ?? {}) as {
         debts_minor?: number;
+        direct_minor?: number;
         pays_minor?: number;
         customers?: number;
         debtors?: number;
       };
       const debtsMinor = Number(row.debts_minor ?? 0);
+      const directDebtsMinor = Number(row.direct_minor ?? 0);
       const paymentsMinor = Number(row.pays_minor ?? 0);
       return {
+        // v72 (الجولة 84 #١): الدين القائم يشمل كل الأصول (بيع +
+        // مباشر) — هو الرقم الذي يراه التاجر في «الدين القائم».
+        outstandingMinor: debtsMinor + directDebtsMinor - paymentsMinor,
+        // v72: debtsMinor = ديون البيع فقط (لها فاتورة في sales) —
+        // هو ما تطرحه معادلة الخزينة من الإيراد كبيع ائتماني، لأن
+        // الإيراد يشمل فواتيرها. الدين المباشر بلا فاتورة ولا نقود
+        // خرجت — لا مكان له في معادلة الخزينة إطلاقاً.
         debtsMinor,
+        directDebtsMinor,
         paymentsMinor,
-        outstandingMinor: debtsMinor - paymentsMinor,
         customersCount: Number(row.customers ?? 0),
         debtorsCount: Number(row.debtors ?? 0),
       };
@@ -656,6 +679,7 @@ export const LocalDebtsRepo = {
       return {
         outstandingMinor: 0,
         debtsMinor: 0,
+        directDebtsMinor: 0,
         paymentsMinor: 0,
         customersCount: 0,
         debtorsCount: 0,

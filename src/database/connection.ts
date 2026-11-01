@@ -329,6 +329,10 @@ const DDL_STATEMENTS: string[] = [
     invoice_ref TEXT NOT NULL UNIQUE,
     amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
     description TEXT,
+    -- v72 (الجولة 84 #١): 'sale' = نشأ عن فاتورة بيع دين INV-L؛
+    -- 'direct' = دين مباشر بلا بيع (لا يلمس معادلة الخزينة — دين
+    -- قائم فقط، والسداد وحده يُغذّي قناة الدفع).
+    origin TEXT NOT NULL DEFAULT 'sale',
     migrated INTEGER NOT NULL DEFAULT 0,
     migrated_ref TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -847,6 +851,8 @@ async function applyMigrations(database: DB): Promise<void> {
         invoice_ref TEXT NOT NULL UNIQUE,
         amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
         description TEXT,
+        -- v72 (الجولة 84 #١): 'sale' دين بيع INV-L / 'direct' مباشر.
+        origin TEXT NOT NULL DEFAULT 'sale',
         migrated INTEGER NOT NULL DEFAULT 0,
         migrated_ref TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -2047,6 +2053,37 @@ async function applyMigrations(database: DB): Promise<void> {
     }
     logDiag('db', 'ترحيل v32: قناة تسوية الاسترداد (محافظ/بنوك)');
     version = 32;
+  }
+
+  if (version < 33) {
+    // ── v72 (الجولة 84 #١): أصل الدين المحلي — 'sale' نشأ عن فاتورة
+    //    بيع دين (INV-L لها صف مقابل في sales)، أو 'direct' دين مباشر
+    //    بلا بيع. قبل هذا التمييز كان الدين المباشر يُخصم من «النقد
+    //    بالخزينة» ضمن معادلة الخزينة (creditSales) رغم أن لا نقود
+    //    خرجت من الدرج ولا بضاعة بيعت — خطأ محاسبي طلب التاجر إصلاحه:
+    //    «لا يضاف الدين المباشر إلى القيمة السالبة بالخزينة ويسجل في
+    //    الدين القائم فقط». اليوم: المباشر يُحتسب في الدين القائم وحده،
+    //    والسداد وحده يُغذّي قناة الدفع التي دُفع بها (نقد/محفظة/بنك).
+    const originCol = await database.execute(
+      "SELECT COUNT(*) AS cnt FROM pragma_table_info('local_debts') WHERE name = 'origin'",
+    );
+    const originRows = (originCol.rows ?? []) as unknown as {cnt?: number}[];
+    if (Number(originRows[0]?.cnt ?? 0) === 0) {
+      await database.execute(
+        "ALTER TABLE local_debts ADD COLUMN origin TEXT NOT NULL DEFAULT 'sale'",
+      );
+    }
+    // ترحيل القيم القائمة مرة واحدة: كل دين بلا فاتورة بيع مقابلة في
+    // جدول sales = دين مباشر (الديون الناشئة عن بيع لها صف INV-L دائماً).
+    // NOT EXISTS (وليس NOT IN) لأن invoice_number قد يحمل NULL.
+    await database.execute(
+      `UPDATE local_debts SET origin = 'direct'
+        WHERE NOT EXISTS (
+          SELECT 1 FROM sales s WHERE s.invoice_number = local_debts.invoice_ref
+        )`,
+    );
+    logDiag('db', 'ترحيل v33: أصل الدين المحلي (بيع/مباشر) — إصلاح الخزينة');
+    version = 33;
   }
 
   if (version !== storedVersion) {

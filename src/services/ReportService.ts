@@ -414,6 +414,13 @@ export const ReportService = {
     // subtracted here. The equation stays balanced in every
     // scenario: revenue (net of RET rows) − creditSales (net of
     // returns) + collections (reversals excluded) = the drawer.
+    // v72 (الجولة 84 #١): localBook.debtsMinor أصبح ديون البيع فقط
+    // (origin='sale' — لها فواتير داخل الإيراد أصلاً فيتعادل الطرح).
+    // الدين المباشر (origin='direct') لا يُطرح هنا إطلاقاً: لا فاتورة
+    // له في الإيراد ولا نقود خرجت من الدرج — كان طرحه السابق يجعل
+    // الخزينة سالبة بلا سبب ويبقى السالب بعد السداد من محفظة/بنك.
+    // هو محسوب في الدين القائم (outstandingMinor) وحده، وسداده وحده
+    // يُغذّي قناة الدفع (نقدي عبر المقبوضات، محفظة/بنك عبر دفترها).
     const creditSalesAllTime =
       debtQueueTotals.allMinor / 100 +
       localBook.debtsMinor / 100 -

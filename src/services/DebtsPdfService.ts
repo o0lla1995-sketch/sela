@@ -186,10 +186,15 @@ export const DebtsPdfService = {
         ref = d.invoice_ref;
         const migratedTag =
           d.migrated === 1 ? ' (مُرحّل إلى صِلة)' : '';
+        // v72 (الجولة 84 #١): الدين المباشر يُوسم دائماً في كشف
+        // الحساب — المحاسب يجب أن يميّزه عن ديون البيع (لا فاتورة
+        // بضاعة مقابلة له ولا أثر له في الخزينة النقدية).
+        const directTag =
+          d.origin === 'direct' ? ' (دين مباشر)' : '';
         label = d.description?.trim() || 'دين';
         // بيان العملية يطبع دائماً حالة الترحيل — الوثيقة
         // المحاسبية يجب أن تُظهر أين يعيش الدين الآن.
-        label = `${label}${migratedTag}`;
+        label = `${label}${directTag}${migratedTag}`;
         debtCell = {t: `+${shekels(d.amount_minor)}`, tone: 'debt', bold: true};
       } else {
         const p = payById.get(op.at)!;

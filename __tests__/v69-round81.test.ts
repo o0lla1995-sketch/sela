@@ -186,11 +186,11 @@ describe('v69 — ٤ منع تكرار اسم المنتج والباركود', 
 describe('v69 — ٥ الإصدار', () => {
   test('71.0.0 (79) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '71.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 79');
+    expect(config).toContain("APP_VERSION = '72.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 80');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 79');
-    expect(gradle).toContain('versionName "71.0.0"');
+    expect(gradle).toContain('versionCode 80');
+    expect(gradle).toContain('versionName "72.0.0"');
   });
 });
 
@@ -203,7 +203,7 @@ describe('v69 — تكامل الترحيل', () => {
   test('قاعدة جديدة تصل v32 بلا أخطاء', async () => {
     const app = freshApp();
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
-    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(32);
+    expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(33);
     // العمود الجديد موجود على تثبيت نظيف.
     const db = app.connection.getDb();
     const ret = db.execute(

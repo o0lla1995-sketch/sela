@@ -760,6 +760,11 @@ export interface LocalDebt {
   invoice_ref: string;
   amount_minor: number;
   description: string | null;
+  /** v72 (الجولة 84 #١): أصل الدين — 'sale' نشأ عن فاتورة بيع دين
+   *  (INV-L لها صف في sales: بضاعة خرجت)، أو 'direct' دين مباشر بلا
+   *  بيع (لا يلمس معادلة النقد بالخزينة — دين قائم فقط، والسداد
+   *  وحده يُغذّي قناة الدفع التي دُفع بها). */
+  origin: 'sale' | 'direct';
   /** 1 once this debt was re-registered in صِلة via the migration
    *  (ترحيل الديون إلى صِلة). */
   migrated: number;
