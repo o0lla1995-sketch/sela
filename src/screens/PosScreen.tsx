@@ -3533,16 +3533,34 @@ export function PosScreen({
           )
         ) : (
           <View
-            style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
+            style={[
+              cartExpanded ? styles.cartPanelExpanded : styles.cartPanel,
+              /* v74 (الجولة 86 #٢): أثناء التعديل يُرفع سقف اللوحة
+               * إلى ٦٦٪ — الشريط المضغوط مع صفوف السلة الثابتة
+               * (رأس + بنود ٨٨ + خصم + إجمالي + بيع/دين ≈ ٣٥٨dp)
+               * تتجاوز سقف ٥٠٪ على أغلب الهواتف فيُدفع زرّا
+               * بيع/دين تحت القائمة السفلية؛ الشبكة أعلاه (flex:1)
+               * تتقلص بدلها وتبقى الأزرار ظاهرة داخل اللوحة. */
+              !cartExpanded && editSession != null
+                ? styles.cartPanelEditCap
+                : null,
+            ]}>
             {/* ── v73 (الجولة 85): شريط تعديل الفاتورة — يظهر في كل
-                حالات السلة (فارغة أو ممتلئة) حتى الإتمام أو الإلغاء:
-                رقم الفاتورة الأصلية، الأصل مقابل الجديد، الفرق الحي،
-                وأزرار الإتمام/الإلغاء. عند الإتمام تُستبدل الفاتورة
-                الأصلية بهذه النسخة المعدلة (نفس الرقم) ويسوّى الفرق. */}
+                حالات السلة (فارغة أو ممتلئة) حتى الإتمام أو الإلغاء.
+                v74 (الجولة 86 #٢): صُغِّر إلى سطرين مضغوطين كي لا يزاح
+                زرَّي بيع/دين تحت القائمة السفلية — طلب التاجر. عند
+                الإتمام تُستبدل الفاتورة الأصلية بهذه النسخة المعدلة
+                (نفس الرقم) ويسوّى الفرق. */}
             {editSession != null ? (
+              /* v74 (الجولة 86 #٢): شريط مضغوط من سطرين فقط — طلب
+               * التاجر: الإشعار الكبير (٣ كتل + زر بعرض اللوحة) كان
+               * يزاح زرَّي بيع/دين تحت القائمة السفلية على الهاتف.
+               * السطر الأول: العنوان + إلغاء؛ السطر الثاني: الأصل
+               * والفرق الحي بجانب زر الإتمام المدمج. المقارنة
+               * الكاملة تبقى في نافذة إتمام التعديل قبل التأكيد. */
               <View style={styles.editBanner}>
                 <View style={styles.editBannerHead}>
-                  <Icon name="edit" size={15} color={c.info} />
+                  <Icon name="edit" size={13} color={c.info} />
                   <Text style={styles.editBannerTitle} numberOfLines={1}>
                     تعديل الفاتورة {editSession.invoiceNumber}
                   </Text>
@@ -3555,52 +3573,47 @@ export function PosScreen({
                   </TouchableOpacity>
                 </View>
                 <View style={styles.editBannerRow}>
-                  <Text style={styles.editBannerMeta}>
-                    الأصل:{' '}
+                  <Text style={styles.editBannerMeta} numberOfLines={1}>
+                    الأصل{' '}
                     {formatMoney(
                       (editSession.originalTotalMinor -
                         editSession.priorRefundedMinor) /
                         100,
                     )}
-                  </Text>
-                  <Text style={styles.editBannerMeta}>
-                    الجديد: {formatMoney(totals.total)}
-                  </Text>
-                  {(() => {
-                    const delta =
-                      Math.round(totals.total * 100) -
-                      (editSession.originalTotalMinor -
-                        editSession.priorRefundedMinor);
-                    if (Math.abs(delta) < 1) {
-                      return (
-                        <Text style={[styles.editDeltaChip, {color: c.textDim}]}>
-                          بلا فرق
+                    {(() => {
+                      const delta =
+                        Math.round(totals.total * 100) -
+                        (editSession.originalTotalMinor -
+                          editSession.priorRefundedMinor);
+                      if (Math.abs(delta) < 1) {
+                        return (
+                          <Text style={{color: c.textDim}}> · بلا فرق</Text>
+                        );
+                      }
+                      return delta > 0 ? (
+                        <Text style={{color: c.danger}}>
+                          {' '}
+                          · على الزبون +{formatMoney(delta / 100)}
+                        </Text>
+                      ) : (
+                        <Text style={{color: c.success}}>
+                          {' '}
+                          · يُرَد {formatMoney(-delta / 100)}
                         </Text>
                       );
-                    }
-                    return delta > 0 ? (
-                      <Text style={[styles.editDeltaChip, {color: c.danger}]}>
-                        على الزبون +{formatMoney(delta / 100)}
-                      </Text>
-                    ) : (
-                      <Text style={[styles.editDeltaChip, {color: c.success}]}>
-                        يُرَد للزبون {formatMoney(-delta / 100)}
-                      </Text>
-                    );
-                  })()}
-                </View>
-                <TouchableOpacity
-                  style={styles.editSettleBtn}
-                  activeOpacity={0.8}
-                  onPress={openPaySheet}
-                  disabled={busy}>
-                  <Icon name="check" size={15} color={c.onAccent} />
-                  <Text style={styles.editSettleBtnText}>
-                    {lines.length === 0
-                      ? 'إتمام التعديل (إرجاع كامل)'
-                      : 'إتمام التعديل'}
+                    })()}
                   </Text>
-                </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.editSettleBtn}
+                    activeOpacity={0.8}
+                    onPress={openPaySheet}
+                    disabled={busy}>
+                    <Icon name="check" size={13} color={c.onAccent} />
+                    <Text style={styles.editSettleBtnText} numberOfLines={1}>
+                      {lines.length === 0 ? 'إتمام الإرجاع' : 'إتمام التعديل'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             ) : null}
             {lines.length === 0 ? (
@@ -6477,71 +6490,71 @@ const useStyles = makeStyles(c =>
       textAlign: 'center',
     },
 
-    /* ── v73 (الجولة 85): شريط تعديل الفاتورة في لوحة السلة ── */
+    /* ── v73 (الجولة 85): شريط تعديل الفاتورة في لوحة السلة.
+     * v74 (الجولة 86 #٢): مقاسات مضغوطة — padding 5/7 و gap 4
+     * وسطران فقط (كان ٣ كتل بـ padding 10 و gap 7 وزر بعرض
+     * اللوحة)؛ الارتفاع انخفض من ~116dp إلى ~58dp فلا يزاح
+     * زرّا بيع/دين تحت القائمة السفلية على الهاتف. */
     editBanner: {
       backgroundColor: c.infoSoft,
       borderWidth: 1,
       borderColor: c.info,
-      borderRadius: 12,
-      padding: 10,
-      marginBottom: 6,
-      gap: 7,
+      borderRadius: 10,
+      paddingVertical: 5,
+      paddingHorizontal: 7,
+      marginBottom: 4,
+      gap: 4,
     },
     editBannerHead: {
       flexDirection: 'row-reverse',
       alignItems: 'center',
-      gap: 7,
+      gap: 5,
     },
     editBannerTitle: {
       flex: 1,
       color: c.info,
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: 11.5,
     },
     editCancelBtn: {
       backgroundColor: c.surfaceHi,
-      borderRadius: 8,
-      paddingVertical: 4,
-      paddingHorizontal: 10,
+      borderRadius: 7,
+      paddingVertical: 2,
+      paddingHorizontal: 7,
       borderWidth: 1,
       borderColor: c.borderSoft,
     },
     editCancelBtnText: {
       color: c.danger,
       fontFamily: fonts.bold,
-      fontSize: 11.5,
+      fontSize: 10.5,
     },
     editBannerRow: {
       flexDirection: 'row-reverse',
       alignItems: 'center',
-      gap: 8,
-      flexWrap: 'wrap',
+      gap: 6,
     },
     editBannerMeta: {
-      color: c.text,
+      flex: 1,
+      color: c.textDim,
       fontFamily: fonts.regular,
-      fontSize: typography.small,
-      fontVariant: ['tabular-nums'],
-    },
-    editDeltaChip: {
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: 11,
       fontVariant: ['tabular-nums'],
     },
     editSettleBtn: {
       flexDirection: 'row-reverse',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 7,
+      gap: 5,
       backgroundColor: c.info,
-      borderRadius: 10,
-      paddingVertical: 9,
-      paddingHorizontal: 12,
+      borderRadius: 8,
+      paddingVertical: 4.5,
+      paddingHorizontal: 10,
     },
     editSettleBtnText: {
       color: c.onAccent,
       fontFamily: fonts.bold,
-      fontSize: typography.small,
+      fontSize: 11.5,
     },
     /* ── v73: نافذة إتمام التعديل ── */
     editSummaryCard: {
@@ -6782,6 +6795,12 @@ const useStyles = makeStyles(c =>
       padding: spacing.sm,
       gap: spacing.xs,
       maxHeight: '50%',
+    },
+    /** v74 (الجولة 86 #٢): سقف أعلى للوحة السلة أثناء تعديل
+     *  الفاتورة فقط — كي لا يختفي زرّا بيع/دين تحت القائمة
+     *  السفلية (شرح كامل عند الاستخدام في JSX). */
+    cartPanelEditCap: {
+      maxHeight: '66%',
     },
     /** v8.2: the EXPANDED cart — fills the body (grid hidden). */
     cartPanelExpanded: {
