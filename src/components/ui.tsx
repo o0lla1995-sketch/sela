@@ -15,6 +15,7 @@ import {
   ActivityIndicator,
   I18nManager,
   KeyboardTypeOptions,
+  PixelRatio,
   Pressable,
   ReturnKeyTypeOptions,
   StyleSheet,
@@ -22,6 +23,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
   ViewStyle,
 } from 'react-native';
@@ -32,6 +34,7 @@ import {useToastStore, type ToastKind} from '../stores/toastStore';
 import {useNotificationsStore} from '../stores/notificationsStore';
 import {
   fonts,
+  headerMetricsFor,
   makeStyles,
   radius,
   shadows,
@@ -69,33 +72,60 @@ export function AppHeader({
   const styles = useHeaderStyles();
   const unreadCount = useNotificationsStore(state => state.unreadCount);
   const canGoBack = navigation.canGoBack();
+  // v75 (الجولة 87 #٢): مقاييس متجاوبة — عرض النافذة بالـdp يحدد
+  // حجم الهيدر كي لا يبدو ضخماً على الشاشات الكبيرة، ونصوصه لا
+  // تتضخم مع إعدادات حجم خط/عرض النظام (maxFontSizeMultiplier=1).
+  const {width: winWidth} = useWindowDimensions();
+  const hm = headerMetricsFor(winWidth / PixelRatio.get());
 
   return (
     <View style={styles.headerRoot}>
-      <View style={styles.headerRow}>
+      <View style={[styles.headerRow, {height: hm.rowHeight}]}>
         {showBack && canGoBack ? (
           <TouchableOpacity
-            style={styles.headerIconBtn}
+            style={[
+              styles.headerIconBtn,
+              {
+                width: hm.iconBtn,
+                height: hm.iconBtn,
+                borderRadius: hm.iconBtn / 2,
+              },
+            ]}
             onPress={() => navigation.goBack()}
             hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
             <Icon
               name={I18nManager.isRTL ? 'chevronRight' : 'chevronLeft'}
-              size={22}
+              size={hm.iconSize}
               color={c.text}
             />
           </TouchableOpacity>
         ) : (
-          <View style={styles.headerIconBtn} pointerEvents="none">
-            <Icon name="basket" size={21} color={c.accent} />
+          <View
+            style={[
+              styles.headerIconBtn,
+              {
+                width: hm.iconBtn,
+                height: hm.iconBtn,
+                borderRadius: hm.iconBtn / 2,
+              },
+            ]}
+            pointerEvents="none">
+            <Icon name="basket" size={hm.iconSize} color={c.accent} />
           </View>
         )}
 
         <View style={styles.headerTextWrap}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
+          <Text
+            style={[styles.headerTitle, {fontSize: hm.title}]}
+            numberOfLines={1}
+            maxFontSizeMultiplier={1}>
             {title}
           </Text>
           {subtitle ? (
-            <Text style={styles.headerSubtitle} numberOfLines={1}>
+            <Text
+              style={[styles.headerSubtitle, {fontSize: hm.subtitle}]}
+              numberOfLines={1}
+              maxFontSizeMultiplier={1}>
               {subtitle}
             </Text>
           ) : null}
@@ -107,18 +137,23 @@ export function AppHeader({
             <TouchableOpacity
               style={[
                 styles.headerIconBtn,
+                {
+                  width: hm.iconBtn,
+                  height: hm.iconBtn,
+                  borderRadius: hm.iconBtn / 2,
+                },
                 unreadCount > 0 ? {borderColor: c.accent} : null,
               ]}
               onPress={() => navigation.navigate('Notifications' as never)}
               hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
               <Icon
                 name="bell"
-                size={19}
+                size={hm.bellSize}
                 color={unreadCount > 0 ? c.accent : c.textDim}
               />
               {unreadCount > 0 ? (
                 <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>
+                  <Text style={styles.bellBadgeText} maxFontSizeMultiplier={1}>
                     {unreadCount > 99 ? '99+' : unreadCount}
                   </Text>
                 </View>
@@ -139,17 +174,15 @@ const useHeaderStyles = makeStyles(c =>
       borderBottomColor: c.borderSoft,
       paddingTop: statusBarHeight,
     },
+    // v75 (الجولة 87 #٢): الارتفاع والقياسات تُحقن ديناميكياً من
+    // headerMetricsFor (متجاوبة) — هنا الأنماط الثابتة فقط.
     headerRow: {
-      height: 58,
       flexDirection: 'row',
       alignItems: 'center',
       paddingHorizontal: spacing.md,
       gap: spacing.sm,
     },
     headerIconBtn: {
-      width: 42,
-      height: 42,
-      borderRadius: 21,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.border,
@@ -163,12 +196,10 @@ const useHeaderStyles = makeStyles(c =>
     headerTitle: {
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: typography.heading,
     },
     headerSubtitle: {
       color: c.textDim,
       fontFamily: fonts.regular,
-      fontSize: typography.small,
       marginTop: -2,
     },
     headerActions: {

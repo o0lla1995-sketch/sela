@@ -1705,7 +1705,9 @@ export const InvoiceService = {
       lines: input.lines,
       discount: input.discount,
       paymentType: input.paymentType,
-      paymentMethod: input.paymentMethod,
+      // v75 (الجولة 87): القناة المختارة قناةُ تسوية الفرق فقط —
+      //   ليست طريقة دفع الفاتورة؛ الصف يبقى على قنته الأصلية.
+      settleMethod: input.paymentMethod,
       book: prep.book,
       expectedPriorReturnsCount: session.priorReturnsCount,
       localCustomerId: session.localCustomerId,

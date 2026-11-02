@@ -1187,13 +1187,24 @@ export function InvoiceDetailScreen() {
                 <Text style={styles.retChipText}>إرجاع/استبدال</Text>
               </TouchableOpacity>
             ) : null}
-            <AppButton
-              small
-              title="إعادة الطباعة"
-              icon="printer"
+            {/* v75 (الجولة 87 #١): زر إعادة الطباعة أيقونة فقط بلا
+                نص (طلب التاجر نصاً) — مربع بحجم شريط الرأس نفسه مع
+                مؤشر تحميل أثناء الطباعة وaccessibilityLabel للقراءة
+                الشاشية. */}
+            <TouchableOpacity
+              style={styles.reprintIconChip}
               onPress={() => void reprint()}
-              loading={reprinting}
-            />
+              disabled={reprinting}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="إعادة طباعة الفاتورة"
+              accessibilityHint="يعيد طباعة هذه الفاتورة على الطابعة المتصلة">
+              {reprinting ? (
+                <ActivityIndicator size="small" color={c.accent} />
+              ) : (
+                <Icon name="printer" size={17} color={c.accent} />
+              )}
+            </TouchableOpacity>
           </View>
         }
       />
@@ -4197,6 +4208,19 @@ const useStyles = makeStyles(c =>
       color: c.warning,
       fontFamily: fonts.bold,
       fontSize: typography.small,
+    },
+    // v75 (الجولة 87 #١): زر إعادة الطباعة الأيقوني — مربع بحجم
+    // شرائح الرأس نفسه (٨٣×٣٨) بلا نص، بلون النبرة لتمييزه عن شريحة
+    // الإرجاع التحذيرية.
+    reprintIconChip: {
+      width: 38,
+      minHeight: 38,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: radius.sm,
+      backgroundColor: c.accentSoft,
+      borderWidth: 1,
+      borderColor: c.accent,
     },
     detailMeta: {
       color: c.textDim,

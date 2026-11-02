@@ -8,6 +8,8 @@
  */
 import {getDb, toMessage} from '../connection';
 import {localNow} from '../../core/format';
+import {reserveRef} from './CashRepo';
+import {paymentMethodById} from '../../core/paymentMethods';
 import type {
   CartLine,
   ExchangeLineInput,
@@ -85,7 +87,11 @@ export interface RewriteSaleInput {
   lines: CartLine[];
   discount: number;
   paymentType: PricingMode;
-  paymentMethod: string | null;
+  /** v75 (الجولة 87): قناة تسوية الفرق المختارة في نافذة إتمام
+   *  التعديل — ليست طريقة دفع الفاتورة! الفاتورة تبقى على
+   *  قناتها الأصلية، وهذه القناة يمرّ منها الفرق فقط (تحصيل أو
+   *  ردّ) كسندَي خزينة متقابلين عندما تختلف عن القناة الأصلية. */
+  settleMethod?: string | null;
   /** دفتر الفاتورة الأصلية — online لا يمر من هنا (تسوية مركبة). */
   book: 'cash' | 'local' | 'sila';
   /** حرس الجلسة: عدد المرتجعات المتوقع لحظة فتح التعديل. */
@@ -1156,12 +1162,19 @@ export const SaleRepo = {
    *     والصافي المتبقي (الأصل − المرتجع): زيادة تُخصم بشرط توفر،
    *     ونقص يعود للأرفف.
    *  ٣. إعادة كتابة الصف والبنود + edit_count/edited_at + تصفير
-   *     returned_minor.
-   *  ٤. تسوية الدفتر: نقدي → طريقة الدفع على الصف؛ دفتر المتجر →
-   *     صف الدين = الإجمالي الجديد؛ صِلة معلق → صف الطابور =
-   *     الإجمالي الجديد؛ صِلة متزامن → سند عكس (نقص) أو صف دين
-   *     زيادة (زيادة) بالفرق الصحيح مقابل الرصيد القائم على
-   *     الخادم.
+   *     returned_minor — طريقة الدفع على الصف تبقى الأصلية:
+   *     الفاتورة دُفعت بها أصلاً ولا ينتقل تبعها كامل المبلغ إلى
+   *     قناة تسوية الفرق (تصحيح الجولة 87 لخطأ الجولة 85).
+   *  ٤. تسوية الدفتر: دفتر المتجر → صف الدين = الإجمالي الجديد؛
+   *     صِلة معلق → صف الطابور = الإجمالي الجديد؛ صِلة متزامن →
+   *     سند عكس (نقص) أو صف دين زيادة (زيادة) بالفرق الصحيح
+   *     مقابل الرصيد القائم على الخادم.
+   *  ٤-ب. فرق القنوات (نقدي فقط — الجولة 87): الفرق يتحرك من/إلى
+   *     القناة المختارة وحدها — سندان متقابلان (تحصيل/ردّ على
+   *     المختارة + مقابلها على الأصلية) كي يطابق رصيد كل قناة
+   *     كشفها الفعلي وتبقى معادلة الدرج متوازنة؛ وعند تساوي
+   *     القناتين أو صفر الفرق لا سنداً — إعادة الكتابة وحدها
+   *     توازن المعادلة.
    *  ٥. لقطة قبل/بعد كاملة في sale_edits — المحاسب يرى التاريخ
    *     كاملاً رغم حذف صفوف RET المطوية. */
   async rewriteSale(input: RewriteSaleInput): Promise<SaleWithItems> {
@@ -1181,6 +1194,21 @@ export const SaleRepo = {
     const totalMinor = Math.round(totalAmount * 100);
     const editedAt = localNow();
     let editCountAfter = 1;
+
+    // v75 (الجولة 87): حجز سندَي تسوية الفرق خارج المعاملة (المرجع
+    //   يقرأ MMKV — نفس انضباط حجوزات صلة). يُحجزان فقط عندما يمكن
+    //   أن يُستخدما: فاتورة نقدية وقناة تسوية محددة. إن لم يلزما
+    //   (فرق صفر أو القناتان واحدة) يُتخطى الرقمان بلا أثر.
+    const maySettleChannels =
+      input.book === 'cash' &&
+      input.settleMethod != null &&
+      input.settleMethod !== '';
+    const settleDepositRef = maySettleChannels
+      ? await reserveRef('deposit')
+      : null;
+    const settleWithdrawalRef = maySettleChannels
+      ? await reserveRef('withdrawal')
+      : null;
 
     await db.transaction(async tx => {
       const saleRow = await tx.execute('SELECT * FROM sales WHERE id = ?', [
@@ -1456,7 +1484,7 @@ export const SaleRepo = {
       await tx.execute(
         `UPDATE sales
            SET total_amount = ?, total_cost = ?, total_profit = ?, discount = ?,
-               payment_type = ?, payment_method = ?,
+               payment_type = ?,
                edit_count = ?, edited_at = ?, returned_minor = 0
          WHERE id = ?`,
         [
@@ -1465,12 +1493,79 @@ export const SaleRepo = {
           totalProfit,
           discount,
           input.paymentType,
-          input.paymentMethod || 'cash',
           editCountAfter,
           editedAt,
           input.saleId,
         ],
       );
+
+      // ── ٤-ب) تسوية فرق القنوات (نقدي فقط) ──
+      // v75 (الجولة 87): الفرق = الجديد − (الأصل − المسترد سابقاً).
+      //   القناة المختارة يمرّ منها الفرق فقط — لا كامل قيمة
+      //   الفاتورة (شكوى التاجر: كانت الفاتورة كلها تنتقل إلى قناة
+      //   التسوية وتُخصم كاملةً من الأصلية). القناتان واحدة أو
+      //   الفرق صفر → لا سنداً: إعادة الكتابة وحدها موزونة. قناتان
+      //   مختلفتان → سندان متقابلان: على المختارة تحصيل الفرق
+      //   (إيداع) أو ردّه (سحب)، وعلى الأصلية المقابل — كي يطابق
+      //   رصيد كل قناة كشفها الفعلي وتبقى معادلة الدرج متوازنة.
+      const originalPaymentMethod =
+        sale.payment_method == null || String(sale.payment_method) === ''
+          ? 'cash'
+          : String(sale.payment_method);
+      const chosenSettleMethod =
+        input.settleMethod != null && input.settleMethod !== ''
+          ? input.settleMethod
+          : 'cash';
+      const editDeltaMinor = totalMinor - (oldTotalMinor - priorRefundedMinor);
+      if (
+        maySettleChannels &&
+        settleDepositRef != null &&
+        settleWithdrawalRef != null &&
+        Math.abs(editDeltaMinor) >= 1 &&
+        chosenSettleMethod !== originalPaymentMethod
+      ) {
+        const absDelta = Math.abs(editDeltaMinor);
+        // أسماء معروضة للتاجر في نصوص السندات (لا معرفات تقنية).
+        const chosenLabel = paymentMethodById(chosenSettleMethod).label;
+        const originalLabel = paymentMethodById(originalPaymentMethod).label;
+        // السند على القناة المختارة: تحصيل الفرق من الزبون أو ردّه له.
+        const chosenIsDeposit = editDeltaMinor > 0;
+        await tx.execute(
+          `INSERT INTO cash_movements
+             (ref, kind, category, note, amount_minor, auth_method, photo_path, payment_method, created_at)
+           VALUES (?, ?, ?, ?, ?, 'none', NULL, ?, ?)`,
+          [
+            chosenIsDeposit ? settleDepositRef : settleWithdrawalRef,
+            chosenIsDeposit ? 'deposit' : 'withdrawal',
+            chosenIsDeposit
+              ? 'تحصيل فرق تعديل فاتورة'
+              : 'رد فرق تعديل فاتورة',
+            chosenIsDeposit
+              ? `فرق تعديل الفاتورة ${invoiceNumber} — حُصّل من الزبون عبر ${chosenLabel}`
+              : `فرق تعديل الفاتورة ${invoiceNumber} — رُدّ للزبون عبر ${chosenLabel}`,
+            absDelta,
+            chosenSettleMethod,
+            editedAt,
+          ],
+        );
+        // المقابل على القناة الأصلية: الفرق لم يمرّ منها.
+        await tx.execute(
+          `INSERT INTO cash_movements
+             (ref, kind, category, note, amount_minor, auth_method, photo_path, payment_method, created_at)
+           VALUES (?, ?, ?, ?, ?, 'none', NULL, ?, ?)`,
+          [
+            chosenIsDeposit ? settleWithdrawalRef : settleDepositRef,
+            chosenIsDeposit ? 'withdrawal' : 'deposit',
+            'تسوية قناة تعديل فاتورة',
+            chosenIsDeposit
+              ? `فرق تعديل الفاتورة ${invoiceNumber} حُصّل عبر ${chosenLabel} — لم يدخل ${originalLabel}`
+              : `فرق تعديل الفاتورة ${invoiceNumber} رُدّ من ${chosenLabel} — بقي في ${originalLabel}`,
+            absDelta,
+            originalPaymentMethod,
+            editedAt,
+          ],
+        );
+      }
 
       // ── ٤) تسوية الدفتر ──
       if (input.book === 'local') {
@@ -1631,7 +1726,7 @@ export const SaleRepo = {
         total_profit: totalProfit,
         discount,
         payment_type: input.paymentType,
-        payment_method: input.paymentMethod || 'cash',
+        payment_method: originalPaymentMethod,
         edit_count: editCountAfter,
         edited_at: editedAt,
         returned_minor: 0,

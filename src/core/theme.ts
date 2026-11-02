@@ -234,6 +234,39 @@ export const statusBarHeight = Platform.select({
   default: 44,
 });
 
+/** v75 (الجولة 87 #٢): مقاييس الهيدر العلوي المتجاوبة.
+ *  ────────────────────────────────────────────────────────────
+ *  شكوى التاجر: الهيدر يبدو أكبر في الشاشات الكبيرة — غير متجاوب.
+ *  سببان مقاسان قابلان للإصلاح من JS:
+ *   ١. تضخّم خط النظام (إعدادات «حجم العرض/الخط» على الهواتف
+ *      الكبيرة غالباً > 1) يكبّر نصوص الهيدر بينما الصف ثابت —
+ *      الحل: maxFontSizeMultiplier=1 على نصوص الهيدر (تجمد كلي).
+ *   ٢. المقاسات الثابتة (58dp) تُرسم فعلياً بمليمترات أكثر على
+ *      الشاشات الكبيرة — الحل: أساس أكثر إحكاماً + تقلّص إضافي
+ *      على العروض الواسعة (الهواتف الكبيرة/التابلت ≥ 440dp) كي
+ *      يبقي الهيدر متناسق النسبة على كل جهاز.
+ *  أهداف اللمس تبقى مريحة (زر 40dp مع hitSlop، والصف 54dp). */
+export interface HeaderMetrics {
+  rowHeight: number;
+  iconBtn: number;
+  iconSize: number;
+  bellSize: number;
+  title: number;
+  subtitle: number;
+}
+
+export function headerMetricsFor(dpWidth: number): HeaderMetrics {
+  const s = dpWidth >= 440 ? 0.95 : 1;
+  return {
+    rowHeight: Math.round(54 * s),
+    iconBtn: Math.round(40 * s),
+    iconSize: Math.round(21 * s),
+    bellSize: Math.round(19 * s),
+    title: 17,
+    subtitle: 11.5,
+  };
+}
+
 /** Touch targets must never be smaller than this (design.md §12). */
 export const MIN_TOUCH = 48;
 
