@@ -60,6 +60,36 @@ const DEFAULT_CATEGORY: Record<CashMovementKind, string> = {
   online_refund: 'استرداد مرتجع طلب أونلاين',
 };
 
+/** v77 (الجولة 89 #٣): فئات تسويات تعديل الفاتورة — سندات داخلية
+ *  يكتبها rewriteSale لتحريك الفرق بين القناتين عند تعديل فاتورة
+ *  عبر قناتين مختلفتين. تبقى في الدفتر للأرصدة (methodLedgerTotals
+ *  يشملها — هي التي توازن كشف كل قناة)، لكنها خارج إطار عمليات
+ *  الخزينة المعروضة للتاجر: سجل الحركات وعدّاده، إجماليات كشف
+ *  الفترة، وبطاقة حركات التقارير — كلها تخفيها (طلب التاجر نصاً:
+ *  «لا اريد اظهار حركات تسوية قناة تعديل فاتورة ورد فرق تعديل
+ *  فاتورة لأنها خارج اطار عمليات الخزينة»). النصوص هنا مطابقة
+ *  حرفياً لنبع INSERT في SaleRepo.rewriteSale — اختبار v77 يحرّس
+ *  التطابق بين النسختين. */
+export const INVOICE_EDIT_SETTLEMENT_CATEGORIES: readonly string[] = [
+  'تحصيل فرق تعديل فاتورة',
+  'رد فرق تعديل فاتورة',
+  'تسوية قناة تعديل فاتورة',
+];
+
+/** v77: بند NOT IN للفئات المستبعدة من واجهات الخزينة — مع
+ *  بارامتراته (نفس ترتيب الثابت). */
+function excludedSettlementClause(
+  clauses: string[],
+  params: (string | number)[],
+): void {
+  clauses.push(
+    `category NOT IN (${INVOICE_EDIT_SETTLEMENT_CATEGORIES.map(
+      () => '?',
+    ).join(', ')})`,
+  );
+  params.push(...INVOICE_EDIT_SETTLEMENT_CATEGORIES);
+}
+
 function rowToRecord(row: Record<string, unknown>): CashMovementRecord {
   const photoRaw = row.photo_path;
   return {
@@ -201,6 +231,9 @@ export const CashRepo = {
       clauses.push('kind = ?');
       params.push(input.kind);
     }
+    // v77 (الجولة 89 #٣): تسويات تعديل الفاتورة سندات داخلية بين
+    //  القنوات — لا مكان لها في سجل حركات الخزينة المعروض.
+    excludedSettlementClause(clauses, params);
     const search = input.search?.trim();
     if (search != null && search.length > 0) {
       clauses.push(
@@ -250,6 +283,9 @@ export const CashRepo = {
         clauses.push('kind = ?');
         params.push(kind);
       }
+      // v77 (الجولة 89 #٣): نفس استبعاد list — العدّاد يطابق الصفوف
+      //  المعروضة بلا تسويات تعديل الفاتورة.
+      excludedSettlementClause(clauses, params);
       const text = search?.trim();
       if (text != null && text.length > 0) {
         clauses.push('(note LIKE ? OR ref LIKE ? OR category LIKE ?)');
@@ -271,16 +307,27 @@ export const CashRepo = {
     }
   },
 
-  /** Period totals for the statement + reports. */
+  /** Period totals for the statement + reports.
+   *  v77 (الجولة 89 #٣): تستبعد تسويات تعديل الفاتورة — إجماليات
+   *  «الإيداعات/المسحوبات» في الكشف وبطاقة حركات التقارير تعكس
+   *  عمليات الخزينة الحقيقية فقط، بلا سندات داخلية بين القنوات
+   *  (وإلا ظهرت بالكشف مبالغ لا صفوف لها، والعداد فوق صفحات
+   *  السجل). الأرصدة نفسها تُحسب من methodLedgerTotals الذي
+   *  يشملها — كشف كل قناة يطابق واقعه. */
   async totalsFor(from: string, to: string): Promise<CashMovementTotals> {
+    const clauses = [
+      'date(created_at) BETWEEN date(?) AND date(?)',
+    ];
+    const params: (string | number)[] = [from, to];
+    excludedSettlementClause(clauses, params);
     const result = await getDb().execute(
       `SELECT kind,
               COUNT(*) AS cnt,
               COALESCE(SUM(amount_minor), 0) AS total
        FROM cash_movements
-       WHERE date(created_at) BETWEEN date(?) AND date(?)
+       WHERE ${clauses.join(' AND ')}
        GROUP BY kind`,
-      [from, to],
+      params,
     );
     let expensesMinor = 0;
     let withdrawalsMinor = 0;

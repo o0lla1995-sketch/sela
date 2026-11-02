@@ -259,11 +259,9 @@ export function HomeScreen() {
 
   // ── The four net numbers (round-24 #2) ──────────────────────────
   const cashTotal = treasury?.cashTotal ?? 0;
-  /* v76 (الجولة ٨٨ #٣): إجمالي الخزينة الآن — النقد بالدرج + كل
-   *  البنوك والمحافظ في رقم واحد. «الخزينة» في ذهن التاجر هي كل
-   *  مال المتجر أينما كان، لا الدرج وحده — طلب التاجر نصاً («حتى
-   *  في الخزينة يظهر فقط النقد بالخزينة دون باقي المحافظ
-   *  والبنوك»). */
+  /* v77 (الجولة 89 #١): إجمالي الخزينة = النقد بالدرج + كل
+   *  البنوك والمحافظ برقم واحد — هو قيمة الخلية الكبرى الأولى في
+   *  بطاقة الخزينة (طلب التاجر: بدل النقد يظهر الإجمالي). */
   const methodsTotal = methodBalances.reduce((sum, ch) => sum + ch.balance, 0);
   const treasuryTotalNow = cashTotal + methodsTotal;
   const localOutstandingShekels = (localBook?.outstandingMinor ?? 0) / 100;
@@ -339,15 +337,22 @@ export function HomeScreen() {
         <Card style={styles.moneyCard}>
           <View style={styles.moneyRow}>
             <View style={styles.moneyCell}>
-              <Text style={styles.moneyLabel}>النقد بالخزينة</Text>
+              {/* v77 (الجولة 89 #١): الخلية الكبرى صارت «إجمالي في
+                  الخزينة» — النقد بالدرج + كل البنوك والمحافظ برقم
+                  واحد (طلب التاجر: بدل النقد يظهر الإجمالي، والقسم
+                  الإضافي من v76 حُذف — رقم واحد كبير يغني عنهما).
+                  الأرصدة التفصيلية لكل قناة تبقى بالشريط أسفل. */}
+              <Text style={styles.moneyLabel}>إجمالي في الخزينة</Text>
               <Text
                 style={[
                   styles.moneyValue,
-                  {color: cashTotal >= 0 ? c.success : c.danger},
+                  {color: treasuryTotalNow >= 0 ? c.success : c.danger},
                 ]}>
-                {formatMoney(cashTotal)}
+                {formatMoney(treasuryTotalNow)}
               </Text>
-              <Text style={styles.moneyMeta}>مبيعات نقدية + تحصيلات ديون</Text>
+              <Text style={styles.moneyMeta}>
+                النقد بالدرج + البنوك والمحافظ — بعد كل الحركات
+              </Text>
             </View>
             <View style={styles.moneyDivider} />
             <View style={styles.moneyCell}>
@@ -405,10 +410,12 @@ export function HomeScreen() {
             </View>
           </View>
 
-          {/* v65 (الجولة 77 — أندرويد #2): شريط مضغوط بأرصدة
-              البنوك والمحافظ المفعّلة — شريط أفقي واحد قابل للتمرير
-              (شعار 20 نقطة + الرصيد) بلا أي مساحة إضافية تُذكر؛
-              النقدي مستثنى لأنه الرقم الكبير أعلاه. */}
+          {/* v65 (الجولة 77 — أندرويد #2) ← v77 (الجولة 89 #١): شريط
+              مضغوط بأرصدة البنوك والمحافظ المفعّلة — شريط أفقي واحد
+              قابل للتمرير (شعار 20 نقطة + الرصيد). النقدي والإجمالي
+              كلاهما في الرقم الكبير أعلاه؛ القسم الإضافي المنفصل
+              (v76) حُذف بطلب التاجر — رقم
+              واحد كبير أولاً يغني عن قسمين متكررين. */}
           {methodBalances.length > 0 ? (
             <View style={styles.channelsWrap}>
               <View style={styles.todayRule} />
@@ -441,27 +448,6 @@ export function HomeScreen() {
                   </View>
                 ))}
               </ScrollView>
-              {/* v76 (الجولة ٨٨ #٣): إجمالي الخزينة الآن داخل بطاقة
-                  الخزينة نفسها — النقد بالدرج + كل البنوك والمحافظ
-                  برقم واحد، وتفكيكه تحته. */}
-              <View style={styles.treasuryTotalRow}>
-                <View style={{flex: 1}}>
-                  <Text style={styles.treasuryTotalLabel}>
-                    إجمالي الخزينة الآن
-                  </Text>
-                  <Text style={styles.treasuryTotalMeta} numberOfLines={1}>
-                    نقد {formatMoney(cashTotal)} + بنوك ومحافظ{' '}
-                    {formatMoney(methodsTotal)}
-                  </Text>
-                </View>
-                <Text
-                  style={[
-                    styles.treasuryTotalValue,
-                    {color: treasuryTotalNow < 0 ? c.danger : c.accent},
-                  ]}>
-                  {formatMoney(treasuryTotalNow)}
-                </Text>
-              </View>
             </View>
           ) : null}
 
@@ -968,35 +954,9 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
       fontVariant: ['tabular-nums'],
     },
-    /* v76 (الجولة ٨٨ #٣): صف إجمالي الخزينة الآن — نقد + بنوك
-     *  ومحافظ، أسفل شريط القنوات داخل بطاقة الخزينة. */
-    treasuryTotalRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      borderRadius: radius.md,
-      paddingHorizontal: 12,
-      paddingVertical: 8,
-    },
-    treasuryTotalLabel: {
-      color: c.text,
-      fontFamily: fonts.bold,
-      fontSize: typography.small,
-    },
-    treasuryTotalMeta: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro + 1,
-      marginTop: 1,
-    },
-    treasuryTotalValue: {
-      fontFamily: fonts.black,
-      fontSize: typography.title - 2,
-      fontVariant: ['tabular-nums'],
-    },
+    /* v77 (الجولة 89 #١): أنماط القسم الإضافي المنفصل من v76
+     *  حُذفت — الرقم الكبير أعلى البطاقة هو الإجمالي نفسه
+     *  (نقد + بنوك ومحافظ) ولا قسمين متكررين بعد الآن. */
     moneyValueToday: {
       fontFamily: fonts.black,
       fontSize: typography.title - 2,

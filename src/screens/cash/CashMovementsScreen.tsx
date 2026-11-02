@@ -4,8 +4,8 @@
  * نظام المصروفات والسحب من الخزينة، على نمط الأنظمة العالمية
  * (Loyverse Cash Drawer / Square Cash Management):
  *
- *   • النقد المتوقع بالدرج الآن — بعد خصم كل المصروفات والمسحوبات
- *     وإضافة الإيداعات (نفس معادلة الرئيسية، لحظة بلحظة).
+ *   • الإجمالي في الخزينة الآن (v77) — النقد بالدرج + كل البنوك
+ *     والمحافظ، بعد خصم كل المصروفات والمسحوبات وإضافة الإيداعات.
  *   • ثلاث حركات موثقة بسندات مرقمة: مصروف (EXP-) بسلة فئات،
  *     سحب رصيد (WD-)، وإيداع (DEP-) — وكل واحدة منها (v27)
  *     مؤمّنة بالبصمة أولاً ثم برمز PIN، مع تنبيه واضح للتاجر
@@ -226,9 +226,9 @@ export function CashMovementsScreen() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [totals, setTotals] = useState<CashMovementTotals | null>(null);
   const [drawerMinor, setDrawerMinor] = useState<number | null>(null);
-  /** v76 (الجولة ٨٨ #٣): أرصدة البنوك والمحافظ الآن + الإجمالي
-   *  الشامل مع النقد — «النقد المتوقع» وحده أعلاه لا يكمل صورة
-   *  الخزينة عند التاجر (طلب التاجر نصاً). */
+  /** v77 (الجولة 89 #٢): أرصدة القنوات تُحمَّل لتغذية الرقم الكبير
+   *  (الإجمالي) وسقوف السندات — عرضها التفصيلي في الرئيسية
+   *  والتقارير حيث ينتمي. */
   const [channelBalances, setChannelBalances] = useState<
     {id: string; label: string; balance: number}[]
   >([]);
@@ -501,77 +501,34 @@ export function CashMovementsScreen() {
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={120}
         onScroll={onLedgerScroll}>
-        {/* ── The drawer hero — expected cash NOW ── */}
+        {/* ── The drawer hero — the WHOLE treasury, now ──
+            v77 (الجولة 89 #٢): الرقم الكبير هو «الإجمالي في الخزينة
+            الآن» — النقد بالدرج + كل البنوك والمحافظ برقم واحد بطلب
+            التاجر («بدلا من رقم النقد بالخزينة الان يظهر الاجمالي في
+            الخزينة الان»). صندوق القنوات المنفصل من v76 حُذف — لا
+            تكرار؛ شريط أرصدة القنوات التفصيلية يبقى في الرئيسية
+            والتقارير حيث ينتمي. */}
         <Card style={styles.drawerCard}>
           <View style={styles.drawerRow}>
             <View style={[styles.drawerIcon, {backgroundColor: c.successSoft}]}>
               <Icon name="wallet" size={24} color={c.success} />
             </View>
             <View style={{flex: 1}}>
-              <Text style={styles.drawerLabel}>النقد المتوقع بالخزينة الآن</Text>
+              <Text style={styles.drawerLabel}>الإجمالي في الخزينة الآن</Text>
               <Text style={[styles.drawerValue, {color: c.success}]}>
-                {drawerMinor == null ? '…' : formatMoney(drawerMinor / 100)}
+                {drawerMinor == null && channelBalances.length === 0
+                  ? '…'
+                  : formatMoney(
+                      (drawerMinor ?? 0) / 100 +
+                        channelBalances.reduce((s, ch) => s + ch.balance, 0),
+                    )}
               </Text>
               <Text style={styles.drawerMeta}>
-                بعد خصم كل المصروفات والمسحوبات وإضافة الإيداعات
+                النقد بالدرج + البنوك والمحافظ — بعد كل المصروفات والمسحوبات
+                والإيداعات
               </Text>
             </View>
           </View>
-          {/* v76 (الجولة ٨٨ #٣): أرصدة البنوك والمحافظ الآن + الإجمالي
-              الشامل مع النقد داخل بطاقة الخزينة نفسها — «النقد
-              المتوقع» وحده كان يوحي بأن الخزينة درج نقدي فقط (طلب
-              التاجر: «حتى في الخزينة يظهر فقط النقد بالخزينة دون
-              باقي المحافظ والبنوك»). */}
-          {channelBalances.length > 0 ? (
-            <View style={styles.drawerChannelsBox}>
-              <View style={styles.drawerChannelsRow}>
-                <Text style={styles.drawerChannelsLabel}>
-                  البنوك والمحافظ الآن
-                </Text>
-                <Text
-                  style={[
-                    styles.drawerChannelsValue,
-                    {
-                      color:
-                        channelBalances.reduce((s, ch) => s + ch.balance, 0) < 0
-                          ? c.danger
-                          : c.text,
-                    },
-                  ]}>
-                  {formatMoney(
-                    channelBalances.reduce((s, ch) => s + ch.balance, 0),
-                  )}
-                </Text>
-              </View>
-              <View style={styles.drawerChannelsRow}>
-                <Text
-                  style={[
-                    styles.drawerChannelsLabel,
-                    {fontFamily: fonts.bold, color: c.text},
-                  ]}>
-                  إجمالي الخزينة الآن — نقد + بنوك ومحافظ
-                </Text>
-                <Text
-                  style={[
-                    styles.drawerChannelsValue,
-                    {
-                      fontFamily: fonts.bold,
-                      color:
-                        (drawerMinor ?? 0) / 100 +
-                          channelBalances.reduce((s, ch) => s + ch.balance, 0) <
-                        0
-                          ? c.danger
-                          : c.success,
-                    },
-                  ]}>
-                  {formatMoney(
-                    (drawerMinor ?? 0) / 100 +
-                      channelBalances.reduce((s, ch) => s + ch.balance, 0),
-                  )}
-                </Text>
-              </View>
-            </View>
-          ) : null}
           {/* v27 (round-35 #3): the badge covers ALL THREE operations
               now — and the unsecured state is a tappable alert that
               jumps straight to the security settings. */}
@@ -3191,34 +3148,8 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
       marginTop: 2,
     },
-    /* v76 (الجولة ٨٨ #٣): صندوق أرصدة البنوك والمحافظ + الإجمالي
-     *  الشامل داخل بطاقة الدرج. */
-    drawerChannelsBox: {
-      marginTop: spacing.md,
-      backgroundColor: c.surfaceAlt,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      borderRadius: radius.md,
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.sm + 2,
-      gap: 4,
-    },
-    drawerChannelsRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-    },
-    drawerChannelsLabel: {
-      flex: 1,
-      color: c.textDim,
-      fontFamily: fonts.regular,
-      fontSize: typography.small,
-    },
-    drawerChannelsValue: {
-      fontFamily: fonts.bold,
-      fontSize: typography.body,
-      fontVariant: ['tabular-nums'],
-    },
+    /* v77 (الجولة 89 #٢): أنماط صندوق القنوات المنفصل (v76) حُذفت —
+     *  الرقم الكبير أعلاه هو الإجمالي نفسه، بلا تكرار. */
     securityHint: {
       flexDirection: 'row',
       gap: spacing.sm,
