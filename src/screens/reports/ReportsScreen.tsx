@@ -97,6 +97,15 @@ export function ReportsScreen() {
   const [payMethods, setPayMethods] = useState<
     Awaited<ReturnType<typeof ReportRepo.methodLedgerTotals>>
   >([]);
+  /** v76 (الجولة ٨٨ #٣+٤): الأرصدة الحية لكل قناة — دفترها عبر
+   *  التاريخ (رصيد «الآن»). كان العرض يجمع صافي الفترة تحت عنوان
+   *  «أرصدة» فيقرأه التاجر رصيداً حالياً: بعد تصفير قناة بالسحب
+   *  ثم بيع/إيداع جديد يظهر الصافي سالباً وكأن القيمة أُضيفت إلى
+   *  ما سُحب («لخبطة في فهم الحسابات»). الرصيد الحقيقي هو دفتر
+   *  القناة عبر التاريخ؛ حركة الفترة تُعرض تفصيلاً تحته. */
+  const [liveMethods, setLiveMethods] = useState<
+    Awaited<ReturnType<typeof ReportRepo.methodLedgerTotals>>
+  >([]);
   const [exporting, setExporting] = useState<'csv' | 'xls' | null>(null);
   const [topMode, setTopMode] = useState<'revenue' | 'profit'>('revenue');
   // v26 (round-34 #6): the cash & debts sections start COLLAPSED —
@@ -115,12 +124,19 @@ export function ReportsScreen() {
     async (key: ReportRangeKey) => {
       setLoading(true);
       try {
-        const [next, nextPayMethods] = await Promise.all([
+        const [next, nextPayMethods, nextLiveMethods] = await Promise.all([
           ReportService.loadBundle(key),
           ReportRepo.methodLedgerTotals(rangeFor(key)),
+          // v76 (الجولة ٨٨ #٣+٤): الأرصدة الحية عبر التاريخ — رصيد
+          //  كل قناة «الآن» (نفس معادلة السقف في نافذة السحب/المصروف).
+          ReportRepo.methodLedgerTotals({
+            from: '2000-01-01',
+            to: '2999-12-31',
+          }),
         ]);
         setBundle(next);
         setPayMethods(nextPayMethods);
+        setLiveMethods(nextLiveMethods);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         toast(message, 'error');
@@ -135,6 +151,53 @@ export function ReportsScreen() {
     useCallback(() => {
       void load(rangeKey);
     }, [rangeKey, load]),
+  );
+
+  /* ── v76 (الجولة ٨٨ #٣+٤): صفوف القنوات «الآن» — اتحاد من له حركة
+     بالفترة مع من له رصيد قائم عبر التاريخ (غير الصفري)، بلا نقدي
+     (له خلية «النقد بالخزينة الآن»). الرصيد المعروض لكل قناة هو
+     دفترها عبر التاريخ — نفس معادلة السقف في سندات السحب/المصروف —
+     وحركة الفترة سطر تفصيلي تحته. ── */
+  const channelNowRows = useMemo(() => {
+    type LedgerRow = (typeof payMethods)[number];
+    const byId = new Map<
+      string,
+      {id: string; period: LedgerRow | null; live: LedgerRow | null}
+    >();
+    for (const row of payMethods) {
+      if (row.method === 'cash') {
+        continue;
+      }
+      byId.set(row.method, {id: row.method, period: row, live: null});
+    }
+    for (const row of liveMethods) {
+      if (row.method === 'cash') {
+        continue;
+      }
+      const hit = byId.get(row.method);
+      if (hit != null) {
+        hit.live = row;
+      } else if (row.net !== 0) {
+        byId.set(row.method, {id: row.method, period: null, live: row});
+      }
+    }
+    return Array.from(byId.values());
+  }, [payMethods, liveMethods]);
+
+  /** v76: مجموع أرصدة البنوك والمحافظ الآن. */
+  const channelsNowTotal = useMemo(
+    () =>
+      channelNowRows.reduce((sum, row) => sum + (row.live?.net ?? 0), 0),
+    [channelNowRows],
+  );
+
+  /** v76: إجمالي الخزينة الآن — النقد بالدرج + كل البنوك والمحافظ.
+   *  «الخزينة» في ذهن التاجر هي كل مال المتجر أينما كان، لا الدرج
+   *  وحده («حتى في الخزينة يظهر فقط النقد بالخزينة دون باقي
+   *  المحافظ والبنوك» — طلب التاجر نصاً). */
+  const treasuryNowTotal = useMemo(
+    () => (bundle?.cash?.cashNowMinor ?? 0) / 100 + channelsNowTotal,
+    [bundle, channelsNowTotal],
   );
 
   const exportReport = useCallback(
@@ -553,9 +616,12 @@ export function ReportsScreen() {
                 <Text style={[styles.cashHeroValue, {color: c.accent}]}>
                   {formatMoney(cash?.collected ?? 0)}
                 </Text>
+                {/* v76 (الجولة ٨٨ #٣): salesCash يشمل مبيعات كل القنوات
+                    (نقد + بنوك ومحافظ) — كانت التسمية «مبيعات نقدية»
+                    توحي بأن حركات المحافظ والبنوك غير محسوبة. */}
                 <Text style={styles.cashHeroMeta}>
-                  مبيعات نقدية {formatMoney(cash?.salesCash ?? 0)} + مقبوضات
-                  (ديون وحملات) {formatMoney(cash?.collections ?? 0)}
+                  مبيعات (نقد + بنوك ومحافظ) {formatMoney(cash?.salesCash ?? 0)} +
+                  مقبوضات (ديون وحملات) {formatMoney(cash?.collections ?? 0)}
                 </Text>
               </View>
 
@@ -630,9 +696,15 @@ export function ReportsScreen() {
               {/* 2-ج-3) v25 (round-32 #3) → v26: المصروفات والمسحوبات
                   بالفترة — the headline is the section's IMPORTANT
                   number (صافي النقد بعد الحركات) and stays visible
-                  always; the breakdown expands on press. */}
+                  always; the breakdown expands on press.
+                  v76 (الجولة ٨٨ #٤): أُعيدت التسمية «صافي حركة الخزينة
+                  بالفترة» — هذا صافي ما دخل وخرج خلال الفترة المحددة
+                  فقط (كل القنوات معاً) وليس رصيداً: بعد تصفير حساب
+                  بالسحب يظهر سالباً بلا معنى مرعب؛ الأرصدة الحقيقية
+                  «الآن» في الخلايا وبطاقة القنوات أسفل (طلب التاجر:
+                  «لخبطة في فهم الحسابات وما فيها من نقد وأرصدة حالية»). */}
               <CollapseSection
-                title="صافي النقد بالفترة (بعد المصروفات والمسحوبات)"
+                title="صافي حركة الخزينة بالفترة (كل القنوات)"
                 valueText={formatMoney(cash?.netCashAfterMovements ?? 0)}
                 valueColor={
                   (cash?.netCashAfterMovements ?? 0) >= 0
@@ -683,7 +755,7 @@ export function ReportsScreen() {
                         styles.rowLabel,
                         {fontFamily: fonts.bold, color: c.text},
                       ]}>
-                      صافي النقد بالفترة (بعد المصروفات والمسحوبات)
+                      صافي حركة الفترة (بعد المصروفات والمسحوبات)
                     </Text>
                     <Text
                       style={[
@@ -698,6 +770,17 @@ export function ReportsScreen() {
                       {formatMoney(cash?.netCashAfterMovements ?? 0)}
                       </Text>
                     </View>
+                    {/* v76 (الجولة ٨٨ #٤): تمييز صريح — حركة الفترة قد
+                        تكون سالبة بعد سحب الأرصدة (تصفير) وهذا طبيعي
+                        ولا يعني رصيداً سالباً؛ الأرصدة الحقيقية الآن في
+                        الخلايا وبطاقة القنوات أدناه. */}
+                    <Text style={styles.periodNote}>
+                      هذا صافي ما دخل وخرج خلال الفترة المحددة فقط (كل
+                      القنوات معاً) — قد يكون سالباً بعد سحب رصيد، وهذا
+                      طبيعي ولا يعني رصيداً سالباً. الأرصدة الحقيقية الآن:
+                      «النقد بالخزينة الآن» و«إجمالي الخزينة الآن» وبطاقة
+                      أرصدة المحافظ والبنوك أدناه.
+                    </Text>
                 </View>
               </CollapseSection>
 
@@ -753,6 +836,22 @@ export function ReportsScreen() {
                     النقد بالخزينة الآن — بعد المصروفات والمسحوبات
                   </Text>
                 </View>
+                {/* v76 (الجولة ٨٨ #٣): إجمالي الخزينة الآن — النقد بالدرج
+                    + كل البنوك والمحافظ. «الخزينة» هي كل مال المتجر أينما
+                    كان، لا الدرج وحده — طلب التاجر نصاً («حتى في الخزينة
+                    يظهر فقط النقد بالخزينة دون باقي المحافظ والبنوك»). */}
+                <View style={styles.outstandingCellInfo}>
+                  <Text
+                    style={[
+                      styles.outstandingValueInfo,
+                      {color: c.accent},
+                    ]}>
+                    {formatMoney(treasuryNowTotal)}
+                  </Text>
+                  <Text style={styles.outstandingMeta}>
+                    إجمالي الخزينة الآن — نقد بالدرج + بنوك ومحافظ
+                  </Text>
+                </View>
               </View>
 
               {/* v32 (round-40 #6): تمييز هذا المتجر — عندما تجمع
@@ -780,59 +879,110 @@ export function ReportsScreen() {
               </Text>
             </Card>
 
-            {/* ── v64 (الجولة 76 #6): أرصدة المحافظ والبنوك — الرصيد
-                الصافي لكل قناة خلال الفترة (نفس سطح المكتب v72). */}
-            {payMethods.length > 0 ? (
+            {/* ── v64 (الجولة 76 #6) → v76 (الجولة ٨٨ #٣+٤): أرصدة
+                المحافظ والبنوك الآن — الرصيد المعروض لكل قناة هو
+                دفترها عبر التاريخ (رصيد «الآن» نفسه الذي يسقّف سندات
+                السحب/المصروف)، وحركة الفترة سطر تفصيلي تحته. كانت
+                البطاقة تجمع صافي الفترة تحت عنوان «أرصدة» فيقرأه
+                التاجر رصيداً حالياً فيرى «الأرصدة بالسالب» بعد تصفير
+                بالسحب ثم بيع/إيداع جديد. */}
+            {channelNowRows.length > 0 ? (
               <View style={styles.methodCard}>
                 <Text style={styles.methodCardTitle}>
-                  أرصدة المحافظ والبنوك
+                  أرصدة المحافظ والبنوك الآن
                 </Text>
                 <Text style={styles.methodCardHint}>
-                  الوارد (مبيعات + سدادات + إيداعات) − الصادر (مرتجعات
-                  + مسحوبات + مصروفات) لكل قناة بالفترة
+                  رصيد كل قناة الآن (دفترها عبر التاريخ) — وحركة الفترة
+                  المحددة تحته
                 </Text>
-                {payMethods.map(row => {
-                  const method = displayMethod(row.method);
+                {channelNowRows.map(row => {
+                  const method = displayMethod(row.id);
+                  const liveNet = row.live?.net ?? 0;
+                  const period = row.period;
                   return (
-                    <View key={row.method} style={styles.methodRow}>
+                    <View key={row.id} style={styles.methodRow}>
                       <View style={styles.methodRowTxts}>
                         <Text style={styles.methodRowName}>
                           {method.label}
                         </Text>
                         <Text style={styles.methodRowSub} numberOfLines={1}>
-                          {(row.salesCount > 0 || row.repaymentsCount > 0
-                            ? `دخل ${formatMoney(
-                                row.salesIn + row.repaymentsIn,
-                              )}`
-                            : 'لا عمليات بيع') +
-                            (row.depositsIn > 0
-                              ? ` + إيداعات ${formatMoney(row.depositsIn)}`
-                              : '') +
-                            (row.refundsOut > 0
-                              ? ` · رُدّ ${formatMoney(row.refundsOut)}`
-                              : '') +
-                            (row.withdrawalsOut + row.expensesOut > 0
-                              ? ` · خرج ${formatMoney(
-                                  row.withdrawalsOut + row.expensesOut,
-                                )}`
-                              : '')}
+                          {period == null
+                            ? 'لا حركة بالفترة — رصيد قائم من قبلها'
+                            : (period.salesCount > 0 || period.repaymentsCount > 0
+                                ? `الفترة: دخل ${formatMoney(
+                                    period.salesIn + period.repaymentsIn,
+                                  )}`
+                                : 'الفترة: لا عمليات بيع') +
+                              (period.depositsIn > 0
+                                ? ` + إيداعات ${formatMoney(period.depositsIn)}`
+                                : '') +
+                              (period.refundsOut > 0
+                                ? ` · رُدّ ${formatMoney(period.refundsOut)}`
+                                : '') +
+                              (period.withdrawalsOut + period.expensesOut > 0
+                                ? ` · خرج ${formatMoney(
+                                    period.withdrawalsOut + period.expensesOut,
+                                  )}`
+                                : '')}
                         </Text>
                       </View>
                       <Text
                         style={[
                           styles.methodRowValue,
-                          {color: method.color === '#16A34A' ? c.success : method.color},
+                          {
+                            color:
+                              method.color === '#16A34A'
+                                ? liveNet < 0
+                                  ? c.danger
+                                  : c.success
+                                : method.color,
+                          },
                         ]}>
-                        {formatMoney(row.net)}
+                        {formatMoney(liveNet)}
                       </Text>
                     </View>
                   );
                 })}
+                {/* v76: المجاميع — البنوك والمحافظ معاً، ثم الإجمالي
+                    الشامل مع النقد بالدرج. */}
+                <View style={styles.methodTotalRule} />
+                <View style={styles.methodTotalRow}>
+                  <Text style={styles.methodTotalLabel}>
+                    البنوك والمحافظ معاً الآن
+                  </Text>
+                  <Text
+                    style={[
+                      styles.methodTotalValue,
+                      {color: channelsNowTotal < 0 ? c.danger : c.success},
+                    ]}>
+                    {formatMoney(channelsNowTotal)}
+                  </Text>
+                </View>
+                <View style={styles.methodTotalRow}>
+                  <Text
+                    style={[
+                      styles.methodTotalLabel,
+                      {fontFamily: fonts.bold},
+                    ]}>
+                    إجمالي الخزينة الآن — نقد + بنوك ومحافظ
+                  </Text>
+                  <Text
+                    style={[
+                      styles.methodTotalValue,
+                      {
+                        fontFamily: fonts.bold,
+                        color: treasuryNowTotal < 0 ? c.danger : c.accent,
+                      },
+                    ]}>
+                    {formatMoney(treasuryNowTotal)}
+                  </Text>
+                </View>
                 <Text style={styles.methodCardNote}>
-                  منظور حركة المال: كل مبلغ يدخل القناة أو يخرج منها
-                  بتاريخه — سدادات الديون تدخل بقناتها، ومرتجعات وفروق
-                  الاستبدال تُخصم من قناة التسوية. المبيعات قبل إصدار
-                  طرق الدفع محسوبة نقدياً.
+                  الرصيد الكبير لكل قناة هو دفترها عبر التاريخ (مبيعات +
+                  سدادات + إيداعات − مرتجعات − مسحوبات − مصروفات) — نفس
+                  السقف الذي تسقّفه سندات السحب والمصروف. رقم «الفترة» تحته
+                  يوضح ما دخل وخرج خلال الفترة المحددة فقط وقد يكون سالباً
+                  بعد سحب رصيد؛ لا يعني ذلك رصيداً سالباً.
                 </Text>
               </View>
             ) : null}
@@ -1579,6 +1729,38 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
       lineHeight: 17,
       marginTop: 4,
+    },
+    /* v76 (الجولة ٨٨ #٣+٤): مجاميع البطاقة + ملاحظة حركة الفترة. */
+    methodTotalRule: {
+      height: 1,
+      backgroundColor: c.borderSoft,
+      marginTop: 4,
+      marginBottom: 2,
+    },
+    methodTotalRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: spacing.md,
+      paddingVertical: 5,
+    },
+    methodTotalLabel: {
+      color: c.text,
+      fontFamily: fonts.medium,
+      fontSize: typography.body,
+      flex: 1,
+    },
+    methodTotalValue: {
+      fontFamily: fonts.black,
+      fontSize: typography.body + 2,
+      fontVariant: ['tabular-nums'],
+    },
+    periodNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      lineHeight: 17,
+      marginTop: 8,
     },
     screen: {flex: 1, backgroundColor: c.bg},
     content: {

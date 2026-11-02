@@ -98,6 +98,29 @@ export function InventoryScreen() {
     }, [refresh]),
   );
 
+  /** v76 (الجولة 88 #2): استرداد منتج مؤرشف من صفحة المنتجات مباشرة —
+   *  زر في كل صف بالقائمة المؤرشة. الأب يملك حالة المؤرشفة وحالة
+   *  الرف معاً فيُحدّثهما معاً بعد الاسترداد (نفس مسار التركيز). */
+  const unarchiveProduct = useCallback(
+    async (product: Product) => {
+      try {
+        await ProductRepo.unarchive(product.id);
+        await refresh();
+        const rows = await ProductRepo.list({archival: 'archived'});
+        setArchivedProducts(rows);
+        useToastStore
+          .getState()
+          .show(`أُعيد «${product.name}» إلى الرف`, 'success');
+      } catch (error) {
+        useToastStore.getState().show(
+          error instanceof Error ? error.message : 'تعذر استرداد المنتج',
+          'error',
+        );
+      }
+    },
+    [refresh],
+  );
+
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     return products.filter(product => {
@@ -214,6 +237,7 @@ export function InventoryScreen() {
       showArchived={showArchived}
       setShowArchived={setShowArchived}
       archivedProducts={archivedProducts}
+      onUnarchive={unarchiveProduct}
     />
 
     {/* v58 (الجولة 62): نافذة الإضافة السريعة لمود نقطة البيع —
@@ -244,6 +268,7 @@ function InventoryLayout({
   showArchived,
   setShowArchived,
   archivedProducts,
+  onUnarchive,
   expiringCount,
   showExpiring,
   setShowExpiring,
@@ -270,6 +295,8 @@ function InventoryLayout({
   showArchived: boolean;
   setShowArchived: (value: boolean) => void;
   archivedProducts: Product[];
+  /** v76 (الجولة 88 #2): استرداد منتج مؤرشف من الصف مباشرة. */
+  onUnarchive: (product: Product) => void;
   /** v32 (round-40 #3): شريحة الصلاحية وقائمتها. */
   expiringCount: number;
   /** v58 (الجولة 62): مود نقطة البيع — إظهار زر الإضافة السريعة. */
@@ -589,6 +616,25 @@ function InventoryLayout({
                 navigation.navigate('ManageUnits' as never);
               }}
             />
+            {/* v76 (الجولة 88 #2): المنتجات المؤرشفة — طلب التاجر نصاً:
+                خيار في قائمة خيارات صفحة المنتج تُفتح منه القائمة
+                المؤرشة مع إمكانية الاسترداد. كانت الشريحة تظهر فقط
+                عند وجود مؤرشفات أصلاً فلا يكتشف التاجر الميزة أبداً
+                ولا يجد مدخلها في قائمة الخيارات. */}
+            <MenuItem
+              icon="archive"
+              label="المنتجات المؤرشفة"
+              hint={
+                archivedProducts.length > 0
+                  ? `${archivedProducts.length} منتجاً — استرداد بلمسة واحدة`
+                  : 'المحذوفة ذات سجل مبيعات/جرد — استردادها متاح دائماً'
+              }
+              onPress={() => {
+                setMenuOpen(false);
+                setShowExpiring(false);
+                setShowArchived(true);
+              }}
+            />
             {/* v68 (الجولة 80 #٢): تقرير PDF للمخزون بالتفصيل —
                 مجمّع بالتصنيفات مع مجاميع كل تصنيف وصف الإجمالي. */}
             <MenuItem
@@ -808,6 +854,16 @@ function InventoryLayout({
                     </Text>
                   </View>
                   <View style={styles.rowEnd}>
+                    {/* v76 (الجولة 88 #2): استرداد بلمسة واحدة من الصف
+                        نفسه (المسار الكامل عبر النموذج باقٍ أيضاً). */}
+                    <TouchableOpacity
+                      style={styles.unarchiveBtn}
+                      onPress={() => onUnarchive(product)}
+                      activeOpacity={0.7}
+                      hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}>
+                      <Icon name="undo" size={15} color={c.success} />
+                      <Text style={styles.unarchiveText}>استرداد</Text>
+                    </TouchableOpacity>
                     <Icon name="chevronLeft" size={16} color={c.textFaint} />
                   </View>
                 </TouchableOpacity>
@@ -1028,7 +1084,8 @@ function MenuItem({
   hint,
   onPress,
 }: {
-  icon: 'clipboard' | 'shapes' | 'scale' | 'printer';
+  /* v76 (الجولة 88 #2): اتّسع لـ«archive» — مدخل المنتجات المؤرشفة. */
+  icon: 'clipboard' | 'shapes' | 'scale' | 'printer' | 'archive';
   label: string;
   hint: string;
   onPress: () => void;
@@ -1274,6 +1331,23 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
+    },
+    /* v76 (الجولة 88 #2): زر الاسترداد داخل صف المنتج المؤرشف. */
+    unarchiveBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.successSoft,
+      backgroundColor: c.successSoft,
+    },
+    unarchiveText: {
+      color: c.success,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 0.5,
     },
     stockBadge: {
       borderRadius: radius.pill,

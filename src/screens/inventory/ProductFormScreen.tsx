@@ -653,6 +653,12 @@ export function ProductFormScreen() {
       // current one points at a file that no longer exists (a
       // restored backup left dead paths — they used to block new
       // images from appearing).
+      // v76 (الجولة 88 #1): البصمة الأمامية هي وجه المنتج — أي
+      // تصوير أو رفع جديد لها يستبدل الصورة الأساسية فوراً. كان
+      // الاستبدال يحدث فقط عند غياب صورة حية، فبقي التاجر يرفع
+      // صورة جديدة بدلاً من القديمة («تم الحفظ بنجاح») والصورة
+      // الأساسية في الرف لا تتغير — طلب التاجر نصاً. الخلفية
+      // والجانبية لا تمسّانها: ليستا وجه المنتج في تجان البيع.
       if (thumbnailPath != null) {
         let currentIsDead = imageUri == null;
         if (imageUri != null && PlatformUtilsNative != null) {
@@ -662,7 +668,7 @@ export function ProductFormScreen() {
             currentIsDead = false;
           }
         }
-        if (currentIsDead) {
+        if (currentIsDead || angle === 'front') {
           setImageUri(thumbnailPath);
         }
       }

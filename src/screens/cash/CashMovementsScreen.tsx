@@ -226,6 +226,12 @@ export function CashMovementsScreen() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [totals, setTotals] = useState<CashMovementTotals | null>(null);
   const [drawerMinor, setDrawerMinor] = useState<number | null>(null);
+  /** v76 (الجولة ٨٨ #٣): أرصدة البنوك والمحافظ الآن + الإجمالي
+   *  الشامل مع النقد — «النقد المتوقع» وحده أعلاه لا يكمل صورة
+   *  الخزينة عند التاجر (طلب التاجر نصاً). */
+  const [channelBalances, setChannelBalances] = useState<
+    {id: string; label: string; balance: number}[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -268,6 +274,23 @@ export function CashMovementsScreen() {
       setTotalCount(count);
       setTotals(totalsAll.totals);
       setDrawerMinor(drawer);
+      // v76 (الجولة ٨٨ #٣): أرصدة البنوك والمحافظ + الإجمالي الشامل —
+      //  أفضل جهد: فشلها لا يعطل تحميل السجل أبداً.
+      try {
+        const channels = activePaymentMethods(
+          useSettingsStore.getState().settings.paymentMethodsEnabled,
+        ).filter(m => m.id !== 'cash');
+        const balances = await Promise.all(
+          channels.map(async m => ({
+            id: m.id,
+            label: m.label,
+            balance: await ReportService.methodBalanceNow(m.id),
+          })),
+        );
+        setChannelBalances(balances);
+      } catch {
+        // معلوماتية فقط.
+      }
     } catch (error) {
       toast(
         error instanceof Error ? error.message : 'تعذر تحميل حركات الخزينة',
@@ -494,6 +517,61 @@ export function CashMovementsScreen() {
               </Text>
             </View>
           </View>
+          {/* v76 (الجولة ٨٨ #٣): أرصدة البنوك والمحافظ الآن + الإجمالي
+              الشامل مع النقد داخل بطاقة الخزينة نفسها — «النقد
+              المتوقع» وحده كان يوحي بأن الخزينة درج نقدي فقط (طلب
+              التاجر: «حتى في الخزينة يظهر فقط النقد بالخزينة دون
+              باقي المحافظ والبنوك»). */}
+          {channelBalances.length > 0 ? (
+            <View style={styles.drawerChannelsBox}>
+              <View style={styles.drawerChannelsRow}>
+                <Text style={styles.drawerChannelsLabel}>
+                  البنوك والمحافظ الآن
+                </Text>
+                <Text
+                  style={[
+                    styles.drawerChannelsValue,
+                    {
+                      color:
+                        channelBalances.reduce((s, ch) => s + ch.balance, 0) < 0
+                          ? c.danger
+                          : c.text,
+                    },
+                  ]}>
+                  {formatMoney(
+                    channelBalances.reduce((s, ch) => s + ch.balance, 0),
+                  )}
+                </Text>
+              </View>
+              <View style={styles.drawerChannelsRow}>
+                <Text
+                  style={[
+                    styles.drawerChannelsLabel,
+                    {fontFamily: fonts.bold, color: c.text},
+                  ]}>
+                  إجمالي الخزينة الآن — نقد + بنوك ومحافظ
+                </Text>
+                <Text
+                  style={[
+                    styles.drawerChannelsValue,
+                    {
+                      fontFamily: fonts.bold,
+                      color:
+                        (drawerMinor ?? 0) / 100 +
+                          channelBalances.reduce((s, ch) => s + ch.balance, 0) <
+                        0
+                          ? c.danger
+                          : c.success,
+                    },
+                  ]}>
+                  {formatMoney(
+                    (drawerMinor ?? 0) / 100 +
+                      channelBalances.reduce((s, ch) => s + ch.balance, 0),
+                  )}
+                </Text>
+              </View>
+            </View>
+          ) : null}
           {/* v27 (round-35 #3): the badge covers ALL THREE operations
               now — and the unsecured state is a tappable alert that
               jumps straight to the security settings. */}
@@ -3112,6 +3190,34 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.small,
       marginTop: 2,
+    },
+    /* v76 (الجولة ٨٨ #٣): صندوق أرصدة البنوك والمحافظ + الإجمالي
+     *  الشامل داخل بطاقة الدرج. */
+    drawerChannelsBox: {
+      marginTop: spacing.md,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      borderRadius: radius.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.sm + 2,
+      gap: 4,
+    },
+    drawerChannelsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+    },
+    drawerChannelsLabel: {
+      flex: 1,
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+    },
+    drawerChannelsValue: {
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+      fontVariant: ['tabular-nums'],
     },
     securityHint: {
       flexDirection: 'row',
