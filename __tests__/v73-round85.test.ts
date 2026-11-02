@@ -271,12 +271,12 @@ describe('v73 — ٧ الإيصال: تمييز النسخة المعدلة', ()
 });
 
 describe('v73 — ٨ الإصدار', () => {
-  test('75.0.0 (83) في config والبناء', () => {
+  test('76.0.0 (84) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '75.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 83');
+    expect(config).toContain("APP_VERSION = '76.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 84');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 83');
-    expect(gradle).toContain('versionName "75.0.0"');
+    expect(gradle).toContain('versionCode 84');
+    expect(gradle).toContain('versionName "76.0.0"');
   });
 });

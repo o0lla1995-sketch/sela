@@ -165,10 +165,10 @@ describe('v50 — خيارات الشراء في سيلا ماركت', () => {
 
   test('⑥ الإصدار: 71.0.0 (79) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '75.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 83');
+    expect(config).toContain("APP_VERSION = '76.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 84');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "75.0.0"');
-    expect(gradle).toContain('versionCode 83');
+    expect(gradle).toContain('versionName "76.0.0"');
+    expect(gradle).toContain('versionCode 84');
   });
 });

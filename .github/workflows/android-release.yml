@@ -107,10 +107,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "/tmp/${{ steps.version.outputs.apk_name }}.apk#تطبيق sela $GITHUB_REF_NAME (APK)" \
-            --title "sela سيلا $GITHUB_REF_NAME" \
-            --generate-notes
+          # v76 (الجولة 88): إذا وُجد إصدار بنفس الوسم لحظة النشر —
+          #  أتمتة خارجية تنشئه فور رفع الوسم — فلا يفشل البناء:
+          #  أرفق الـAPK إليه ووحّد العنوان والملاحظات. كانت الخطوة
+          #  تفشل بـ«already exists» فتضيع نتيجة بناء سليم كامل.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release for $GITHUB_REF_NAME already exists — attaching the APK to it"
+            gh release upload "$GITHUB_REF_NAME" \
+              "/tmp/${{ steps.version.outputs.apk_name }}.apk#تطبيق sela $GITHUB_REF_NAME (APK)" --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "sela سيلا $GITHUB_REF_NAME" \
+              --generate-notes || true
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "/tmp/${{ steps.version.outputs.apk_name }}.apk#تطبيق sela $GITHUB_REF_NAME (APK)" \
+              --title "sela سيلا $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
 
   # v22 (round-28 #6): the signed Play Store AAB — built with the
   # merchant's own key (abdala hanouna) from repo SECRETS, so the
