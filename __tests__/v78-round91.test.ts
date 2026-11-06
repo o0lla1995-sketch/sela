@@ -198,13 +198,13 @@ describe('v78 — ٤ لا إشعارات نفاد للمنتجات بلا تتب
 });
 
 describe('v78 — الإصدار', () => {
-  test('config.ts وbuild.gradle عند 78.1.0 / 87', () => {
+  test('config.ts وbuild.gradle عند 78.2.0 / 87', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '78.1.0'");
-    expect(config).toContain('APP_BUILD_CODE = 87');
+    expect(config).toContain("APP_VERSION = '78.2.0'");
+    expect(config).toContain('APP_BUILD_CODE = 88');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionName "78.1.0"');
-    expect(gradle).toContain('versionCode 87');
+    expect(gradle).toContain('versionName "78.2.0"');
+    expect(gradle).toContain('versionCode 88');
   });
 });
 
@@ -223,5 +223,25 @@ describe('v78.1 — كاشير #١: طرق الدفع من نقطة البيع �
     expect(src).toContain('line.variantLabel != null');
     expect(src).toContain('شفاء الزبون بالاسم');
     expect(src).toContain('body.customerName != null');
+  });
+});
+
+describe('v78.2 — كاشير #٣ تكملة: شفاء الوحدات والاستبدال', () => {
+  test('شفاء الوحدة بالاسم في مسار البيع قبل الرفض', () => {
+    const src = read('src/services/lan/LanHandlers.ts');
+    expect(src).toContain('شفاء الوحدة بالاسم');
+    // المطابقة بالاسم أو الاختصار (علبة/علب) ثم الرفض إن بقي ميتاً.
+    expect(src).toContain('u.name === wantedUnit || u.short === wantedUnit');
+    expect(src).toContain('وحدة غير متاحة لـ «${product.name}»');
+  });
+
+  test('شفاء بدائل الاستبدال بالتسمية والاسم (نفس قواعد البيع)', () => {
+    const src = read('src/services/lan/LanHandlers.ts');
+    expect(src).toContain('شفاء بدائل الاستبدال بالتسمية/الاسم');
+    expect(src).toContain('wantedEx');
+    expect(src).toContain('wantedUnitEx');
+    // المعرفات قابلة للشفاء (let) في المسارين.
+    expect(src).toContain('// v78.2: let — قد يُشفى المعرفان بالتسمية/الاسم أدناه.');
+    expect(src).toContain('// v78.2: let — قد يُشفى المعرفان (المتغير بالتسمية والوحدة');
   });
 });

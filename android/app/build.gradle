@@ -98,8 +98,8 @@ android {
         applicationId "com.sela.pal"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 87
-        versionName "78.1.0"
+        versionCode 88
+        versionName "78.2.0"
     }
 
     // Prevent Android from compressing the bundled .tflite model in the APK.

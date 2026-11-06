@@ -53,7 +53,7 @@ describe('v61 — الجولة 65: حل أسطر الإرجاع عند الخا�
 
   test('⑤ الإصدار: 71.0.0 (79)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '78.1.0'");
-    expect(config).toContain('APP_BUILD_CODE = 87');
+    expect(config).toContain("APP_VERSION = '78.2.0'");
+    expect(config).toContain('APP_BUILD_CODE = 88');
   });
 });

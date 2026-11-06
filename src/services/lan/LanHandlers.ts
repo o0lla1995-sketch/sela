@@ -1008,7 +1008,9 @@ async function handleSale(
     const line = raw as Record<string, unknown>;
     const productId = Number(line.productId ?? 0);
     const quantity = Number(line.quantity ?? 0);
-    const unitId =
+    // v78.2: let — قد يُشفى المعرفان (المتغير بالتسمية والوحدة
+    // بالاسم) أدناه قبل الرفض.
+    let unitId =
       line.unitId == null || line.unitId === '' ? null : Number(line.unitId);
     let variantId =
       line.variantId == null || line.variantId === ''
@@ -1060,6 +1062,24 @@ async function handleSale(
     }
     if (variantId != null && !product.variants.some(v => v.id === variantId)) {
       return fail(400, `متغير غير متاح لـ «${product.name}»`);
+    }
+    // v78.2 (الجولة 91 — كاشير #3 تكملة): شفاء الوحدة بالاسم —
+    // تحرير المنتج في نقطة البيع يستبدل وحدات sale_units بمعرّفات
+    // جديدة، ففاتورة كاشير بيعت بكتالوج مؤقت تحمل معرّفاً ميتاً
+    // كانت تُرفض نهائياً («وحدة غير متاحة»). الكاشير v3.5 يرسل اسم
+    // الوحدة مع كل سطر (unitName) — مطابقته الدقيقة بالاسم تعيد
+    // وصل السطر بالوحدة الحالية، تماماً كشفاء المتغير بالتسمية
+    // والزبون بالاسم في v78.1.
+    if (unitId != null && !product.units.some(u => u.id === unitId)) {
+      const wantedUnit = String(line.unitName ?? '').trim();
+      if (wantedUnit.length > 0) {
+        const healedUnit = product.units.find(
+          u => u.name === wantedUnit || u.short === wantedUnit,
+        );
+        if (healedUnit != null) {
+          unitId = healedUnit.id;
+        }
+      }
     }
     if (unitId != null && !product.units.some(u => u.id === unitId)) {
       return fail(400, `وحدة غير متاحة لـ «${product.name}»`);
@@ -1415,9 +1435,10 @@ async function handleReturn(
       const line = raw as Record<string, unknown>;
       const productId = Number(line.productId ?? 0);
       const quantity = Number(line.quantity ?? 0);
-      const unitId =
+      // v78.2: let — قد يُشفى المعرفان بالتسمية/الاسم أدناه.
+      let unitId =
         line.unitId == null || line.unitId === '' ? null : Number(line.unitId);
-      const variantId =
+      let variantId =
         line.variantId == null || line.variantId === ''
           ? null
           : Number(line.variantId);
@@ -1437,8 +1458,42 @@ async function handleReturn(
       if (!product.hasVariants && variantId != null) {
         return fail(400, `«${product.name}» ليس منتج متغيرات`);
       }
+      // v78.2: شفاء بدائل الاستبدال بالتسمية/الاسم — نفس قواعد
+      // مسار البيع (المتغير بالتسمية، الوحدة بالاسم) حتى لا تُرفض
+      // عملية استبدال كاملة بسبب معرّف ميت في كتالوج مؤقت.
+      if (
+        variantId != null &&
+        !product.variants.some(v => v.id === variantId) &&
+        line.variantLabel != null &&
+        String(line.variantLabel).length > 0
+      ) {
+        const wantedEx = String(line.variantLabel).trim();
+        const healedEx = product.variants.find(v => {
+          const isSize = v.kind === 'size';
+          const label = isSize
+            ? v.size
+            : v.color
+            ? `${v.color} · ${v.size}`
+            : v.size;
+          return label === wantedEx;
+        });
+        if (healedEx != null) {
+          variantId = healedEx.id;
+        }
+      }
       if (variantId != null && !product.variants.some(v => v.id === variantId)) {
         return fail(400, `متغير غير متاح لـ «${product.name}»`);
+      }
+      if (unitId != null && !product.units.some(u => u.id === unitId)) {
+        const wantedUnitEx = String(line.unitName ?? '').trim();
+        if (wantedUnitEx.length > 0) {
+          const healedUnitEx = product.units.find(
+            u => u.name === wantedUnitEx || u.short === wantedUnitEx,
+          );
+          if (healedUnitEx != null) {
+            unitId = healedUnitEx.id;
+          }
+        }
       }
       const cartLine = catalogToCartLine(product, unitId, quantity, variantId);
       exchange.push({

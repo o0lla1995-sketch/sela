@@ -210,7 +210,7 @@ describe('v66 — ٤ الإعدادات: مفتاح Switch حقيقي (إزال�
 describe('v66 — ٥ الإصدار', () => {
   test('71.0.0 (79)', () => {
     const src = read(CONFIG);
-    expect(src).toContain("APP_VERSION = '78.1.0'");
-    expect(src).toContain('APP_BUILD_CODE = 87');
+    expect(src).toContain("APP_VERSION = '78.2.0'");
+    expect(src).toContain('APP_BUILD_CODE = 88');
   });
 });
