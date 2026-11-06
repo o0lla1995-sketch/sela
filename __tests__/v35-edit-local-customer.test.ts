@@ -30,7 +30,10 @@ describe('v35 — تعديل بيانات الزبون المحلي (نافذة 
     expect(src).toContain('editNameFieldRef');
     expect(src).toContain('editPhoneFieldRef');
     // الحفظ بنفس معايير التسجيل + تفرد الهوية.
-    expect(src).toContain('isValidIdNumber(editId)');
+    // v78 (الجولة 91 #٣): الهوية اختيارية — التحقق لمن أدخل قيمة
+    // فقط (isValidIdNumber على القيمة المشذبة)، والفارغ مقبول.
+    expect(src).toContain('isValidIdNumber(editId.trim())');
+    expect(src).toContain('editId.trim().length > 0');
     expect(src).toContain('isValidLocalPhone(editPhone)');
     expect(src).toContain('LocalDebtsRepo.byIdNumber(editId.trim())');
     expect(src).toContain('رقم الهوية مسجّل لزبون آخر');

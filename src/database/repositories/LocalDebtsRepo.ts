@@ -124,6 +124,16 @@ export function isValidIdNumber(value: string): boolean {
   return ID_NUMBER_RE.test(value);
 }
 
+/** v78 (الجولة 91 #٣): رقم الهوية صار اختيارياً في دفتر الديون —
+ *  طلب التاجر نصاً: «يجب جعل إدخال رقم الهوية غير اجباري في دفتر
+ *  الديون عند إضافة او تعديل زبون». الفارغ مسموح دائماً؛ وإن أُدخل
+ *  شيئ فلا يُقبل إلا 9 أرقام بالضبط (القيمة النهائية تُخزن NULL
+ *  لا سلسلة فارغة — عمود id_number UNIQUE ولا يسمح بتكرار ''). */
+export function isValidOptionalIdNumber(value: string): boolean {
+  const clean = value.replace(/\s+/g, '');
+  return clean.length === 0 || ID_NUMBER_RE.test(clean);
+}
+
 export function isValidLocalPhone(value: string): boolean {
   return PHONE_RE.test(value);
 }
@@ -174,13 +184,11 @@ export const LocalDebtsRepo = {
 
   /**
    * Creates a local debt account. v19 (round-25 #3): the
-   * registration standards — ID number EXACTLY 9 digits, mobile
-   * EXACTLY 10 digits starting 056/059 (Jawwal), both enforced
-   * here (defense in depth behind the form). Refuses (throws with
-   * a spoken Arabic message) when the ID number already exists —
-   * locally OR in the صِلة cache — so the same person never lives
-   * on both sides («لا يتكرر نفس الزبون في الجانبين من خلال رقم
-   * الهوية»).
+   * registration standards — mobile EXACTLY 10 digits starting
+   * 056/059 (Jawwal). v78 (الجولة 91 #٣): رقم الهوية اختياري — إن
+   *  أُدخل فيجب 9 أرقام بالضبط (تطابق صِلة والتفرد المحلي يبقيان
+   *  على من أدخل هوية فقط؛ من لم يدخلها يُخزن NULL فلا يتكرر
+   *  أبداً على قيد UNIQUE).
    */
   async createCustomer(input: {
     idNumber: string;
@@ -189,8 +197,8 @@ export const LocalDebtsRepo = {
     notes?: string | null;
   }): Promise<LocalCustomer> {
     const idNumber = input.idNumber.replace(/\s+/g, '');
-    if (!ID_NUMBER_RE.test(idNumber)) {
-      throw new Error('رقم الهوية يجب أن يكون 9 أرقام بالضبط');
+    if (idNumber.length > 0 && !ID_NUMBER_RE.test(idNumber)) {
+      throw new Error('رقم الهوية يجب أن يكون 9 أرقام بالضبط (أو اتركه فارغاً)');
     }
     const name = input.name.trim();
     if (name.length === 0) {
@@ -202,44 +210,52 @@ export const LocalDebtsRepo = {
         'رقم الجوال مطلوب: 10 أرقام يبدأ بـ 056 أو 059 (مثال: 0591234567)',
       );
     }
-    // Local uniqueness (SQLite UNIQUE also guards, but with a nicer message).
-    const localHit = await this.byIdNumber(idNumber);
-    if (localHit != null) {
-      throw new Error(
-        `رقم الهوية مسجل مسبقاً لـ«${localHit.name}» في دفتر المتجر`,
-      );
-    }
-    // Cross-system: the same ID on a صِلة account means the debts
-    // should flow through صِلة (or be linked after creation).
-    try {
-      const silaHit = await getDb().execute(
-        'SELECT name FROM sila_customers WHERE id_number = ? LIMIT 1',
-        [idNumber],
-      );
-      const silaName = (silaHit.rows?.[0] as {name?: string})?.name;
-      if (silaName != null) {
+    // Local uniqueness (SQLite UNIQUE also guards, but with a nicer
+    // message) — v78: لمن أدخل هوية فقط.
+    if (idNumber.length > 0) {
+      const localHit = await this.byIdNumber(idNumber);
+      if (localHit != null) {
         throw new Error(
-          `هذا الرقم مسجل في صِلة لـ«${silaName}» — سجّل ديونته عبر صِلة أو اربط الحسابين من ملفه بعد الإنشاء`,
+          `رقم الهوية مسجل مسبقاً لـ«${localHit.name}» في دفتر المتجر`,
         );
       }
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('صِلة')) {
-        throw error;
+      // Cross-system: the same ID on a صِلة account means the debts
+      // should flow through صِلة (or be linked after creation).
+      try {
+        const silaHit = await getDb().execute(
+          'SELECT name FROM sila_customers WHERE id_number = ? LIMIT 1',
+          [idNumber],
+        );
+        const silaName = (silaHit.rows?.[0] as {name?: string})?.name;
+        if (silaName != null) {
+          throw new Error(
+            `هذا الرقم مسجل في صِلة لـ«${silaName}» — سجّل ديونته عبر صِلة أو اربط الحسابين من ملفه بعد الإنشاء`,
+          );
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('صِلة')) {
+          throw error;
+        }
+        // Table missing / fresh install — continue.
       }
-      // Table missing / fresh install — continue.
     }
-    await getDb().execute(
+    // v78: الفارغ يُخزن NULL — عمود id_number UNIQUE ولا يقبل تكرار
+    // السلاسل الفارغة أبداً (زبونان بلا هوية مسموحان، NULL ≠ NULL).
+    const insertResult = await getDb().execute(
       `INSERT INTO local_customers (id_number, name, phone, notes)
        VALUES (?, ?, ?, ?)`,
-      [idNumber, name, phone, input.notes?.trim() || null],
+      [idNumber.length > 0 ? idNumber : null, name, phone, input.notes?.trim() || null],
     );
-    const created = await this.byIdNumber(idNumber);
+    // v78: الجلب بالمعرف لا بالهوية — الهوية قد تكون NULL الآن.
+    const created = await this.byId(Number(insertResult.insertId ?? -1));
     if (created == null) {
       throw new Error('تعذر إنشاء حساب الزبون');
     }
     logDiag(
       'localDebts',
-      `أُنشئ حساب دين محلي: ${created.name} (هوية ${idNumber})`,
+      `أُنشئ حساب دين محلي: ${created.name}${
+        idNumber.length > 0 ? ` (هوية ${idNumber})` : ' (بلا رقم هوية)'
+      }`,
     );
     return created;
   },
@@ -247,7 +263,8 @@ export const LocalDebtsRepo = {
   /** v35 (الجولة 43): تعديل بيانات الزبون من نافذته — الاسم والجوال
    *  ورقم الهوية (مع تفرد الهوية داخل الجدول UNIQUE؛ التحقق
    *  المنطقي والتكرار يفحصهما المتصل قبل النداء، والقيد يمنع
-   *  التكرار في أسوأ الأحوال). */
+   *  التكرار في أسوأ الأحوال). v78 (الجولة 91 #٣): حذف الهوية
+   *  (فراغ) يخزن NULL — الاختيارية مطبقة هنا أيضاً. */
   async updateCustomer(
     id: number,
     patch: {
@@ -262,7 +279,9 @@ export const LocalDebtsRepo = {
     const args: (string | number | boolean | null)[] = [];
     if (patch.idNumber != null) {
       sets.push('id_number = ?');
-      args.push(patch.idNumber.trim());
+      // v78: الفارغ يعني «بلا هوية» — يُخزن NULL كي لا يتصادم مع
+      // زبون آخر بلا هوية على قيد UNIQUE.
+      args.push(patch.idNumber.trim() === '' ? null : patch.idNumber.trim());
     }
     if (patch.name != null) {
       sets.push('name = ?');

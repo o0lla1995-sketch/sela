@@ -27,6 +27,9 @@ interface NotificationsState {
   markAllRead: () => void;
   markRead: (id: string) => void;
   clearAll: () => void;
+  /** v78 (الجولة 91 #٤): إسقاط إشعارات النفاد/الانخفاض لمنتجات
+   *  بلا تتبع — تنظيف الإشعارات التاريخية العالقة. */
+  dropStockAlertsFor: (productIds: Set<number>) => number;
 }
 
 function loadInitial(): AppNotification[] {
@@ -126,6 +129,36 @@ export const useNotificationsStore = create<NotificationsState>((set, get) => ({
     persist([]);
     set({items: [], unreadCount: 0});
   },
+
+  /** v78 (الجولة 91 #٤): إسقاط إشعارات نفاد/انخفاض المخزون لمنتجات
+   *  صارت بلا تتبع — طلب التاجر: «يجب الا يتم ارسال إشعارات نفاد
+   *  المخزون للمنتجات التي بدون تتبع». الإنذار الجديد ممنوع أصلاً
+   *  منذ v35؛ هذا ينظّف أيضاً الإشعارات التاريخية العالقة (قبل وسم
+   *  المنتج بلا تتبع أو من نسخ قديمة) فلا يراها التاجر مجدداً.
+   *  يعيد عدد ما أُسقط. */
+  dropStockAlertsFor: (productIds: Set<number>) => {
+    if (productIds.size === 0) {
+      return 0;
+    }
+    const current = get().items;
+    let dropped = 0;
+    const kept = current.filter(item => {
+      if (
+        (item.kind === 'out_of_stock' || item.kind === 'low_stock') &&
+        item.productId != null &&
+        productIds.has(item.productId)
+      ) {
+        dropped += 1;
+        return false;
+      }
+      return true;
+    });
+    if (dropped > 0) {
+      persist(kept);
+      set({items: kept, unreadCount: recount(kept)});
+    }
+    return dropped;
+  },
 }));
 
 /** Imperative accessor for services. */
@@ -136,4 +169,9 @@ export const notificationsStore = {
     body: string,
     options?: {productId?: number; system?: boolean},
   ) => useNotificationsStore.getState().push(kind, title, body, options),
+
+  /** v78 (الجولة 91 #٤): من خدمات الأعمال — إسقاط إشعارات النفاد
+   *  القديمة لمنتجات بلا تتبع. */
+  dropStockAlertsFor: (productIds: Set<number>) =>
+    useNotificationsStore.getState().dropStockAlertsFor(productIds),
 };

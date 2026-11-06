@@ -113,10 +113,10 @@ describe('v72 — ٢ حذف عبارة «السلة فارغة» من شريط �
 describe('v72 — ٦ الإصدار والتوقيع', () => {
   test('72.0.0 (80) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '77.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 85');
+    expect(config).toContain("APP_VERSION = '78.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 86');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 85');
-    expect(gradle).toContain('versionName "77.0.0"');
+    expect(gradle).toContain('versionCode 86');
+    expect(gradle).toContain('versionName "78.0.0"');
   });
 });

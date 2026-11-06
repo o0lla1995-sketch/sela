@@ -350,6 +350,28 @@ export interface BackupFile {
     note: string | null;
     created_at: string;
   }[];
+  /** v78 (الجولة 91 #٢): حسابات التجار — السجل وحركاته (توريد/
+   *  سداد/مرتجع/تحصيل) تُحمل مع النسخة الاحتياطية كاملة؛ معرّفات
+   *  التجار تُعاد ربطها عند الاستعادة (نفس دفتر الديون). */
+  merchants?: {
+    id: number;
+    name: string;
+    phone: string | null;
+    id_number: string | null;
+    notes: string | null;
+    created_at: string;
+  }[];
+  merchant_movements?: {
+    merchant_id: number;
+    ref: string;
+    kind: 'invoice' | 'payment' | 'return' | 'collection';
+    amount: number;
+    method: string | null;
+    note: string | null;
+    items_json: string | null;
+    cash_ref: string | null;
+    created_at: string;
+  }[];
   /** v18 (round-24 #1): money صِلة collected on the store's behalf
    *  (customer repaid through the Sila app) — restoring this ledger
    *  keeps the treasury and reports whole; without it every restored
@@ -468,6 +490,8 @@ export const BackupService = {
       localCustomers,
       localDebts,
       localPayments,
+      merchantsRaw,
+      merchantMovesRaw,
       appCollections,
       voucherRedemptions,
       campaignDebts,
@@ -564,6 +588,20 @@ export const BackupService = {
           `SELECT local_customer_id, receipt_ref, amount_minor, method, note,
                 created_at
          FROM local_payments`,
+        )
+        .catch(() => ({rows: []})),
+      // v78 (الجولة 91 #٢): حسابات التجار وحركاتها.
+      db
+        .execute(
+          `SELECT id, name, phone, id_number, notes, created_at
+         FROM merchants`,
+        )
+        .catch(() => ({rows: []})),
+      db
+        .execute(
+          `SELECT merchant_id, ref, kind, amount, method, note, items_json,
+                cash_ref, created_at
+         FROM merchant_movements`,
         )
         .catch(() => ({rows: []})),
       db
@@ -929,6 +967,30 @@ export const BackupService = {
         amount_minor: Number(row.amount_minor ?? 0),
         method: String(row.method ?? 'cash'),
         note: row.note == null ? null : String(row.note),
+        created_at: String(row.created_at ?? ''),
+      })),
+      // v78 (الجولة 91 #٢): دفتر التجار — السجل وحركاته حرفياً.
+      merchants: rowsOf(merchantsRaw).map(row => ({
+        id: Number(row.id ?? 0),
+        name: String(row.name ?? ''),
+        phone: row.phone == null ? null : String(row.phone),
+        id_number: row.id_number == null ? null : String(row.id_number),
+        notes: row.notes == null ? null : String(row.notes),
+        created_at: String(row.created_at ?? ''),
+      })),
+      merchant_movements: rowsOf(merchantMovesRaw).map(row => ({
+        merchant_id: Number(row.merchant_id ?? 0),
+        ref: String(row.ref ?? ''),
+        kind: (['invoice', 'payment', 'return', 'collection'].includes(
+          String(row.kind ?? ''),
+        )
+          ? String(row.kind)
+          : 'invoice') as 'invoice' | 'payment' | 'return' | 'collection',
+        amount: Number(row.amount ?? 0),
+        method: row.method == null ? null : String(row.method),
+        note: row.note == null ? null : String(row.note),
+        items_json: row.items_json == null ? null : String(row.items_json),
+        cash_ref: row.cash_ref == null ? null : String(row.cash_ref),
         created_at: String(row.created_at ?? ''),
       })),
       // v18 (round-24 #1): the Sila-app collections ledger.
@@ -1720,8 +1782,12 @@ export const BackupService = {
       await tx.execute('DELETE FROM local_payments');
       await tx.execute('DELETE FROM local_debts');
       await tx.execute('DELETE FROM local_customers');
+      // v78 (الجولة 91 #٢): دفتر التجار — الحركات أولاً ثم السجل
+      // (ترتيب FK مع CASCADE يكفي لكن الترتيب الصريح أوضح).
+      await tx.execute('DELETE FROM merchant_movements');
+      await tx.execute('DELETE FROM merchants');
       await tx.execute(
-        "DELETE FROM sqlite_sequence WHERE name IN ('local_customers','local_debts','local_payments')",
+        "DELETE FROM sqlite_sequence WHERE name IN ('local_customers','local_debts','local_payments','merchants','merchant_movements')",
       );
       const localCustomerMap = new Map<number, number>();
       for (const customer of doc.local_customers ?? []) {
@@ -1803,6 +1869,57 @@ export const BackupService = {
               payment.method || 'cash',
               payment.note ?? null,
               payment.created_at || nowLocal(),
+            ],
+          );
+        } catch {
+          // Duplicate ref — first copy wins.
+        }
+      }
+
+      // v78 (الجولة 91 #٢): دفتر التجار — السجل يُستعاد أولاً مع
+      // إعادة ربط المعرّفات، ثم حركاته كلها (فواتير التوريد وبنودها
+      // JSON والسدادات بمراجع سنداتها) تشير للتاجر الصحيح.
+      const merchantMap = new Map<number, number>();
+      for (const merchant of doc.merchants ?? []) {
+        if (!merchant.name) {
+          continue;
+        }
+        const insert = await tx.execute(
+          `INSERT INTO merchants (name, phone, id_number, notes, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            merchant.name,
+            merchant.phone ?? null,
+            merchant.id_number ?? null,
+            merchant.notes ?? null,
+            merchant.created_at || nowLocal(),
+          ],
+        );
+        if (merchant.id != null && insert.insertId != null) {
+          merchantMap.set(merchant.id, insert.insertId);
+        }
+      }
+      for (const movement of doc.merchant_movements ?? []) {
+        const mappedId = merchantMap.get(movement.merchant_id);
+        if (mappedId == null || !movement.ref) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO merchant_movements
+              (merchant_id, ref, kind, amount, method, note, items_json,
+               cash_ref, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              mappedId,
+              movement.ref,
+              movement.kind,
+              Number(movement.amount ?? 0),
+              movement.method ?? null,
+              movement.note ?? null,
+              movement.items_json ?? null,
+              movement.cash_ref ?? null,
+              movement.created_at || nowLocal(),
             ],
           );
         } catch {

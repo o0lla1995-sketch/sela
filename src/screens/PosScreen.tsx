@@ -4978,7 +4978,17 @@ function WeightSheet({
               {unitRows != null && unitRows.length > 0 ? (
                 <>
                   <Text style={styles.weightQuickLabel}>وحدات المنتج</Text>
-                  {unitRows.map(row => {
+                  {/* v78 (الجولة 91 #١): وحدات الوزن مرتبة تصاعدياً
+                      بالسعر — الأقل في الأعلى. */}
+                  {unitRows
+                    .slice()
+                    .sort(
+                      (a, b) =>
+                        unitPriceFor(product, a, pricingMode) -
+                          unitPriceFor(product, b, pricingMode) ||
+                        a.conversion - b.conversion,
+                    )
+                    .map(row => {
                     const price = unitPriceFor(product, row, pricingMode);
                     return (
                       <TouchableOpacity
@@ -5692,9 +5702,19 @@ function SaleSheetView({
   const clothingVariants = (product.variants ?? []).filter(
     v => v.kind === 'variant',
   );
-  const sizeVariants = (product.variants ?? []).filter(
-    v => v.kind === 'size',
-  );
+  // v78 (الجولة 91 #١): خيارات البيع (الأحجام) تُرتّب تصاعدياً بالسعر
+  //  الفعلي — الأقل في الأعلى إلى الأكبر في الأسفل (طلب التاجر:
+  //  «تظهر متغيرات الصنف بالترتيب علي حسب السعر من الاقل في
+  //  الأعلي الي الأكبر»). المفاضلة على السعر قبل خصم المنتج (نفس
+  //  ترتيب الأسعار المعروض بعد الخصم) مع فاصل بالمعرّف للثبات.
+  const sizeVariants = [...(product.variants ?? [])]
+    .filter(v => v.kind === 'size')
+    .sort(
+      (a, b) =>
+        (a.retail_price ?? product.retail_price) -
+          (b.retail_price ?? product.retail_price) ||
+        a.id - b.id,
+    );
   const colors = [...new Set(clothingVariants.map(v => v.color))];
   const activeColor = color ?? colors[0] ?? null;
   const colorVariants = clothingVariants.filter(v => v.color === activeColor);
@@ -6081,7 +6101,17 @@ function SaleSheetView({
                     color={pickedUnitId == null ? c.accent : c.textFaint}
                   />
                 </TouchableOpacity>
-                {(unitRows ?? []).map(row => {
+                {/* v78 (الجولة 91 #١): الوحدات مرتبة تصاعدياً بالسعر
+                    الفعلي — الأقل في الأعلى. */}
+                {(unitRows ?? [])
+                  .slice()
+                  .sort(
+                    (a, b) =>
+                      unitPriceFor(product, a, pricingMode) -
+                        unitPriceFor(product, b, pricingMode) ||
+                      a.conversion - b.conversion,
+                  )
+                  .map(row => {
                   const active = pickedUnitId === row.unit_id;
                   const price = unitPriceFor(product, row, pricingMode);
                   return (

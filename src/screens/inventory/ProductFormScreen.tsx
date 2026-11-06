@@ -393,7 +393,22 @@ export function ProductFormScreen() {
             );
             setCategoryId(product.category_id ?? 'none');
             setSaleMode(product.sold_by_weight === 1 ? 'weight' : 'piece');
-            setUnitRows(productUnits.map(unitRowToDraft));
+            // v78 (الجولة 91 #١): صفوف الوحدات تُحمّل مرتبة تصاعدياً
+            //  بالسعر الفعلي (تجاوز الوحدة أو سعر الأساس × التحويل) —
+            //  نفس ترتيب ظهورها في نافذة البيع: الأقل في الأعلى.
+            setUnitRows(
+              productUnits
+                .slice()
+                .sort(
+                  (a, b) =>
+                    (a.retail_price ??
+                      product.retail_price * a.conversion) -
+                      (b.retail_price ??
+                        product.retail_price * b.conversion) ||
+                    a.conversion - b.conversion,
+                )
+                .map(unitRowToDraft),
+            );
             // v35 (الجولة 43): وحدة الأساس + المخزون بلا تتبع
             //  يُحمّلان كما حفظا — بلغة المجال نفسها.
             setBaseUnitName(product.base_unit_name ?? null);
@@ -417,12 +432,24 @@ export function ProductFormScreen() {
               }
               if (sizeVariants.length > 0) {
                 setSizesEnabled(true);
+                // v78 (الجولة 91 #١): الأحجام تُحمّل مرتبة تصاعدياً
+                //  بالسعر — الأقل في الأعلى (نافذة البيع والنموذج
+                //  بنفس الترتيب).
                 setSizeDrafts(
-                  sizeVariants.map(v => ({
-                    size: v.size,
-                    price: v.retail_price != null ? String(v.retail_price) : '',
-                    cost: v.cost_price != null ? String(v.cost_price) : '',
-                  })),
+                  sizeVariants
+                    .slice()
+                    .sort(
+                      (a, b) =>
+                        (a.retail_price ?? product.retail_price) -
+                          (b.retail_price ?? product.retail_price) ||
+                        a.id - b.id,
+                    )
+                    .map(v => ({
+                      size: v.size,
+                      price:
+                        v.retail_price != null ? String(v.retail_price) : '',
+                      cost: v.cost_price != null ? String(v.cost_price) : '',
+                    })),
                 );
               }
             }

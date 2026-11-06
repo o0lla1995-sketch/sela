@@ -41,6 +41,7 @@ import {BarChart, peakIndex} from '../../components/charts/BarChart';
 import {Icon, type IconName} from '../../components/Icon';
 import {ReportService, type ReportBundle} from '../../services/ReportService';
 import {ReportRepo} from '../../database/repositories/ReportRepo';
+import {MerchantRepo} from '../../database/repositories/MerchantRepo';
 import {rangeFor} from '../../services/ReportService';
 import {displayMethod} from '../../core/paymentMethods';
 import {ExportService} from '../../services/ExportService';
@@ -106,6 +107,20 @@ export function ReportsScreen() {
   const [liveMethods, setLiveMethods] = useState<
     Awaited<ReturnType<typeof ReportRepo.methodLedgerTotals>>
   >([]);
+  /** v78 (الجولة 91 #٢): إجماليات حسابات التجار — المستحق لهم الآن
+   *  وحركة فترة التقرير (توريد/سداد/مرتجع/تحصيل) وأكبر المستحقات. */
+  const [merchantTotals, setMerchantTotals] = useState<
+    Awaited<ReturnType<typeof MerchantRepo.totals>>
+  >({
+    count: 0,
+    owedNow: 0,
+    creditNow: 0,
+    purchasesInRange: 0,
+    paymentsInRange: 0,
+    returnsInRange: 0,
+    collectionsInRange: 0,
+    topOwed: [],
+  });
   const [exporting, setExporting] = useState<'csv' | 'xls' | null>(null);
   const [topMode, setTopMode] = useState<'revenue' | 'profit'>('revenue');
   // v26 (round-34 #6): the cash & debts sections start COLLAPSED —
@@ -124,7 +139,13 @@ export function ReportsScreen() {
     async (key: ReportRangeKey) => {
       setLoading(true);
       try {
-        const [next, nextPayMethods, nextLiveMethods] = await Promise.all([
+        const merchantRange = rangeFor(key);
+        const [
+          next,
+          nextPayMethods,
+          nextLiveMethods,
+          nextMerchantTotals,
+        ] = await Promise.all([
           ReportService.loadBundle(key),
           ReportRepo.methodLedgerTotals(rangeFor(key)),
           // v76 (الجولة ٨٨ #٣+٤): الأرصدة الحية عبر التاريخ — رصيد
@@ -133,10 +154,14 @@ export function ReportsScreen() {
             from: '2000-01-01',
             to: '2999-12-31',
           }),
+          // v78 (الجولة 91 #٢): حسابات التجار — الرصيد الآن دائماً +
+          // حركة فترة التقرير (توريد/سداد/مرتجع/تحصيل).
+          MerchantRepo.totals(merchantRange.from, merchantRange.to),
         ]);
         setBundle(next);
         setPayMethods(nextPayMethods);
         setLiveMethods(nextLiveMethods);
+        setMerchantTotals(nextMerchantTotals);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         toast(message, 'error');
@@ -456,7 +481,7 @@ export function ReportsScreen() {
   }[] = [
     {key: 'overview', label: 'الملخص', icon: 'chart', hint: 'مؤشرات المبيعات وأداؤها'},
     {key: 'cash', label: 'النقد والخزينة', icon: 'wallet', hint: 'المحصّل والمصروفات وأرصدة القنوات'},
-    {key: 'debts', label: 'الديون والقسائم', icon: 'book', hint: 'فواتير الدين والقسائم الشرائية'},
+    {key: 'debts', label: 'الديون والقسائم', icon: 'book', hint: 'فواتير الدين والقسائم وحسابات التجار'},
     {key: 'products', label: 'المنتجات والتصدير', icon: 'list', hint: 'الأكثر إيراداً وتصدير التقارير'},
     {
       key: 'stockValue',
@@ -1212,6 +1237,101 @@ export function ReportsScreen() {
               </Card>
             ) : null}
 
+            {/* ── v78 (الجولة 91 #٢): حسابات التجار — المستحق لهم
+                الآن (رصيد حي دائماً) + حركة فترة التقرير (توريد/
+                سداد/مرتجع/تحصيل) + أكبر المستحقات. طلب التاجر:
+                «المستحقات الخاصة بالتجار وبالتقارير». ── */}
+            {activeTab === 'debts' ? (
+              <Card>
+                <SectionTitle
+                  title="حسابات التجار"
+                  hint="فواتير التوريد والسدادات — الرصيد الآن دائماً"
+                />
+                {merchantTotals.count === 0 ? (
+                  <EmptyState
+                    icon="store"
+                    title="لا تجار بعد"
+                    subtitle="أضف تجارك من شاشة «التجار» في الرئيسية وسجّل فواتير التوريد"
+                  />
+                ) : (
+                  <>
+                    <View style={styles.statsGrid}>
+                      <View style={styles.statsCell}>
+                        <StatCard
+                          label={`مستحق للتجار الآن · ${merchantTotals.count} تاجر`}
+                          value={formatMoney(merchantTotals.owedNow)}
+                          tone={merchantTotals.owedNow > 0 ? 'danger' : 'success'}
+                          icon="store"
+                        />
+                      </View>
+                      <View style={styles.statsCell}>
+                        <StatCard
+                          label="لك عند التجار"
+                          value={formatMoney(merchantTotals.creditNow)}
+                          tone="success"
+                          icon="wallet"
+                        />
+                      </View>
+                      <View style={styles.statsCell}>
+                        <StatCard
+                          label="توريد بالفترة"
+                          value={formatMoney(merchantTotals.purchasesInRange)}
+                          tone="accent"
+                          icon="plus"
+                        />
+                      </View>
+                      <View style={styles.statsCell}>
+                        <StatCard
+                          label="سدادات بالفترة"
+                          value={formatMoney(merchantTotals.paymentsInRange)}
+                          tone="success"
+                          icon="wallet"
+                        />
+                      </View>
+                      <View style={styles.statsCell}>
+                        <StatCard
+                          label="مرتجعات/خصومات بالفترة"
+                          value={formatMoney(merchantTotals.returnsInRange)}
+                          icon="undo"
+                        />
+                      </View>
+                      <View style={styles.statsCell}>
+                        <StatCard
+                          label="تحصيلات منه بالفترة"
+                          value={formatMoney(merchantTotals.collectionsInRange)}
+                          icon="download"
+                        />
+                      </View>
+                    </View>
+                    <CollapseSection
+                      title={`أكبر المستحقات للتجار · ${merchantTotals.topOwed.length}`}
+                      valueText={formatMoney(
+                        merchantTotals.topOwed.reduce(
+                          (sum, row) => sum + row.balance,
+                          0,
+                        ),
+                      )}
+                      valueColor={c.warning}
+                      open={openSections['merTop'] ?? false}
+                      onToggle={() => toggleSection('merTop')}
+                      show={merchantTotals.topOwed.length > 0}>
+                      {merchantTotals.topOwed.map((row, index) => (
+                        <View key={row.merchant.id} style={styles.merTopRow}>
+                          <Text style={styles.merTopRank}>{index + 1}</Text>
+                          <Text style={styles.merTopName} numberOfLines={1}>
+                            {row.merchant.name}
+                          </Text>
+                          <Text style={[styles.merTopValue, {color: c.danger}]}>
+                            {formatMoney(row.balance)}
+                          </Text>
+                        </View>
+                      ))}
+                    </CollapseSection>
+                  </>
+                )}
+              </Card>
+            ) : null}
+
             {/* v68: تبويب «المنتجات والتصدير». */}
             {activeTab === 'products' ? (
             <>
@@ -1570,6 +1690,33 @@ function CollapseSection({
 
 const useStyles = makeStyles(c =>
   StyleSheet.create({
+    // ── v78 (الجولة 91 #٢): صفوف أكبر المستحقات للتجار — ترتيب
+    //    مرقم + اسم + رصيد، نفس لغة قوائم التقارير الجدولية. ──
+    merTopRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingVertical: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    merTopRank: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: 13,
+      minWidth: 16,
+    },
+    merTopName: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: 13,
+    },
+    merTopValue: {
+      fontFamily: fonts.black,
+      fontSize: 13,
+      fontVariant: ['tabular-nums'],
+    },
     // ── v68 (الجولة 80 #٤ب) ← v69 (الجولة 81 #١): شريط تبويبات
     //    التقارير — أيقونات فقط بلا نص بجانبها (بطلب التاجر)، كل
     //    تبويب مربع متساوٍ يتوسطه الرمز، واسم النشط تحت الشريط. ──

@@ -158,13 +158,13 @@ describe('v77 — ٣ السجل: تسويات تعديل الفاتورة خار
   });
 });
 
-describe('v77 — ٤ الإصدار: 77.0.0 (85) في config والبناء', () => {
-  test('config.ts وbuild.gradle عند 77.0.0 / 85', () => {
+describe('v77 — ٤ الإصدار: 77.0.0 (86) في config والبناء', () => {
+  test('config.ts وbuild.gradle عند 78.0.0 / 86', () => {
     const config = read(CONFIG);
     const gradle = read(GRADLE);
-    expect(config).toContain("APP_VERSION = '77.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 85');
-    expect(gradle).toContain('versionName "77.0.0"');
-    expect(gradle).toContain('versionCode 85');
+    expect(config).toContain("APP_VERSION = '78.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 86');
+    expect(gradle).toContain('versionName "78.0.0"');
+    expect(gradle).toContain('versionCode 86');
   });
 });

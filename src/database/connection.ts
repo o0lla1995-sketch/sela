@@ -512,6 +512,36 @@ const DDL_STATEMENTS: string[] = [
     UNIQUE (cashier_id, device_id)
   )`,
   'CREATE INDEX IF NOT EXISTS idx_landev_status ON lan_devices(status, cashier_id)',
+  // ── v78 (الجولة 91 #٢): حسابات التجار (الموردين) — دفتر الذمم
+  // الدائنة بمعيار الأنظمة الاحترافية: سجل تجار + سجل حركات موحد
+  // لكل تاجر. فاتورة التوريد (invoice) ترفع ما علينا له؛ السداد
+  // (payment) والمرتجع/الخصم (return) والتحصيل منه (collection)
+  // تخفضه. بنود فاتورة التوريد JSON داخل items_json (خفة المخطط
+  // وسهولة النسخ الاحتياطي)؛ method تحمل قناة السداد/التحصيل
+  // (cash/بنك/محفظة — نفس معرفات PAYMENT_METHODS) و cash_ref
+  // يربط سند الخزينة المرافق كي يوازن كشف الخزينة كشف التاجر.
+  `CREATE TABLE IF NOT EXISTS merchants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    phone TEXT,
+    id_number TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS merchant_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant_id INTEGER NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    ref TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('invoice','payment','return','collection')),
+    amount REAL NOT NULL CHECK (amount > 0),
+    method TEXT,
+    note TEXT,
+    items_json TEXT,
+    cash_ref TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_merchant_moves ON merchant_movements(merchant_id, created_at DESC, id DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_merchant_moves_kind ON merchant_movements(kind, created_at DESC)',
 ];
 
 const DEFAULT_CATEGORIES: string[] = [
@@ -2231,6 +2261,9 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM local_payments');
   await database.execute('DELETE FROM local_debts');
   await database.execute('DELETE FROM local_customers');
+  // v78 (الجولة 91 #٢): دفتر التجار.
+  await database.execute('DELETE FROM merchant_movements');
+  await database.execute('DELETE FROM merchants');
   await database.execute('DELETE FROM campaign_settlements');
   await database.execute('DELETE FROM campaign_debts');
   await database.execute('DELETE FROM voucher_redemptions');
@@ -2239,7 +2272,7 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM online_order_items');
   await database.execute('DELETE FROM online_orders');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sale_return_exchanges','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','voucher_redemptions','campaign_settlements','cash_movements','online_order_items')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sale_return_exchanges','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','merchants','merchant_movements','voucher_redemptions','campaign_settlements','cash_movements','online_order_items')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

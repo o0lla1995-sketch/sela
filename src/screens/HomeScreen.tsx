@@ -71,6 +71,7 @@ const QUICK_ACTIONS: {
     | 'Sila'
     | 'LocalDebts'
     | 'CashMovements'
+    | 'Merchants'
     /** v48 (الجولة 56): طلبات البيع أونلاين. */
     | 'OnlineOrders';
   accent?: boolean;
@@ -79,6 +80,9 @@ const QUICK_ACTIONS: {
   {key: 'add', label: 'إضافة منتج', icon: 'plus', target: 'ProductForm'},
   {key: 'invoices', label: 'الفواتير', icon: 'inbox', target: 'Invoices'},
   {key: 'debts', label: 'دفتر الديون', icon: 'book', target: 'LocalDebts'},
+  // v78 (الجولة 91 #٢): حسابات التجار — فواتير التوريد والمستحقات
+  // وصفحة كشف حساب لكل تاجر (ذمم دائنة بمعيار الأنظمة الاحترافية).
+  {key: 'merchants', label: 'التجار', icon: 'store', target: 'Merchants'},
   // v26 (round-34 #6): الخزينة gets its own shortcut — the expenses /
   // withdrawals / deposits center is one tap away from the dashboard
   // (it left the reports header to live HERE).

@@ -144,7 +144,7 @@ export function LocalDebtsScreen() {
   const [linkBusy, setLinkBusy] = useState(false);
   /** v35 (الجولة 43): تعديل بيانات الزبون من نافذته — طلب التاجر:
    *  «لا يوجد خيار تعديل بيانات الزبون في نافذة الزبون». نفس
-   *  معايير التسجيل (هوية 9 أرقام، جوال 056/059) وتحقق فوري
+   *  معايير التسجيل (هوية اختيارية v78، جوال 056/059) وتحقق فوري
    *  داخل الحقول، وتفرد الهوية يُفحص قبل الحفظ. */
   const [editOpen, setEditOpen] = useState(false);
   const [editId, setEditId] = useState('');
@@ -208,16 +208,13 @@ export function LocalDebtsScreen() {
     if (addBusy) {
       return;
     }
-    // v19 (round-25 #3): the registration standards — ID exactly 9
-    // digits, mobile exactly 10 digits starting 056/059. Errors are
-    // shown INLINE under their fields (and the offending field
-    // grabs focus), not as a late alert after the fact.
+    // v19 (round-25 #3) → v78 (الجولة 91 #٣): معايير التسجيل —
+    // الجوال 10 أرقام يبدأ 056/059، ورقم الهوية صار اختيارياً:
+    // فارغ = بلا هوية؛ وإن أُدخل فـ9 أرقام بالضبط. الأخطاء تظهر
+    // INLINE تحت حقولها (والحقل المخالف يمسك التركيز).
     const errors: {id?: string; name?: string; phone?: string} = {};
-    if (!isValidIdNumber(addId)) {
-      errors.id =
-        addId.length === 0
-          ? 'رقم الهوية مطلوب'
-          : `رقم الهوية 9 أرقام بالضبط (${addId.length} حالياً)`;
+    if (addId.trim().length > 0 && !isValidIdNumber(addId.trim())) {
+      errors.id = `رقم الهوية 9 أرقام بالضبط (${addId.trim().length} حالياً) — أو اتركه فارغاً`;
     }
     if (addName.trim().length === 0) {
       errors.name = 'اسم الزبون مطلوب';
@@ -274,17 +271,16 @@ export function LocalDebtsScreen() {
     setEditOpen(true);
   }, []);
 
-  /** v35: حفظ التعديل — نفس معايير التسجيل + تفرد الهوية. */
+  /** v35: حفظ التعديل — نفس معايير التسجيل + تفرد الهوية.
+   *  v78 (الجولة 91 #٣): الهوية اختيارية هنا أيضاً — الحذف (فراغ)
+   *  مسموح ويخزن NULL، والتفرد يُفحص لمن أدخل هوية فقط. */
   const saveEdit = useCallback(async () => {
     if (editBusy || detail == null) {
       return;
     }
     const errors: {id?: string; name?: string; phone?: string} = {};
-    if (!isValidIdNumber(editId)) {
-      errors.id =
-        editId.length === 0
-          ? 'رقم الهوية مطلوب'
-          : `رقم الهوية 9 أرقام بالضبط (${editId.length} حالياً)`;
+    if (editId.trim().length > 0 && !isValidIdNumber(editId.trim())) {
+      errors.id = `رقم الهوية 9 أرقام بالضبط (${editId.trim().length} حالياً) — أو اتركه فارغاً`;
     }
     if (editName.trim().length === 0) {
       errors.name = 'اسم الزبون مطلوب';
@@ -297,9 +293,11 @@ export function LocalDebtsScreen() {
           ? `رقم الجوال 10 أرقام بالضبط (${editPhone.length} حالياً)`
           : 'يبدأ بـ 056 أو 059 فقط';
     }
-    // الهوية وحدها إن تغيّرت: لا يجوز أن يملكها زبون آخر.
+    // الهوية وحدها إن تغيّرت: لا يجوز أن يملكها زبون آخر
+    // (v78: فقط عندما أُدخل هوية فعلية — الفارغ مسموح للجميع).
     if (
       errors.id == null &&
+      editId.trim().length > 0 &&
       editId.trim() !== detail.customer.id_number
     ) {
       const holder = await LocalDebtsRepo.byIdNumber(editId.trim());
@@ -926,7 +924,9 @@ export function LocalDebtsScreen() {
                   ) : null}
                 </View>
                 <Text style={styles.customerMeta} numberOfLines={1}>
-                  هوية {entry.customer.id_number}
+                  {entry.customer.id_number
+                    ? `هوية ${entry.customer.id_number}`
+                    : 'بلا رقم هوية'}
                   {entry.customer.phone ? ` · ${entry.customer.phone}` : ''}
                 </Text>
               </View>
@@ -975,7 +975,7 @@ export function LocalDebtsScreen() {
             <Text style={styles.sheetTitle}>حساب دين جديد — دفتر المتجر</Text>
             <Field
               ref={idFieldRef}
-              label="رقم الهوية (9 أرقام) *"
+              label="رقم الهوية (اختياري — 9 أرقام)"
               value={addId}
               onChangeText={text => {
                 setAddId(text.replace(/\D/g, '').slice(0, 9));
@@ -1030,8 +1030,9 @@ export function LocalDebtsScreen() {
               <Text style={styles.fieldError}>{addErrors.phone}</Text>
             ) : null}
             <Text style={styles.sheetHint}>
-              معايير التسجيل: هوية 9 أرقام بالضبط، وجوال 10 أرقام يبدأ بـ 056
-              أو 059. رقم الهوية يمنع تكرار الزبون: إن كان له حساب صِلة بنفس
+              معايير التسجيل: الجوال 10 أرقام يبدأ بـ 056 أو 059. رقم
+              الهوية اختياري (v78): اتركه فارغاً أو 9 أرقام بالضبط —
+              إن أُدخل يمنع تكرار الزبون: إن كان له حساب صِلة بنفس
               الرقم سيظهر تنبيه — ديونته تسجَّل عبر صِلة أو يُربط الحسابان
               لاحقاً.
             </Text>
@@ -1079,7 +1080,9 @@ export function LocalDebtsScreen() {
               <View style={{flex: 1}}>
                 <Text style={styles.detailName}>{detail.customer.name}</Text>
                 <Text style={styles.detailMeta}>
-                  هوية {detail.customer.id_number}
+                  {detail.customer.id_number
+                    ? `هوية ${detail.customer.id_number}`
+                    : 'بلا رقم هوية'}
                   {detail.customer.phone ? ` · ${detail.customer.phone}` : ''}
                 </Text>
                 {detail.customer.sila_customer_id != null ? (
@@ -1342,7 +1345,7 @@ export function LocalDebtsScreen() {
               keyboardShouldPersistTaps="handled">
               <Field
                 ref={editIdFieldRef}
-                label="رقم الهوية (9 أرقام) *"
+                label="رقم الهوية (اختياري — 9 أرقام)"
                 value={editId}
                 onChangeText={text => {
                   setEditId(text.replace(/\D/g, '').slice(0, 9));
@@ -1397,8 +1400,9 @@ export function LocalDebtsScreen() {
                 <Text style={styles.fieldError}>{editErrors.phone}</Text>
               ) : null}
               <Text style={styles.sheetHint}>
-                نفس معايير التسجيل: هوية 9 أرقام بالضبط وجوال 10 أرقام يبدأ
-                بـ 056 أو 059. رقم الهوية لا يُقبل إن كان مسجّلاً لزبون آخر
+                نفس معايير التسجيل: الجوال 10 أرقام يبدأ بـ 056 أو 059،
+                ورقم الهوية اختياري — احذفه (فراغ) أو 9 أرقام بالضبط،
+                ولا يُقبل إن كان مسجّلاً لزبون آخر
                 — وسجل الديون والسدادّات يبقى كما هو تماماً.
               </Text>
               <AppButton

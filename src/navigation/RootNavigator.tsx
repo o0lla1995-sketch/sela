@@ -42,6 +42,7 @@ import {
 } from '../screens/invoices/InvoicesScreen';
 import {SilaScreen} from '../screens/sila/SilaScreen';
 import {LocalDebtsScreen} from '../screens/debts/LocalDebtsScreen';
+import {MerchantsScreen} from '../screens/merchants/MerchantsScreen';
 import {SecuritySettingsScreen} from '../screens/settings/SecuritySettingsScreen';
 import {CashMovementsScreen} from '../screens/cash/CashMovementsScreen';
 import {DriveBackupScreen} from '../screens/settings/DriveBackupScreen';
@@ -75,6 +76,9 @@ export type RootStackParamList = {
   /** v16 (round-22 #4): the STORE-LOCAL debt book — customer
    *  accounts by ID number, local debts & repayments. */
   LocalDebts: undefined;
+  /** v78 (الجولة 91 #٢): حسابات التجار والموردين — فواتير التوريد
+   *  والمستحقات وصفحة كشف حساب لكل تاجر. */
+  Merchants: undefined;
   /** v13 (round-19 #2): app-lock setup (fingerprint + 4-digit PIN). */
   Security: undefined;
   /** v25 (round-32 #3): الخزينة والمصروفات — the cash movements
@@ -236,6 +240,7 @@ export function RootNavigator() {
         />
         <Stack.Screen name="Sila" component={SilaScreen} />
         <Stack.Screen name="LocalDebts" component={LocalDebtsScreen} />
+        <Stack.Screen name="Merchants" component={MerchantsScreen} />
         <Stack.Screen name="Security" component={SecuritySettingsScreen} />
         <Stack.Screen name="Cashiers" component={CashiersScreen} />
         <Stack.Screen

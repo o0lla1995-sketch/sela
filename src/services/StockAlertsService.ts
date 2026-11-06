@@ -163,6 +163,21 @@ export const StockAlertsService = {
         ledger.keys = [...ledger.keys, ...newKeys].slice(-400);
         saveLedger(ledger);
       }
+      // v78 (الجولة 91 #٤): المنتجات بلا تتبع لا تُنذَر نفاداً أبداً
+      // (منذ v35) — والآن يُنظَّف مركز الإشعارات أيضاً من أي إشعارات
+      // نفاد/انخفاض تاريخية عالقة لها (قبل وسمها بلا تتبع أو من
+      // دفتر المخصومات في نسخ قديمة) فلا تصل للتاجر مجدداً بأي
+      // مسار. طلب التاجر نصاً: «يجب الا يتم ارسال إشعارات نفاد
+      // المخزون للمنتجات التي بدون تتبع».
+      const untrackedIds = new Set<number>();
+      for (const product of products) {
+        if (product.stock_untracked === 1) {
+          untrackedIds.add(product.id);
+        }
+      }
+      if (untrackedIds.size > 0) {
+        notificationsStore.dropStockAlertsFor(untrackedIds);
+      }
       return {low, out, expired, expiring};
     } catch (error) {
       // Alerts must never break the business flow.
