@@ -35,6 +35,7 @@ import {useSyncStore} from '../store/sync';
 import {initOfflineStore, listInvoices} from '../store/offline';
 import {useAppSettings} from '../store/settings';
 import {CashierApi} from '../api/client';
+import {APP_VERSION_LABEL} from '../core/config';
 import {biometricAvailability, type BiometricStatus} from '../native';
 
 export function MeScreen() {
@@ -298,7 +299,7 @@ export function MeScreen() {
         variant="danger"
         onPress={() => void signOut()}
       />
-      <Text style={styles.version}>سيلّا كاشير · الإصدار 3.2.0 (7)</Text>
+      <Text style={styles.version}>سيلّا كاشير · الإصدار {APP_VERSION_LABEL}</Text>
     </ScrollView>
   );
 }

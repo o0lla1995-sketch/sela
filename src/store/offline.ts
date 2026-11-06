@@ -49,6 +49,10 @@ export interface LocalInvoice {
   total: number;
   discount: number;
   customerName: string | null;
+  /** v3.5 (الجولة 91 — كاشير #2): معرّف زبون الدفتر لبيعة الدين
+   *  المحلية — به يُبنى «دفتر الدين المعلق» لحظة البيع دون
+   *  اتصال، ويُصالَح تلقائياً مع أرصدة الخادم بعد المزامنة. */
+  customerId: number | null;
   createdAt: string;
   syncedAt: string | null;
   rejectReason: string | null;
@@ -115,6 +119,13 @@ export async function initOfflineStore(): Promise<void> {
   // ومسكوك مثل source_ref تماماً.
   try {
     await localDb.run('ALTER TABLE invoices ADD COLUMN payment_method TEXT');
+  } catch {
+    // العمود موجود مسبقاً.
+  }
+  // v3.5 (الجولة 91 — كاشير #2): معرّف زبون الدفتر — لدفتر الدين
+  // المحلي المعلق (بيع دين دون اتصال يظهر رصيده فوراً).
+  try {
+    await localDb.run('ALTER TABLE invoices ADD COLUMN customer_id INTEGER');
   } catch {
     // العمود موجود مسبقاً.
   }
@@ -268,7 +279,11 @@ export async function recordLocalOp(input: {
   payMethod?: string | null;
   total: number;
   discount: number;
+  /** v3.5: اسم الزبون الحقيقي (لا «زبون الدفتر») — يظهر في
+   *  الأرشيف ويُسافر مع الحمولة ليشفي الخادم الربط بالاسم. */
   customerName: string | null;
+  /** v3.5: معرّف زبون الدفتر — لدفتر الدين المحلي المعلق. */
+  customerId?: number | null;
   createdAt: string;
   lines: DraftLine[];
   payload: Record<string, unknown>;
@@ -284,14 +299,15 @@ export async function recordLocalOp(input: {
        * اختيار طريقة الدفع. المحاذاة الآن حرفية:
        *   ref, kind, display_number ← ؟؟؟
        *   synced_number ← NULL · status ← 'pending'
-       *   pay_kind, payment_method, total, discount, customer_name,
-       *   created_at ← ؟؟؟؟؟؟
+       *   pay_kind, payment_method, total, discount,
+       *   customer_name, customer_id, created_at ← ؟؟؟؟؟؟؟
        *   synced_at, reject_reason ← NULL, NULL · source_ref ← ؟ */
       sql: `INSERT INTO invoices
         (ref, kind, display_number, synced_number, status, pay_kind,
          payment_method, total,
-         discount, customer_name, created_at, synced_at, reject_reason, source_ref)
-       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+         discount, customer_name, customer_id, created_at,
+         synced_at, reject_reason, source_ref)
+       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       params: [
         input.ref,
         input.kind,
@@ -301,6 +317,7 @@ export async function recordLocalOp(input: {
         input.total,
         input.discount,
         input.customerName,
+        input.customerId ?? null,
         input.createdAt,
         input.sourceRef ?? null,
       ],
@@ -391,6 +408,69 @@ export async function pendingStockAdjustments(): Promise<
   return [...merged.values()];
 }
 
+// ── v3.5 (الجولة 91 — كاشير #2): دفتر الدين المعلق ────────────────
+/**
+ * «التسجيل اللحظي للدين» دون اتصال (طلب التاجر نصاً): كل بيعة دين
+ * تُسجَّل محلياً باسم زبونها ومعرّفه لحظة إتمامها — لا انتظار
+ * المزامنة. هذا الدفتر المعلق يجيب: «كم زاد دين كل زبون من
+ * عمليات هذا الجهاز التي لم تصل نقطة البيع بعد؟»
+ *
+ * المعادلة (لكل زبون):
+ *   دين معلّق = Σ(مبيعات دين معلقة) − Σ(مرتجعات معلقة مصدرها
+ *               فاتورة دين لنفس الزبون)
+ *
+ * لأن إرجاع أصناف من فاتورة دين يخفض الدين عند نقطة البيع
+ * (دفترها يعدّل الرصيد عكسياً) — فالمرتجع المعلق يخفض المعلق
+ * المحلي بنفس المنطق.
+ *
+ * وبعد المزامنة يتعادل الدفتر تلقائياً: العملية تغادر «pending»
+ * فتخرج من هذا الحساب، ورصيد الخادم المسحوب (customers) يشملها
+ * — القيم الحقيقية تحلّ محل التقدير المحلي بلا أي ازدواج. ومع
+ * تعدد الكاشيرات يحسب كل جهاز معلّقه وحده فوق رصيد آخر مزامنة
+ * (الذي يشمل عمليات الأجهزة الأخرى المتزامنة) — فلا يفلت دين
+ * ولا يُحسب مرتين.
+ */
+export async function pendingDebtByCustomer(): Promise<Map<number, number>> {
+  await initOfflineStore();
+  const result = new Map<number, number>();
+  // ① مبيعات الدين المعلقة — تجمع لكل زبون.
+  const salesRows = await localDb.select(
+    `SELECT customer_id AS cid, SUM(total) AS total
+     FROM invoices
+     WHERE kind = 'sale' AND pay_kind = 'debt'
+       AND status = 'pending' AND customer_id IS NOT NULL
+     GROUP BY customer_id`,
+  );
+  for (const row of salesRows) {
+    const cid = Number(row.cid ?? 0);
+    if (cid > 0) {
+      result.set(cid, Number(row.total ?? 0));
+    }
+  }
+  // ② مرتجعات معلقة مصدرها فاتورة دين — تخفض دين صاحبها.
+  const returnRows = await localDb.select(
+    `SELECT s.customer_id AS cid, SUM(r.total) AS total
+     FROM invoices r
+     JOIN invoices s ON s.ref = r.source_ref
+     WHERE r.kind = 'return' AND r.status = 'pending'
+       AND s.pay_kind = 'debt' AND s.customer_id IS NOT NULL
+     GROUP BY s.customer_id`,
+  );
+  for (const row of returnRows) {
+    const cid = Number(row.cid ?? 0);
+    if (cid > 0) {
+      result.set(cid, (result.get(cid) ?? 0) - Number(row.total ?? 0));
+    }
+  }
+  // لا نُبقي أصفاراً — الرصيد الحقيقي يأتي من الخادم.
+  for (const [cid, total] of [...result.entries()]) {
+    if (Math.abs(total) < 0.0001) {
+      result.delete(cid);
+    }
+  }
+  return result;
+}
+
 function rowToOp(row: DbRow): OutboxOp {
   return {
     opId: String(row.op_id),
@@ -465,8 +545,8 @@ export async function listInvoices(limit = 100): Promise<LocalInvoice[]> {
   await initOfflineStore();
   const rows = await localDb.select(
     `SELECT ref, kind, display_number, synced_number, status, pay_kind,
-            payment_method, total, discount, customer_name, created_at,
-            synced_at, reject_reason, source_ref
+            payment_method, total, discount, customer_name, customer_id,
+            created_at, synced_at, reject_reason, source_ref
      FROM invoices ORDER BY created_at DESC, ref DESC LIMIT ?`,
     [limit],
   );
@@ -487,6 +567,7 @@ function rowToInvoice(row: DbRow): LocalInvoice {
     total: Number(row.total ?? 0),
     discount: Number(row.discount ?? 0),
     customerName: row.customer_name == null ? null : String(row.customer_name),
+    customerId: row.customer_id == null ? null : Number(row.customer_id),
     createdAt: String(row.created_at ?? ''),
     syncedAt: row.synced_at == null ? null : String(row.synced_at),
     rejectReason: row.reject_reason == null ? null : String(row.reject_reason),

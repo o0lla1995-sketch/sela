@@ -188,8 +188,10 @@ describe('v3.4.1 — تكافؤ علامات الاستفهام مع المعا�
       expect(placeholders).toBe(call.params.length);
     }
 
-    // جملة إدراج الفاتورة تحديداً: 14 عموداً تقابلها 14 قيمة و10
+    // جملة إدراج الفاتورة تحديداً: 15 عموداً تقابلها 15 قيمة و11
     // معاملات (NULL و'pending' حرفيان داخل الجملة).
+    // v3.5 (الجولة 91): عمود customer_id انضم — الحرس يظل يعدّ
+    // الأعمدة والقيم والمعاملات حرفياً كفحص SQLite نفسه.
     const invoiceInsert = txCalls.find(c =>
       c.sql.includes('INSERT INTO invoices'),
     );
@@ -200,12 +202,16 @@ describe('v3.4.1 — تكافؤ علامات الاستفهام مع المعا�
     const values = invoiceInsert!.sql.match(/VALUES\s*\(([^)]+)\)/s);
     expect(values).toBeDefined();
     const valueCount = values![1].split(',').length;
-    expect(columnCount).toBe(14);
-    expect(valueCount).toBe(14);
+    expect(columnCount).toBe(15);
+    expect(valueCount).toBe(15);
     // طريقة الدفع في موضعها الصحيح (العمود السابع، المعامل الخامس).
     expect(invoiceInsert!.params[4]).toBe('jawwal_pay');
+    // اسم الزبون ثم معرّفه (معاملان متتاليان بعد الخصم) — دفتر
+    // الدين المحلي المعلق يُبنى منهما (الجولة 91 — كاشير #2).
+    expect(invoiceInsert!.params[7]).toBe('أحمد');
+    expect(invoiceInsert!.params[8]).toBeNull();
     // ومصدر الربط آخر المعاملات.
-    expect(invoiceInsert!.params[9]).toBeNull();
+    expect(invoiceInsert!.params[10]).toBeNull();
   });
 
   test('المرتجع دون اتصال: نفس التكافؤ مع source_ref', async () => {

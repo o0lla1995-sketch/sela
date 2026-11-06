@@ -56,13 +56,14 @@ import {CashierApi, localTimestamp, newClientRef} from '../api/client';
 import type {CatalogProduct, CatalogVariant, LocalCustomer} from '../api/types';
 import {
   availableStock,
+  displayBaseStock,
+  displayVariantStock,
   imageStore,
   linePrice,
   refreshPendingStockAdjustments,
   sellableNow,
   useCartStore,
   useCatalogStore,
-  variantLabel as makeVariantLabel,
   variantPrice,
 } from '../store/catalog';
 import {useSessionStore} from '../store/session';
@@ -71,10 +72,13 @@ import {usePayMethodsStore} from '../store/payMethods';
 import {PaymentMethodLogo} from '../components/PaymentMethodLogo';
 import {beep, scanProductBarcode} from '../native';
 import {
+  cacheCustomers,
   loadCachedCustomers,
   nextLocalNumber,
+  pendingDebtByCustomer,
   recordLocalOp,
 } from '../store/offline';
+import {validateSaleDraft} from '../store/validation';
 import {kickSync, useSyncStore} from '../store/sync';
 
 const WEIGHT_UNIT_NAME = 'كغ';
@@ -442,6 +446,8 @@ export function SaleSheet({
   }, [product?.id]);
 
   // أول متغير متاح تلقائياً (أول لون+مقاس له رصيد).
+  // v3.5: الرصيد يشمل المعلّق المحلي — لا يقفز الاختيار تلقائياً
+  // على متغير نُفد محلياً ببيعٍ لم يُزامن بعد.
   useEffect(() => {
     if (sizeVariants.length > 0 && variantId == null) {
       setVariantId(sizeVariants[0].id);
@@ -449,12 +455,14 @@ export function SaleSheet({
     }
     if (clothingVariants.length > 0 && variantId == null) {
       const available =
-        sizesOfColor.find(v => v.stockQty > 0) ?? sizesOfColor[0];
+        sizesOfColor.find(
+          v => product != null && displayVariantStock(product, v.id) > 0,
+        ) ?? sizesOfColor[0];
       if (available) {
         setVariantId(available.id);
       }
     }
-  }, [clothingVariants, sizeVariants, sizesOfColor, variantId]);
+  }, [clothingVariants, sizeVariants, sizesOfColor, variantId, product]);
 
   if (product == null) {
     return null;
@@ -565,29 +573,32 @@ export function SaleSheet({
               <View style={styles.group}>
                 <Text style={styles.groupTitle}>المقاس</Text>
                 <View style={styles.chipRow}>
-                  {sizesOfColor.map(v => (
-                    <Pressable
-                      key={v.id}
-                      style={[
-                        styles.chip,
-                        variantId === v.id ? styles.chipActive : null,
-                        v.stockQty <= 0 ? styles.chipOut : null,
-                      ]}
-                      onPress={() => setVariantId(v.id)}>
-                      <Text
+                  {sizesOfColor.map(v => {
+                    // v3.5: رصيد المتغير يشمل معلّق هذا الجهاز —
+                    // الرقم يتحرك لحظة البيع دون اتصال.
+                    const vStock = displayVariantStock(product, v.id);
+                    return (
+                      <Pressable
+                        key={v.id}
                         style={[
-                          styles.chipText,
-                          variantId === v.id ? {color: c.accent} : null,
-                        ]}>
-                        {v.size || '—'}
-                      </Text>
-                      <Text style={styles.chipPrice}>
-                        {v.stockQty > 0
-                          ? `متاح ${formatQty(v.stockQty)}`
-                          : 'نفد'}
-                      </Text>
-                    </Pressable>
-                  ))}
+                          styles.chip,
+                          variantId === v.id ? styles.chipActive : null,
+                          vStock <= 0 ? styles.chipOut : null,
+                        ]}
+                        onPress={() => setVariantId(v.id)}>
+                        <Text
+                          style={[
+                            styles.chipText,
+                            variantId === v.id ? {color: c.accent} : null,
+                          ]}>
+                          {v.size || '—'}
+                        </Text>
+                        <Text style={styles.chipPrice}>
+                          {vStock > 0 ? `متاح ${formatQty(vStock)}` : 'نفد'}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
                 </View>
               </View>
             </>
@@ -719,6 +730,12 @@ function CustomerPickerSheet({
   const c = useThemeColors();
   const styles = useCustomerStyles();
   const [customers, setCustomers] = useState<LocalCustomer[] | null>(null);
+  /** v3.5 (الجولة 91 — كاشير #2): الدين المعلق من هذا الجهاز — يظهر
+   *  مع رصيد الخادم لحظة اختيار الزبون (تسجيل لحظي للدين دون
+   *  اتصال؛ يتعادل مع الخادم بعد المزامنة تلقائياً). */
+  const [pendingDebt, setPendingDebt] = useState<Map<number, number>>(
+    new Map(),
+  );
 
   useEffect(() => {
     void (async () => {
@@ -726,6 +743,9 @@ function CustomerPickerSheet({
       try {
         const payload = await CashierApi.customers();
         list = payload.customers ?? [];
+        // v3.5: نجدد النسخة المخزنة فور توفر الاتصال — بها يتحقق
+        // سلامة الفاتورة قبل الحفظ المحلي (كاشير #3).
+        await cacheCustomers(list);
       } catch {
         list = await loadCachedCustomers();
         if (list.length > 0) {
@@ -733,6 +753,11 @@ function CustomerPickerSheet({
         }
       }
       setCustomers(list);
+      try {
+        setPendingDebt(await pendingDebtByCustomer());
+      } catch {
+        // الدفتر المعلق أفضل جهد — رصيد الخادم يكفي.
+      }
     })();
   }, [toast]);
 
@@ -762,31 +787,45 @@ function CustomerPickerSheet({
           />
         ) : (
           <ScrollView style={{maxHeight: 340}} contentContainerStyle={{gap: 8}}>
-            {customers.map(customer => (
-              <Pressable
-                key={customer.id}
-                style={styles.row}
-                onPress={() => {
-                  onPick(customer);
-                  onClose();
-                }}>
-                <View style={{flex: 1}}>
-                  <Text style={styles.name}>{customer.name}</Text>
-                  <Text style={styles.dimText}>
-                    {customer.idNumber}
-                    {customer.phone ? ` · ${customer.phone}` : ''}
-                  </Text>
-                </View>
-                {customer.outstandingMinor > 0 ? (
-                  <Badge
-                    label={`عليه ${formatMoney(customer.outstandingMinor / 100)}`}
-                    tone="warning"
-                  />
-                ) : (
-                  <Badge label="مسدَّد" tone="success" />
-                )}
-              </Pressable>
-            ))}
+            {customers.map(customer => {
+              // v3.5 (الجولة 91 — كاشير #2): الرصيد المعروض = رصيد
+              // آخر مزامنة + دين هذا الجهاز المعلق — بيع دين دون
+              // اتصال يظهر فوراً ويتعادل مع الخادم بعد المزامنة.
+              const pending = pendingDebt.get(customer.id) ?? 0;
+              const effective = customer.outstandingMinor / 100 + pending;
+              return (
+                <Pressable
+                  key={customer.id}
+                  style={styles.row}
+                  onPress={() => {
+                    onPick(customer);
+                    onClose();
+                  }}>
+                  <View style={{flex: 1}}>
+                    <Text style={styles.name}>{customer.name}</Text>
+                    <Text style={styles.dimText}>
+                      {customer.idNumber}
+                      {customer.phone ? ` · ${customer.phone}` : ''}
+                    </Text>
+                  </View>
+                  <View style={{alignItems: 'flex-end', gap: 3}}>
+                    {effective > 0.0001 ? (
+                      <Badge
+                        label={`عليه ${formatMoney(effective)}`}
+                        tone="warning"
+                      />
+                    ) : (
+                      <Badge label="مسدَّد" tone="success" />
+                    )}
+                    {pending > 0.0001 ? (
+                      <Text style={styles.pendingText}>
+                        + {formatMoney(pending)} بانتظار المزامنة
+                      </Text>
+                    ) : null}
+                  </View>
+                </Pressable>
+              );
+            })}
           </ScrollView>
         )}
       </View>
@@ -1071,7 +1110,9 @@ export function SellScreen() {
   const completeSaleInner = useCallback(
     async (
       paymentType: 'cash' | 'debt',
-      customerId?: number,
+      /** v3.5: الزبون كاملاً (اسم + معرّف) — الاسم يسافر مع
+       * الحمولة ليشفي الخادم الربط، ويُخزن محلياً لدفتر الدين. */
+      customer?: LocalCustomer | null,
       paymentMethod?: string,
     ) => {
       const createdAt = localTimestamp();
@@ -1080,6 +1121,11 @@ export function SellScreen() {
         productId: line.product.id,
         unitId: line.unitId,
         variantId: line.variantId,
+        // v3.5 (الجولة 91 — كاشير #3): التسمية والاسم مع كل سطر —
+        // بها يشفي الخادم (والتحقق المحلي) الربط حين تكون معرّفات
+        // المتغيرات قد استُبدلت بتحرير المنتج في نقطة البيع.
+        variantLabel: line.variantLabel,
+        unitName: line.unitName,
         quantity: line.quantity,
       }));
       const subtotal = cart.subtotal();
@@ -1099,14 +1145,10 @@ export function SellScreen() {
       }
       const discount = Math.max(0, Math.min(cart.discount, maxAllowed));
       const total = Math.max(0, subtotal - discount);
-      const customerName =
-        paymentType === 'debt'
-          ? customerId != null
-            ? 'زبون الدفتر'
-            : ''
-          : null;
+      const customerId = customer?.id ?? null;
+      const customerName = paymentType === 'debt' ? customer?.name ?? '' : null;
 
-      // ① محاولة الإرسال المباشر (وأنت متصل).
+      // ① محاولة الإرسال المباشر (وأنت متصل) — الخادم هو الحكم.
       if (online) {
         try {
           const payload = await CashierApi.sale({
@@ -1114,7 +1156,11 @@ export function SellScreen() {
             discount,
             paymentType,
             paymentMethod,
-            localCustomerId: customerId,
+            localCustomerId: customerId ?? undefined,
+            // v3.5: الاسم يشفي الربط إن حُذف الزبون وأُنشئ باسمه
+            // من جديد في نقطة البيع (نفس قاعدة الخادم v78.1).
+            customerName:
+              paymentType === 'debt' ? customerName ?? undefined : undefined,
             clientRef,
             createdAt,
             print: printReceipts,
@@ -1150,13 +1196,62 @@ export function SellScreen() {
             return;
           }
           // الشبكة انقطعت (status 0) → نكمل محلياً (المسار الأهم).
-          toast('لا اتصال — سُجِّلت الفاتورة محلياً وتزامن تلقائياً', 'info');
+          // v3.5: لا رسالة «سُجّلت محلياً» هنا — التحقق أولاً، فإن
+          // فسدت الفاتورة تُرد برسالتها الواضحة لا بوعدين متناقضين.
         }
       }
 
       // ② التسجيل المحلي الكامل (بيع دون اتصال).
       try {
+        // v3.5 (الجولة 91 — كاشير #3): التحقق من سلامة الفاتورة قبل
+        // الحفظ — لا تُحفظ فاتورة سيُرفضها الخادم حتماً (منتج
+        // محذوف، متغير استُبدلت معرّفاته بلا شفاء، وحدة مفقودة،
+        // زبون دفتر محذوف). الشفاء المحلي يوصل ما يمكن توصيله
+        // (متغير بالتسمية، وحدة بالاسم، زبون بالاسم) — والباقي
+        // يُرد الآن برسالة عربية واضحة بدل رفض غامض عند المزامنة.
+        const customers = await loadCachedCustomers();
+        const validation = validateSaleDraft({
+          lines: cart.lines.map(line => ({
+            productId: line.product.id,
+            productName: line.product.name,
+            unitId: line.unitId,
+            unitName: line.unitName,
+            variantId: line.variantId,
+            variantLabel: line.variantLabel,
+            quantity: line.quantity,
+          })),
+          products,
+          customers,
+          payKind: paymentType,
+          customerId,
+          customerName,
+        });
+        if (!validation.ok) {
+          toast(validation.issues[0], 'error');
+          return;
+        }
+        // الأسطر بعد الشفاء — معرّفات موصولة بالحالي (نفس قاعدة
+        // الخادم v78.1: التسمية أولاً)، والزبون الموصول بالاسم.
+        // healedLines بنفس ترتيب وعدد أسطر السلة عند النجاح —
+        // المطابقة بالفهرس (المفاتيح نفسها تتغير بالشفاء).
+        const payloadLines = cart.lines.map((line, index) => {
+          const healed = validation.healedLines[index];
+          return {
+            productId: line.product.id,
+            unitId: healed?.unitId ?? line.unitId,
+            variantId: healed?.variantId ?? line.variantId,
+            variantLabel: line.variantLabel,
+            unitName: line.unitName,
+            quantity: line.quantity,
+          };
+        });
+        const resolvedCustomer = validation.resolvedCustomer;
         const displayNumber = await nextLocalNumber();
+        // الشبكة كانت مقطوعة حين حاولنا الإرسال — الفاتورة سليمة
+        // الآن وتُسجَّل محلياً وتتزامن تلقائياً.
+        if (!online) {
+          toast('لا اتصال — سُجِّلت الفاتورة محلياً وتزامن تلقائياً', 'info');
+        }
         await recordLocalOp({
           ref: clientRef,
           kind: 'sale',
@@ -1167,14 +1262,20 @@ export function SellScreen() {
           payMethod: paymentMethod ?? 'cash',
           total,
           discount,
-          customerName,
+          // v3.5 (كاشير #2): اسم الزبون الحقيقي ومعرّفه — دفتر الدين
+          // المحلي المعلق يُبنى منهما فوراً (لا «زبون الدفتر» بعد
+          // اليوم)، ويظل الاسم ظاهراً في الأرشيف وبالبحث.
+          customerName: resolvedCustomer?.name ?? customerName,
+          customerId: resolvedCustomer?.id ?? customerId,
           createdAt,
-          lines: cart.lines.map(line => ({
+          lines: cart.lines.map((line, index) => ({
             productId: line.product.id,
             name: line.product.name,
-            variantId: line.variantId,
+            // المعرفات المُشفاة — تطابق الكتالوج الحالي فتظل تسويات
+            // المخزون المعلق دقيقة بعد الشفاء المحلي.
+            variantId: validation.healedLines[index]?.variantId ?? line.variantId,
             variantLabel: line.variantLabel,
-            unitId: line.unitId,
+            unitId: validation.healedLines[index]?.unitId ?? line.unitId,
             unitName: line.unitName,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
@@ -1184,11 +1285,14 @@ export function SellScreen() {
             conversion: line.conversion,
           })),
           payload: {
-            lines,
+            lines: payloadLines,
             discount,
             paymentType,
             paymentMethod,
-            localCustomerId: customerId,
+            localCustomerId: resolvedCustomer?.id ?? customerId,
+            // v3.5 (كاشير #3): الاسم يسافر مع الحمولة — شفاء الربط
+            // عند الخادم إن كان المعرّف قد تغيّر.
+            customerName: resolvedCustomer?.name ?? customerName,
             clientRef,
             createdAt,
           },
@@ -1220,6 +1324,7 @@ export function SellScreen() {
       online,
       perms.maxDiscountPct,
       printReceipts,
+      products,
       refreshCatalog,
       toast,
     ],
@@ -1228,7 +1333,7 @@ export function SellScreen() {
   const completeSale = useCallback(
     async (
       paymentType: 'cash' | 'debt',
-      customerId?: number,
+      customer?: LocalCustomer | null,
       paymentMethod?: string,
     ) => {
       // v3.1 (الجولة 65): حارس متزامن أولاً — ضغطتان في نفس اللحظة
@@ -1243,7 +1348,7 @@ export function SellScreen() {
       saleInFlightRef.current = true;
       setBusy(true);
       try {
-        await completeSaleInner(paymentType, customerId, paymentMethod);
+        await completeSaleInner(paymentType, customer, paymentMethod);
       } finally {
         saleInFlightRef.current = false;
         setBusy(false);
@@ -1309,11 +1414,15 @@ export function SellScreen() {
     const rawPrice = item.hasVariants
       ? price.label
       : formatMoney(item.retailPrice);
+    // v3.5 (الجولة 91 — كاشير #2): الرقم المعروض يتحرك لحظياً —
+    // مخزون آخر مزامنة + معلّق هذا الجهاز (بيع دون اتصال يُرى
+    // فوراً في كل أشكال العرض — طلب التاجر نصاً).
+    const displayStock = displayBaseStock(item);
     const stockLabel = item.stockUntracked
       ? 'يُباع دائماً'
       : out
       ? 'نفد'
-      : `${formatQty(item.stockQty)} ${weighted ? WEIGHT_UNIT_NAME : 'حبة'}`;
+      : `${formatQty(displayStock)} ${weighted ? WEIGHT_UNIT_NAME : 'حبة'}`;
     const stockColor = out ? c.danger : c.success;
 
     if (productView === 'list') {
@@ -1953,7 +2062,7 @@ export function SellScreen() {
       {customerPicker ? (
         <CustomerPickerSheet
           onClose={() => setCustomerPicker(false)}
-          onPick={customer => void completeSale('debt', customer.id)}
+          onPick={customer => void completeSale('debt', customer)}
         />
       ) : null}
 
@@ -2368,6 +2477,13 @@ const useCustomerStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.small,
       textAlign: 'right',
+    },
+    // v3.5 (الجولة 91 — كاشير #2): سطر الدين المعلق من هذا الجهاز.
+    pendingText: {
+      color: c.warning,
+      fontFamily: fonts.medium,
+      fontSize: 11,
+      textAlign: 'left',
     },
   }) as const,
 );

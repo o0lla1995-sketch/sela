@@ -121,6 +121,12 @@ export interface SaleLineInput {
   productId: number;
   unitId?: number | null;
   variantId?: number | null;
+  /** v3.5 (الجولة 91 — كاشير #3): تسمية المتغير («أسود · L» أو
+   *  الحجم) — يشفي بها الخادم الربط إن كانت معرّفات المتغيرات
+   *  قد استُبدلت بتحرير المنتج في نقطة البيع (نفس قاعدة v78.1). */
+  variantLabel?: string | null;
+  /** v3.5: اسم وحدة البيع — شفاء احتياطي إن استُبدلت الوحدات. */
+  unitName?: string | null;
   quantity: number;
 }
 
@@ -222,6 +228,10 @@ export const CashierApi = {
      *  البيع مع الفاتورة وتدخل أرصدة طرق الدفع. */
     paymentMethod?: string;
     localCustomerId?: number;
+    /** v3.5 (الجولة 91 — كاشير #3): اسم زبون الدفتر — يشفي به
+     *  الخادم الربط إن كان المعرّف قد تغيّر (حُذف الزبون وأُنشئ
+     *  باسمه من جديد). */
+    customerName?: string;
     /** v2.0: مرجع فريد من هذا الجهاز (ميزة المزامنة). */
     clientRef?: string;
     /** v2.0: زمن البيع الفعلي عند الكاشير YYYY-MM-DD HH:mm:ss. */

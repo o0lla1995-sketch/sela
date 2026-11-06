@@ -70,29 +70,21 @@ import {
 import type {CatalogProduct, InvoiceDetail, InvoiceLine} from '../api/types';
 import {usePayMethodsStore} from '../store/payMethods';
 import {PaymentMethodLogo} from '../components/PaymentMethodLogo';
+import {
+  filterInvoices,
+  type InvoiceFilterState,
+  type Kind,
+  type Period,
+  type SyncStatus,
+} from '../store/invoiceFilters';
 import {useSessionStore} from '../store/session';
 import {useAppSettings} from '../store/settings';
 import {scanProductBarcode} from '../native';
 import {kickSync, useSyncStore} from '../store/sync';
 
-type Period = 'today' | 'week' | 'all';
-type Kind = 'all' | 'sales' | 'returns' | 'debts';
-
-function withinPeriod(createdAt: string, period: Period): boolean {
-  if (period === 'all') {
-    return true;
-  }
-  const day = createdAt.slice(0, 10);
-  const now = new Date();
-  const pad = (v: number) => String(v).padStart(2, '0');
-  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  if (period === 'today') {
-    return day === today;
-  }
-  const weekAgo = new Date(now.getTime() - 6 * 86400000);
-  const from = `${weekAgo.getFullYear()}-${pad(weekAgo.getMonth() + 1)}-${pad(weekAgo.getDate())}`;
-  return day >= from && day <= today;
-}
+// v3.5 (الجولة 91 — كاشير #4): الفلترة انتقلت لمنطق خالص قابل
+// للاختبار في store/invoiceFilters (النوع + الزمن + قناة الدفع +
+// حالة المزامنة + البحث متعدد الأبعاد).
 
 /** v3.4: تسمية طريقة الدفع من المخزن العالمي (تسميات الخادم)،
  *  مع خريطة ثابتة احتياطية لأشهر الجهات. */
@@ -125,6 +117,11 @@ export function InvoicesScreen() {
 
   const [period, setPeriod] = useState<Period>('today');
   const [kind, setKind] = useState<Kind>('all');
+  /** v3.5 (الجولة 91 — كاشير #4): فلاتر جديدة — قناة الدفع
+   *  (نقدي/بنك/محفظة المفعّلة عند التاجر) وحالة المزامنة
+   *  (متزامنة/بانتظار/مرفوضة). */
+  const [payFilter, setPayFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState<SyncStatus>('all');
   const [search, setSearch] = useState('');
   const [invoices, setInvoices] = useState<LocalInvoice[] | null>(null);
   const [openRef, setOpenRef] = useState<string | null>(null);
@@ -172,41 +169,17 @@ export function InvoicesScreen() {
     if (!invoices) {
       return [];
     }
-    const query = search.trim().toLowerCase();
-    return invoices.filter(inv => {
-      if (!withinPeriod(inv.createdAt, period)) {
-        return false;
-      }
-      if (kind === 'sales' && inv.kind !== 'sale') {
-        return false;
-      }
-      if (kind === 'returns' && inv.kind !== 'return') {
-        return false;
-      }
-      if (kind === 'debts' && !(inv.kind === 'sale' && inv.payKind === 'debt')) {
-        return false;
-      }
-      if (query.length === 0) {
-        return true;
-      }
-      if (inv.displayNumber.toLowerCase().includes(query)) {
-        return true;
-      }
-      if (inv.syncedNumber && inv.syncedNumber.toLowerCase().includes(query)) {
-        return true;
-      }
-      if ((inv.customerName ?? '').toLowerCase().includes(query)) {
-        return true;
-      }
-      const items = itemsCache[inv.ref];
-      if (items != null) {
-        return items.some(
-          item => item.name.toLowerCase().includes(query),
-        );
-      }
-      return false;
-    });
-  }, [invoices, itemsCache, kind, period, search]);
+    // v3.5: المنطق الخالص في store/invoiceFilters — النوع والزمن
+    // والقناة والحالة والبحث متعدد الأبعاد معاً.
+    const filters: InvoiceFilterState = {
+      period,
+      kind,
+      pay: payFilter,
+      status: statusFilter,
+      query: search,
+    };
+    return filterInvoices(invoices, filters, itemsCache);
+  }, [invoices, itemsCache, kind, period, payFilter, search, statusFilter]);
 
   const openInvoice = filtered.find(inv => inv.ref === openRef) ?? null;
 
@@ -233,6 +206,8 @@ export function InvoicesScreen() {
         setKind('all');
         setPeriod('all');
         setSearch('');
+        setPayFilter('all');
+        setStatusFilter('all');
         setOpenRef(hit.ref);
         return;
       }
@@ -245,6 +220,8 @@ export function InvoicesScreen() {
             setKind('all');
             setPeriod('all');
             setSearch('');
+            setPayFilter('all');
+            setStatusFilter('all');
             const merged = await listInvoices(300);
             const localHit = merged.find(
               inv => inv.syncedNumber === payload.invoice!.number,
@@ -321,6 +298,82 @@ export function InvoicesScreen() {
                 active ? styles.kindChipActive : null,
               ]}
               onPress={() => setKind(item.key)}>
+              <Text
+                style={[
+                  styles.kindText,
+                  active ? {color: c.accent, fontFamily: fonts.bold} : null,
+                ]}>
+                {item.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {/* v3.5 (الجولة 91 — كاشير #4): فلتر قناة الدفع — رقائق
+          ديناميكية من طرق الدفع المفعّلة عند التاجر (بنوك ومحافظ)
+          + النقدي؛ يظهر فقط عند وجود أكثر من نقدي. */}
+      {payMethods.length > 1 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.payFilterRow}
+          contentContainerStyle={{gap: 6, paddingHorizontal: spacing.md}}>
+          {[{id: 'all', label: 'كل القنوات', color: c.accent}, ...payMethods].map(
+            method => {
+              const active = payFilter === method.id;
+              return (
+                <Pressable
+                  key={method.id}
+                  style={[
+                    styles.payChip,
+                    active
+                      ? {borderColor: c.accent, backgroundColor: c.accentSoft}
+                      : null,
+                  ]}
+                  onPress={() => setPayFilter(method.id)}>
+                  {method.id !== 'all' && method.id !== 'cash' ? (
+                    <PaymentMethodLogo methodId={method.id} size={16} />
+                  ) : method.id === 'cash' ? (
+                    <View
+                      style={[styles.payChipCash, {backgroundColor: method.color}]}>
+                      <Text style={styles.payChipMark}>₪</Text>
+                    </View>
+                  ) : null}
+                  <Text
+                    style={[
+                      styles.payChipText,
+                      active ? {color: c.accent, fontFamily: fonts.bold} : null,
+                    ]}
+                    numberOfLines={1}>
+                    {method.label}
+                  </Text>
+                </Pressable>
+              );
+            },
+          )}
+        </ScrollView>
+      ) : null}
+
+      {/* v3.5: فلتر حالة المزامنة — لإيجاد المعلقة والمرفوضة بسرعة. */}
+      <View style={styles.kindRow}>
+        {(
+          [
+            {key: 'all', label: 'كل الحالات'},
+            {key: 'synced', label: 'متزامنة'},
+            {key: 'pending', label: 'بانتظار المزامنة'},
+            {key: 'rejected', label: 'مرفوضة'},
+          ] as {key: SyncStatus; label: string}[]
+        ).map(item => {
+          const active = statusFilter === item.key;
+          return (
+            <Pressable
+              key={item.key}
+              style={[
+                styles.kindChip,
+                active ? styles.kindChipActive : null,
+              ]}
+              onPress={() => setStatusFilter(item.key)}>
               <Text
                 style={[
                   styles.kindText,
@@ -562,7 +615,7 @@ function InvoiceDetailSheet({
   const [items, setItems] = useState<LocalInvoiceItem[]>([]);
   const [serverDetail, setServerDetail] = useState<InvoiceDetail | null>(null);
   const [returnOpen, setReturnOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [_busy, _setBusy] = useState(false);
 
   const isSale = invoice.kind === 'sale';
 
@@ -922,6 +975,11 @@ function ReturnSheet({
           productId: pick.productId,
           unitId: pick.unitId,
           variantId: pick.variantId,
+          // v3.5 (الجولة 91 — كاشير #3): التسمية والاسم مع أسطر
+          // الاستبدال أيضاً — يشفي بها الخادم الربط إن استُبدلت
+          // المعرّفات بتحرير المنتج.
+          variantLabel: pick.variantLabel,
+          unitName: pick.unitName,
           quantity: pick.quantity,
         }))
       : undefined;
@@ -1398,7 +1456,7 @@ function ExchangeSheet({
   refundTotal,
   picks,
   onAdd,
-  onRemove,
+  onRemove: _onRemove,
   onClear,
   onClose,
 }: {
@@ -1848,6 +1906,32 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
     },
     padded: {paddingHorizontal: spacing.md, paddingBottom: 6},
+    // v3.5 (الجولة 91 — كاشير #4): رقائق فلتر قناة الدفع.
+    payFilterRow: {flexGrow: 0, paddingBottom: 4},
+    payChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+    },
+    payChipCash: {
+      width: 16,
+      height: 16,
+      borderRadius: 5,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    payChipMark: {color: '#FFFFFF', fontSize: 10, fontWeight: '900'},
+    payChipText: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: typography.small,
+    },
     row: {
       flexDirection: 'row',
       alignItems: 'center',

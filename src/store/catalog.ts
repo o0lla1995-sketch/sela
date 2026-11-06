@@ -348,6 +348,36 @@ export function availableStock(
   return stockWithAdjustments(product, pendingAdj, unitId, variantId);
 }
 
+/**
+ * v3.5 (الجولة 91 — كاشير #2) — «الخصم اللحظي» المرئي: الرقم
+ * المعروض على البلاطة/الصف/البطاقة هو مخزون آخر مزامنة + المعلّق
+ * المحلي (بيع دون اتصال يحرّك الرقم فوراً في كل العروض — طلب
+ * التاجر نصاً: «يحدث خصم لحظي من المخزون»). بلا تتبع → لا رقم.
+ */
+export function displayBaseStock(product: CatalogProduct): number {
+  return Math.max(0, product.stockQty + productBaseAdjustment(product.id));
+}
+
+/**
+ * v3.5: رصيد متغير (لون×مقاس) كما يُعرض على رقائق المقاسات —
+ * يشمل معلّق هذا الجهاز فلا يُباع ما نُفد محلياً، ويتعادل مع
+ * الخادم بعد المزامنة تلقائياً.
+ */
+export function displayVariantStock(
+  product: CatalogProduct,
+  variantId: number,
+): number {
+  const variant = product.variants.find(v => v.id === variantId);
+  if (variant == null) {
+    return 0;
+  }
+  // الأحجام (مطعم) تُباع من مخزون المنتج نفسه — نفس قاعدة السلة.
+  if (variant.kind === 'size') {
+    return displayBaseStock(product);
+  }
+  return Math.max(0, variant.stockQty + variantAdjustment(variant.id));
+}
+
 // ── السلة ────────────────────────────────────────────────────────
 export interface CartLine {
   key: string;
