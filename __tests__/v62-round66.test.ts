@@ -64,7 +64,7 @@ describe('v62 — ④ التحديث الإجباري: مقارنة الإصدا
     expect(req.required).toBe(true);
     expect(req.minVersion).toBe('79.0.0');
     expect(req.updateUrl).toBe('https://play.google.com/x');
-    expect(req.currentVersion).toBe('78.0.0');
+    expect(req.currentVersion).toBe('78.1.0');
     // إفراغ الخادم يلغي الإجبار.
     adoptUpdateInfoIfProvided({minAppVersion: '', updateUrl: ''});
     expect(getUpdateRequirement().required).toBe(false);
@@ -216,10 +216,10 @@ describe('v62 — حرّوس المصدر للجولة كاملة', () => {
 
   test('⑥ الإصدار: 71.0.0 (79)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '78.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 86');
+    expect(config).toContain("APP_VERSION = '78.1.0'");
+    expect(config).toContain('APP_BUILD_CODE = 87');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "78.0.0"');
-    expect(gradle).toContain('versionCode 86');
+    expect(gradle).toContain('versionName "78.1.0"');
+    expect(gradle).toContain('versionCode 87');
   });
 });

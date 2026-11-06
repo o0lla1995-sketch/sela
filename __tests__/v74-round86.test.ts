@@ -99,10 +99,10 @@ describe('v74 — ١ شريط التعديل مضغوط إلى سطرين', () =
 describe('v74 — ٢ الإصدار', () => {
   test('77.0.0 (86) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '78.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 86');
+    expect(config).toContain("APP_VERSION = '78.1.0'");
+    expect(config).toContain('APP_BUILD_CODE = 87');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 86');
-    expect(gradle).toContain('versionName "78.0.0"');
+    expect(gradle).toContain('versionCode 87');
+    expect(gradle).toContain('versionName "78.1.0"');
   });
 });

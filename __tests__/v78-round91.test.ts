@@ -198,12 +198,30 @@ describe('v78 — ٤ لا إشعارات نفاد للمنتجات بلا تتب
 });
 
 describe('v78 — الإصدار', () => {
-  test('config.ts وbuild.gradle عند 78.0.0 / 86', () => {
+  test('config.ts وbuild.gradle عند 78.1.0 / 87', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '78.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 86');
+    expect(config).toContain("APP_VERSION = '78.1.0'");
+    expect(config).toContain('APP_BUILD_CODE = 87');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionName "78.0.0"');
-    expect(gradle).toContain('versionCode 86');
+    expect(gradle).toContain('versionName "78.1.0"');
+    expect(gradle).toContain('versionCode 87');
+  });
+});
+
+describe('v78.1 — كاشير #١: طرق الدفع من نقطة البيع الأندرويد', () => {
+  test('نقطة النهاية /api/payment-methods بنفس شكل سطح المكتب', () => {
+    const src = read('src/services/lan/LanHandlers.ts');
+    expect(src).toContain("path === '/api/payment-methods'");
+    expect(src).toContain(
+      'activePaymentMethods(\n        getSettings().paymentMethodsEnabled,\n      )',
+    );
+  });
+
+  test('كاشير #٣: شفاء المتغير بالتسمية والزبون بالاسم عند المزامنة', () => {
+    const src = read('src/services/lan/LanHandlers.ts');
+    expect(src).toContain('شفاء المتغير بالتسمية');
+    expect(src).toContain('line.variantLabel != null');
+    expect(src).toContain('شفاء الزبون بالاسم');
+    expect(src).toContain('body.customerName != null');
   });
 });

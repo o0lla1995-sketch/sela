@@ -1791,7 +1791,8 @@ export const BackupService = {
       );
       const localCustomerMap = new Map<number, number>();
       for (const customer of doc.local_customers ?? []) {
-        if (!customer.id_number || !customer.name) {
+        // v78 (الجولة 91 #٣): الهوية اختيارية — الاسم وحده إلزامي.
+        if (!customer.name) {
           continue;
         }
         const insert = await tx.execute(
@@ -1799,7 +1800,7 @@ export const BackupService = {
             (id_number, name, phone, notes, sila_customer_id, sila_linked_at, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
-            customer.id_number,
+            customer.id_number ?? null,
             customer.name,
             customer.phone ?? null,
             customer.notes ?? null,

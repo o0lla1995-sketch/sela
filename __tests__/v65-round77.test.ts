@@ -130,10 +130,10 @@ describe('v65 — ٥ الشعارات الرسمية الحقيقية', () => {
 describe('v65 — ٦ الإصدار', () => {
   test('الإصدار: 71.0.0 (79) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '78.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 86');
+    expect(config).toContain("APP_VERSION = '78.1.0'");
+    expect(config).toContain('APP_BUILD_CODE = 87');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 86');
-    expect(gradle).toContain('versionName "78.0.0"');
+    expect(gradle).toContain('versionCode 87');
+    expect(gradle).toContain('versionName "78.1.0"');
   });
 });

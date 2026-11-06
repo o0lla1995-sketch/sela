@@ -334,7 +334,10 @@ const DDL_STATEMENTS: string[] = [
   // the migration path re-registers them as fresh INV-D debts.
   `CREATE TABLE IF NOT EXISTS local_customers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    id_number TEXT NOT NULL UNIQUE,
+    -- v78 (الجولة 91 #٣): الهوية اختيارية — NULL لمن بلا هوية
+    --  (القيد NOT NULL أزيل بترحيل v35؛ التفرد يبقى على من أدخل
+    --  هوية فعلية فقط — NULL ≠ NULL في SQLite).
+    id_number TEXT UNIQUE,
     name TEXT NOT NULL,
     phone TEXT,
     notes TEXT,
@@ -2167,6 +2170,51 @@ async function applyMigrations(database: DB): Promise<void> {
     );
     logDiag('db', 'ترحيل v34: تعديل الفواتير عبر نقطة البيع + سجل التدقيق');
     version = 34;
+  }
+
+  if (version < 35) {
+    // v78 (الجولة 91 #٣): الهوية اختيارية في دفتر الديون — عمود
+    // id_number كان NOT NULL فيرفض زبوناً بلا هوية أصلاً. إعادة
+    // البناء بالمسار الرسمي (بناء بديل ← نسخ ← حذف ← rename) مع
+    // إسقاط NOT NULL فقط؛ التفرد UNIQUE يبقى (NULL ≠ NULL فلا
+    // يتصادم زبونان بلا هوية أبداً). الأبناء (local_debts/
+    // local_payments) يربطون بالاسم فلا ينكسر شيء (نفس ترحيل v24).
+    await database.execute('PRAGMA foreign_keys = OFF');
+    try {
+      await database.transaction(async () => {
+        await database.execute(`CREATE TABLE local_customers_v35 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          id_number TEXT UNIQUE,
+          name TEXT NOT NULL,
+          phone TEXT,
+          notes TEXT,
+          sila_customer_id TEXT,
+          sila_linked_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )`);
+        await database.execute(
+          `INSERT INTO local_customers_v35
+             SELECT id, id_number, name, phone, notes, sila_customer_id,
+                    sila_linked_at, created_at
+           FROM local_customers`,
+        );
+        await database.execute('DROP TABLE local_customers');
+        await database.execute(
+          'ALTER TABLE local_customers_v35 RENAME TO local_customers',
+        );
+        // الفهارس تُعاد باسمها الرسمي (إسقاط الجدول أسقطها).
+        await database.execute(
+          'CREATE INDEX IF NOT EXISTS idx_local_debts_cust ON local_debts(local_customer_id, created_at DESC)',
+        );
+        await database.execute(
+          'CREATE INDEX IF NOT EXISTS idx_local_pays_cust ON local_payments(local_customer_id, created_at DESC)',
+        );
+      });
+    } finally {
+      await database.execute('PRAGMA foreign_keys = ON');
+    }
+    logDiag('db', 'ترحيل v35: الهوية اختيارية في دفتر الديون (إسقاط NOT NULL)');
+    version = 35;
   }
 
   if (version !== storedVersion) {

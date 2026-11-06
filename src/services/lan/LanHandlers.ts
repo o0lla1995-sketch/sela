@@ -68,6 +68,7 @@ import {getDb} from '../../database/connection';
 import {PlatformUtilsNative} from '../../native/nativeBridge';
 import {APP_VERSION} from '../../core/config';
 import {localNow} from '../../core/format';
+import {activePaymentMethods} from '../../core/paymentMethods';
 import type {
   CartLine,
   ExchangeLineInput,
@@ -676,6 +677,28 @@ export async function handleLanRequest(
       });
     }
 
+    // v78.1 (الجولة 91 — كاشير #١): طرق الدفع المفعّلة عند التاجر —
+    // نفس نقطة النهاية التي تقدمها نقطة البيع لسطح المكتب منذ v71
+    // (الجولة 75 #١٠). قبل هذا كان تطبيق الكاشير المتصل بالأندرويد
+    // يسقط إلى «نقدي وحده» فلا تظهر نافذة اختيار المحافظ والبنوك
+    // المفعّلة في الإعدادات أبداً (شكوى التاجر: «عند إضافة منتجات
+    // الي السلة والضغط علي بيع لا تظهر له خيارات الدفع من خلال
+    // المحافظ والبنوك التي هي مفعلة في تطبيق نقطة البيع»).
+    if (path === '/api/payment-methods' && method === 'GET') {
+      const methods = activePaymentMethods(
+        getSettings().paymentMethodsEnabled,
+      );
+      return ok({
+        ok: true,
+        methods: methods.map(m => ({
+          id: m.id,
+          label: m.label,
+          kind: m.kind,
+          color: m.color,
+        })),
+      });
+    }
+
     if (path === '/api/auth/login' && method === 'POST') {
       return await handleLogin(req);
     }
@@ -987,7 +1010,7 @@ async function handleSale(
     const quantity = Number(line.quantity ?? 0);
     const unitId =
       line.unitId == null || line.unitId === '' ? null : Number(line.unitId);
-    const variantId =
+    let variantId =
       line.variantId == null || line.variantId === ''
         ? null
         : Number(line.variantId);
@@ -1006,6 +1029,34 @@ async function handleSale(
     }
     if (!product.hasVariants && variantId != null) {
       return fail(400, `«${product.name}» ليس منتج متغيرات`);
+    }
+    // v78.1 (الجولة 91 — كاشير #٣): شفاء المتغير بالتسمية — فاتورة
+    // بِيعت من كاشير بكتالوج مؤقت (أو قبل تحديثه) تحمل معرّف متغير
+    // أُعيد إنشاؤه في نقطة البيع (تحرير المنتج يستبدل المتغيرات
+    // بمعرّفات جديدة) فكانت تُرفض نهائياً وتبقى «مرفوضة» في أرشيف
+    // الكاشير والبضاعة خرجت فعلاً. التسمية (الحجم أو «اللون ·
+    // المقاس») تنقلها نقطة البيع نفسها في السطر؛ تطابقها الدقيق
+    // مع متغير حالي يعيد وصل الفاتورة بلا رفض — نفس ما يفعله
+    // السجل التجاري بالوصف لا بالمعرّف العابر.
+    if (
+      variantId != null &&
+      !product.variants.some(v => v.id === variantId) &&
+      line.variantLabel != null &&
+      String(line.variantLabel).length > 0
+    ) {
+      const wanted = String(line.variantLabel).trim();
+      const healed = product.variants.find(v => {
+        const isSize = v.kind === 'size';
+        const label = isSize
+          ? v.size
+          : v.color
+          ? `${v.color} · ${v.size}`
+          : v.size;
+        return label === wanted;
+      });
+      if (healed != null) {
+        variantId = healed.id;
+      }
     }
     if (variantId != null && !product.variants.some(v => v.id === variantId)) {
       return fail(400, `متغير غير متاح لـ «${product.name}»`);
@@ -1032,7 +1083,17 @@ async function handleSale(
     if (paymentType === 'debt') {
       const customerId = Number(body.localCustomerId ?? 0);
       const balances = await LocalDebtsRepo.listWithBalances();
-      const found = balances.find(b => b.customer.id === customerId);
+      let found = balances.find(b => b.customer.id === customerId);
+      // v78.1 (الجولة 91 — كاشير #٣): شفاء الزبون بالاسم — حُذف
+      // حسابه وأُنشئ باسمه نفسه من جديد فمعرّفه تغيّر؛ الفاتورة
+      // تُوصل بالحساب الحالي بالاسم الدقيق بدل رفضها نهائياً
+      // (الدين خرج من المتجر فعلاً في زمن البيع).
+      if (found == null && body.customerName != null) {
+        const wanted = String(body.customerName).trim();
+        if (wanted.length > 0) {
+          found = balances.find(b => b.customer.name === wanted);
+        }
+      }
       if (!found) {
         return fail(400, 'اختر زبوناً من دفتر المتجر للبيع بالدين');
       }
