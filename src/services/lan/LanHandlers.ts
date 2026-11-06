@@ -68,7 +68,7 @@ import {getDb} from '../../database/connection';
 import {PlatformUtilsNative} from '../../native/nativeBridge';
 import {APP_VERSION} from '../../core/config';
 import {localNow} from '../../core/format';
-import {activePaymentMethods} from '../../core/paymentMethods';
+import {activePaymentMethods, isPaymentMethodId} from '../../core/paymentMethods';
 import type {
   CartLine,
   ExchangeLineInput,
@@ -838,6 +838,10 @@ export async function handleLanRequest(
           isReturn: String(row.invoice_number ?? '').startsWith('RET-'),
           returnedMinor: Number(row.returned_minor ?? 0),
           paymentType: String(row.payment_type ?? 'RETAIL'),
+          // v79 (الجولة 92 — كاشير #٢): طريقة الدفع الفعلية.
+          paymentMethod: row.payment_method
+            ? String(row.payment_method)
+            : 'cash',
           itemCount: Number(row.item_count ?? 0),
           createdAt: String(row.created_at ?? ''),
           clientRef: row.client_ref ? String(row.client_ref) : null,
@@ -983,6 +987,20 @@ async function handleSale(
     return fail(400, 'السلة فارغة');
   }
   const paymentType = body.paymentType === 'debt' ? 'debt' : 'cash';
+  // v79 (الجولة 92 — كاشير #٢): طريقة الدفع (بنك/محفظة) من الكاشير —
+  // كانت تُهمل كلياً فتُسجّل كل فاتورة كاشير نقدياً في الخزينة
+  // (نفس منطق سطح المكتب v71): تُخزّن مع الفاتورة وتدخل أرصدة
+  // البنوك والمحافظ في التقارير؛ الدين لا يقبلها (لا مال دخل).
+  let paymentMethod: string | undefined;
+  if (paymentType === 'cash') {
+    const requested = body.paymentMethod ? String(body.paymentMethod) : '';
+    if (requested && requested !== 'cash') {
+      if (!isPaymentMethodId(requested)) {
+        return fail(400, 'طريقة دفع غير معروفة');
+      }
+      paymentMethod = requested;
+    }
+  }
   const clientRef = body.clientRef ? String(body.clientRef).slice(0, 80) : '';
   const clientCreatedAt = body.createdAt
     ? String(body.createdAt).slice(0, 19)
@@ -1130,6 +1148,10 @@ async function handleSale(
       lines,
       discount,
       paymentType: 'RETAIL',
+      // v79 (الجولة 92 — كاشير #٢): القناة الفعلية التي اختارها
+      // الكاشير — تنساب لطريقة الدفع في الفاتورة والإيصال وأرصدة
+      // القنوات، وتُرفض الجهة غير المعروفة قبل تسجيل الفاتورة.
+      paymentMethod,
       print,
       receiptSettings: receiptSettings(),
       cashierId: authed.cashierId,
@@ -1209,6 +1231,11 @@ async function handleInvoiceList(
     isReturn: String(row.invoice_number ?? '').startsWith('RET-'),
     returnedMinor: Number(row.returned_minor ?? 0),
     paymentType: String(row.payment_type ?? 'RETAIL'),
+    // v79 (الجولة 92 — كاشير #٢): طريقة الدفع الفعلية مع الفاتورة —
+    // بدونها كان أرشيف الكاشير يُظهر «نقدي» لكل فاتورة بنك/محفظة.
+    paymentMethod: row.payment_method
+      ? String(row.payment_method)
+      : 'cash',
     itemCount: Number(row.item_count ?? 0),
     createdAt: String(row.created_at ?? ''),
     clientRef: row.client_ref ? String(row.client_ref) : null,

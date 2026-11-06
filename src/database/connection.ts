@@ -535,7 +535,7 @@ const DDL_STATEMENTS: string[] = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     merchant_id INTEGER NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
     ref TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('invoice','payment','return','collection')),
+    kind TEXT NOT NULL CHECK (kind IN ('invoice','payment','return','collection','debt')),
     amount REAL NOT NULL CHECK (amount > 0),
     method TEXT,
     note TEXT,
@@ -2215,6 +2215,70 @@ async function applyMigrations(database: DB): Promise<void> {
     }
     logDiag('db', 'ترحيل v35: الهوية اختيارية في دفتر الديون (إسقاط NOT NULL)');
     version = 35;
+  }
+
+  if (version < 36) {
+    // v79 (الجولة 92 #٣): الدين المستحق المباشر للتجار بلا فاتورة —
+    // قيد CHECK على النوع لا يقبل 'debt' في قواعد الجولة 91، وSQLite
+    // لا يعدّل CHECK إلا بإعادة بناء الجدول (نفس مسار v35 الرسمي:
+    // جدول بديل ← نسخ ← حذف ← rename ← إعادة الفهارس).
+    const hasDebt = await database.execute(
+      "SELECT COUNT(*) AS c FROM pragma_table_info('merchant_movements')",
+    );
+    const tableExists =
+      Number((hasDebt.rows?.[0] as {c?: number})?.c ?? 0) > 0;
+    if (tableExists) {
+      const checkSql = await database.execute(
+        "SELECT sql AS ddl FROM sqlite_master WHERE type = 'table' AND name = 'merchant_movements'",
+      );
+      const ddl = String(
+        (checkSql.rows?.[0] as {ddl?: string})?.ddl ?? '',
+      );
+      if (!ddl.includes("'debt'")) {
+        await database.execute('PRAGMA foreign_keys = OFF');
+        try {
+          await database.transaction(async () => {
+            await database.execute(`CREATE TABLE merchant_movements_v36 (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              merchant_id INTEGER NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+              ref TEXT NOT NULL,
+              kind TEXT NOT NULL CHECK (kind IN ('invoice','payment','return','collection','debt')),
+              amount REAL NOT NULL CHECK (amount > 0),
+              method TEXT,
+              note TEXT,
+              items_json TEXT,
+              cash_ref TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )`);
+            await database.execute(
+              `INSERT INTO merchant_movements_v36
+                 (id, merchant_id, ref, kind, amount, method, note,
+                  items_json, cash_ref, created_at)
+               SELECT id, merchant_id, ref, kind, amount, method, note,
+                      items_json, cash_ref, created_at
+               FROM merchant_movements`,
+            );
+            await database.execute('DROP TABLE merchant_movements');
+            await database.execute(
+              'ALTER TABLE merchant_movements_v36 RENAME TO merchant_movements',
+            );
+            await database.execute(
+              'CREATE INDEX IF NOT EXISTS idx_merchant_moves ON merchant_movements(merchant_id, created_at DESC, id DESC)',
+            );
+            await database.execute(
+              'CREATE INDEX IF NOT EXISTS idx_merchant_moves_kind ON merchant_movements(kind, created_at DESC)',
+            );
+          });
+        } finally {
+          await database.execute('PRAGMA foreign_keys = ON');
+        }
+        logDiag(
+          'db',
+          'ترحيل v36: نوع الدين المباشر في حركات التجار',
+        );
+      }
+    }
+    version = 36;
   }
 
   if (version !== storedVersion) {

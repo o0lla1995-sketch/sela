@@ -119,6 +119,7 @@ export function ReportsScreen() {
     paymentsInRange: 0,
     returnsInRange: 0,
     collectionsInRange: 0,
+    debtsInRange: 0,
     topOwed: [],
   });
   const [exporting, setExporting] = useState<'csv' | 'xls' | null>(null);
@@ -1278,6 +1279,14 @@ export function ReportsScreen() {
                           value={formatMoney(merchantTotals.purchasesInRange)}
                           tone="accent"
                           icon="plus"
+                        />
+                      </View>
+                      <View style={styles.statsCell}>
+                        <StatCard
+                          label="ديون مباشرة بالفترة"
+                          value={formatMoney(merchantTotals.debtsInRange)}
+                          tone="neutral"
+                          icon="book"
                         />
                       </View>
                       <View style={styles.statsCell}>

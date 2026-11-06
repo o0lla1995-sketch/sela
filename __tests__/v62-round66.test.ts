@@ -59,18 +59,18 @@ describe('v62 — ④ التحديث الإجباري: مقارنة الإصدا
     // بلا توجيه: لا إجبار.
     expect(getUpdateRequirement().required).toBe(false);
     // توجيه بحد أدنى أعلى من إصدار البناء (78.0.0): 79.0.0: إجبار + رابط. (v70: الإصدار الجديد يقلب المقارنة — الحارس يُحرَّض للأعلى دائماً؛ v76→v77: رُقّي الحد مع رفع الإصدار)
-    adoptUpdateInfoIfProvided({minAppVersion: '79.0.0', updateUrl: 'https://play.google.com/x'});
+    adoptUpdateInfoIfProvided({minAppVersion: '80.0.0', updateUrl: 'https://play.google.com/x'});
     const req = getUpdateRequirement();
     expect(req.required).toBe(true);
-    expect(req.minVersion).toBe('79.0.0');
+    expect(req.minVersion).toBe('80.0.0');
     expect(req.updateUrl).toBe('https://play.google.com/x');
-    expect(req.currentVersion).toBe('78.2.0');
+    expect(req.currentVersion).toBe('79.0.0');
     // إفراغ الخادم يلغي الإجبار.
     adoptUpdateInfoIfProvided({minAppVersion: '', updateUrl: ''});
     expect(getUpdateRequirement().required).toBe(false);
     // رد بلا الحقل إطلاقاً (خادم قديم) لا يمس الكاش.
     storage.delete(KEYS.updateRequirement);
-    adoptUpdateInfoIfProvided({minAppVersion: '79.0.0', updateUrl: ''});
+    adoptUpdateInfoIfProvided({minAppVersion: '80.0.0', updateUrl: ''});
     adoptUpdateInfoIfProvided({somethingElse: 1});
     expect(getUpdateRequirement().required).toBe(true);
   });
@@ -216,10 +216,10 @@ describe('v62 — حرّوس المصدر للجولة كاملة', () => {
 
   test('⑥ الإصدار: 71.0.0 (79)', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '78.2.0'");
-    expect(config).toContain('APP_BUILD_CODE = 88');
+    expect(config).toContain("APP_VERSION = '79.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 89');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "78.2.0"');
-    expect(gradle).toContain('versionCode 88');
+    expect(gradle).toContain('versionName "79.0.0"');
+    expect(gradle).toContain('versionCode 89');
   });
 });

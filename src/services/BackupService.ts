@@ -364,7 +364,7 @@ export interface BackupFile {
   merchant_movements?: {
     merchant_id: number;
     ref: string;
-    kind: 'invoice' | 'payment' | 'return' | 'collection';
+    kind: 'invoice' | 'payment' | 'return' | 'collection' | 'debt';
     amount: number;
     method: string | null;
     note: string | null;

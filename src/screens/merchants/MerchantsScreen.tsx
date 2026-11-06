@@ -23,6 +23,7 @@ import {
   Alert,
   BackHandler,
   Keyboard,
+  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -46,6 +47,7 @@ import {
 } from '../../core/paymentMethods';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {CashService} from '../../services/CashService';
+import {ExportService} from '../../services/ExportService';
 import {
   MerchantRepo,
   type MerchantBalance,
@@ -78,9 +80,10 @@ function BackHandlerCloser({
 }
 
 /** نوع الحركة المالية في نافذة «حركة مع التاجر». */
-type FinanceKind = 'payment' | 'return' | 'collection';
+type FinanceKind = 'payment' | 'return' | 'collection' | 'debt';
 
 const FINANCE_OPTIONS: {key: FinanceKind; label: string; icon: IconName}[] = [
+  {key: 'debt', label: 'دين مستحق', icon: 'book'},
   {key: 'payment', label: 'سداد له', icon: 'wallet'},
   {key: 'return', label: 'مرتجع / خصم', icon: 'undo'},
   {key: 'collection', label: 'تحصيل منه', icon: 'download'},
@@ -91,6 +94,21 @@ const KIND_LABELS: Record<string, string> = {
   payment: 'سداد له',
   return: 'مرتجع / خصم',
   collection: 'تحصيل منه',
+  debt: 'دين مستحق مباشر',
+};
+
+/** v79 (الجولة 92 #٤): لون شارة النوع في كشف الحساب — تمييز بصري
+ *  فوري لاتجاه الحركة (علينا له / له عندنا) بمعيار الأنظمة
+ *  الاحترافية بدل سطر نصي واحد لكل شيء. */
+const KIND_TONES: Record<
+  string,
+  {bg: 'dangerSoft' | 'successSoft' | 'warningSoft' | 'infoSoft'; fg: 'danger' | 'success' | 'warning' | 'info'}
+> = {
+  invoice: {bg: 'dangerSoft', fg: 'danger'},
+  debt: {bg: 'warningSoft', fg: 'warning'},
+  payment: {bg: 'successSoft', fg: 'success'},
+  return: {bg: 'infoSoft', fg: 'info'},
+  collection: {bg: 'successSoft', fg: 'success'},
 };
 
 /** بند مسودة في محرر فاتورة التوريد. */
@@ -438,6 +456,22 @@ export function MerchantsScreen() {
     try {
       const merchantId = detail.merchant.id;
       const merchantName = detail.merchant.name;
+      // v79 (الجولة 92 #٣): الدين المستحق المباشر — بلا فاتورة وبلا
+      // حركة خزينة؛ يرفع المستحق له ويُسدّد لاحقاً كأي سداد.
+      if (financeKind === 'debt') {
+        const movement = await MerchantRepo.addDirectDebt({
+          merchantId,
+          amount,
+          note: financeNote,
+        });
+        setFinanceOpen(false);
+        await refreshDetail(merchantId);
+        toast(
+          `سُجّل دين مستحق ${movement.ref} — ${formatMoney(amount)} على حساب ${merchantName}`,
+          'success',
+        );
+        return;
+      }
       if (financeKind === 'return') {
         await MerchantRepo.addReturn({
           merchantId,
@@ -519,6 +553,96 @@ export function MerchantsScreen() {
   const financeNeedsMethod =
     financeKind === 'payment' || financeKind === 'collection';
 
+  // ── v79 (الجولة 92 #٣): تنزيل كشف الحساب — تاجر واحد أو دفتر
+  //  التجار ككل، بصيغة Excel أو CSV (نفس منسق تصدير التقارير،
+  //  ملف في مجلد التنزيلات يفتح فوراً في Excel). ──
+  const exportMerchantStatement = useCallback(
+    (merchantId: number, name: string) => {
+      Alert.alert(
+        `تنزيل كشف حساب «${name}»؟`,
+        'ملف كامل بكل الحركات والرصيد الجاري بعد كل حركة وصف الإجماليات — يُحفظ في مجلد التنزيلات.',
+        [
+          {text: 'إلغاء', style: 'cancel'},
+          {
+            text: 'ملف Excel',
+            onPress: () => {
+              void ExportService.exportMerchantStatement(merchantId, 'xls')
+                .then(path =>
+                  toast(`نُزّل كشف الحساب — ${path}`, 'success'),
+                )
+                .catch((error: unknown) =>
+                  toast(
+                    error instanceof Error
+                      ? error.message
+                      : 'تعذر تنزيل الكشف',
+                    'error',
+                  ),
+                );
+            },
+          },
+          {
+            text: 'ملف CSV',
+            onPress: () => {
+              void ExportService.exportMerchantStatement(merchantId, 'csv')
+                .then(path =>
+                  toast(`نُزّل كشف الحساب — ${path}`, 'success'),
+                )
+                .catch((error: unknown) =>
+                  toast(
+                    error instanceof Error
+                      ? error.message
+                      : 'تعذر تنزيل الكشف',
+                    'error',
+                  ),
+                );
+            },
+          },
+        ],
+      );
+    },
+    [toast],
+  );
+
+  const exportMerchantsBook = useCallback(() => {
+    if (list.length === 0) {
+      toast('لا تجار مسجلون بعد', 'error');
+      return;
+    }
+    Alert.alert(
+      'تنزيل دفتر التجار ككل؟',
+      `سطر لكل تاجر من ${list.length} — الرصيد الحالي وتفكيكه الكامل وإجمالي المستحقات.`,
+      [
+        {text: 'إلغاء', style: 'cancel'},
+        {
+          text: 'ملف Excel',
+          onPress: () => {
+            void ExportService.exportMerchantsBook('xls')
+              .then(path => toast(`نُزّل دفتر التجار — ${path}`, 'success'))
+              .catch((error: unknown) =>
+                toast(
+                  error instanceof Error ? error.message : 'تعذر التنزيل',
+                  'error',
+                ),
+            );
+          },
+        },
+        {
+          text: 'ملف CSV',
+          onPress: () => {
+            void ExportService.exportMerchantsBook('csv')
+              .then(path => toast(`نُزّل دفتر التجار — ${path}`, 'success'))
+              .catch((error: unknown) =>
+                toast(
+                  error instanceof Error ? error.message : 'تعذر التنزيل',
+                  'error',
+                ),
+            );
+          },
+        },
+      ],
+    );
+  }, [list.length, toast]);
+
   return (
     <View style={styles.screen}>
       <AppHeader
@@ -555,6 +679,13 @@ export function MerchantsScreen() {
             returnKeyType="search"
           />
         </View>
+        <AppButton
+          title="تنزيل الدفتر"
+          icon="download"
+          small
+          variant="secondary"
+          onPress={exportMerchantsBook}
+        />
         <AppButton
           title="تاجر جديد"
           icon="plus"
@@ -728,6 +859,19 @@ export function MerchantsScreen() {
                   {detail.merchant.notes ? ` · ${detail.merchant.notes}` : ''}
                 </Text>
               </View>
+              {/* v79 (#٤): اتصال مباشر بضغطة — نافذة هاتفية احترافية. */}
+              {detail.merchant.phone ? (
+                <TouchableOpacity
+                  style={styles.phoneButton}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    void Linking.openURL(
+                      `tel:${detail.merchant.phone?.replace(/\s+/g, '')}`,
+                    );
+                  }}>
+                  <Icon name="phone" size={17} color={c.accent} />
+                </TouchableOpacity>
+              ) : null}
             </View>
 
             {/* بطاقة الرصيد */}
@@ -765,8 +909,11 @@ export function MerchantsScreen() {
                 {formatMoney(Math.abs(detail.balance))}
               </Text>
               <Text style={styles.balanceCardBreak}>
-                توريد {formatMoney(detail.invoiceTotal)} · سداد{' '}
-                {formatMoney(detail.paymentTotal)} · مرتجع/خصم{' '}
+                توريد {formatMoney(detail.invoiceTotal)}
+                {detail.debtTotal > 0.005
+                  ? ` · دين مباشر ${formatMoney(detail.debtTotal)}`
+                  : ''}{' '}
+                · سداد {formatMoney(detail.paymentTotal)} · مرتجع/خصم{' '}
                 {formatMoney(detail.returnTotal)} · تحصيل{' '}
                 {formatMoney(detail.collectionTotal)}
               </Text>
@@ -781,6 +928,15 @@ export function MerchantsScreen() {
                 onPress={openInvoice}
               />
               <AppButton
+                title="دين مستحق"
+                icon="book"
+                small
+                variant="secondary"
+                onPress={() => openFinance('debt')}
+              />
+            </View>
+            <View style={styles.actionsRow}>
+              <AppButton
                 title="سداد له"
                 icon="wallet"
                 small
@@ -794,12 +950,26 @@ export function MerchantsScreen() {
                 variant="secondary"
                 onPress={() => openFinance('return')}
               />
+            </View>
+            <View style={styles.actionsRow}>
               <AppButton
                 title="تحصيل منه"
                 icon="download"
                 small
                 variant="secondary"
                 onPress={() => openFinance('collection')}
+              />
+              <AppButton
+                title="تنزيل الكشف"
+                icon="download"
+                small
+                variant="ghost"
+                onPress={() =>
+                  exportMerchantStatement(
+                    detail.merchant.id,
+                    detail.merchant.name,
+                  )
+                }
               />
             </View>
             <View style={styles.actionsRow}>
@@ -832,12 +1002,32 @@ export function MerchantsScreen() {
                   لا حركات بعد — ابدأ بفاتورة توريد أو سداد
                 </Text>
               ) : (
-                statement.map(row => (
+                statement.map(row => {
+                  const tone = KIND_TONES[row.movement.kind];
+                  const positive =
+                    row.movement.kind === 'invoice' ||
+                    row.movement.kind === 'debt';
+                  return (
                   <View key={row.movement.id} style={styles.historyRow}>
                     <View style={{flex: 1, minWidth: 0}}>
-                      <Text style={styles.historyRef} numberOfLines={1}>
-                        {KIND_LABELS[row.movement.kind]} · {row.movement.ref}
-                      </Text>
+                      {/* v79 (#٤): شارة نوع ملونة + المرجع — قراءة فورية */}
+                      <View style={styles.historyHead}>
+                        {tone ? (
+                          <View
+                            style={[styles.kindBadge, {backgroundColor: c[tone.bg]}]}>
+                            <Text
+                              style={[
+                                styles.kindBadgeText,
+                                {color: c[tone.fg]},
+                              ]}>
+                              {KIND_LABELS[row.movement.kind]}
+                            </Text>
+                          </View>
+                        ) : null}
+                        <Text style={styles.historyRef} numberOfLines={1}>
+                          {row.movement.ref}
+                        </Text>
+                      </View>
                       <Text style={styles.historyMeta} numberOfLines={1}>
                         {formatDateTime(row.movement.createdAt)}
                         {row.movement.method != null &&
@@ -863,13 +1053,10 @@ export function MerchantsScreen() {
                         style={[
                           styles.historyAmount,
                           {
-                            color:
-                              row.movement.kind === 'invoice'
-                                ? c.danger
-                                : c.success,
+                            color: positive ? c.danger : c.success,
                           },
                         ]}>
-                        {row.movement.kind === 'invoice' ? '+' : '−'}
+                        {positive ? '+' : '−'}
                         {formatMoney(row.movement.amount)}
                       </Text>
                       <Text style={styles.historyRunning}>
@@ -877,7 +1064,8 @@ export function MerchantsScreen() {
                       </Text>
                     </View>
                   </View>
-                ))
+                  );
+                })
               )}
             </ScrollView>
           </View>
@@ -1012,6 +1200,17 @@ export function MerchantsScreen() {
                         />
                       </View>
                     </View>
+                    {/* v79 (#٤): إجمالي السطر حيّاً — فاتورة تُقرأ كجدول
+                        محاسبي لا كحقول متناثرة. */}
+                    <Text style={styles.itemLineTotal}>
+                      إجمالي السطر:{' '}
+                      <Text style={{color: c.accent, fontFamily: fonts.bold}}>
+                        {formatMoney(
+                          (Number(item.qty.replace(',', '.')) || 0) *
+                            (Number(item.price.replace(',', '.')) || 0),
+                        )}
+                      </Text>
+                    </Text>
                   </View>
                   <TouchableOpacity
                     style={styles.itemRemove}
@@ -1106,7 +1305,9 @@ export function MerchantsScreen() {
               ))}
             </View>
             <Text style={styles.sheetHint}>
-              {financeKind === 'payment'
+              {financeKind === 'debt'
+                ? 'التزام مالي مباشر على حساب التاجر بلا فاتورة توريد (رسوم، نقد، توريد ضاعت فاتورته) — يرفع المستحق له ولا يمس الخزينة.'
+                : financeKind === 'payment'
                 ? 'يدفع من قناة الدفع المختارة (يُسجل سند صرف في الخزينة) ويخفض ما علينا للتاجر.'
                 : financeKind === 'return'
                 ? 'أرجعنا له بضاعة أو حصلنا خصماً — يخفض الرصيد بلا حركة خزينة.'
@@ -1157,7 +1358,9 @@ export function MerchantsScreen() {
             />
             <AppButton
               title={
-                financeKind === 'payment'
+                financeKind === 'debt'
+                  ? 'تسجيل الدين المستحق'
+                  : financeKind === 'payment'
                   ? 'تسجيل السداد'
                   : financeKind === 'return'
                   ? 'تسجيل المرتجع/الخصم'
@@ -1415,6 +1618,30 @@ const useStyles = makeStyles(c =>
       borderColor: c.borderSoft,
       padding: 10,
     },
+    /* v79 (#٤): رأس صف الكشف — شارة نوع ملونة + المرجع. */
+    historyHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      flexWrap: 'wrap',
+    },
+    kindBadge: {
+      borderRadius: 6,
+      paddingHorizontal: 7,
+      paddingVertical: 2.5,
+    },
+    kindBadgeText: {
+      fontFamily: fonts.bold,
+      fontSize: 10,
+    },
+    phoneButton: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      backgroundColor: c.accentSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
     historyRef: {
       color: c.text,
       fontFamily: fonts.bold,
@@ -1456,6 +1683,14 @@ const useStyles = makeStyles(c =>
     itemNumRow: {
       flexDirection: 'row',
       gap: 8,
+    },
+    /* v79 (#٤): إجمالي السطر الحيّ في محرر فاتورة التوريد. */
+    itemLineTotal: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: 11,
+      marginTop: 2,
+      textAlign: 'left',
     },
     itemRemove: {
       width: 34,

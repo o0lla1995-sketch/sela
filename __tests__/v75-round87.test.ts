@@ -157,9 +157,9 @@ describe('v75 — ٣ الهيدر العلوي المتجاوب مع أحجام 
 
 describe('v75 — ٤ الإصدار', () => {
   test('77.0.0 (86) في config والبناء', () => {
-    expect(read(CONFIG)).toContain("APP_VERSION = '78.2.0'");
-    expect(read(CONFIG)).toContain('APP_BUILD_CODE = 88');
-    expect(read(GRADLE)).toContain('versionCode 88');
-    expect(read(GRADLE)).toContain('versionName "78.2.0"');
+    expect(read(CONFIG)).toContain("APP_VERSION = '79.0.0'");
+    expect(read(CONFIG)).toContain('APP_BUILD_CODE = 89');
+    expect(read(GRADLE)).toContain('versionCode 89');
+    expect(read(GRADLE)).toContain('versionName "79.0.0"');
   });
 });

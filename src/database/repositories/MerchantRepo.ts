@@ -17,19 +17,24 @@
  *    حركة خزينة: الرصيد ينخفض.
  *  • تحصيل منه (collection) — أعطانا نقداً/تحويلاً (تسبيق أو
  *    تسوية): الرصيد ينخفض مع سند إيداع في الخزينة.
+ *  • دين مستحق مباشر (debt) — v79 (الجولة 92 #٣): التزام مالي
+ *    مباشر على حساب التاجر بلا فاتورة توريد (رسوم، نقد اقترضه
+ *    التاجر منا، توريد ضاعت فاتورته…) — يرفع المستحق له تماماً
+ *    كفاتورة التوريد لكن بلا بنود ولا حركة خزينة.
  *
- *  رصيد التاجر = Σ فواتير − Σ سداد − Σ مرتجعات − Σ تحصيلات
+ *  رصيد التاجر = Σ فواتير + Σ ديون − Σ سداد − Σ مرتجعات − Σ تحصيلات
  *  موجب = علينا له (مستحق) · سالب = له عندنا (دائن لنا) · صفر = مسدد.
  */
 import {getDb} from '../connection';
-import {localToday} from '../../core/format';
+import {localNow, localToday} from '../../core/format';
 import {logDiag} from '../../core/diagnostics';
 
 export type MerchantMovementKind =
   | 'invoice'
   | 'payment'
   | 'return'
-  | 'collection';
+  | 'collection'
+  | 'debt';
 
 export interface Merchant {
   id: number;
@@ -70,6 +75,8 @@ export interface MerchantBalance {
   paymentTotal: number;
   returnTotal: number;
   collectionTotal: number;
+  /** v79: ديون مستحقة مباشرة بلا فاتورة توريد. */
+  debtTotal: number;
   /** آخر حركة (أي نوع) بصيغة ISO أو null. */
   lastAt: string | null;
 }
@@ -92,6 +99,8 @@ export interface MerchantTotals {
   paymentsInRange: number;
   returnsInRange: number;
   collectionsInRange: number;
+  /** v79: ديون مباشرة مسجلة خلال الفترة. */
+  debtsInRange: number;
   topOwed: {merchant: Merchant; balance: number}[];
 }
 
@@ -137,7 +146,9 @@ function rowToMovement(row: Record<string, unknown>): MerchantMovement {
     id: Number(row.id ?? 0),
     merchantId: Number(row.merchant_id ?? 0),
     ref: String(row.ref ?? ''),
-    kind: (['invoice', 'payment', 'return', 'collection'].includes(kind)
+    kind: (['invoice', 'payment', 'return', 'collection', 'debt'].includes(
+      kind,
+    )
       ? kind
       : 'invoice') as MerchantMovementKind,
     amount: Number(row.amount ?? 0),
@@ -155,6 +166,7 @@ const KIND_PREFIX: Record<MerchantMovementKind, string> = {
   payment: 'سداد',
   return: 'مرتجع',
   collection: 'تحصيل',
+  debt: 'دين',
 };
 
 /** المرجع التالي للنوع — تسلسل يومي متزايد يُحسب من قيد القاعدة
@@ -287,6 +299,7 @@ export const MerchantRepo = {
               SUM(CASE WHEN kind = 'payment' THEN amount ELSE 0 END) AS payments,
               SUM(CASE WHEN kind = 'return' THEN amount ELSE 0 END) AS returns,
               SUM(CASE WHEN kind = 'collection' THEN amount ELSE 0 END) AS collections,
+              SUM(CASE WHEN kind = 'debt' THEN amount ELSE 0 END) AS debts,
               MAX(created_at) AS last_at
        FROM merchant_movements GROUP BY merchant_id`,
     );
@@ -316,14 +329,20 @@ export const MerchantRepo = {
       const paymentTotal = Number(sums?.payments ?? 0);
       const returnTotal = Number(sums?.returns ?? 0);
       const collectionTotal = Number(sums?.collections ?? 0);
+      const debtTotal = Number(sums?.debts ?? 0);
       result.push({
         merchant,
         balance:
-          invoiceTotal - paymentTotal - returnTotal - collectionTotal,
+          invoiceTotal +
+          debtTotal -
+          paymentTotal -
+          returnTotal -
+          collectionTotal,
         invoiceTotal,
         paymentTotal,
         returnTotal,
         collectionTotal,
+        debtTotal,
         lastAt: sums?.last_at == null ? null : String(sums.last_at),
       });
     }
@@ -369,7 +388,12 @@ export const MerchantRepo = {
         total,
         input.note?.trim() || null,
         JSON.stringify(items),
-        input.createdAt ?? null,
+        // v79 (الجولة 92 #٣): الجذر الحقيقي لخطأ «تعذر حفظ الفاتورة —
+        // NOT NULL constraint failed: merchant_movements.created_at»:
+        // تمرير NULL صريحاً يتجاوز DEFAULT العمود (القيمة الافتراضية
+        // تُطبّق فقط عند غياب العمود أصلاً) — نفس الإصلاح في الإدراجات
+        // الأربعة كلها. الطابع الزمني المحلي يطابق صيغة datetime('now').
+        input.createdAt ?? localNow(),
       ],
     );
     logDiag(
@@ -404,7 +428,7 @@ export const MerchantRepo = {
         input.method ?? 'cash',
         input.note?.trim() || null,
         input.cashRef ?? null,
-        input.createdAt ?? null,
+        input.createdAt ?? localNow(),
       ],
     );
     logDiag('merchants', `سداد ${ref} بمبلغ ${amount.toFixed(2)} ₪`);
@@ -432,8 +456,41 @@ export const MerchantRepo = {
         ref,
         Math.round(amount * 100) / 100,
         input.note?.trim() || null,
-        input.createdAt ?? null,
+        input.createdAt ?? localNow(),
       ],
+    );
+    return (await this.movementById(Number(result.insertId ?? -1)))!;
+  },
+
+  /** v79 (الجولة 92 #٣): دين مستحق مباشر بلا فاتورة توريد — يرفع
+   *  المستحق للتاجر (رسوم/نقد/التزام اتفقنا عليه بلا بضاعة موثقة)
+   *  ولا يمس الخزينة إطلاقاً؛ يُسدّد لاحقاً كأي سداد عادي. */
+  async addDirectDebt(input: {
+    merchantId: number;
+    amount: number;
+    note?: string | null;
+    createdAt?: string;
+  }): Promise<MerchantMovement> {
+    const amount = Number(input.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('مبلغ الدين المستحق يجب أن يكون أكبر من صفر');
+    }
+    const ref = await nextRef('debt');
+    const result = await getDb().execute(
+      `INSERT INTO merchant_movements
+        (merchant_id, ref, kind, amount, note, created_at)
+       VALUES (?, ?, 'debt', ?, ?, ?)`,
+      [
+        input.merchantId,
+        ref,
+        Math.round(amount * 100) / 100,
+        input.note?.trim() || null,
+        input.createdAt ?? localNow(),
+      ],
+    );
+    logDiag(
+      'merchants',
+      `دين مستحق مباشر ${ref} بمبلغ ${amount.toFixed(2)} ₪`,
     );
     return (await this.movementById(Number(result.insertId ?? -1)))!;
   },
@@ -463,7 +520,7 @@ export const MerchantRepo = {
         input.method ?? 'cash',
         input.note?.trim() || null,
         input.cashRef ?? null,
-        input.createdAt ?? null,
+        input.createdAt ?? localNow(),
       ],
     );
     return (await this.movementById(Number(result.insertId ?? -1)))!;
@@ -493,8 +550,9 @@ export const MerchantRepo = {
     const asc: MerchantStatementRow[] = [];
     for (const row of rows) {
       const movement = rowToMovement(row);
+      // v79: الدين المباشر كفاتورة التوريد — يرفع الرصيد الجاري.
       running +=
-        movement.kind === 'invoice'
+        movement.kind === 'invoice' || movement.kind === 'debt'
           ? movement.amount
           : -movement.amount;
       asc.push({movement, runningBalance: Math.round(running * 100) / 100});
@@ -505,7 +563,7 @@ export const MerchantRepo = {
   /** رصيد تاجر واحد الآن — null إن لم يوجد. */
   async balanceNow(merchantId: number): Promise<number | null> {
     const result = await getDb().execute(
-      `SELECT SUM(CASE WHEN kind = 'invoice' THEN amount ELSE -amount END) AS bal
+      `SELECT SUM(CASE WHEN kind IN ('invoice', 'debt') THEN amount ELSE -amount END) AS bal
        FROM merchant_movements WHERE merchant_id = ?`,
       [merchantId],
     );
@@ -539,6 +597,7 @@ export const MerchantRepo = {
     let paymentsInRange = 0;
     let returnsInRange = 0;
     let collectionsInRange = 0;
+    let debtsInRange = 0;
     if (from != null && to != null) {
       const inRange = await db.execute(
         `SELECT kind, SUM(amount) AS s FROM merchant_movements
@@ -562,6 +621,9 @@ export const MerchantRepo = {
           case 'collection':
             collectionsInRange = sum;
             break;
+          case 'debt':
+            debtsInRange = sum;
+            break;
         }
       }
     }
@@ -573,6 +635,7 @@ export const MerchantRepo = {
       paymentsInRange: Math.round(paymentsInRange * 100) / 100,
       returnsInRange: Math.round(returnsInRange * 100) / 100,
       collectionsInRange: Math.round(collectionsInRange * 100) / 100,
+      debtsInRange: Math.round(debtsInRange * 100) / 100,
       topOwed: owed.slice(0, 5),
     };
   },

@@ -10,6 +10,7 @@ import {ReportService} from './ReportService';
 import {ProductRepo} from '../database/repositories/ProductRepo';
 import {StocktakeRepo} from '../database/repositories/StocktakeRepo';
 import {SaleRepo} from '../database/repositories/SaleRepo';
+import {MerchantRepo} from '../database/repositories/MerchantRepo';
 import {localToday} from '../core/format';
 import {paymentMethodLabel} from '../core/paymentMethods';
 import type {ReportRangeKey, DateRange, Product} from '../core/types';
@@ -289,4 +290,166 @@ export const ExportService = {
     ];
     return exportRows('sela_backup', rows, 'csv');
   },
+
+  /** v79 (الجولة 92 #٣): كشف حساب تاجر واحد — كل الحركات بالرصيد
+   *  الجاري بعد كل حركة (الأقدم أولاً كما في الدفاتر المحاسبية)
+   *  مع صف إجماليات أسفل الجدول. */
+  async exportMerchantStatement(
+    merchantId: number,
+    format: 'csv' | 'xls',
+  ): Promise<string> {
+    const merchant = await MerchantRepo.byId(merchantId);
+    if (merchant == null) {
+      throw new Error('حساب التاجر غير موجود');
+    }
+    // الكشف يُبنى تصاعدياً (الأقدم أولاً) — نعكس تسلسل العرض.
+    const statement = (await MerchantRepo.statement(merchantId, 2000)).slice()
+      .reverse();
+    if (statement.length === 0) {
+      throw new Error('لا حركات في كشف حساب هذا التاجر بعد');
+    }
+    const rows: (string | number)[][] = [
+      [`كشف حساب التاجر — ${merchant.name}`],
+      [
+        merchant.phone ? `جوال: ${merchant.phone}` : '',
+        merchant.id_number ? `هوية: ${merchant.id_number}` : '',
+      ],
+      [],
+      [
+        'التاريخ والوقت',
+        'نوع الحركة',
+        'المرجع',
+        'موجب (علينا له) (₪)',
+        'سالب (له عندنا) (₪)',
+        'قناة السداد',
+        'سند الخزينة',
+        'البيان / البنود',
+        'الرصيد الجاري (₪)',
+      ],
+      ...statement.map(row => {
+        const positive =
+          row.movement.kind === 'invoice' || row.movement.kind === 'debt';
+        const itemsText =
+          row.movement.items
+            ?.map(item => `${item.name} ×${item.qty}`)
+            .join(' · ') ?? '';
+        return [
+          row.movement.createdAt,
+          MERCHANT_KIND_LABELS[row.movement.kind] ?? row.movement.kind,
+          row.movement.ref,
+          positive ? row.movement.amount.toFixed(2) : '',
+          positive ? '' : row.movement.amount.toFixed(2),
+          row.movement.method != null && row.movement.method !== 'cash'
+            ? paymentMethodLabel(row.movement.method)
+            : row.movement.method === 'cash'
+            ? 'نقدي'
+            : '',
+          row.movement.cashRef ?? '',
+          [row.movement.note ?? '', itemsText].filter(Boolean).join(' — '),
+          row.runningBalance.toFixed(2),
+        ];
+      }),
+      [],
+      [
+        'الإجماليات',
+        '',
+        '',
+        statement
+          .filter(
+            row =>
+              row.movement.kind === 'invoice' || row.movement.kind === 'debt',
+          )
+          .reduce((sum, row) => sum + row.movement.amount, 0)
+          .toFixed(2),
+        statement
+          .filter(
+            row =>
+              row.movement.kind !== 'invoice' && row.movement.kind !== 'debt',
+          )
+          .reduce((sum, row) => sum + row.movement.amount, 0)
+          .toFixed(2),
+        '',
+        '',
+        '',
+        `الرصيد الحالي: ${(statement[statement.length - 1]?.runningBalance ??
+          0).toFixed(2)} ₪`,
+      ],
+    ];
+    return exportRows(
+      `merchant_${merchant.name.replace(/\s+/g, '_')}`,
+      rows,
+      format,
+    );
+  },
+
+  /** v79 (الجولة 92 #٣): دفتر التجار ككل — سطر لكل تاجر برصيده
+   *  وتفكيكه الكامل، ثم إجمالي المستحقات في أسفل الجدول. */
+  async exportMerchantsBook(format: 'csv' | 'xls'): Promise<string> {
+    const list = await MerchantRepo.listWithBalances();
+    if (list.length === 0) {
+      throw new Error('لا تجار مسجلون بعد');
+    }
+    const rows: (string | number)[][] = [
+      ['دفتر حسابات التجار — سيلا'],
+      [],
+      [
+        'التاجر',
+        'الجوال',
+        'الهوية',
+        'فواتير التوريد (₪)',
+        'ديون مباشرة (₪)',
+        'سداد (₪)',
+        'مرتجع/خصم (₪)',
+        'تحصيل (₪)',
+        'الرصيد الحالي (₪)',
+        'حالة الرصيد',
+        'آخر حركة',
+      ],
+      ...list.map(entry => [
+        entry.merchant.name,
+        entry.merchant.phone ?? '',
+        entry.merchant.id_number ?? '',
+        entry.invoiceTotal.toFixed(2),
+        entry.debtTotal.toFixed(2),
+        entry.paymentTotal.toFixed(2),
+        entry.returnTotal.toFixed(2),
+        entry.collectionTotal.toFixed(2),
+        entry.balance.toFixed(2),
+        entry.balance > 0.005
+          ? 'مستحق له'
+          : entry.balance < -0.005
+          ? 'لك عنده'
+          : 'مسدد',
+        entry.lastAt ?? 'لا حركات',
+      ]),
+      [],
+      [
+        'الإجماليات',
+        '',
+        '',
+        list.reduce((sum, e) => sum + e.invoiceTotal, 0).toFixed(2),
+        list.reduce((sum, e) => sum + e.debtTotal, 0).toFixed(2),
+        list.reduce((sum, e) => sum + e.paymentTotal, 0).toFixed(2),
+        list.reduce((sum, e) => sum + e.returnTotal, 0).toFixed(2),
+        list.reduce((sum, e) => sum + e.collectionTotal, 0).toFixed(2),
+        list.reduce((sum, e) => sum + e.balance, 0).toFixed(2),
+        `مستحق للتجار: ${list
+          .reduce((sum, e) => sum + Math.max(0, e.balance), 0)
+          .toFixed(2)} ₪ · لك عند التجار: ${list
+          .reduce((sum, e) => sum + Math.max(0, -e.balance), 0)
+          .toFixed(2)} ₪`,
+        '',
+      ],
+    ];
+    return exportRows('merchants_book', rows, format);
+  },
+};
+
+/** تسميات أنواع حركات التاجر في التصدير. */
+const MERCHANT_KIND_LABELS: Record<string, string> = {
+  invoice: 'فاتورة توريد',
+  payment: 'سداد له',
+  return: 'مرتجع/خصم',
+  collection: 'تحصيل منه',
+  debt: 'دين مستحق مباشر',
 };

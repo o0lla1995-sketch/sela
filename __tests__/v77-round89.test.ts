@@ -162,9 +162,9 @@ describe('v77 — ٤ الإصدار: 77.0.0 (86) في config والبناء', ()
   test('config.ts وbuild.gradle عند 78.0.0 / 86', () => {
     const config = read(CONFIG);
     const gradle = read(GRADLE);
-    expect(config).toContain("APP_VERSION = '78.2.0'");
-    expect(config).toContain('APP_BUILD_CODE = 88');
-    expect(gradle).toContain('versionName "78.2.0"');
-    expect(gradle).toContain('versionCode 88');
+    expect(config).toContain("APP_VERSION = '79.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 89');
+    expect(gradle).toContain('versionName "79.0.0"');
+    expect(gradle).toContain('versionCode 89');
   });
 });

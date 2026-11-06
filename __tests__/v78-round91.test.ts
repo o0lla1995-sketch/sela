@@ -70,7 +70,7 @@ describe('v78 — ٢ ميزة حسابات التجار (ذمم دائنة)', ()
     expect(src).toContain('CREATE TABLE IF NOT EXISTS merchants');
     expect(src).toContain('CREATE TABLE IF NOT EXISTS merchant_movements');
     expect(src).toContain(
-      "kind TEXT NOT NULL CHECK (kind IN ('invoice','payment','return','collection'))",
+      "kind TEXT NOT NULL CHECK (kind IN ('invoice','payment','return','collection','debt'))",
     );
     expect(src).toContain('idx_merchant_moves');
     // المسح الكامل يشمل الجدولين.
@@ -81,7 +81,9 @@ describe('v78 — ٢ ميزة حسابات التجار (ذمم دائنة)', ()
 
   test('المستودع: المعادلة (توريد − سداد − مرتجع − تحصيل) والمراجع', () => {
     const src = read(MERCHANT_REPO);
-    expect(src).toContain('invoiceTotal - paymentTotal - returnTotal - collectionTotal');
+    expect(src).toContain('invoiceTotal +');
+    expect(src).toContain('debtTotal -');
+    expect(src).toContain('paymentTotal -');
     expect(src).toContain("invoice: 'توريد'");
     expect(src).toContain("payment: 'سداد'");
     expect(src).toContain("return: 'مرتجع'");
@@ -198,13 +200,13 @@ describe('v78 — ٤ لا إشعارات نفاد للمنتجات بلا تتب
 });
 
 describe('v78 — الإصدار', () => {
-  test('config.ts وbuild.gradle عند 78.2.0 / 87', () => {
+  test('config.ts وbuild.gradle عند 79.0.0 / 87', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '78.2.0'");
-    expect(config).toContain('APP_BUILD_CODE = 88');
+    expect(config).toContain("APP_VERSION = '79.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 89');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionName "78.2.0"');
-    expect(gradle).toContain('versionCode 88');
+    expect(gradle).toContain('versionName "79.0.0"');
+    expect(gradle).toContain('versionCode 89');
   });
 });
 

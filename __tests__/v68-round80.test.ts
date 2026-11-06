@@ -151,10 +151,10 @@ describe('v68 — ٤ب صفحة التقارير بتبويبات', () => {
 describe('v68 — ٥ الإصدار', () => {
   test('71.0.0 (79) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '78.2.0'");
-    expect(config).toContain('APP_BUILD_CODE = 88');
+    expect(config).toContain("APP_VERSION = '79.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 89');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "78.2.0"');
-    expect(gradle).toContain('versionCode 88');
+    expect(gradle).toContain('versionName "79.0.0"');
+    expect(gradle).toContain('versionCode 89');
   });
 });
