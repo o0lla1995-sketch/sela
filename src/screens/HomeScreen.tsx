@@ -299,13 +299,24 @@ export function HomeScreen() {
     (treasury?.revenueAllTime ?? 0) -
     (treasury?.creditSalesAllTime ?? 0) -
     (treasury?.voucherSalesAllTime ?? 0) +
-    (treasury?.voucherCounterExtraAllTime ?? 0);
+    (treasury?.voucherCounterExtraAllTime ?? 0) -
+    // v80 (الجولة 93 #١): مبيعات البنوك والمحافظ لا تدخل «مبيعات
+    // نقدية» أبداً — لها صفها الخاص أسفلها، وإلا قرأها التاجر
+    // مضافة مرتين: مرة هنا ومرة في رصيد القناة أسفل البطاقة
+    // («يتم اضافة الرصيد بشكل مزدوج في النقدي والبنك»).
+    (treasury?.nonCashSalesAllTime ?? 0);
+  const nonCashSalesShekels = treasury?.nonCashSalesAllTime ?? 0;
+  const nonCashRepaymentsShekels =
+    treasury?.nonCashRepaymentsAllTime ?? 0;
   const collectionsTotal =
     (treasury?.localCollectionsAllTime ?? 0) +
     (treasury?.cashierCollectionsAllTime ?? 0) +
     (treasury?.appCollectionsAllTime ?? 0) +
     (treasury?.prepaidCoveredAllTime ?? 0) +
-    (treasury?.campaignSettlementsAllTime ?? 0);
+    (treasury?.campaignSettlementsAllTime ?? 0) -
+    // v80: سدادّات المحافظ/البنوك لا تدخل المقبوضات النقدية —
+    // صفها الخاص أسفلها (نفس قاعدة المبيعات أعلاه).
+    (treasury?.nonCashRepaymentsAllTime ?? 0);
   const campaignSettlementsShekels = treasury?.campaignSettlementsAllTime ?? 0;
   const viaSilaShekels =
     (treasury?.cashierCollectionsAllTime ?? 0) +
@@ -485,6 +496,29 @@ export function HomeScreen() {
                 {formatMoney(salesCash)}
               </Text>
             </View>
+            {/* v80 (الجولة 93 #١): مبيعات البنوك والمحافظ بصفها الخاص —
+                ليست نقداً في الدرج ولا تختفي من الكشف؛ رصيدها الحالي
+                في شريط القنوات أسفل البطاقة (لا ازدواج). */}
+            {nonCashSalesShekels > 0.005 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  مبيعات عبر البنوك والمحافظ (أرصدتها في شريط القنوات)
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.info}]}>
+                  {formatMoney(nonCashSalesShekels)}
+                </Text>
+              </View>
+            ) : null}
+            {nonCashRepaymentsShekels > 0.005 ? (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownLabel}>
+                  سدادّات استُلمت عبر البنوك والمحافظ
+                </Text>
+                <Text style={[styles.breakdownValue, {color: c.info}]}>
+                  {formatMoney(nonCashRepaymentsShekels)}
+                </Text>
+              </View>
+            ) : null}
             <View style={styles.breakdownRow}>
               <Text style={styles.breakdownLabel}>تحصيلات ديون مستلمة</Text>
               <Text style={[styles.breakdownValue, {color: c.success}]}>

@@ -47,7 +47,9 @@ import {
 } from '../../core/paymentMethods';
 import {useSettingsStore} from '../../stores/settingsStore';
 import {CashService} from '../../services/CashService';
-import {ExportService} from '../../services/ExportService';
+// v80 (الجولة 93 #٢): كشوف التجار PDF — أُلغي تصدير Excel/CSV كلياً
+// بطلب التاجر («لغيهما»)؛ الوثيقة قابلة للطباعة A4 عربية.
+import {MerchantsPdfService} from '../../services/MerchantsPdfService';
 import {
   MerchantRepo,
   type MerchantBalance,
@@ -553,45 +555,74 @@ export function MerchantsScreen() {
   const financeNeedsMethod =
     financeKind === 'payment' || financeKind === 'collection';
 
-  // ── v79 (الجولة 92 #٣): تنزيل كشف الحساب — تاجر واحد أو دفتر
-  //  التجار ككل، بصيغة Excel أو CSV (نفس منسق تصدير التقارير،
-  //  ملف في مجلد التنزيلات يفتح فوراً في Excel). ──
+  // ── v80 (الجولة 93 #٢): كشوف التجار PDF قابل للطباعة — أُلغيت
+  // صيغتا Excel وCSV بطلب التاجر نصاً («لغيهما»)، ونفس محرّك
+  // تقارير الديون المجرب (A4 RTL + Tajawal) يرسم كشف التاجر
+  // ودفتر التجار كاملاً، مع تنزيل ومشاركة وطباعة النظام. ──
+  const [pdfBusy, setPdfBusy] = useState(false);
+
+  const runPdf = useCallback(
+    (task: () => Promise<string>) => {
+      if (pdfBusy) {
+        return;
+      }
+      setPdfBusy(true);
+      task()
+        .then(path => toast(`نُزّل كشف الـPDF — ${path}`, 'success'))
+        .catch((error: unknown) =>
+          toast(
+            error instanceof Error ? error.message : 'تعذر إنشاء الـPDF',
+            'error',
+          ),
+        )
+        .finally(() => setPdfBusy(false));
+    },
+    [pdfBusy, toast],
+  );
+
   const exportMerchantStatement = useCallback(
     (merchantId: number, name: string) => {
       Alert.alert(
-        `تنزيل كشف حساب «${name}»؟`,
-        'ملف كامل بكل الحركات والرصيد الجاري بعد كل حركة وصف الإجماليات — يُحفظ في مجلد التنزيلات.',
+        `كشف حساب «${name}» — PDF قابل للطباعة`,
+        'وثيقة محاسبية كاملة بكل الحركات والرصيد الجاري بعد كل حركة وصف الإجماليات — A4 عربي جاهز للطباعة.',
         [
           {text: 'إلغاء', style: 'cancel'},
           {
-            text: 'ملف Excel',
+            text: 'تنزيل الـPDF',
+            onPress: () =>
+              runPdf(() =>
+                MerchantsPdfService.exportStatementPdf(merchantId),
+              ),
+          },
+          {
+            text: 'مشاركة',
             onPress: () => {
-              void ExportService.exportMerchantStatement(merchantId, 'xls')
-                .then(path =>
-                  toast(`نُزّل كشف الحساب — ${path}`, 'success'),
+              void MerchantsPdfService.exportStatementPdf(merchantId)
+                .then(() =>
+                  MerchantsPdfService.shareStatementPdf(merchantId),
                 )
                 .catch((error: unknown) =>
                   toast(
                     error instanceof Error
                       ? error.message
-                      : 'تعذر تنزيل الكشف',
+                      : 'تعذر إنشاء الـPDF',
                     'error',
                   ),
                 );
             },
           },
           {
-            text: 'ملف CSV',
+            text: 'طباعة',
             onPress: () => {
-              void ExportService.exportMerchantStatement(merchantId, 'csv')
-                .then(path =>
-                  toast(`نُزّل كشف الحساب — ${path}`, 'success'),
+              void MerchantsPdfService.exportStatementPdf(merchantId)
+                .then(() =>
+                  MerchantsPdfService.printStatementPdf(merchantId),
                 )
                 .catch((error: unknown) =>
                   toast(
                     error instanceof Error
                       ? error.message
-                      : 'تعذر تنزيل الكشف',
+                      : 'تعذر إنشاء الـPDF',
                     'error',
                   ),
                 );
@@ -600,7 +631,7 @@ export function MerchantsScreen() {
         ],
       );
     },
-    [toast],
+    [runPdf, toast],
   );
 
   const exportMerchantsBook = useCallback(() => {
@@ -609,39 +640,48 @@ export function MerchantsScreen() {
       return;
     }
     Alert.alert(
-      'تنزيل دفتر التجار ككل؟',
-      `سطر لكل تاجر من ${list.length} — الرصيد الحالي وتفكيكه الكامل وإجمالي المستحقات.`,
+      'دفتر التجار كاملاً — PDF قابل للطباعة',
+      `سطر لكل تاجر من ${list.length} — الرصيد الحالي وتفكيكه الكامل وصف الإجماليات — A4 عربي جاهز للطباعة.`,
       [
         {text: 'إلغاء', style: 'cancel'},
         {
-          text: 'ملف Excel',
+          text: 'تنزيل الـPDF',
+          onPress: () =>
+            runPdf(() => MerchantsPdfService.exportBookPdf()),
+        },
+        {
+          text: 'مشاركة',
           onPress: () => {
-            void ExportService.exportMerchantsBook('xls')
-              .then(path => toast(`نُزّل دفتر التجار — ${path}`, 'success'))
+            void MerchantsPdfService.exportBookPdf()
+              .then(() => MerchantsPdfService.shareBookPdf())
               .catch((error: unknown) =>
                 toast(
-                  error instanceof Error ? error.message : 'تعذر التنزيل',
+                  error instanceof Error
+                    ? error.message
+                    : 'تعذر إنشاء الـPDF',
                   'error',
                 ),
-            );
+              );
           },
         },
         {
-          text: 'ملف CSV',
+          text: 'طباعة',
           onPress: () => {
-            void ExportService.exportMerchantsBook('csv')
-              .then(path => toast(`نُزّل دفتر التجار — ${path}`, 'success'))
+            void MerchantsPdfService.exportBookPdf()
+              .then(() => MerchantsPdfService.printBookPdf())
               .catch((error: unknown) =>
                 toast(
-                  error instanceof Error ? error.message : 'تعذر التنزيل',
+                  error instanceof Error
+                    ? error.message
+                    : 'تعذر إنشاء الـPDF',
                   'error',
                 ),
-            );
+              );
           },
         },
       ],
     );
-  }, [list.length, toast]);
+  }, [list.length, runPdf, toast]);
 
   return (
     <View style={styles.screen}>
@@ -919,74 +959,83 @@ export function MerchantsScreen() {
               </Text>
             </View>
 
-            {/* أزرار العمليات */}
-            <View style={styles.actionsRow}>
+            {/* v80 (الجولة 93 #٤): أزرار العمليات أُعيد تنظيمها — كانت
+                ثمانية أزرار متراكبة جانباً إلى جنب في أربعة صفوف
+                متساوية (شكوى التاجر: «الأزرار المتراكمة بشكل كبير»).
+                التصميم الجديد هرمي واضح: العملية اليومية الأولى بحجم
+                كامل، ثم عمليات المال الأربع في شبكة ٢×٢ مضغوطة، ثم
+                الكشف والوثائق، والإدارة (تعديل/حذف) في الأسفل هامشة
+                صغيرة لا تنافس العمليات المالية. */}
+            <AppButton
+              title="فاتورة توريد جديدة"
+              icon="plus"
+              onPress={openInvoice}
+            />
+            <View style={styles.actionsGrid}>
               <AppButton
-                title="فاتورة توريد"
-                icon="plus"
+                title="سداد له"
+                icon="wallet"
                 small
-                onPress={openInvoice}
+                variant="secondary"
+                style={{flexBasis: '48%', flexGrow: 1}}
+                onPress={() => openFinance('payment')}
               />
               <AppButton
                 title="دين مستحق"
                 icon="book"
                 small
                 variant="secondary"
+                style={{flexBasis: '48%', flexGrow: 1}}
                 onPress={() => openFinance('debt')}
-              />
-            </View>
-            <View style={styles.actionsRow}>
-              <AppButton
-                title="سداد له"
-                icon="wallet"
-                small
-                variant="secondary"
-                onPress={() => openFinance('payment')}
               />
               <AppButton
                 title="مرتجع/خصم"
                 icon="undo"
                 small
                 variant="secondary"
+                style={{flexBasis: '48%', flexGrow: 1}}
                 onPress={() => openFinance('return')}
               />
-            </View>
-            <View style={styles.actionsRow}>
               <AppButton
                 title="تحصيل منه"
                 icon="download"
                 small
                 variant="secondary"
+                style={{flexBasis: '48%', flexGrow: 1}}
                 onPress={() => openFinance('collection')}
               />
-              <AppButton
-                title="تنزيل الكشف"
-                icon="download"
-                small
-                variant="ghost"
-                onPress={() =>
-                  exportMerchantStatement(
-                    detail.merchant.id,
-                    detail.merchant.name,
-                  )
-                }
-              />
             </View>
-            <View style={styles.actionsRow}>
-              <AppButton
-                title="تعديل البيانات"
-                icon="edit"
-                small
-                variant="ghost"
-                onPress={() => openEdit(detail)}
-              />
-              <AppButton
-                title="حذف التاجر"
-                icon="trash"
-                small
-                variant="danger"
-                onPress={() => removeMerchant(detail)}
-              />
+            <AppButton
+              title="كشف حساب PDF قابل للطباعة"
+              icon="download"
+              small
+              variant="ghost"
+              loading={pdfBusy}
+              onPress={() =>
+                exportMerchantStatement(
+                  detail.merchant.id,
+                  detail.merchant.name,
+                )
+              }
+            />
+            <View style={styles.adminRow}>
+              <TouchableOpacity
+                style={styles.adminButton}
+                activeOpacity={0.7}
+                onPress={() => openEdit(detail)}>
+                <Icon name="edit" size={15} color={c.textDim} />
+                <Text style={styles.adminButtonText}>تعديل البيانات</Text>
+              </TouchableOpacity>
+              <View style={styles.adminDivider} />
+              <TouchableOpacity
+                style={styles.adminButton}
+                activeOpacity={0.7}
+                onPress={() => removeMerchant(detail)}>
+                <Icon name="trash" size={15} color={c.danger} />
+                <Text style={[styles.adminButtonText, {color: c.danger}]}>
+                  حذف التاجر
+                </Text>
+              </TouchableOpacity>
             </View>
 
             {/* كشف الحساب */}
@@ -1603,6 +1652,41 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       gap: 6,
       marginTop: 8,
+    },
+    /* v80 (الجولة 93 #٤): شبكة عمليات المال ٢×٢ — أزرار متساوية
+     * بلا تراكب؛ الفاتورة اليومية فوقها بحجم كامل والإدارة أسفل. */
+    actionsGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 6,
+      marginTop: 6,
+    },
+    /* v80: صف الإدارة الهامشي — تعديل/حذف بأصغر حجم بصري لا ينافس
+     * العمليات المالية (طابور واحد رقيق بفاصل رأسي). */
+    adminRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginTop: 10,
+      gap: 4,
+    },
+    adminButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingVertical: 6,
+      paddingHorizontal: 10,
+      borderRadius: 8,
+    },
+    adminButtonText: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: 12,
+    },
+    adminDivider: {
+      width: 1,
+      height: 14,
+      backgroundColor: c.borderSoft,
     },
     historyList: {
       flexGrow: 0,

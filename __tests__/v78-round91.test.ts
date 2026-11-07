@@ -200,13 +200,13 @@ describe('v78 — ٤ لا إشعارات نفاد للمنتجات بلا تتب
 });
 
 describe('v78 — الإصدار', () => {
-  test('config.ts وbuild.gradle عند 79.0.0 / 87', () => {
+  test('config.ts وbuild.gradle عند 80.0.0 / 90', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '79.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 89');
+    expect(config).toContain("APP_VERSION = '80.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 90');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionName "79.0.0"');
-    expect(gradle).toContain('versionCode 89');
+    expect(gradle).toContain('versionName "80.0.0"');
+    expect(gradle).toContain('versionCode 90');
   });
 });
 

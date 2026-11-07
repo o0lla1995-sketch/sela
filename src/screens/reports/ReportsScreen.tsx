@@ -19,6 +19,7 @@
  */
 import React, {useCallback, useMemo, useState} from 'react';
 import {
+  Alert,
   ScrollView,
   StyleSheet,
   Text,
@@ -45,6 +46,9 @@ import {MerchantRepo} from '../../database/repositories/MerchantRepo';
 import {rangeFor} from '../../services/ReportService';
 import {displayMethod} from '../../core/paymentMethods';
 import {ExportService} from '../../services/ExportService';
+// v80 (الجولة 93 #٧): تقرير الفترة الشامل PDF — وثيقة قابلة للطباعة
+// تضم عمليات التجار المختصرة (طلب التاجر نصاً).
+import {PeriodReportPdfService} from '../../services/PeriodReportPdfService';
 import {useToastStore} from '../../stores/toastStore';
 import {useCatalogStore} from '../../stores/catalogStore';
 import {
@@ -123,6 +127,8 @@ export function ReportsScreen() {
     topOwed: [],
   });
   const [exporting, setExporting] = useState<'csv' | 'xls' | null>(null);
+  /** v80 (الجولة 93 #٧): إنشاء تقرير الفترة PDF الشامل. */
+  const [periodPdfBusy, setPeriodPdfBusy] = useState(false);
   const [topMode, setTopMode] = useState<'revenue' | 'profit'>('revenue');
   // v26 (round-34 #6): the cash & debts sections start COLLAPSED —
   // each shows its HEADLINE number; one tap expands the details
@@ -245,6 +251,45 @@ export function ReportsScreen() {
     },
     [rangeKey, toast],
   );
+
+  /** v80 (الجولة 93 #٧): إنشاء تقرير الفترة PDF الشامل ثم خيارات
+   *  المشاركة/الطباعة — الوثيقة تشمل عمليات التجار المختصرة. */
+  const openPeriodPdf = useCallback(() => {
+    if (periodPdfBusy) {
+      return;
+    }
+    setPeriodPdfBusy(true);
+    PeriodReportPdfService.exportPeriodPdf(rangeKey)
+      .then(path => {
+        setPeriodPdfBusy(false);
+        Alert.alert(
+          'تقرير الفترة PDF جاهز',
+          `نُزّل التقرير الشامل — ${path}`,
+          [
+            {text: 'إغلاق', style: 'cancel'},
+            {
+              text: 'مشاركة',
+              onPress: () => {
+                void PeriodReportPdfService.sharePeriodPdf(rangeKey);
+              },
+            },
+            {
+              text: 'طباعة',
+              onPress: () => {
+                void PeriodReportPdfService.printPeriodPdf(rangeKey);
+              },
+            },
+          ],
+        );
+      })
+      .catch((error: unknown) => {
+        setPeriodPdfBusy(false);
+        toast(
+          error instanceof Error ? error.message : 'تعذر إنشاء التقرير',
+          'error',
+        );
+      });
+  }, [periodPdfBusy, rangeKey, toast]);
 
   // v47 (الجولة 55 #3): «متجاوب بالحجم» — عرض الرسم يتبع نافذة
   // الجهاز لحظياً (دوران/تابلت/تقسيم شاشة). كان يُحسب مرة واحدة عند
@@ -638,17 +683,29 @@ export function ReportsScreen() {
 
               {/* 2-أ) The net cash hero. */}
               <View style={styles.cashHero}>
-                <Text style={styles.cashHeroLabel}>النقد المحصّل بالفترة</Text>
+                <Text style={styles.cashHeroLabel}>
+                  النقد المحصّل بالدرج بالفترة
+                </Text>
                 <Text style={[styles.cashHeroValue, {color: c.accent}]}>
                   {formatMoney(cash?.collected ?? 0)}
                 </Text>
-                {/* v76 (الجولة ٨٨ #٣): salesCash يشمل مبيعات كل القنوات
-                    (نقد + بنوك ومحافظ) — كانت التسمية «مبيعات نقدية»
-                    توحي بأن حركات المحافظ والبنوك غير محسوبة. */}
+                {/* v80 (الجولة 93 #١): الرقم نقدي صافٍ (الدرج فقط) —
+                    مبيعات ومقبوضات البنوك والمحافظ بصفها المعلوماتي
+                    أسفله وأرصدتها في بطاقة القنوات، فلا يُقرأ المبلغ
+                    واحده مرتين (شكوى التاجر نصاً). */}
                 <Text style={styles.cashHeroMeta}>
-                  مبيعات (نقد + بنوك ومحافظ) {formatMoney(cash?.salesCash ?? 0)} +
-                  مقبوضات (ديون وحملات) {formatMoney(cash?.collections ?? 0)}
+                  مبيعات نقدية {formatMoney(cash?.salesCash ?? 0)} +
+                  مقبوضات نقدية (ديون وحملات){' '}
+                  {formatMoney(cash?.collections ?? 0)}
                 </Text>
+                {(cash?.nonCashSalesAmount ?? 0) > 0.005 ||
+                (cash?.nonCashRepaymentsAmount ?? 0) > 0.005 ? (
+                  <Text style={styles.cashHeroMeta}>
+                    عبر البنوك والمحافظ (أرصدتها في بطاقة القنوات): مبيعات{' '}
+                    {formatMoney(cash?.nonCashSalesAmount ?? 0)} · سدادّات{' '}
+                    {formatMoney(cash?.nonCashRepaymentsAmount ?? 0)}
+                  </Text>
+                ) : null}
               </View>
 
               {/* 2-ب) Collections received in the range — v26: brief
@@ -719,18 +776,14 @@ export function ReportsScreen() {
                 </View>
               </CollapseSection>
 
-              {/* 2-ج-3) v25 (round-32 #3) → v26: المصروفات والمسحوبات
-                  بالفترة — the headline is the section's IMPORTANT
-                  number (صافي النقد بعد الحركات) and stays visible
-                  always; the breakdown expands on press.
-                  v76 (الجولة ٨٨ #٤): أُعيدت التسمية «صافي حركة الخزينة
-                  بالفترة» — هذا صافي ما دخل وخرج خلال الفترة المحددة
-                  فقط (كل القنوات معاً) وليس رصيداً: بعد تصفير حساب
-                  بالسحب يظهر سالباً بلا معنى مرعب؛ الأرصدة الحقيقية
-                  «الآن» في الخلايا وبطاقة القنوات أسفل (طلب التاجر:
-                  «لخبطة في فهم الحسابات وما فيها من نقد وأرصدة حالية»). */}
+              {/* 2-ج-3) v25 (round-32 #3) → v26 → v80 (الجولة 93 #١):
+                  المصروفات والمسحوبات بالفترة — العنوان هو صافي حركة
+                  الدرج النقدي فقط (الدرج الحقيقي)، وحركات البنوك
+                  والمحافظ سطر معلوماتي مستقل أسفلها كي لا تُقرأ
+                  خصماً مزدوجاً مع أرصدة القنوات (شكوى التاجر نصاً).
+                  قد يظهر سالباً بعد سحب رصيد — طبيعي وليس رصيداً. */}
               <CollapseSection
-                title="صافي حركة الخزينة بالفترة (كل القنوات)"
+                title="صافي حركة الدرج النقدي بالفترة"
                 valueText={formatMoney(cash?.netCashAfterMovements ?? 0)}
                 valueColor={
                   (cash?.netCashAfterMovements ?? 0) >= 0
@@ -796,13 +849,15 @@ export function ReportsScreen() {
                       {formatMoney(cash?.netCashAfterMovements ?? 0)}
                       </Text>
                     </View>
-                    {/* v76 (الجولة ٨٨ #٤): تمييز صريح — حركة الفترة قد
-                        تكون سالبة بعد سحب الأرصدة (تصفير) وهذا طبيعي
-                        ولا يعني رصيداً سالباً؛ الأرصدة الحقيقية الآن في
-                        الخلايا وبطاقة القنوات أدناه. */}
+                    {/* v80 (الجولة 93 #١): تمييز صريح — هذه حركة الدرج
+                        النقدي فقط؛ حركات البنوك والمحافظ لا تدخلها
+                        أصلاً (قد يكون سالباً بعد سحب رصيد وهذا طبيعي
+                        ولا يعني رصيداً سالباً). الأرصدة الحقيقية الآن:
+                        «النقد بالخزينة الآن» و«إجمالي الخزينة الآن»
+                        وبطاقة أرصدة المحافظ والبنوك أدناه. */}
                     <Text style={styles.periodNote}>
-                      هذا صافي ما دخل وخرج خلال الفترة المحددة فقط (كل
-                      القنوات معاً) — قد يكون سالباً بعد سحب رصيد، وهذا
+                      هذا صافي ما دخل الدرج النقدي وخرج منه خلال الفترة
+                      المحددة فقط — قد يكون سالباً بعد سحب رصيد، وهذا
                       طبيعي ولا يعني رصيداً سالباً. الأرصدة الحقيقية الآن:
                       «النقد بالخزينة الآن» و«إجمالي الخزينة الآن» وبطاقة
                       أرصدة المحافظ والبنوك أدناه.
@@ -1099,6 +1154,90 @@ export function ReportsScreen() {
               <Text style={styles.chartHint}>
                 العمود المضيء هو ساعة الذروة والخط المتقطع متوسط الساعة
                 النشطة — جهّز المخزون والطاقم لأيام وساعات الذروة
+              </Text>
+            </Card>
+
+            {/* ── v80 (الجولة 93 #٧): عمليات التجار بشكل مختصر — طلب
+                التاجر نصاً: «لا يوجد في التقارير ما يوضح عمليات التجار
+                بشكل مختصر ويضاف الي التقارير في حال طباعتها». البطاقة
+                في تبويب الملخص نفسه (لا تحتاج البحث في تبويب الديون)،
+                والتفصيل الكامل في تبويب الديون والقسائم. ── */}
+            {merchantTotals.count > 0 ? (
+              <Card>
+                <SectionTitle
+                  title="عمليات التجار — ملخص مختصر"
+                  hint="فواتير التوريد والسدادات لهذه الفترة"
+                />
+                <View style={styles.merBriefGrid}>
+                  <View style={styles.merBriefCell}>
+                    <Text style={styles.merBriefLabel}>
+                      مستحق للتجار الآن · {merchantTotals.count} تاجر
+                    </Text>
+                    <Text
+                      style={[
+                        styles.merBriefValue,
+                        {
+                          color:
+                            merchantTotals.owedNow > 0
+                              ? c.danger
+                              : c.success,
+                        },
+                      ]}>
+                      {formatMoney(merchantTotals.owedNow)}
+                    </Text>
+                  </View>
+                  <View style={styles.merBriefCell}>
+                    <Text style={styles.merBriefLabel}>توريد بالفترة</Text>
+                    <Text style={[styles.merBriefValue, {color: c.accent}]}>
+                      {formatMoney(merchantTotals.purchasesInRange)}
+                    </Text>
+                  </View>
+                  <View style={styles.merBriefCell}>
+                    <Text style={styles.merBriefLabel}>سدادات بالفترة</Text>
+                    <Text
+                      style={[styles.merBriefValue, {color: c.success}]}>
+                      {formatMoney(merchantTotals.paymentsInRange)}
+                    </Text>
+                  </View>
+                  <View style={styles.merBriefCell}>
+                    <Text style={styles.merBriefLabel}>تحصيلات بالفترة</Text>
+                    <Text style={[styles.merBriefValue, {color: c.info}]}>
+                      {formatMoney(merchantTotals.collectionsInRange)}
+                    </Text>
+                  </View>
+                </View>
+                {merchantTotals.topOwed.length > 0 ? (
+                  <Text style={styles.merBriefNote}>
+                    أكبر المستحقات:{' '}
+                    {merchantTotals.topOwed
+                      .slice(0, 3)
+                      .map(row => `${row.merchant.name} (${formatMoney(row.balance)})`)
+                      .join(' · ')}
+                  </Text>
+                ) : null}
+              </Card>
+            ) : null}
+
+            {/* ── v80 (الجولة 93 #٧): تقرير PDF شامل قابل للطباعة —
+                ملخص الفترة كله (المبيعات + القنوات + النقد والديون +
+                عمليات التجار المختصرة + الأكثر مبيعاً) بوثيقة A4 عربية
+                واحدة: تنزيل أو مشاركة أو طباعة نظام. ── */}
+            <Card>
+              <SectionTitle
+                title="تقرير الفترة PDF"
+                hint="وثيقة شاملة قابلة للطباعة — تشمل عمليات التجار"
+              />
+              <AppButton
+                title="إنشاء تقرير PDF شامل للفترة"
+                icon="printer"
+                small
+                loading={periodPdfBusy}
+                onPress={openPeriodPdf}
+              />
+              <Text style={styles.merBriefNote}>
+                يضم ملخص المبيعات والأرباح وأرصدة القنوات والنقد بالدرج
+                والديون القائمة وعمليات التجار المختصرة والأكثر إيراداً —
+                جاهز للطباعة أو المشاركة (واتساب/إيميل).
               </Text>
             </Card>
             </>
@@ -1725,6 +1864,44 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.black,
       fontSize: 13,
       fontVariant: ['tabular-nums'],
+    },
+    /* v80 (الجولة 93 #٧): شبكة ملخص عمليات التجار المختصر — ٢×٢
+     * نظيفة داخل بطاقة الملخص. */
+    merBriefGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+    },
+    merBriefCell: {
+      flexBasis: '48%',
+      flexGrow: 1,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      alignItems: 'center',
+    },
+    merBriefLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: 11,
+      textAlign: 'center',
+    },
+    merBriefValue: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: 15,
+      marginTop: 3,
+    },
+    merBriefNote: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: 11,
+      lineHeight: 17,
+      marginTop: 8,
+      textAlign: 'right',
     },
     // ── v68 (الجولة 80 #٤ب) ← v69 (الجولة 81 #١): شريط تبويبات
     //    التقارير — أيقونات فقط بلا نص بجانبها (بطلب التاجر)، كل

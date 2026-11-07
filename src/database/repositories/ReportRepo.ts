@@ -828,6 +828,49 @@ export const ReportRepo = {
     };
   },
 
+  /** v80 (الجولة 93 #١): ما جرى على القنوات غير النقدية بفترة محددة —
+   *  نفس منطق nonCashExclusionsMinor لكن مقيدة بالتاريخ كي تُعرض
+   *  أرقام «النقد المحصّل بالفترة» نقية من مبيعات ومقبوضات
+   *  المحافظ/البنوك، وبصف معلوماتي منفصل لها (لا ازدواج مع أرصدة
+   *  القنوات). يشمل صفوف RET بقناتها (مرتجع محفظة يُعاد للقناة). */
+  async nonCashInRange(
+    range: DateRange,
+  ): Promise<{salesNetMinor: number; repaymentsMinor: number}> {
+    const [start, end] = rangeBounds(range);
+    const result = await getDb().execute(
+      `SELECT
+         (SELECT COALESCE(SUM(total_amount), 0) * 100
+            FROM sales
+            WHERE COALESCE(payment_method, 'cash') != 'cash'
+              AND created_at >= ? AND created_at <= ?
+              AND invoice_number NOT LIKE 'INV-D-%'
+              AND invoice_number NOT LIKE 'INV-L-%'
+              AND invoice_number NOT LIKE 'INV-O-%'
+              AND invoice_number NOT LIKE 'INV-V-%') AS sales_net,
+         (SELECT COALESCE(SUM(amount_minor), 0)
+            FROM local_payments
+            WHERE COALESCE(CASE WHEN method IN ('card','other') THEN 'other' ELSE method END, 'cash') != 'cash'
+              AND created_at >= ? AND created_at <= ?) AS local_rep,
+         (SELECT COALESCE(SUM(amount_minor), 0)
+            FROM sila_payment_queue
+            WHERE kind = 'repayment'
+              AND COALESCE(CASE WHEN payment_method IN ('card','other') THEN 'other' ELSE payment_method END, 'cash') != 'cash'
+              AND created_at >= ? AND created_at <= ?) AS sila_rep`,
+      [start, end, start, end, start, end],
+    );
+    const row = (result.rows?.[0] ?? {}) as {
+      sales_net?: number;
+      local_rep?: number;
+      sila_rep?: number;
+    };
+    return {
+      salesNetMinor: Math.round(Number(row.sales_net ?? 0)),
+      repaymentsMinor: Math.round(
+        Number(row.local_rep ?? 0) + Number(row.sila_rep ?? 0),
+      ),
+    };
+  },
+
   safeMessage(error: unknown): string {
     return toMessage(error);
   },

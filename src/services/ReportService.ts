@@ -105,6 +105,13 @@ export interface CashDebtsBundle {
   depositsCount: number;
   /** v25: صافي النقد بالفترة بعد المصروفات والمسحوبات. */
   netCashAfterMovements: number;
+  /** v80 (الجولة 93 #١): مبيعات البنوك والمحافظ بالفترة (بالشيكل)
+   *  — خارج أرقام النقد أعلاه بالكامل، تُعرض بصف معلوماتي خاص
+   *  كي لا تُقرأ مضافة مرتين (مرة في المحصّل ومرة في رصيد
+   *  القناة) — شكوى التاجر نصاً. */
+  nonCashSalesAmount: number;
+  /** v80: سدادّات استُلمت عبر البنوك والمحافظ بالفترة (بالشيكل). */
+  nonCashRepaymentsAmount: number;
   /** v26 (round-34 #3): لقطة الآن — النقد المتوقع بالخزينة (نفس
    *  معادلة الرئيسية، لكن بالفترة/الكل حسب الخزينة اللحظية). */
   cashNowMinor: number;
@@ -170,6 +177,16 @@ export interface TreasurySnapshot {
   withdrawalsAllTime: number;
   /** v25: الإيداعات النقدية للخزينة عبر التاريخ — إضافة. */
   depositsAllTime: number;
+  /** v80 (الجولة 93 #١): المبيعات التي جرت على بنوك/محافظ عبر
+   *  التاريخ (بالشيكل) — لا علاقة لها بالدرج النقدي إطلاقاً؛
+   *  تُعرض بصفها الخاص في تفاصيل الخزينة كي لا تُقرأ مبيعات
+   *  المحافظ داخل «مبيعات نقدية» فيبدو الرصيد مضافاً مرتين
+   *  (شكوى التاجر: «يتم اضافة الرصيد بشكل مزدوج في النقدي
+   *  والبنك» — المبلغ واحد، ظهر في رقمين). */
+  nonCashSalesAllTime: number;
+  /** v80: سدادّات الديون التي استُلمت على بنوك/محافظ (بالشيكل)
+   *  — نفس منطق الفصل أعلاه للمقبوضات. */
+  nonCashRepaymentsAllTime: number;
   /** النقد المتوقع في الخزينة الآن. */
   cashTotal: number;
 }
@@ -243,8 +260,11 @@ export const ReportService = {
       voucherGoods,
       voucherSettlementsReceived,
       campaignTotals,
-      cashMovements,
+      // v80 (الجولة 93 #١): حركات الفترة مفصولة نقدي/قنوات — بطاقة
+      // النقد تعرض الدرج النقدي صافياً، وحركات القنوات معلوماتية.
+      cashMovementsSplit,
       treasuryNow,
+      nonCashRange,
     ] = await Promise.all([
       ReportRepo.summary(range),
       ReportRepo.topProducts(range, 10),
@@ -269,11 +289,16 @@ export const ReportService = {
       // النقد المحصّل بالفترة.
       VouchersRepo.settlementsReceivedInRange(range.from, range.to),
       VouchersRepo.campaignsTotals(),
-      // v25 (round-32 #3): the cash-movements ledger of the period.
-      CashRepo.totalsFor(range.from, range.to),
+      // v80 (الجولة 93 #١): إجماليات الفترة مفصولة نقدي/قنوات —
+      // استبدلت totalsFor المختوطة (كانت تجمع درج وقنوات معاً
+      // فتُوحي بخصم/إضافة مزدوجة مع أرصدة القنوات).
+      CashRepo.totalsForSplit(range.from, range.to),
       // v26 (round-34 #6): the live «النقد بالخزينة الآن» cell in
       // the الدين القائم الآن grid of the reports page.
       this.treasurySnapshot(),
+      // v80 (الجولة 93 #١): ما جرى على البنوك والمحافظ بالفترة —
+      // يُفصل من أرقام النقد المحصّل كي لا يُقرأ مزدوجاً.
+      ReportRepo.nonCashInRange(range),
     ]);
 
     const topByProfit = [...topByRevenue]
@@ -284,11 +309,15 @@ export const ReportService = {
     // only their COUNTER-EXTRA part entered the drawer at sale time —
     // the claim part arrives later with the campaign settlements
     // (§2: التسوية تحصيل). The equation stays balanced either way.
+    // v80 (الجولة 93 #١): مبيعات البنوك والمحافظ تُفصل هنا —
+    //  «النقد المحصّل بالفترة» درج نقدي صافٍ، وللقنوات سطرها
+    //  المعلوماتي الخاص (نفس انضباط معادلة الخزينة الكلية).
     const salesCash =
       summary.revenue -
       debtSales.amount -
       voucherGoods.goodsAmount +
-      voucherSales.counterExtraMinor / 100;
+      voucherSales.counterExtraMinor / 100 -
+      nonCashRange.salesNetMinor / 100;
     // v22 (round-28 #2): the period's collected cash includes the
     // campaign settlements RECEIVED in the period (المستلم من
     // المؤسسات) — the user's rule: «المستحق في النقد المحصل
@@ -298,8 +327,15 @@ export const ReportService = {
         localPayments.minor +
         appCollections.minor +
         creditCovered +
-        voucherSettlementsReceived.minor) /
+        voucherSettlementsReceived.minor -
+        // v80 (الجولة 93 #١): سدادّات البنوك/المحافظ خارج المقبوضات
+        // النقدية — لها سطرها المعلوماتي الخاص أسفل البطل.
+        nonCashRange.repaymentsMinor) /
       100;
+    // v80: مبيعات البنوك والمحافظ بالفترة — سطر معلوماتي مستقل،
+    // وأرقام «النقد المحصّل» أعلاه نقية منها بلا ازدواج.
+    const nonCashSalesAmount = nonCashRange.salesNetMinor / 100;
+    const nonCashRepaymentsAmount = nonCashRange.repaymentsMinor / 100;
 
     return {
       range,
@@ -342,18 +378,25 @@ export const ReportService = {
         campaignSettlementsAmount: voucherSettlementsReceived.minor / 100,
         campaignDueMinor: campaignTotals.dueMinor,
         // v25 (round-32 #3): the drawer's non-sale life of the period.
-        expensesAmount: cashMovements.expensesMinor / 100,
-        expensesCount: cashMovements.expensesCount,
-        withdrawalsAmount: cashMovements.withdrawalsMinor / 100,
-        withdrawalsCount: cashMovements.withdrawalsCount,
-        depositsAmount: cashMovements.depositsMinor / 100,
-        depositsCount: cashMovements.depositsCount,
+        // v80 (الجولة 93 #١): نقية نقدياً — مصاريف وسحوبات البنوك
+        // والمحافظ لا تُخصم من الدرج أبداً (سطرها المعلوماتي أسفل
+        // وبطاقة القنوات ترصدها) — كان خلطها يوحي بخصم مزدوج.
+        expensesAmount: cashMovementsSplit.cash.expensesMinor / 100,
+        expensesCount: cashMovementsSplit.cash.expensesCount,
+        withdrawalsAmount: cashMovementsSplit.cash.withdrawalsMinor / 100,
+        withdrawalsCount: cashMovementsSplit.cash.withdrawalsCount,
+        depositsAmount: cashMovementsSplit.cash.depositsMinor / 100,
+        depositsCount: cashMovementsSplit.cash.depositsCount,
         netCashAfterMovements:
           salesCash +
           collections +
-          cashMovements.depositsMinor / 100 -
-          cashMovements.expensesMinor / 100 -
-          cashMovements.withdrawalsMinor / 100,
+          cashMovementsSplit.cash.depositsMinor / 100 -
+          cashMovementsSplit.cash.expensesMinor / 100 -
+          cashMovementsSplit.cash.withdrawalsMinor / 100,
+        // v80 (الجولة 93 #١): أرصدة القنوات غير النقدية بالفترة —
+        // معلوماتية تماماً ولا تدخل أي رقم نقدي أعلاه.
+        nonCashSalesAmount,
+        nonCashRepaymentsAmount,
         // v26 (round-34): the live drawer number + the period's
         // discounts (its own KPI — «تفاصيل الخصم بعد الإرجاعات»).
         cashNowMinor: Math.round(treasuryNow.cashTotal * 100),
@@ -471,6 +514,10 @@ export const ReportService = {
       expensesAllTime: cashTotals.expensesMinor / 100,
       withdrawalsAllTime: cashTotals.withdrawalsMinor / 100,
       depositsAllTime: cashTotals.depositsMinor / 100,
+      // v80 (الجولة 93 #١): المبالغ التي جرت على القنوات غير النقدية
+      // — تُعرض بصفوفها الخاصة ولا تختفي من الكشف (شفافية كاملة).
+      nonCashSalesAllTime: nonCashExclusions.salesNetMinor / 100,
+      nonCashRepaymentsAllTime: nonCashExclusions.repaymentsMinor / 100,
       cashTotal:
         revenueAllTime -
         creditSalesAllTime -

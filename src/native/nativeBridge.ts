@@ -130,6 +130,13 @@ interface PlatformUtilsNative {
     fileName: string,
     payloadJson: string,
   ): Promise<string>;
+  /** v80 (الجولة 93 #٧): تقرير الفترة الشامل PDF — وثيقة A4 عربية
+   *  متعددة الأقسام (ملخص/قنوات/نقد/تجار/الأكثر مبيعاً)؛ كل قسم
+   *  عنوان + بطاقات + جدول أعمدة بأوزان نسبية (قابل للطباعة). */
+  createPeriodReportPdf(
+    fileName: string,
+    payloadJson: string,
+  ): Promise<string>;
   /** v40 (الجولة 48 #4): يرسم شكل الفاتورة الحرارية كصورة PNG
    *  (صفوف JSON بنفس بنية الفاتورة → Tajawal على ورقة بيضاء
    *  بمقاس 58/80مم) ويحفظها في مجلد التنزيلات → المسار. */

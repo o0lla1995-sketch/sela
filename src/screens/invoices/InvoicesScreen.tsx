@@ -1866,6 +1866,19 @@ function ReturnSheet({
         setRatio(prep.discountRatio);
         setDebtLabel(prep.debtLabel);
         setDebtState(prep.debtState as {kind: string});
+        // v80 (الجولة 93 #٥): القناة الأصلية للفاتورة هي افتراض
+        //  التسوية — طلب التاجر نصاً: «الخصم من الأصل»؛ مرتجع بضاعة
+        //  بيعت عبر محفظة/بنك يُرد إلى القناة نفسها تلقائياً (والتاجر
+        //  يغيّرها من المنتقي إن أراد). كتب الدين تُسوّى في الدفتر
+        //  فلا قناة لها.
+        if (
+          prep.book === 'cash' &&
+          prep.sale.payment_method != null &&
+          prep.sale.payment_method !== '' &&
+          prep.sale.payment_method !== 'cash'
+        ) {
+          setRefundChannel(prep.sale.payment_method);
+        }
       })
       .catch(err => {
         setError(err instanceof Error ? err.message : 'تعذر تحضير الإرجاع');

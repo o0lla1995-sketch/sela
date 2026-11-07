@@ -375,6 +375,115 @@ export const CashRepo = {
     };
   },
 
+  /** v80 (الجولة 93 #١): إجماليات الفترة مفصولة نقدي/قنوات — نفس
+   *  إجماليات totalsFor لكن موزعة على الدرج النقدي مقابل البنوك
+   *  والمحافظ، كي تعرض التقارير «صافي حركة الدرج النقدي» نقياً من
+   *  مصاريف وسحوبات القنوات (لها أرصدتها في بطاقة القنوات) فلا
+   *  يُقرأ الخصم مرتين (شكوى التاجر: «يخصم من الخزينة والمحفظة
+   *  كخصم مزدوج»). */
+  async totalsForSplit(
+    from: string,
+    to: string,
+  ): Promise<{
+    cash: {
+      expensesMinor: number;
+      withdrawalsMinor: number;
+      depositsMinor: number;
+      expensesCount: number;
+      withdrawalsCount: number;
+      depositsCount: number;
+    };
+    channels: {
+      expensesMinor: number;
+      withdrawalsMinor: number;
+      depositsMinor: number;
+      expensesCount: number;
+      withdrawalsCount: number;
+      depositsCount: number;
+    };
+  }> {
+    try {
+      const clauses = [
+        'date(created_at) BETWEEN date(?) AND date(?)',
+        `category NOT IN (${INVOICE_EDIT_SETTLEMENT_CATEGORIES.map(
+          () => '?',
+        ).join(', ')})`,
+      ];
+      const params: (string | number)[] = [
+        from,
+        to,
+        ...INVOICE_EDIT_SETTLEMENT_CATEGORIES,
+      ];
+      const result = await getDb().execute(
+        `SELECT COALESCE(payment_method, 'cash') AS method, kind,
+                COALESCE(SUM(amount_minor), 0) AS total,
+                COUNT(*) AS cnt
+         FROM cash_movements
+         WHERE ${clauses.join(' AND ')}
+           AND kind IN ('expense','withdrawal','deposit')
+         GROUP BY COALESCE(payment_method, 'cash'), kind`,
+        params,
+      );
+      const cash = {
+        expensesMinor: 0,
+        withdrawalsMinor: 0,
+        depositsMinor: 0,
+        expensesCount: 0,
+        withdrawalsCount: 0,
+        depositsCount: 0,
+      };
+      const channels = {
+        expensesMinor: 0,
+        withdrawalsMinor: 0,
+        depositsMinor: 0,
+        expensesCount: 0,
+        withdrawalsCount: 0,
+        depositsCount: 0,
+      };
+      for (const raw of result.rows ?? []) {
+        const row = raw as {
+          method?: string;
+          kind?: string;
+          total?: number;
+          cnt?: number;
+        };
+        const bucket = row.method === 'cash' ? cash : channels;
+        const total = Number(row.total ?? 0);
+        const cnt = Number(row.cnt ?? 0);
+        if (row.kind === 'expense') {
+          bucket.expensesMinor = total;
+          bucket.expensesCount = cnt;
+        } else if (row.kind === 'withdrawal') {
+          bucket.withdrawalsMinor = total;
+          bucket.withdrawalsCount = cnt;
+        } else if (row.kind === 'deposit') {
+          bucket.depositsMinor = total;
+          bucket.depositsCount = cnt;
+        }
+      }
+      return {cash, channels};
+    } catch {
+      return {
+        cash: {
+          expensesMinor: 0,
+          withdrawalsMinor: 0,
+          depositsMinor: 0,
+          expensesCount: 0,
+          withdrawalsCount: 0,
+          depositsCount: 0,
+        },
+        channels: {
+          expensesMinor: 0,
+          withdrawalsMinor: 0,
+          depositsMinor: 0,
+          expensesCount: 0,
+          withdrawalsCount: 0,
+          depositsCount: 0,
+        },
+      };
+    }
+  },
+
   /** All-time totals for the treasury snapshot (single query). */
   async allTimeTotals(): Promise<{
     expensesMinor: number;

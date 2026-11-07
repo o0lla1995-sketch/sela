@@ -1771,6 +1771,343 @@ class PlatformUtilsModule(private val reactContext: ReactApplicationContext) :
   }
 
   /**
+   * v80 (الجولة 93 #٧): تقرير الفترة الشامل PDF — طلب التاجر نصاً:
+   * «لا يوجد في التقارير ما يوضح عمليات التجار بشكل مختصر ويضاف
+   * الي التقارير في حال طباعتها» — وثيقة A4 عربية واحدة متعددة
+   * الأقسام بنفس عائلة المحركات المجربة (PdfDocument + Tajawal +
+   * RTL). كل قسم: عنوان + بطاقات ملخص اختيارية + جدول أعمدة
+   * بأوزان نسبية + سطر ملاحظة:
+   *   {
+   *     "storeName": "…", "title": "تقرير الفترة", "periodLabel": "…",
+   *     "generatedAt": "…",
+   *     "sections": [
+   *       {"heading": "ملخص المبيعات",
+   *        "summary": [ {"label":"الإيراد","value":"1200.00 ₪"}, … ],
+   *        "columns": [ {"label":"الصنف","w":3.0}, … ],
+   *        "rows":    [ {"cells":[{"t":"…","tone":"debt","bold":true}]}, … ],
+   *        "note": "…"},
+   *       …
+   *     ],
+   *     "footer": "…"
+   *   }
+   */
+  @ReactMethod
+  fun createPeriodReportPdf(fileName: String, payloadJson: String, promise: Promise) {
+    try {
+      val pdf = android.graphics.pdf.PdfDocument()
+      val pageWidth = 595
+      val pageHeight = 842
+      val margin = 36f
+
+      val json = org.json.JSONObject(payloadJson)
+      val storeName = json.optString("storeName", "sela")
+      val title = json.optString("title", "تقرير الفترة")
+      val periodLabel = json.optString("periodLabel", "")
+      val generatedAt = json.optString("generatedAt", "")
+      val footerText = json.optString("footer", "")
+
+      fun optArray(obj: org.json.JSONObject, name: String): List<org.json.JSONObject> {
+        val out = ArrayList<org.json.JSONObject>()
+        val arr = obj.optJSONArray(name) ?: return out
+        for (i in 0 until arr.length()) {
+          out.add(arr.getJSONObject(i))
+        }
+        return out
+      }
+      val sections = optArray(json, "sections")
+
+      val regular = loadTajawal(reactContext, "Tajawal-Regular.ttf")
+      val bold = loadTajawal(reactContext, "Tajawal-Bold.ttf")
+
+      var page = pdf.startPage(
+        android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
+      )
+      var canvas = page.canvas
+      var pageNo = 1
+      var y = 0f
+
+      fun text(
+        value: String,
+        x: Float,
+        cy: Float,
+        paint: android.graphics.Paint,
+        align: android.graphics.Paint.Align = android.graphics.Paint.Align.RIGHT
+      ) {
+        paint.textAlign = align
+        canvas.drawText(value, x, cy, paint)
+      }
+
+      fun newPage() {
+        pdf.finishPage(page)
+        pageNo += 1
+        page = pdf.startPage(
+          android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNo).create()
+        )
+        canvas = page.canvas
+        y = margin + 18f
+        val headPaint = android.graphics.Paint().apply {
+          typeface = bold
+          textSize = 10f
+          color = android.graphics.Color.GRAY
+          isAntiAlias = true
+        }
+        text("$storeName — $title (تابع)", pageWidth - margin, y, headPaint)
+        text("صفحة $pageNo", margin, y, headPaint, android.graphics.Paint.Align.LEFT)
+        y += 26f
+      }
+
+      fun ensureSpace(needed: Float) {
+        if (y + needed > pageHeight - margin - 24f) {
+          newPage()
+        }
+      }
+
+      val titlePaint = android.graphics.Paint().apply {
+        typeface = bold; textSize = 22f; color = android.graphics.Color.BLACK; isAntiAlias = true
+      }
+      val accentPaint = android.graphics.Paint().apply {
+        typeface = bold; textSize = 16f; color = android.graphics.Color.rgb(0xF9, 0x73, 0x16); isAntiAlias = true
+      }
+      val subPaint = android.graphics.Paint().apply {
+        typeface = regular; textSize = 11.5f; color = android.graphics.Color.DKGRAY; isAntiAlias = true
+      }
+      val headPaint = android.graphics.Paint().apply {
+        typeface = bold; textSize = 13f; color = android.graphics.Color.BLACK; isAntiAlias = true
+      }
+      val cellPaint = android.graphics.Paint().apply {
+        typeface = regular; textSize = 10f; color = android.graphics.Color.BLACK; isAntiAlias = true
+      }
+      val cellBold = android.graphics.Paint().apply {
+        typeface = bold; textSize = 10f; color = android.graphics.Color.BLACK; isAntiAlias = true
+      }
+      val cellDanger = android.graphics.Paint().apply {
+        typeface = bold; textSize = 10f; color = android.graphics.Color.rgb(0xDC, 0x26, 0x26); isAntiAlias = true
+      }
+      val cellSuccess = android.graphics.Paint().apply {
+        typeface = bold; textSize = 10f; color = android.graphics.Color.rgb(0x16, 0xA3, 0x4A); isAntiAlias = true
+      }
+      val notePaint = android.graphics.Paint().apply {
+        typeface = regular; textSize = 9f; color = android.graphics.Color.DKGRAY; isAntiAlias = true
+      }
+      val linePaint = android.graphics.Paint().apply {
+        strokeWidth = 1f; color = android.graphics.Color.rgb(0xCC, 0xCC, 0xCC)
+      }
+      val headerBgPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.rgb(0xF3, 0xF4, 0xF6)
+      }
+      val zebraPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.rgb(0xF8, 0xF9, 0xFB)
+      }
+
+      fun ellipsizeTo(value: String, maxWidth: Float, paint: android.graphics.Paint): String {
+        if (value.isEmpty() || maxWidth <= 10f) return ""
+        if (paint.measureText(value) <= maxWidth) return value
+        val marker = "..."
+        val markerW = paint.measureText(marker)
+        var out = value
+        while (out.length > 1 && paint.measureText(out) + markerW > maxWidth) {
+          out = out.substring(0, out.length - 1)
+        }
+        return out.trimEnd() + marker
+      }
+
+      // ── Title block ──
+      y = margin + 20f
+      text(storeName, pageWidth - margin, y, titlePaint)
+      y += 28f
+      text(title, pageWidth - margin, y, accentPaint)
+      y += 20f
+      text("الفترة: $periodLabel", pageWidth - margin, y, subPaint)
+      y += 15f
+      text("صدر بتاريخ: $generatedAt", pageWidth - margin, y, subPaint)
+      y += 14f
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 20f
+
+      val usableW = pageWidth - 2 * margin
+      val rowH = 17f
+
+      // ── Sections ──
+      for (section in sections) {
+        val heading = section.optString("heading", "")
+        val summary = optArray(section, "summary")
+        val columns = optArray(section, "columns")
+        val rows = optArray(section, "rows")
+        val note = section.optString("note", "")
+
+        ensureSpace(46f)
+        text(heading, pageWidth - margin, y, headPaint)
+        y += 8f
+        canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+        y += 16f
+
+        // بطاقات الملخص — عمودان.
+        if (summary.isNotEmpty()) {
+          var col = 0
+          val colW = usableW / 2f
+          for (item in summary) {
+            val label = item.optString("label", "")
+            val value = item.optString("value", "")
+            if (col == 0) {
+              ensureSpace(30f)
+            }
+            val boxRight = pageWidth - margin - col * (colW + 8f)
+            canvas.drawRoundRect(
+              boxRight - colW, y - 4f, boxRight, y + 24f, 6f, 6f, headerBgPaint
+            )
+            text(ellipsizeTo(label, colW - 16f, cellPaint), boxRight - 8f, y + 6f, cellPaint)
+            text(ellipsizeTo(value, colW - 16f, cellBold), boxRight - 8f, y + 19f, cellBold)
+            col += 1
+            if (col >= 2) {
+              col = 0
+              y += 34f
+            }
+          }
+          if (col != 0) {
+            y += 34f
+          }
+          y += 8f
+        }
+
+        // جدول بأعمدة بأوزان نسبية (RTL — الأول أقصى اليمين).
+        if (columns.isNotEmpty()) {
+          val totalW = columns.map { it.optDouble("w", 1.0).toFloat() }.sum()
+          val xs = ArrayList<Float>()
+          var x = pageWidth - margin
+          for (c in columns) {
+            xs.add(x)
+            x -= usableW * (c.optDouble("w", 1.0).toFloat() / totalW)
+          }
+
+          fun tableHeader() {
+            canvas.drawRect(margin, y - 12f, pageWidth - margin, y + 6f, headerBgPaint)
+            for ((i, c) in columns.withIndex()) {
+              val label = c.optString("label", "")
+              val w = if (i + 1 < xs.size) xs[i] - xs[i + 1] else xs[i] - margin
+              text(ellipsizeTo(label, w - 8f, cellBold), xs[i] - 4f, y, cellBold)
+            }
+            y += 22f
+          }
+
+          ensureSpace(40f)
+          tableHeader()
+          var zebra = false
+          for (row in rows) {
+            if (y + rowH > pageHeight - margin - 26f) {
+              newPage()
+              tableHeader()
+              zebra = false
+            }
+            val cells = optArray(row, "cells")
+            if (zebra) {
+              canvas.drawRect(margin, y - 12f, pageWidth - margin, y + 5f, zebraPaint)
+            }
+            zebra = !zebra
+            for ((i, c) in columns.withIndex()) {
+              val cell = if (i < cells.size) cells[i] else null
+              if (cell == null) continue
+              val t = cell.optString("t", "")
+              val tone = cell.optString("tone", "")
+              val isBold = cell.optBoolean("bold", false)
+              val paint = when {
+                tone == "debt" -> cellDanger
+                tone == "pay" -> cellSuccess
+                isBold -> cellBold
+                else -> cellPaint
+              }
+              val w = if (i + 1 < xs.size) xs[i] - xs[i + 1] else xs[i] - margin
+              text(ellipsizeTo(t, w - 8f, paint), xs[i] - 4f, y, paint)
+            }
+            y += rowH
+          }
+          y += 8f
+        }
+
+        if (note.isNotEmpty()) {
+          ensureSpace(24f)
+          text(note, pageWidth - margin, y, notePaint)
+          y += 16f
+        }
+        y += 10f
+      }
+
+      // ── Footer ──
+      y += 6f
+      ensureSpace(30f)
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 18f
+      val footPaint = android.graphics.Paint().apply {
+        typeface = regular; textSize = 9f; color = android.graphics.Color.GRAY; isAntiAlias = true
+      }
+      text(if (footerText.isNotEmpty()) footerText else "أُنشئ بواسطة تطبيق sela", pageWidth - margin, y, footPaint)
+      text("صفحة $pageNo", margin, y, footPaint, android.graphics.Paint.Align.LEFT)
+
+      pdf.finishPage(page)
+
+      // ── Save via MediaStore ── (نفس مسار كشف الخزينة)
+      val bytes = ByteArrayOutputStream().use { stream ->
+        pdf.writeTo(stream)
+        pdf.close()
+        stream.toByteArray()
+      }
+      val displayName = sanitizeFileName(fileName)
+      val resultPath: String
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = reactContext.contentResolver
+        val values = ContentValues().apply {
+          put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+          put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+          put(
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            Environment.DIRECTORY_DOWNLOADS + "/" + EXPORT_DIR_NAME
+          )
+        }
+        val collection =
+          MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(collection, values)
+          ?: throw IllegalStateException("فشل إنشاء ملف التقرير")
+        resolver.openOutputStream(uri)?.use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        } ?: throw IllegalStateException("تعذّر فتح ملف التقرير للكتابة")
+        resultPath = "Downloads/$EXPORT_DIR_NAME/$displayName"
+      } else {
+        @Suppress("DEPRECATION")
+        val downloadsDir =
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val targetDir = File(downloadsDir, EXPORT_DIR_NAME)
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+          throw IllegalStateException("تعذّر إنشاء مجلد التصدير")
+        }
+        val targetFile = File(targetDir, displayName)
+        FileOutputStream(targetFile).use { stream ->
+          stream.write(bytes)
+          stream.flush()
+        }
+        resultPath = targetFile.absolutePath
+      }
+
+      val activity = currentActivity
+      val handler = android.os.Handler((activity ?: reactContext).mainLooper)
+      handler.post {
+        try {
+          Toast.makeText(
+            reactContext,
+            "تم حفظ تقرير الفترة PDF في: $resultPath",
+            Toast.LENGTH_LONG
+          ).show()
+        } catch (ignored: Exception) {
+          // Cosmetic only.
+        }
+      }
+
+      promise.resolve(resultPath)
+    } catch (t: Throwable) {
+      promise.reject("PDF_FAILED", "فشل إنشاء تقرير الفترة PDF: ${t.message}")
+    }
+  }
+
+  /**
    * v68 (الجولة 80 #٢): تقرير المخزون التفصيلي PDF — طلب التاجر نصاً
    * «إضافة زر في صفحة المخزون يمكن من خلاله طباعة تقرير pdf بكافة
    * المنتجات بالمخزون بالتفصيل وبشكل مرتب ومفصل» — نفس تصميم سطح

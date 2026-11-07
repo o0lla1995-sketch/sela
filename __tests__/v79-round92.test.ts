@@ -94,23 +94,31 @@ describe('v79 — ٢ الدين المستحق المباشر بلا فاتور�
   });
 });
 
-describe('v79 — ٣ تنزيل كشف الحساب ودفتر التجار', () => {
-  test('دالتا التصدير في ExportService', () => {
-    const service = read(EXPORT_SERVICE);
-    expect(service).toContain('async exportMerchantStatement(');
-    expect(service).toContain('async exportMerchantsBook(');
+describe('v79 → v80 (الجولة 93) — ٣ كشوف التجار PDF بدل Excel/CSV', () => {
+  test('خدمة PDF كاملة تحل محل تصدير Excel/CSV الملغى', () => {
+    const service = read(
+      'src/services/MerchantsPdfService.ts',
+    );
+    expect(service).toContain('exportStatementPdf');
+    expect(service).toContain('exportBookPdf');
     expect(service).toContain('دين مستحق مباشر');
+    // ExportService لم يعد يصدّر كشوف التجار نهائياً («لغيهما»).
+    const exportService = read(EXPORT_SERVICE);
+    expect(exportService).not.toContain('exportMerchantStatement');
+    expect(exportService).not.toContain('exportMerchantsBook');
   });
 
-  test('زر تنزيل الكشف في صفحة التاجر وزر الدفتر في الرئيسية', () => {
+  test('زر كشف PDF في صفحة التاجر وزر الدفتر في الرئيسية', () => {
     const screen = read(MERCHANT_SCREEN);
-    expect(screen).toContain('title="تنزيل الكشف"');
-    expect(screen).toContain('title="تنزيل الدفتر"');
+    expect(screen).toContain('كشف حساب PDF قابل للطباعة');
     expect(screen).toContain('exportMerchantStatement');
     expect(screen).toContain('exportMerchantsBook');
-    // خيار الصيغة (Excel/CSV) قبل التنزيل.
-    expect(screen).toContain("'ملف Excel'");
-    expect(screen).toContain("'ملف CSV'");
+    // خيارات PDF: تنزيل ومشاركة وطباعة — لا Excel ولا CSV.
+    expect(screen).toContain("'تنزيل الـPDF'");
+    expect(screen).toContain("'مشاركة'");
+    expect(screen).toContain("'طباعة'");
+    expect(screen).not.toContain("'ملف Excel'");
+    expect(screen).not.toContain("'ملف CSV'");
   });
 });
 
@@ -160,12 +168,12 @@ describe('v79 — ٥ الكاشير: القناة الفعلية لا نقدي �
 });
 
 describe('v79 — الإصدار', () => {
-  test('config.ts وbuild.gradle عند 79.0.0 / 89', () => {
+  test('config.ts وbuild.gradle عند 80.0.0 / 90', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '79.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 89');
+    expect(config).toContain("APP_VERSION = '80.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 90');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionName "79.0.0"');
-    expect(gradle).toContain('versionCode 89');
+    expect(gradle).toContain('versionName "80.0.0"');
+    expect(gradle).toContain('versionCode 90');
   });
 });
