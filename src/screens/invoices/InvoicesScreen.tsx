@@ -88,6 +88,7 @@ import type {
   ReturnLineInput,
   SaleItemRecord,
   SaleRecord,
+  SaleReturnExchange,
   SaleReturnRecord,
   SilaDebtRow,
 } from '../../core/types';
@@ -920,6 +921,8 @@ export function InvoiceDetailScreen() {
   //  (RET-…), its lines render from sale_return_items (positive
   //  quantities + product names) instead of the negative sale_items
   //  mirror, plus the original-invoice card.
+  //  v81 (الجولة 94 #٥): بدائل الاستبدال معها — كشف RET يفرّق ما
+  //  رُدّ وما خرج بدله بنداً بنداً (كانت البدائل لا تظهر إطلاقاً).
   const [retContext, setRetContext] = useState<{
     ret: SaleReturnRecord;
     lines: {
@@ -929,6 +932,7 @@ export function InvoiceDetailScreen() {
       unit_price: number;
       line_total: number;
     }[];
+    exchanges: SaleReturnExchange[];
   } | null>(null);
   // v23 (round-29 #2): the RETURNS flow — the sheet + this
   //  invoice's return receipts (updated after every successful
@@ -1009,7 +1013,12 @@ export function InvoiceDetailScreen() {
           if (record != null && record.return_kind != null) {
             const ret = await SaleRepo.returnByNumber(record.invoice_number);
             if (ret != null) {
-              const retLines = await SaleRepo.returnItems(ret.id);
+              const [retLines, retExchanges] = await Promise.all([
+                SaleRepo.returnItems(ret.id),
+                // v81 (الجولة 94 #٥): بدائل الاستبدال — البضاعة التي
+                // خرجت من المخزون بدل المرتجع، بنداً بنداً.
+                SaleRepo.returnExchanges(ret.id),
+              ]);
               if (mounted) {
                 setRetContext({
                   ret,
@@ -1020,6 +1029,7 @@ export function InvoiceDetailScreen() {
                     unit_price: line.unit_price,
                     line_total: line.line_total,
                   })),
+                  exchanges: retExchanges,
                 });
               }
             }
@@ -1588,6 +1598,93 @@ export function InvoiceDetailScreen() {
                 </View>
               ))}
             </Card>
+            {/* v81 (الجولة 94 #٥): بدائل الاستبدال بنداً بنداً — كانت
+                تُحفظ في قاعدة البيانات ولا تظهر في كشف الفاتورة
+                إطلاقاً (شكوى التاجر: «لا نعرف ماذا خرج بدل ماذا»)؛
+                البضاعة التي خرجت من المخزون مقابل المرتجع. */}
+            {retContext.exchanges.length > 0 ? (
+              <>
+                <Text style={styles.sectionLabel}>
+                  بدائل الاستبدال — خرجت من المخزن بدل المرتجع (
+                  {retContext.exchanges.length})
+                </Text>
+                <Card style={{padding: 0, overflow: 'hidden'}}>
+                  {retContext.exchanges.map((line, index) => (
+                    <View
+                      key={`ex-${retContext.ret.id}-${line.id ?? index}`}
+                      style={[
+                        styles.itemRow,
+                        index < retContext.exchanges.length - 1
+                          ? styles.itemRowBorder
+                          : null,
+                      ]}>
+                      <View style={{flex: 1}}>
+                        <Text style={styles.itemName} numberOfLines={2}>
+                          {line.product_name}
+                          {line.variant_label ? ` (${line.variant_label})` : ''}
+                          {line.unit_name && line.unit_name !== 'قطعة'
+                            ? ` (${line.unit_name})`
+                            : ''}
+                        </Text>
+                        <Text style={styles.itemMeta}>
+                          {formatQty(line.quantity)} ×{' '}
+                          {formatMoney(line.unit_price)} ={' '}
+                          <Text style={styles.itemTotalText}>
+                            {formatMoney(line.line_total)}
+                          </Text>
+                        </Text>
+                      </View>
+                    </View>
+                  ))}
+                </Card>
+                {/* خلاصة القيمتين والفرق — نفس معادلة تسوية الاستبدال
+                    (v40): موجب يُرَد للزبون وسالب يدفعه هو. */}
+                <View style={styles.retSummaryNote}>
+                  <Icon name="swap" size={15} color={c.info} />
+                  <Text style={styles.retSummaryNoteText}>
+                    قيمة المرتجع {formatMoney(retContext.ret.refund_minor / 100)}{' '}
+                    · قيمة البدائل{' '}
+                    {formatMoney(retContext.ret.exchange_minor / 100)}
+                    {retContext.ret.refund_minor >=
+                    retContext.ret.exchange_minor ? (
+                      <>
+                        {' · يُرَد للزبون '}
+                        <Text style={[styles.retSummaryNoteText, {color: c.success}]}>
+                          {formatMoney(
+                            (retContext.ret.refund_minor -
+                              retContext.ret.exchange_minor) /
+                              100,
+                          )}
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        {' · يدفع الزبون فرقاً '}
+                        <Text style={[styles.retSummaryNoteText, {color: c.warning}]}>
+                          {formatMoney(
+                            (retContext.ret.exchange_minor -
+                              retContext.ret.refund_minor) /
+                              100,
+                          )}
+                        </Text>
+                      </>
+                    )}
+                  </Text>
+                </View>
+              </>
+            ) : null}
+            {/* v81 (الجولة 94 #٥): قناة تسوية المرتجع — من أين رُدّ
+                المال (أو صُرف الفرق)؛ NULL = نقد من الدرج. */}
+            {retContext.ret.refund_method === 'cash' &&
+            retContext.exchanges.length === 0 ? (
+              <View style={styles.retSummaryNote}>
+                <Icon name="wallet" size={15} color={c.textDim} />
+                <Text style={styles.retSummaryNoteText}>
+                  سُدّد المرتجع عبر{' '}
+                  {paymentMethodById(retContext.ret.refund_channel).label}
+                </Text>
+              </View>
+            ) : null}
             {retContext.ret.debt_adjusted_minor > 0 ? (
               <View style={styles.retDebtNote}>
                 <Icon name="info" size={15} color={c.warning} />
@@ -3961,6 +4058,23 @@ const useStyles = makeStyles(c =>
       flex: 1,
       color: c.text,
       fontFamily: fonts.regular,
+      fontSize: typography.small,
+      lineHeight: 18,
+    },
+    /* v81 (الجولة 94 #٥): خلاصة الاستبدال/قناة التسوية في كشف RET —
+     * شريط معلوماتي هادئ (info) لا ينافس بطاقات البنود. */
+    retSummaryNote: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: spacing.sm,
+      backgroundColor: c.infoSoft,
+      borderRadius: radius.md,
+      padding: spacing.md,
+    },
+    retSummaryNoteText: {
+      flex: 1,
+      color: c.text,
+      fontFamily: fonts.medium,
       fontSize: typography.small,
       lineHeight: 18,
     },

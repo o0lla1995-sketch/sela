@@ -158,10 +158,10 @@ describe('v71 — ٥ الرجوع للفاتورة السابقة من السل�
 
 describe('v71 — ٦ الإصدار والتوقيع', () => {
   test('71.0.0 (79) في config والبناء', () => {
-    expect(read(CONFIG)).toContain("APP_VERSION = '80.0.0'");
-    expect(read(CONFIG)).toContain('APP_BUILD_CODE = 90');
-    expect(read(GRADLE)).toContain('versionCode 90');
-    expect(read(GRADLE)).toContain('versionName "80.0.0"');
+    expect(read(CONFIG)).toContain("APP_VERSION = '81.0.0'");
+    expect(read(CONFIG)).toContain('APP_BUILD_CODE = 91');
+    expect(read(GRADLE)).toContain('versionCode 91');
+    expect(read(GRADLE)).toContain('versionName "81.0.0"');
   });
 
   test('CI يوقّع بنفس مفتاح Play في كل بناء (بلا تغيير)', () => {

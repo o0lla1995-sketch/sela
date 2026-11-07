@@ -186,11 +186,11 @@ describe('v69 — ٤ منع تكرار اسم المنتج والباركود', 
 describe('v69 — ٥ الإصدار', () => {
   test('71.0.0 (79) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '80.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 90');
+    expect(config).toContain("APP_VERSION = '81.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 91');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 90');
-    expect(gradle).toContain('versionName "80.0.0"');
+    expect(gradle).toContain('versionCode 91');
+    expect(gradle).toContain('versionName "81.0.0"');
   });
 });
 

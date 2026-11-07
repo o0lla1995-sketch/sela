@@ -21,9 +21,17 @@
  *                                        v60: + print (طباعة الفاتورة من
  *                                            طابعة نقطة البيع إن طلبه الكاشير)
  *   GET  /api/invoices?since=             فواتير الكاشير نفسه (+ زيادة cursor)
+ *                                        v81: صفوف RET تحمل isExchange
+ *                                        + refundMinor/exchangeMinor
+ *                                        + originalRef (الفاتورة الأصل)
  *   GET  /api/invoice?id=                 تفاصيل فاتورة + القابل للإرجاع
+ *                                        v81: فاتورة RET تُرد بنودها
+ *                                        كاملة — المرتجع (returnLines)
+ *                                        والبدائل (exchangeLines)
+ *                                        وقيمتاهما وقناة التسوية
  *   GET  /api/invoice-by-number?number=   v60: فاتورة الكاشير برقمها
  *                                        (باركود الإيصال CODE128 يفتحها)
+ *                                        v81: + isExchange/originalRef
  *   GET  /api/printer-status              v60: حالة طابعة نقطة البيع
  *                                        (متصل/غير متصل + اسم الجهاز)
  *   POST /api/return                      إرجاع/استبدال من فواتير الكاشير
@@ -828,6 +836,23 @@ export async function handleLanRequest(
         return ok({ok: true, invoice: null});
       }
       const row = rows[0];
+      const isReturn = String(row.invoice_number ?? '').startsWith('RET-');
+      // v81 (الجولة 94 — كاشير #٤): حقول المرتجع/الاستبدال هنا
+      // أيضاً — مسح باركود فاتورة RET يميّز استبدالاً من مرتجع
+      // ويشير لفاتورتها الأصلية.
+      let isExchange = false;
+      let originalRef: string | null = null;
+      if (isReturn) {
+        const retRow = await db.execute(
+          'SELECT is_exchange, invoice_ref FROM sale_returns WHERE return_number = ? LIMIT 1',
+          [String(row.invoice_number ?? '')],
+        );
+        const ret = (retRow.rows?.[0] ?? null) as
+          | {is_exchange?: number; invoice_ref?: string}
+          | null;
+        isExchange = Number(ret?.is_exchange ?? 0) === 1;
+        originalRef = ret?.invoice_ref ? String(ret.invoice_ref) : null;
+      }
       return ok({
         ok: true,
         invoice: {
@@ -835,7 +860,9 @@ export async function handleLanRequest(
           number: String(row.invoice_number ?? ''),
           total: Number(row.total_amount ?? 0),
           discount: Number(row.discount ?? 0),
-          isReturn: String(row.invoice_number ?? '').startsWith('RET-'),
+          isReturn,
+          isExchange,
+          originalRef,
           returnedMinor: Number(row.returned_minor ?? 0),
           paymentType: String(row.payment_type ?? 'RETAIL'),
           // v79 (الجولة 92 — كاشير #٢): طريقة الدفع الفعلية.
@@ -1214,32 +1241,47 @@ async function handleInvoiceList(
   const limit = Math.min(200, Math.max(5, Number(req.query.limit ?? 30) || 30));
   const since = Number(req.query.since ?? 0) || 0;
   const db = getDb();
+  // v81 (الجولة 94 — كاشير #٤): انضمام sale_returns لصفوف RET —
+  // بدونها كان أرشيف الكاشير لا يفرّق مرتجعاً من استبدال ولا يظهر
+  // قيمة أي منهما ولا الفاتورة الأصلية التي جاء منها.
   const result = await db.execute(
-    `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
+    `SELECT s.*, (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count,
+            sr.is_exchange, sr.exchange_minor, sr.refund_minor, sr.invoice_ref AS original_ref
      FROM sales s
+     LEFT JOIN sale_returns sr ON sr.return_number = s.invoice_number
      WHERE s.cashier_id = ? ${since > 0 ? 'AND s.id > ?' : ''}
      ORDER BY s.id DESC
      LIMIT ?`,
     since > 0 ? [authed.cashierId, since, limit] : [authed.cashierId, limit],
   );
   const rows = (result.rows ?? []) as unknown as Record<string, unknown>[];
-  const invoices = rows.map(row => ({
-    id: Number(row.id),
-    number: String(row.invoice_number ?? ''),
-    total: Number(row.total_amount ?? 0),
-    discount: Number(row.discount ?? 0),
-    isReturn: String(row.invoice_number ?? '').startsWith('RET-'),
-    returnedMinor: Number(row.returned_minor ?? 0),
-    paymentType: String(row.payment_type ?? 'RETAIL'),
-    // v79 (الجولة 92 — كاشير #٢): طريقة الدفع الفعلية مع الفاتورة —
-    // بدونها كان أرشيف الكاشير يُظهر «نقدي» لكل فاتورة بنك/محفظة.
-    paymentMethod: row.payment_method
-      ? String(row.payment_method)
-      : 'cash',
-    itemCount: Number(row.item_count ?? 0),
-    createdAt: String(row.created_at ?? ''),
-    clientRef: row.client_ref ? String(row.client_ref) : null,
-  }));
+  const invoices = rows.map(row => {
+    const isReturn = String(row.invoice_number ?? '').startsWith('RET-');
+    return {
+      id: Number(row.id),
+      number: String(row.invoice_number ?? ''),
+      total: Number(row.total_amount ?? 0),
+      discount: Number(row.discount ?? 0),
+      isReturn,
+      returnedMinor: Number(row.returned_minor ?? 0),
+      paymentType: String(row.payment_type ?? 'RETAIL'),
+      // v79 (الجولة 92 — كاشير #٢): طريقة الدفع الفعلية مع الفاتورة —
+      // بدونها كان أرشيف الكاشير يُظهر «نقدي» لكل فاتورة بنك/محفظة.
+      paymentMethod: row.payment_method
+        ? String(row.payment_method)
+        : 'cash',
+      itemCount: Number(row.item_count ?? 0),
+      createdAt: String(row.created_at ?? ''),
+      clientRef: row.client_ref ? String(row.client_ref) : null,
+      // v81 (الجولة 94 — كاشير #٤): تفكيك المرتجع/الاستبدال —
+      // نوعه وقيمتاه وفاتورته الأصلية، فيعرف الكاشير ماذا رُدّ
+      // نقداً وماذا استُبدل بضاعة.
+      isExchange: isReturn && Number(row.is_exchange ?? 0) === 1,
+      refundMinor: isReturn ? Number(row.refund_minor ?? 0) : 0,
+      exchangeMinor: isReturn ? Number(row.exchange_minor ?? 0) : 0,
+      originalRef: isReturn && row.original_ref ? String(row.original_ref) : null,
+    };
+  });
   return ok({ok: true, invoices});
 }
 
@@ -1258,6 +1300,60 @@ async function handleInvoiceDetail(
   const owner = await dbCashierIdForSale(saleId);
   if (owner !== authed.cashierId) {
     return fail(403, 'هذه الفاتورة ليست من فواتيرك');
+  }
+  // v81 (الجولة 94 — كاشير #٤): فاتورة المرتجع نفسها (RET-) لها
+  // معاينة خاصة — prepareReturn يرفضها أصلاً («لا يمكن الإرجاع من
+  // مرتجع») فكان الكاشير يصله خطأ بدل تفاصيل مرتجعه/استبداله.
+  // الآن تُرد بنودها كاملة: ما رُدّ (sale_return_items) وما خرج
+  // بدله (sale_return_exchanges) وقيمتا كل منهما وقناة التسوية
+  // والفاتورة الأصلية — تطابق ما يعرضه أرشيف نقطة البيع.
+  if (sale.invoice_number.startsWith('RET-') || sale.return_kind != null) {
+    const ret = await SaleRepo.returnByNumber(sale.invoice_number);
+    if (ret == null) {
+      return fail(404, 'سجل المرتجع غير موجود');
+    }
+    const [retLines, exchangeLines] = await Promise.all([
+      SaleRepo.returnItems(ret.id),
+      SaleRepo.returnExchanges(ret.id),
+    ]);
+    const original = await SaleRepo.getById(ret.sale_id);
+    return ok({
+      ok: true,
+      sale: {
+        id: sale.id,
+        number: sale.invoice_number,
+        total: sale.total_amount,
+        discount: sale.discount,
+        createdAt: sale.created_at,
+        returnedMinor: sale.returned_minor,
+        isReturn: true,
+        isExchange: ret.is_exchange === 1,
+        refundMinor: ret.refund_minor,
+        exchangeMinor: ret.exchange_minor,
+        refundChannel: ret.refund_channel ?? 'cash',
+        debtAdjustedMinor: ret.debt_adjusted_minor,
+        book: ret.book,
+        originalRef: ret.invoice_ref,
+        originalTotal: original?.total_amount ?? null,
+      },
+      returnLines: retLines.map(line => ({
+        productId: line.product_id,
+        productName: line.product_name,
+        quantity: line.quantity,
+        unitName: line.unit_name,
+        unitPrice: line.unit_price,
+        lineTotal: line.line_total,
+      })),
+      exchangeLines: exchangeLines.map(line => ({
+        productId: line.product_id,
+        productName: line.product_name,
+        quantity: line.quantity,
+        unitName: line.unit_name,
+        unitPrice: line.unit_price,
+        lineTotal: line.line_total,
+        variantLabel: line.variant_label,
+      })),
+    });
   }
   try {
     const prep = await InvoiceService.prepareReturn(saleId);

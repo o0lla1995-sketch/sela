@@ -77,10 +77,12 @@ describe('v80 (الجولة 93) — كشوف التجار PDF قابل للطب�
     expect(screen).not.toContain('ExportService.exportMerchantStatement');
     expect(screen).not.toContain("ملف Excel");
     expect(screen).not.toContain("ملف CSV");
-    // والبديل موصول فعلاً.
+    // والبديل موصول فعلاً — v81: زر «كشف PDF» في صف الفاتورة
+    // وحوار التنزيل يصف الوثيقة بأنها قابلة للطباعة.
     expect(screen).toContain('MerchantsPdfService.exportStatementPdf');
     expect(screen).toContain('MerchantsPdfService.exportBookPdf');
-    expect(screen).toContain('كشف حساب PDF قابل للطباعة');
+    expect(screen).toContain('title="كشف PDF"');
+    expect(screen).toContain('PDF قابل للطباعة');
   });
 });
 
@@ -90,7 +92,10 @@ describe('v80 (الجولة 93) — نافذة التاجر المحسّنة', (
     expect(screen).toContain('فاتورة توريد جديدة');
     expect(screen).toContain('styles.actionsGrid');
     expect(screen).toContain("style={{flexBasis: '48%', flexGrow: 1}}");
-    expect(screen).toContain('styles.adminRow');
+    // v81 (الجولة 94 #٣): صف الإدارة انتقل للهيدر أيقونات، والكشف
+    // صار في صف الفاتورة نفسه — لا صفوف أزرار متساوية متراكبة.
+    expect(screen).toContain('styles.primaryRow');
+    expect(screen).not.toContain('styles.adminRow');
     // لا صفوف أزرار متساوية متراكبة بعد الآن.
     expect(screen).not.toContain('title="تنزيل الكشف"');
   });
@@ -135,12 +140,12 @@ describe('v80 (الجولة 93) — قناة تسوية المرتجع الأص�
 });
 
 describe('v80 — الإصدار', () => {
-  test('config.ts وbuild.gradle عند 80.0.0 / 90', () => {
+  test('config.ts وbuild.gradle عند الإصدار الجاري (محدّث لـ v81)', () => {
     const config = R('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '80.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 90');
+    expect(config).toContain("APP_VERSION = '81.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 91');
     const gradle = R('android/app/build.gradle');
-    expect(gradle).toContain('versionName "80.0.0"');
-    expect(gradle).toContain('versionCode 90');
+    expect(gradle).toContain('versionName "81.0.0"');
+    expect(gradle).toContain('versionCode 91');
   });
 });

@@ -719,19 +719,23 @@ export function MerchantsScreen() {
             returnKeyType="search"
           />
         </View>
-        <AppButton
-          title="تنزيل الدفتر"
-          icon="download"
-          small
-          variant="secondary"
+        {/* v81 (الجولة 94 #١): زرا الصفحة بالأيقونة فقط بلا نص — طلب
+            التاجر نصاً («زرين بأيقونة فقط بلا نص»): تنزيل الكشف
+            وإضافة تاجر؛ حقل البحث يتنفس بكامل العرض تقريباً. */}
+        <TouchableOpacity
+          style={styles.iconAction}
+          activeOpacity={0.75}
           onPress={exportMerchantsBook}
-        />
-        <AppButton
-          title="تاجر جديد"
-          icon="plus"
-          small
+          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+          <Icon name="download" size={19} color={c.accent} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.iconActionPrimary}
+          activeOpacity={0.75}
           onPress={() => setAddOpen(true)}
-        />
+          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+          <Icon name="plus" size={21} color={c.onAccent} />
+        </TouchableOpacity>
       </View>
 
       {/* القائمة */}
@@ -899,6 +903,24 @@ export function MerchantsScreen() {
                   {detail.merchant.notes ? ` · ${detail.merchant.notes}` : ''}
                 </Text>
               </View>
+              {/* v81 (الجولة 94 #٣): إدارة التاجر في رأس النافذة
+                  بالأيقونة فقط — طلب التاجر نصاً («تعديل/حذف بأيقونة
+                  فقط في الهيدر»)؛ حررنا صف الإدارة السفلي كاملاً
+                  لمساحة أكمل للكشف والعمليات. */}
+              <TouchableOpacity
+                style={styles.headerIconBtn}
+                activeOpacity={0.75}
+                onPress={() => openEdit(detail)}
+                hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                <Icon name="edit" size={17} color={c.textDim} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.headerIconBtnDanger}
+                activeOpacity={0.75}
+                onPress={() => removeMerchant(detail)}
+                hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                <Icon name="trash" size={17} color={c.danger} />
+              </TouchableOpacity>
               {/* v79 (#٤): اتصال مباشر بضغطة — نافذة هاتفية احترافية. */}
               {detail.merchant.phone ? (
                 <TouchableOpacity
@@ -962,15 +984,33 @@ export function MerchantsScreen() {
             {/* v80 (الجولة 93 #٤): أزرار العمليات أُعيد تنظيمها — كانت
                 ثمانية أزرار متراكبة جانباً إلى جنب في أربعة صفوف
                 متساوية (شكوى التاجر: «الأزرار المتراكمة بشكل كبير»).
-                التصميم الجديد هرمي واضح: العملية اليومية الأولى بحجم
-                كامل، ثم عمليات المال الأربع في شبكة ٢×٢ مضغوطة، ثم
-                الكشف والوثائق، والإدارة (تعديل/حذف) في الأسفل هامشة
-                صغيرة لا تنافس العمليات المالية. */}
-            <AppButton
-              title="فاتورة توريد جديدة"
-              icon="plus"
-              onPress={openInvoice}
-            />
+                v81 (الجولة 94 #٣): كشف الـPDF في صف فاتورة التوريد
+                نفسه — طلب التاجر نصاً («زر الكشف بجانب زر إنشاء
+                الفاتورة في نفس الصف»)؛ العملية اليومية وكشف الحساب
+                وجهان لعملة واحدة في صف واحد، ثم شبكة ٢×٢ لعمليات
+                المال، ولا صف إدارة بعد الآن (انتقلت للهيدر أيقونات). */}
+            <View style={styles.primaryRow}>
+              <AppButton
+                title="فاتورة توريد جديدة"
+                icon="plus"
+                style={{flexBasis: '58%', flexGrow: 1}}
+                onPress={openInvoice}
+              />
+              <AppButton
+                title="كشف PDF"
+                icon="download"
+                small
+                variant="secondary"
+                loading={pdfBusy}
+                style={{flexBasis: '42%', flexGrow: 1}}
+                onPress={() =>
+                  exportMerchantStatement(
+                    detail.merchant.id,
+                    detail.merchant.name,
+                  )
+                }
+              />
+            </View>
             <View style={styles.actionsGrid}>
               <AppButton
                 title="سداد له"
@@ -1004,38 +1044,6 @@ export function MerchantsScreen() {
                 style={{flexBasis: '48%', flexGrow: 1}}
                 onPress={() => openFinance('collection')}
               />
-            </View>
-            <AppButton
-              title="كشف حساب PDF قابل للطباعة"
-              icon="download"
-              small
-              variant="ghost"
-              loading={pdfBusy}
-              onPress={() =>
-                exportMerchantStatement(
-                  detail.merchant.id,
-                  detail.merchant.name,
-                )
-              }
-            />
-            <View style={styles.adminRow}>
-              <TouchableOpacity
-                style={styles.adminButton}
-                activeOpacity={0.7}
-                onPress={() => openEdit(detail)}>
-                <Icon name="edit" size={15} color={c.textDim} />
-                <Text style={styles.adminButtonText}>تعديل البيانات</Text>
-              </TouchableOpacity>
-              <View style={styles.adminDivider} />
-              <TouchableOpacity
-                style={styles.adminButton}
-                activeOpacity={0.7}
-                onPress={() => removeMerchant(detail)}>
-                <Icon name="trash" size={15} color={c.danger} />
-                <Text style={[styles.adminButtonText, {color: c.danger}]}>
-                  حذف التاجر
-                </Text>
-              </TouchableOpacity>
             </View>
 
             {/* كشف الحساب */}
@@ -1661,32 +1669,56 @@ const useStyles = makeStyles(c =>
       gap: 6,
       marginTop: 6,
     },
-    /* v80: صف الإدارة الهامشي — تعديل/حذف بأصغر حجم بصري لا ينافس
-     * العمليات المالية (طابور واحد رقيق بفاصل رأسي). */
-    adminRow: {
+    /* v81 (الجولة 94 #٣): صف العملية اليومية — فاتورة التوريد وكشف
+     * الـPDF جنباً إلى جنب في صف واحد (طلب التاجر نصاً). */
+    primaryRow: {
       flexDirection: 'row',
+      alignItems: 'stretch',
+      gap: 6,
+      marginTop: 8,
+    },
+    /* v81 (الجولة 94 #٣): زرا إدارة التاجر في رأس النافذة — أيقونة
+     * فقط بلا نص (طلب التاجر نصاً)؛ التعديل محايد والحذف بنبرة
+     * الخطر نفسها التي كانت للنص قبله. */
+    headerIconBtn: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
       alignItems: 'center',
       justifyContent: 'center',
-      marginTop: 10,
-      gap: 4,
     },
-    adminButton: {
-      flexDirection: 'row',
+    headerIconBtnDanger: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      backgroundColor: c.dangerSoft,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
       alignItems: 'center',
-      gap: 5,
-      paddingVertical: 6,
-      paddingHorizontal: 10,
-      borderRadius: 8,
+      justifyContent: 'center',
     },
-    adminButtonText: {
-      color: c.textDim,
-      fontFamily: fonts.medium,
-      fontSize: 12,
+    /* v81 (الجولة 94 #١): زرا صفحة التجار بالأيقونة فقط — تنزيل
+     * الكشف (محايد) وإضافة تاجر (برتقالي ممتلئ هو الفعل الأساسي). */
+    iconAction: {
+      width: 42,
+      height: 42,
+      borderRadius: 12,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
-    adminDivider: {
-      width: 1,
-      height: 14,
-      backgroundColor: c.borderSoft,
+    iconActionPrimary: {
+      width: 42,
+      height: 42,
+      borderRadius: 12,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     historyList: {
       flexGrow: 0,

@@ -110,7 +110,10 @@ describe('v79 → v80 (الجولة 93) — ٣ كشوف التجار PDF بدل 
 
   test('زر كشف PDF في صفحة التاجر وزر الدفتر في الرئيسية', () => {
     const screen = read(MERCHANT_SCREEN);
-    expect(screen).toContain('كشف حساب PDF قابل للطباعة');
+    // v81 (الجولة 94 #٣): زر «كشف PDF» في صف فاتورة التوريد نفسه،
+    // وحوار التنزيل يصف الوثيقة بأنها قابلة للطباعة.
+    expect(screen).toContain('title="كشف PDF"');
+    expect(screen).toContain('PDF قابل للطباعة');
     expect(screen).toContain('exportMerchantStatement');
     expect(screen).toContain('exportMerchantsBook');
     // خيارات PDF: تنزيل ومشاركة وطباعة — لا Excel ولا CSV.
@@ -170,10 +173,10 @@ describe('v79 — ٥ الكاشير: القناة الفعلية لا نقدي �
 describe('v79 — الإصدار', () => {
   test('config.ts وbuild.gradle عند 80.0.0 / 90', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '80.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 90');
+    expect(config).toContain("APP_VERSION = '81.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 91');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionName "80.0.0"');
-    expect(gradle).toContain('versionCode 90');
+    expect(gradle).toContain('versionName "81.0.0"');
+    expect(gradle).toContain('versionCode 91');
   });
 });
