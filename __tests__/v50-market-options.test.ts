@@ -82,12 +82,16 @@ describe('v50 — خيارات الشراء في سيلا ماركت', () => {
     const db = app.connection.getDb();
 
     // العمود الجديد موجود والبيانات القديمة سليمة.
-    const cols = (db.execute('PRAGMA table_info(online_order_items)')
-      .rows as {name: string}[]).map(r => String(r.name));
+    const colsResult = await db.execute(
+      'PRAGMA table_info(online_order_items)',
+    );
+    const cols = (colsResult.rows as {name: string}[]).map(r =>
+      String(r.name),
+    );
     expect(cols).toContain('variant');
-    const row = db.execute(
+    const row = (await db.execute(
       "SELECT product_name, variant, line_total_minor FROM online_order_items WHERE server_order_id = 7",
-    ).rows[0] as {product_name: string; variant: string | null};
+    )).rows[0] as {product_name: string; variant: string | null};
     expect(row.product_name).toBe('قميص قطن');
     expect(row.variant).toBeNull();
     expect(Number(row.line_total_minor)).toBe(11800);
@@ -100,15 +104,15 @@ describe('v50 — خيارات الشراء في سيلا ماركت', () => {
     db.execute(`INSERT INTO online_order_items
                   (server_order_id, product_ref, product_name, variant, unit_price_minor, quantity, line_total_minor)
                 VALUES (7, '12', 'قميص قطن', 'المقاس: XL', 5900, 1, 5900)`);
-    const count = (db.execute(
+    const count = ((await db.execute(
       "SELECT COUNT(*) AS n FROM online_order_items WHERE server_order_id = 7",
-    ).rows[0] as {n: number}).n;
+    )).rows[0] as {n: number}).n;
     expect(Number(count)).toBe(3); // القديم + خياران مختلفان
-    expect(() =>
+    await expect(
       db.execute(`INSERT INTO online_order_items
                     (server_order_id, product_ref, product_name, variant, unit_price_minor, quantity, line_total_minor)
                   VALUES (7, '12', 'قميص قطن', 'المقاس: L', 5900, 1, 5900)`),
-    ).toThrow();
+    ).rejects.toThrow();
     try {
       fs.rmSync(file, {force: true});
     } catch {
@@ -120,9 +124,9 @@ describe('v50 — خيارات الشراء في سيلا ماركت', () => {
     const app = freshApp();
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
     const db = app.connection.getDb();
-    const idx = db.execute(
+    const idx = (await db.execute(
       "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_online_items_variant_unique'",
-    ).rows as {name: string}[];
+    )).rows as {name: string}[];
     expect(idx.length).toBe(1);
   });
 
@@ -165,10 +169,10 @@ describe('v50 — خيارات الشراء في سيلا ماركت', () => {
 
   test('⑥ الإصدار: 71.0.0 (79) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '81.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 91');
+    expect(config).toContain("APP_VERSION = '82.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 92');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "81.0.0"');
-    expect(gradle).toContain('versionCode 91');
+    expect(gradle).toContain('versionName "82.0.0"');
+    expect(gradle).toContain('versionCode 92');
   });
 });

@@ -39,7 +39,7 @@ import {SilaSync} from './sila/SilaSync';
 import {logDiag} from '../core/diagnostics';
 import type {AppSettings} from '../stores/settingsStore';
 
-const BACKUP_VERSION = 5;
+const BACKUP_VERSION = 6;
 const JSON_MIME = 'application/json';
 
 /** v23 (round-29 #2): one RET receipt in a backup — keyed by the
@@ -53,8 +53,17 @@ interface SaleReturnBackupEntry {
   refund_channel?: string | null;
   refund_minor: number;
   debt_adjusted_minor: number;
+  /** v82 (الجولة 95): وشاح الاستبدال وفرقه — يظهران على الفاتورة
+   *  المستعادة كما كانا. */
+  is_exchange?: number;
+  exchange_minor?: number;
+  /** v82: مرجع عملية المرتجع من جهاز الكاشير. */
+  client_ref?: string | null;
   note: string | null;
   created_at: string;
+  /** v82 (الجولة 95): الكاشير الذي أنجز المرتجع (معرّفه الأصلي —
+   *  يُعاد ربطه بحسابه المستعاد). */
+  cashier_id?: number | null;
   items: {
     /** The ORIGINAL sale_items row id (mapped on restore). */
     sale_item_ref: string;
@@ -153,6 +162,9 @@ export interface BackupFile {
     stock_quantity: number;
     retail_price: number | null;
     cost_price: number | null;
+    /** v82 (الجولة 95): وقت إنشاء المتغير — كان يُستعاد بوقت
+     *  الاسترجاع بدل وقته الحقيقي. */
+    created_at?: string;
   }[];
   embeddings: {
     product_id: number;
@@ -175,6 +187,19 @@ export interface BackupFile {
      * a backup from before returns simply had none). */
     returned_minor?: number;
     return_kind?: string | null;
+    /** v82 (الجولة 95): قناة الدفع الفعلية (بنك/محفظة/نقدي) —
+     *  بدونها تتحوّل كل مبيعات النسخة المستعادة إلى «نقد» فتنهار
+     *  أرصدة المحافظ والبنوك ويقفز الرصيد النقدي فوق واقع الخزينة
+     *  (جذر شكوى الاسترجاع: «أخطاء كبيرة في أرصدة المحافظ والرصيد
+     *  الإجمالي يتغير»). مرتجعات RET تحمل قناتها هنا أيضاً. معها
+     *  مرجع عملية الكاشير client_ref وعدّاد تعديل الفاتورة. */
+    payment_method?: string | null;
+    client_ref?: string | null;
+    edit_count?: number;
+    edited_at?: string | null;
+    /** v82 (الجولة 95): الكاشير صاحب الفاتورة (معرّفه الأصلي —
+     *  يُعاد ربطه بحسابه المستعاد). */
+    cashier_id?: number | null;
   }[];
   sale_items: {
     /** v23 (round-29 #2): the ORIGINAL line id — lets the restore
@@ -209,8 +234,13 @@ export interface BackupFile {
     refund_channel?: string | null;
     refund_minor: number;
     debt_adjusted_minor: number;
+    is_exchange?: number;
+    exchange_minor?: number;
+    client_ref?: string | null;
     note: string | null;
     created_at: string;
+    /** v82 (الجولة 95): الكاشير الذي أنجز المرتجع. */
+    cashier_id?: number | null;
     items: {
       sale_item_ref: string;
       product_id: number;
@@ -289,6 +319,12 @@ export interface BackupFile {
      *  restored with the row so the collections engine never
      *  re-detects pre-anchor history after a restore. */
     reconcile_offset_minor?: number;
+    /** v82 (الجولة 95): أرصدة هذا الجهاز من إسناد الخادم ثنائي
+     *  المرحلة (0075) — تُستعاد كي لا تختلط أرصدة نقاط البيع
+     *  قبل أول مزامنة (نسخ قديمة: صفر وتصحّحها المزامنة). */
+    device_outstanding_minor?: number;
+    device_purchases_minor?: number;
+    device_payments_minor?: number;
     last_synced_at: string | null;
   }[];
   /** v15 (round-21 #3): the repayments queue — one row per RCP
@@ -372,6 +408,114 @@ export interface BackupFile {
     cash_ref: string | null;
     created_at: string;
   }[];
+  /** v82 (الجولة 95): سجل الخزينة — المصاريف والسحوبات والإيداعات
+   *  بكل قنواتها (نقدي/بنك/محفظة). بدون هذا الجدول تفقد الخزينة
+   *  كل عملياتها غير البيعية بعد الاسترجاع فيظهر النقد أكبر من
+   *  الواقع، وتفقد المحافظ إيداعاتها وسحوباتها ومصاريفها فتظهر
+   *  أرصدتها خاطئة. السندات غير قابلة للتعديل بحكم التصميم —
+   *  تُستعاد كما كُتبت حرفياً (مرجع UNIQUE). */
+  cash_movements?: {
+    ref: string;
+    kind: string;
+    category: string;
+    note: string | null;
+    amount_minor: number;
+    auth_method: string;
+    photo_path: string | null;
+    payment_method: string | null;
+    created_at: string;
+  }[];
+  /** v82 (الجولة 95): الاستبدالات (بضاعة خرجت مقابل المرتجع بلا
+   *  أثر مالي) — مرتبطة بسند المرتجع برقمه المستقر RET-…،
+   *  والمنتج ومتغيره يُعاد ربطهما بمعرّفيهما الجديدين. */
+  sale_return_exchanges?: {
+    return_number: string;
+    product_id: number;
+    product_name: string;
+    quantity: number;
+    unit_name: string | null;
+    base_quantity: number;
+    unit_price: number;
+    line_total: number;
+    cost_price: number;
+    variant_id: number | null;
+    variant_color: string | null;
+    variant_label: string | null;
+    created_at: string;
+  }[];
+  /** v82 (الجولة 95): سجل تعديل الفواتير عبر نقطة البيع — لقطة
+   *  قبل/بعد JSON لكل عملية، مربوطة بالفاتورة برقمها المستقر. */
+  sale_edits?: {
+    sale_invoice_ref: string;
+    edited_at: string;
+    before_json: string;
+    after_json: string;
+    delta_minor: number;
+    note: string | null;
+  }[];
+  /** v82 (الجولة 95): الطلبات الأونلاين — ديون الطلبات المُرسَلة
+   *  غير المحصَّلة تعيش هنا (outstanding)؛ بدون استعادتها تختفي
+   *  ديون الأونلاين بعد الاسترجاع (جذر «الديون لم تسترجع»).
+   *  server_id هو مفتاح الخادم فيُستعاد كما هو. */
+  online_orders?: {
+    server_id: number;
+    order_number: string;
+    status: string;
+    customer_name: string;
+    customer_phone: string;
+    customer_id_number: string;
+    region_name: string | null;
+    address: string | null;
+    note: string | null;
+    delivery_fee_minor: number;
+    items_total_minor: number;
+    total_minor: number;
+    returned_minor: number;
+    invoice_ref: string | null;
+    reject_reason: string | null;
+    cancel_reason: string | null;
+    revision: number;
+    server_created_at: number;
+    server_updated_at: number;
+    created_at: string;
+    updated_at: string;
+  }[];
+  online_order_items?: {
+    server_order_id: number;
+    product_id: number | null;
+    product_ref: string | null;
+    product_name: string;
+    variant: string | null;
+    unit_price_minor: number;
+    quantity: number;
+    line_total_minor: number;
+  }[];
+  /** v82 (الجولة 95): حسابات الكاشيرين وأجهزتهم الموثوقة —
+   *  استعادتها تحفظ أسماء الدخول وكلمات المرور المملّحة والأجهزة
+   *  المقبولة كما كانت (لا يعاد طلب موافقة المدير بعد الاسترجاع). */
+  lan_cashiers?: {
+    id: number;
+    username: string;
+    password_hash: string;
+    salt: string;
+    display_name: string;
+    is_active: number;
+    max_discount_pct: number;
+    can_debt: number;
+    can_return: number;
+    created_at: string;
+    last_seen_at: string | null;
+  }[];
+  lan_devices?: {
+    cashier_id: number;
+    device_id: string;
+    device_label: string;
+    status: string;
+    token: string | null;
+    ip: string | null;
+    first_seen_at: string;
+    last_seen_at: string | null;
+  }[];
   /** v18 (round-24 #1): money صِلة collected on the store's behalf
    *  (customer repaid through the Sila app) — restoring this ledger
    *  keeps the treasury and reports whole; without it every restored
@@ -445,6 +589,8 @@ export interface BackupFile {
     method: string | null;
     reference: string | null;
     created_at: string;
+    /** v82 (الجولة 95): وقت انعكاس التسوية محلياً. */
+    mirrored_at?: string;
   }[];
   /** v8.3: embedded product image files (base64 JPEG) — keyed by
    *  `name`, referenced by the products' original image paths. */
@@ -496,6 +642,13 @@ export const BackupService = {
       voucherRedemptions,
       campaignDebts,
       campaignSettlements,
+      cashMovementsRaw,
+      saleExchangesRaw,
+      saleEditsRaw,
+      onlineOrdersRaw,
+      onlineOrderItemsRaw,
+      lanCashiersRaw,
+      lanDevicesRaw,
     ] = await Promise.all([
       db.execute('SELECT id, name, store_mode FROM categories'),
       db.execute('SELECT id, name, short_name, sort_order, kind, store_mode FROM units'),
@@ -509,14 +662,18 @@ export const BackupService = {
       //  جديد مع منتجاتها (ملابس لون×مقاس، مطعم أحجام بأسعارها).
       db
         .execute(
-          'SELECT id, product_id, kind, color, size, stock_quantity, retail_price, cost_price FROM product_variants',
+          'SELECT id, product_id, kind, color, size, stock_quantity, retail_price, cost_price, created_at FROM product_variants',
         )
         .catch(() => ({rows: []})),
       db.execute(
         'SELECT product_id, angle_label, embedding_data, thumbnail_path FROM product_embeddings',
       ),
       db.execute(
-        'SELECT id, invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, returned_minor, return_kind FROM sales',
+        // v82 (الجولة 95): payment_method + client_ref + edit_count +
+        //  edited_at — قناة الدفع الفعلية لكل فاتورة (ومرتجعات RET
+        //  بقناتها) هي أساس أرصدة المحافظ والبنوك؛ مرجع الكاشير
+        //  يمنع ازدواج عملياته عند المزامنة بعد الاسترجاع.
+        'SELECT id, invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, returned_minor, return_kind, payment_method, client_ref, edit_count, edited_at, cashier_id FROM sales',
       ),
       db.execute(
         'SELECT id, sale_id, product_id, quantity, unit_price, cost_price, total_line_price, unit_name, base_quantity, variant_label, variant_id FROM sale_items',
@@ -528,7 +685,8 @@ export const BackupService = {
         .execute(
           `SELECT sr.return_number, sr.invoice_ref AS sale_invoice_ref, sr.book,
                   sr.refund_method, sr.refund_channel, sr.refund_minor, sr.debt_adjusted_minor,
-                  sr.note, sr.created_at,
+                  sr.is_exchange, sr.exchange_minor, sr.client_ref,
+                  sr.note, sr.created_at, sr.cashier_id,
                   si.id AS sale_item_id, si.product_id, si.product_name,
                   si.quantity, si.unit_name, si.base_quantity, si.unit_price,
                   si.line_total, si.cost_price
@@ -556,7 +714,9 @@ export const BackupService = {
                 pos_outstanding_minor, app_outstanding_minor, other_minor,
                 pos_purchases_minor, app_purchases_minor,
                 last_payment_at, last_payment_amount_minor,
-                reconcile_offset_minor, last_synced_at
+                reconcile_offset_minor, last_synced_at,
+                device_outstanding_minor, device_purchases_minor,
+                device_payments_minor
          FROM sila_customers`,
       ),
       db
@@ -634,8 +794,77 @@ export const BackupService = {
       db
         .execute(
           `SELECT settlement_id, campaign_id, campaign_name, amount_minor,
-                kind, status, method, reference, created_at
+                kind, status, method, reference, created_at, mirrored_at
          FROM campaign_settlements`,
+        )
+        .catch(() => ({rows: []})),
+      // v82 (الجولة 95): سجل الخزينة بكل قنواته — النسخة القديمة
+      //  كانت تتركه خارج الملف فتفقد الخزينة مصاريفها وسحوباتها
+      //  وإيداعاتها بعد الاسترجاع (جذر تغيّر الرصيد الإجمالي).
+      db
+        .execute(
+          `SELECT ref, kind, category, note, amount_minor, auth_method,
+                photo_path, payment_method, created_at
+         FROM cash_movements`,
+        )
+        .catch(() => ({rows: []})),
+      // v82: الاستبدالات — مرتبطة برقم سند المرتجع المستقر.
+      db
+        .execute(
+          `SELECT sr.return_number, srex.product_id, srex.product_name,
+                  srex.quantity, srex.unit_name, srex.base_quantity,
+                  srex.unit_price, srex.line_total, srex.cost_price,
+                  srex.variant_id, srex.variant_color, srex.variant_label,
+                  srex.created_at
+           FROM sale_return_exchanges srex
+           JOIN sale_returns sr ON sr.id = srex.return_id
+           ORDER BY srex.id ASC`,
+        )
+        .catch(() => ({rows: []})),
+      // v82: سجل تعديل الفواتير — مربوط برقم الفاتورة المستقر.
+      db
+        .execute(
+          `SELECT s.invoice_number AS sale_invoice_ref, se.edited_at,
+                  se.before_json, se.after_json, se.delta_minor, se.note
+           FROM sale_edits se
+           JOIN sales s ON s.id = se.sale_id
+           ORDER BY se.id ASC`,
+        )
+        .catch(() => ({rows: []})),
+      // v82: الطلبات الأونلاين وبنودها — ديون الطلبات غير المحصَّلة
+      //  تعيش هنا (جذر «الديون لم تسترجع»).
+      db
+        .execute(
+          `SELECT server_id, order_number, status, customer_name,
+                  customer_phone, customer_id_number, region_name, address,
+                  note, delivery_fee_minor, items_total_minor, total_minor,
+                  returned_minor, invoice_ref, reject_reason, cancel_reason,
+                  revision, server_created_at, server_updated_at,
+                  created_at, updated_at
+           FROM online_orders`,
+        )
+        .catch(() => ({rows: []})),
+      db
+        .execute(
+          `SELECT server_order_id, product_id, product_ref, product_name,
+                  variant, unit_price_minor, quantity, line_total_minor
+           FROM online_order_items`,
+        )
+        .catch(() => ({rows: []})),
+      // v82: حسابات الكاشيرين وأجهزتهم الموثوقة.
+      db
+        .execute(
+          `SELECT id, username, password_hash, salt, display_name,
+                  is_active, max_discount_pct, can_debt, can_return,
+                  created_at, last_seen_at
+           FROM lan_cashiers`,
+        )
+        .catch(() => ({rows: []})),
+      db
+        .execute(
+          `SELECT cashier_id, device_id, device_label, status, token, ip,
+                  first_seen_at, last_seen_at
+           FROM lan_devices`,
         )
         .catch(() => ({rows: []})),
     ]);
@@ -645,6 +874,9 @@ export const BackupService = {
     // through the guarded native helper; a missing/dead file is
     // silently skipped (its path is simply not in the map, and the
     // restore then clears that product's image).
+    // v82 (الجولة 95): صور سندات الخزينة المرفقة تُضمَّن هي الأخرى
+    //  (بادئة cash_ تميّزها عن صور المنتجات) — دليل المصروف/السحب
+    //  لا يفقد بعد حذف بيانات الجهاز والاسترجاع.
     const images: {name: string; data: string}[] = [];
     try {
       const platform = requirePlatformUtils();
@@ -662,6 +894,26 @@ export const BackupService = {
               .split('/')
               .pop()
               ?.replace(/[^A-Za-z0-9._-]/g, '_')}`;
+            images.push({name, data: base64});
+          }
+        } catch {
+          // Dead path — nothing to embed.
+        }
+      }
+      for (const row of rowsOf(cashMovementsRaw)) {
+        const uri = row.photo_path == null ? null : String(row.photo_path);
+        if (uri == null || uri.length === 0 || seen.has(uri)) {
+          continue;
+        }
+        seen.add(uri);
+        try {
+          const base64 = await platform.readFileBase64(uri);
+          if (base64.length > 0) {
+            const originalName = uri.split('/').pop() ?? '';
+            const name = `cash_${images.length}_${originalName.replace(
+              /[^A-Za-z0-9._-]/g,
+              '_',
+            )}`;
             images.push({name, data: base64});
           }
         } catch {
@@ -748,6 +1000,8 @@ export const BackupService = {
         stock_quantity: Number(row.stock_quantity ?? 0),
         retail_price: row.retail_price == null ? null : Number(row.retail_price),
         cost_price: row.cost_price == null ? null : Number(row.cost_price),
+        // v82 (الجولة 95): وقت الإنشاء يسافر مع المتغير.
+        created_at: String(row.created_at ?? ''),
       })),
       embeddings: rowsOf(embeddings).map(row => ({
         product_id: Number(row.product_id),
@@ -770,6 +1024,20 @@ export const BackupService = {
         created_at: String(row.created_at ?? ''),
         returned_minor: Number(row.returned_minor ?? 0),
         return_kind: row.return_kind == null ? null : String(row.return_kind),
+        // v82 (الجولة 95): القناة الفعلية + مرجع الكاشير + التعديل —
+        //  قناة غائبة (نسخ قديمة) = نقدي (توافق تاريخي).
+        payment_method:
+          row.payment_method == null || row.payment_method === ''
+            ? null
+            : String(row.payment_method),
+        client_ref:
+          row.client_ref == null || row.client_ref === ''
+            ? null
+            : String(row.client_ref),
+        edit_count: Number(row.edit_count ?? 0),
+        edited_at: row.edited_at == null ? null : String(row.edited_at),
+        // v82: الكاشير صاحب الفاتورة — يُعاد ربطه بحسابه.
+        cashier_id: row.cashier_id == null ? null : Number(row.cashier_id),
       })),
       sale_items: rowsOf(saleItems).map(row => ({
         id: Number(row.id),
@@ -812,8 +1080,17 @@ export const BackupService = {
                   : String(row.refund_channel),
               refund_minor: Number(row.refund_minor ?? 0),
               debt_adjusted_minor: Number(row.debt_adjusted_minor ?? 0),
+              // v82 (الجولة 95): وشاح الاستبدال وفرقه ومرجع الكاشير.
+              is_exchange: Number(row.is_exchange ?? 0) === 1 ? 1 : 0,
+              exchange_minor: Number(row.exchange_minor ?? 0),
+              client_ref:
+                row.client_ref == null || row.client_ref === ''
+                  ? null
+                  : String(row.client_ref),
               note: row.note == null ? null : String(row.note),
               created_at: String(row.created_at ?? ''),
+              // v82 (الجولة 95): الكاشير الذي أنجز المرتجع.
+              cashier_id: row.cashier_id == null ? null : Number(row.cashier_id),
               items: [],
             };
             byNumber.set(number, ret);
@@ -902,6 +1179,10 @@ export const BackupService = {
             ? null
             : Number(row.last_payment_amount_minor),
         reconcile_offset_minor: Number(row.reconcile_offset_minor ?? 0),
+        // v82 (الجولة 95): أرصدة هذا الجهاز من إسناد الخادم (0075).
+        device_outstanding_minor: Number(row.device_outstanding_minor ?? 0),
+        device_purchases_minor: Number(row.device_purchases_minor ?? 0),
+        device_payments_minor: Number(row.device_payments_minor ?? 0),
         last_synced_at:
           row.last_synced_at == null ? null : String(row.last_synced_at),
       })),
@@ -981,17 +1262,134 @@ export const BackupService = {
       merchant_movements: rowsOf(merchantMovesRaw).map(row => ({
         merchant_id: Number(row.merchant_id ?? 0),
         ref: String(row.ref ?? ''),
-        kind: (['invoice', 'payment', 'return', 'collection'].includes(
-          String(row.kind ?? ''),
-        )
+        // v82 (الجولة 95): 'debt' (الدين المستحق المباشر من الجولة 92)
+        //  كانت تُصدَّر خطأً كـ'invoice' فتتشوه سجلات التاجر بعد
+        //  الاسترجاع — الأنواع الخمسة كلها تنتقل الآن كما كُتبت.
+        kind: ([
+          'invoice',
+          'payment',
+          'return',
+          'collection',
+          'debt',
+        ].includes(String(row.kind ?? ''))
           ? String(row.kind)
-          : 'invoice') as 'invoice' | 'payment' | 'return' | 'collection',
+          : 'invoice') as
+          | 'invoice'
+          | 'payment'
+          | 'return'
+          | 'collection'
+          | 'debt',
         amount: Number(row.amount ?? 0),
         method: row.method == null ? null : String(row.method),
         note: row.note == null ? null : String(row.note),
         items_json: row.items_json == null ? null : String(row.items_json),
         cash_ref: row.cash_ref == null ? null : String(row.cash_ref),
         created_at: String(row.created_at ?? ''),
+      })),
+      // v82 (الجولة 95): سجل الخزينة — كما كُتب حرفياً.
+      cash_movements: rowsOf(cashMovementsRaw).map(row => ({
+        ref: String(row.ref ?? ''),
+        kind: String(row.kind ?? 'expense'),
+        category: String(row.category ?? 'أخرى'),
+        note: row.note == null ? null : String(row.note),
+        amount_minor: Number(row.amount_minor ?? 0),
+        auth_method: String(row.auth_method ?? 'none'),
+        photo_path:
+          row.photo_path == null || String(row.photo_path).length === 0
+            ? null
+            : String(row.photo_path),
+        payment_method:
+          row.payment_method == null || row.payment_method === ''
+            ? null
+            : String(row.payment_method),
+        created_at: String(row.created_at ?? ''),
+      })),
+      // v82: الاستبدالات مرتبطة برقم سند المرتجع المستقر.
+      sale_return_exchanges: rowsOf(saleExchangesRaw).map(row => ({
+        return_number: String(row.return_number ?? ''),
+        product_id: Number(row.product_id ?? 0),
+        product_name: String(row.product_name ?? ''),
+        quantity: Number(row.quantity ?? 0),
+        unit_name: row.unit_name == null ? null : String(row.unit_name),
+        base_quantity: Number(row.base_quantity ?? 0),
+        unit_price: Number(row.unit_price ?? 0),
+        line_total: Number(row.line_total ?? 0),
+        cost_price: Number(row.cost_price ?? 0),
+        variant_id: row.variant_id == null ? null : Number(row.variant_id),
+        variant_color:
+          row.variant_color == null ? null : String(row.variant_color),
+        variant_label:
+          row.variant_label == null ? null : String(row.variant_label),
+        created_at: String(row.created_at ?? ''),
+      })),
+      // v82: سجل تعديل الفواتير مرتبطاً برقم الفاتورة المستقر.
+      sale_edits: rowsOf(saleEditsRaw).map(row => ({
+        sale_invoice_ref: String(row.sale_invoice_ref ?? ''),
+        edited_at: String(row.edited_at ?? ''),
+        before_json: String(row.before_json ?? '{}'),
+        after_json: String(row.after_json ?? '{}'),
+        delta_minor: Number(row.delta_minor ?? 0),
+        note: row.note == null ? null : String(row.note),
+      })),
+      // v82: الطلبات الأونلاين وبنودها.
+      online_orders: rowsOf(onlineOrdersRaw).map(row => ({
+        server_id: Number(row.server_id ?? 0),
+        order_number: String(row.order_number ?? ''),
+        status: String(row.status ?? 'new'),
+        customer_name: String(row.customer_name ?? ''),
+        customer_phone: String(row.customer_phone ?? ''),
+        customer_id_number: String(row.customer_id_number ?? ''),
+        region_name: row.region_name == null ? null : String(row.region_name),
+        address: row.address == null ? null : String(row.address),
+        note: row.note == null ? null : String(row.note),
+        delivery_fee_minor: Number(row.delivery_fee_minor ?? 0),
+        items_total_minor: Number(row.items_total_minor ?? 0),
+        total_minor: Number(row.total_minor ?? 0),
+        returned_minor: Number(row.returned_minor ?? 0),
+        invoice_ref: row.invoice_ref == null ? null : String(row.invoice_ref),
+        reject_reason:
+          row.reject_reason == null ? null : String(row.reject_reason),
+        cancel_reason:
+          row.cancel_reason == null ? null : String(row.cancel_reason),
+        revision: Number(row.revision ?? 1),
+        server_created_at: Number(row.server_created_at ?? 0),
+        server_updated_at: Number(row.server_updated_at ?? 0),
+        created_at: String(row.created_at ?? ''),
+        updated_at: String(row.updated_at ?? ''),
+      })),
+      online_order_items: rowsOf(onlineOrderItemsRaw).map(row => ({
+        server_order_id: Number(row.server_order_id ?? 0),
+        product_id: row.product_id == null ? null : Number(row.product_id),
+        product_ref: row.product_ref == null ? null : String(row.product_ref),
+        product_name: String(row.product_name ?? ''),
+        variant: row.variant == null ? null : String(row.variant),
+        unit_price_minor: Number(row.unit_price_minor ?? 0),
+        quantity: Number(row.quantity ?? 0),
+        line_total_minor: Number(row.line_total_minor ?? 0),
+      })),
+      // v82: حسابات الكاشيرين وأجهزتهم.
+      lan_cashiers: rowsOf(lanCashiersRaw).map(row => ({
+        id: Number(row.id ?? 0),
+        username: String(row.username ?? ''),
+        password_hash: String(row.password_hash ?? ''),
+        salt: String(row.salt ?? ''),
+        display_name: String(row.display_name ?? ''),
+        is_active: Number(row.is_active ?? 1) === 1 ? 1 : 0,
+        max_discount_pct: Number(row.max_discount_pct ?? 10),
+        can_debt: Number(row.can_debt ?? 1) === 1 ? 1 : 0,
+        can_return: Number(row.can_return ?? 1) === 1 ? 1 : 0,
+        created_at: String(row.created_at ?? ''),
+        last_seen_at: row.last_seen_at == null ? null : String(row.last_seen_at),
+      })),
+      lan_devices: rowsOf(lanDevicesRaw).map(row => ({
+        cashier_id: Number(row.cashier_id ?? 0),
+        device_id: String(row.device_id ?? ''),
+        device_label: String(row.device_label ?? ''),
+        status: String(row.status ?? 'pending'),
+        token: row.token == null ? null : String(row.token),
+        ip: row.ip == null ? null : String(row.ip),
+        first_seen_at: String(row.first_seen_at ?? ''),
+        last_seen_at: row.last_seen_at == null ? null : String(row.last_seen_at),
       })),
       // v18 (round-24 #1): the Sila-app collections ledger.
       sila_app_collections: rowsOf(appCollections).map(row => ({
@@ -1075,6 +1473,8 @@ export const BackupService = {
         method: row.method == null ? null : String(row.method),
         reference: row.reference == null ? null : String(row.reference),
         created_at: String(row.created_at ?? ''),
+        // v82 (الجولة 95): وقت الانعكاس المحلي يسافر مع التسوية.
+        mirrored_at: String(row.mirrored_at ?? ''),
       })),
       images,
       settings: getSettings(),
@@ -1167,8 +1567,11 @@ export const BackupService = {
           if (!image?.name || !image?.data) {
             continue;
           }
+          // v82 (الجولة 95): صور سندات الخزينة تعود إلى مجلد vouchers
+          //  (مكانها الأصلي)، وصور المنتجات إلى thumbs كما كانت.
+          const isCashPhoto = image.name.startsWith('cash_');
           const newPath = await platform.writeFileBase64(
-            'thumbs',
+            isCashPhoto ? 'vouchers' : 'thumbs',
             image.name.endsWith('.jpg') ? image.name : `${image.name}.jpg`,
             image.data,
           );
@@ -1189,6 +1592,28 @@ export const BackupService = {
         const match = doc.images.find(
           entry =>
             entry?.name != null &&
+            !entry.name.startsWith('cash_') &&
+            entry.name.includes(originalName.replace(/[^A-Za-z0-9._-]/g, '_')),
+        );
+        if (match != null) {
+          const newPath = nameToNewPath.get(match.name);
+          if (newPath != null) {
+            imageNewPath.set(uri, newPath);
+          }
+        }
+      }
+      // v82: صور سندات الخزينة — إعادة توجيه المسار القديم للملف
+      //  الجديد على هذا الجهاز (نفس منطق صور المنتجات).
+      for (const movement of doc.cash_movements ?? []) {
+        const uri = movement.photo_path;
+        if (uri == null || uri.length === 0) {
+          continue;
+        }
+        const originalName = uri.split('/').pop() ?? '';
+        const match = doc.images.find(
+          entry =>
+            entry?.name != null &&
+            entry.name.startsWith('cash_') &&
             entry.name.includes(originalName.replace(/[^A-Za-z0-9._-]/g, '_')),
         );
         if (match != null) {
@@ -1270,19 +1695,48 @@ export const BackupService = {
     };
 
     await db.transaction(async tx => {
+      // v82 (الجولة 95): الاسترجاع = استبدال كامل. كان المسح القديم
+      //  يترك جداول كاملة حيّة (cash_movements، الطلبات الأونلاين،
+      //  الاستبدالات، سجل التعديلات، متغيرات المنتجات، حسابات
+      //  الكاشيرين) فتختلط بيانات الجهاز القديمة بالمستعادة — أرصدة
+      //  خزينة مزدوجة وسجلات يتيمة تشير لمعرّفات أعيد استخدامها.
+      //  اليوم يُمسح كل جدول أعمال (نفس مجموعة wipeAllData كاملة)
+      //  قبل إدخال أي صف من النسخة — إما أن تحل النسخة بالكامل أو
+      //  لا يتغير شيء (المعاملة واحدة).
+      //  ترتيب الأبناء قبل الآباء (المفاتيح الأجنبية مفعّلة).
       await tx.execute('DELETE FROM sale_return_items');
+      await tx.execute('DELETE FROM sale_return_exchanges');
       await tx.execute('DELETE FROM sale_returns');
+      await tx.execute('DELETE FROM sale_edits');
       await tx.execute('DELETE FROM sale_items');
       await tx.execute('DELETE FROM sales');
       await tx.execute('DELETE FROM stocktake_items');
       await tx.execute('DELETE FROM stocktakes');
+      await tx.execute('DELETE FROM online_order_items');
+      await tx.execute('DELETE FROM online_orders');
+      await tx.execute('DELETE FROM lan_devices');
+      await tx.execute('DELETE FROM lan_cashiers');
       await tx.execute('DELETE FROM product_embeddings');
       await tx.execute('DELETE FROM product_units');
+      await tx.execute('DELETE FROM product_variants');
       await tx.execute('DELETE FROM products');
       await tx.execute('DELETE FROM units');
       await tx.execute('DELETE FROM categories');
+      await tx.execute('DELETE FROM sila_debt_queue');
+      await tx.execute('DELETE FROM sila_customers');
+      await tx.execute('DELETE FROM sila_payment_queue');
+      await tx.execute('DELETE FROM sila_app_collections');
+      await tx.execute('DELETE FROM local_payments');
+      await tx.execute('DELETE FROM local_debts');
+      await tx.execute('DELETE FROM local_customers');
+      await tx.execute('DELETE FROM merchant_movements');
+      await tx.execute('DELETE FROM merchants');
+      await tx.execute('DELETE FROM campaign_settlements');
+      await tx.execute('DELETE FROM campaign_debts');
+      await tx.execute('DELETE FROM voucher_redemptions');
+      await tx.execute('DELETE FROM cash_movements');
       await tx.execute(
-        "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_units','product_embeddings','sales','sale_items','sale_returns','sale_return_items','stocktakes','stocktake_items')",
+        "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_units','product_embeddings','product_variants','sales','sale_items','sale_returns','sale_return_items','sale_return_exchanges','sale_edits','stocktakes','stocktake_items','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','merchants','merchant_movements','voucher_redemptions','campaign_settlements','cash_movements','online_order_items','lan_cashiers','lan_devices')",
       );
 
       // Categories & units — keep maps from backup ids to fresh ids.
@@ -1390,7 +1844,10 @@ export const BackupService = {
             Number(row.stock_quantity ?? 0),
             row.retail_price ?? null,
             row.cost_price ?? null,
-            nowLocal(),
+            // v82 (الجولة 95): وقت الإنشاء الحقيقي — القيمة الفارغة
+            //  المتعمدة تُحفظ فارغة (افتراض الجدول)، والغائب كلياً
+            //  (نسخ قديمة) يسقط على الآن.
+            row.created_at ?? nowLocal(),
           ],
         );
         variantIdMap.set(Number(row.id), Number(inserted.insertId));
@@ -1456,10 +1913,89 @@ export const BackupService = {
         );
       }
 
+      // v82 (الجولة 95): حسابات الكاشيرين — تُستعاد بترقيم جديد
+      //  (username UNIQUE: النسخة الثانية بنفس الاسم تُتخطى)،
+      //  والأجهزة تعود لكاشيرها الصحيح بمعرّفه الجديد. تُستعاد قبل
+      //  الفواتير كي تُربط فواتير الكاشيرين (sales.cashier_id)
+      //  ومرتجعاتهم بحساباتهم الجديدة.
+      const cashierIdMap = new Map<number, number>();
+      const seenUsernames = new Set<string>();
+      for (const cashier of doc.lan_cashiers ?? []) {
+        const username = String(cashier.username ?? '').trim();
+        if (!username || !cashier.password_hash || seenUsernames.has(username)) {
+          continue;
+        }
+        seenUsernames.add(username);
+        const insert = await tx.execute(
+          `INSERT INTO lan_cashiers
+            (username, password_hash, salt, display_name, is_active,
+             max_discount_pct, can_debt, can_return, created_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            username,
+            cashier.password_hash,
+            cashier.salt || '',
+            cashier.display_name || username,
+            cashier.is_active === 0 ? 0 : 1,
+            Number(cashier.max_discount_pct ?? 10),
+            cashier.can_debt === 0 ? 0 : 1,
+            cashier.can_return === 0 ? 0 : 1,
+            cashier.created_at || nowLocal(),
+            cashier.last_seen_at ?? null,
+          ],
+        );
+        if (cashier.id != null && insert.insertId != null) {
+          cashierIdMap.set(Number(cashier.id), Number(insert.insertId));
+        }
+      }
+      let cashierDevicesRestored = 0;
+      const seenDeviceKeys = new Set<string>();
+      for (const device of doc.lan_devices ?? []) {
+        const mappedId = cashierIdMap.get(Number(device.cashier_id));
+        const deviceId = String(device.device_id ?? '');
+        if (mappedId == null || !deviceId) {
+          continue;
+        }
+        const key = `${mappedId}:${deviceId}`;
+        if (seenDeviceKeys.has(key)) {
+          continue;
+        }
+        seenDeviceKeys.add(key);
+        try {
+          await tx.execute(
+            `INSERT INTO lan_devices
+              (cashier_id, device_id, device_label, status, token, ip, first_seen_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              mappedId,
+              deviceId,
+              device.device_label ?? '',
+              device.status || 'pending',
+              device.token ?? null,
+              device.ip ?? null,
+              device.first_seen_at || nowLocal(),
+              device.last_seen_at ?? null,
+            ],
+          );
+          cashierDevicesRestored += 1;
+        } catch {
+          // Duplicate device — first copy wins.
+        }
+      }
+      if (cashierIdMap.size > 0) {
+        logDiag(
+          'backup',
+          `استُعيد حسابات الكاشيرين: ${cashierIdMap.size} كاشير و${cashierDevicesRestored} جهاز`,
+        );
+      }
+
       // Sales history — v15: a single bad row is SKIPPED (counted as
       // skipped) instead of killing the whole restore transaction.
       // v23 (round-29 #2): returned_minor + return_kind travel with
       // every sale; the invoice-number map feeds the returns below.
+      // v82 (الجولة 95): payment_method + client_ref + edit_count +
+      //  edited_at — القناة الفعلية لكل فاتورة (وأساس أرصدة القنوات
+      //  بعد الاسترجاع) ومرجع عملية الكاشير وعدّاد التعديل.
       const saleMap = new Map<number, number>();
       const saleIdByInvoiceRef = new Map<string, number>();
       let sales = 0;
@@ -1468,8 +2004,8 @@ export const BackupService = {
         try {
           const inserted = await tx.execute(
             `INSERT INTO sales
-              (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, returned_minor, return_kind)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              (invoice_number, total_amount, total_cost, total_profit, discount, payment_type, created_at, returned_minor, return_kind, payment_method, client_ref, edit_count, edited_at, cashier_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               sale.invoice_number || `R-${Date.now()}-${sales}`,
               Number(sale.total_amount ?? 0),
@@ -1480,6 +2016,18 @@ export const BackupService = {
               sale.created_at || nowLocal(),
               Number(sale.returned_minor ?? 0),
               sale.return_kind ?? null,
+              // v82: القناة كما كانت — غائبة (نسخ قديمة أو مبيعات
+              //  سطح المكتب القديمة NULL) = نقدي. لا يجوز إدخال NULL
+              //  صريحاً: العمود NOT NULL DEFAULT 'cash' والافتراض لا
+              //  يعمل عند التحديد الصريح (كان يسقط الفاتورة كلها).
+              sale.payment_method ?? 'cash',
+              sale.client_ref ?? null,
+              Number(sale.edit_count ?? 0),
+              sale.edited_at ?? null,
+              // v82: فاتورة الكاشير تُعاد لحسابه المستعاد.
+              sale.cashier_id != null
+                ? cashierIdMap.get(Number(sale.cashier_id)) ?? null
+                : null,
             ],
           );
           saleMap.set(Number(sale.id), Number(inserted.insertId));
@@ -1542,16 +2090,20 @@ export const BackupService = {
       //  ORIGINAL invoice (mapped by invoice number; the internal
       //  sale ids were remapped above), each line mapped to its new
       //  sale_items id so per-line remaining math stays correct.
+      // v82 (الجولة 95): returnIdByNumber — خريطة رقم السند → معرّفه
+      //  الجديد تُغذّي استبدالات المرتجع أسفل، وسند مكرر الرقم في
+      //  نسخة قديمة يُتخطى بدل أن يُسقط المعاملة كلها.
       let saleReturns = 0;
+      const returnIdByNumber = new Map<string, number>();
       for (const ret of doc.sale_returns ?? []) {
         const newSaleId = saleIdByInvoiceRef.get(String(ret.sale_invoice_ref));
-        if (newSaleId == null) {
+        if (newSaleId == null || returnIdByNumber.has(ret.return_number)) {
           continue;
         }
         const insertedReturn = await tx.execute(
           `INSERT INTO sale_returns
-            (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, note, created_at, refund_channel)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (return_number, sale_id, invoice_ref, book, refund_method, refund_minor, debt_adjusted_minor, is_exchange, exchange_minor, client_ref, note, created_at, refund_channel, cashier_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             ret.return_number,
             newSaleId,
@@ -1560,11 +2112,23 @@ export const BackupService = {
             ret.refund_method || 'none',
             Number(ret.refund_minor ?? 0),
             Number(ret.debt_adjusted_minor ?? 0),
+            // v82: وشاح الاستبدال وفرقه ومرجع عملية الكاشير.
+            (ret as {is_exchange?: number}).is_exchange === 1 ? 1 : 0,
+            Number((ret as {exchange_minor?: number}).exchange_minor ?? 0),
+            (ret as {client_ref?: string | null}).client_ref ?? null,
             ret.note ?? null,
             ret.created_at || nowLocal(),
             // v69 (الجولة 81 #٣): قناة التسوية إن وُجدت بالنسخة.
             ret.refund_channel ?? null,
+            // v82 (الجولة 95): مرتجع الكاشير يُعاد لحسابه المستعاد.
+            ret.cashier_id != null
+              ? cashierIdMap.get(Number(ret.cashier_id)) ?? null
+              : null,
           ],
+        );
+        returnIdByNumber.set(
+          ret.return_number,
+          Number(insertedReturn.insertId),
         );
         for (const line of ret.items ?? []) {
           const newProductId = productMap.get(Number(line.product_id));
@@ -1592,6 +2156,62 @@ export const BackupService = {
           );
         }
         saleReturns += 1;
+      }
+
+      // v82 (الجولة 95): استبدالات المرتجع — بضاعة خرجت مقابل
+      //  المرتجع (بلا أثر مالي): السند برقمه المستقر، والمنتج
+      //  ومتغيره بمعرّفيهما الجديدين.
+      for (const exchange of doc.sale_return_exchanges ?? []) {
+        const newReturnId = returnIdByNumber.get(exchange.return_number);
+        const newProductId = productMap.get(Number(exchange.product_id));
+        if (newReturnId == null || newProductId == null) {
+          continue;
+        }
+        await tx.execute(
+          `INSERT INTO sale_return_exchanges
+            (return_id, product_id, product_name, quantity, unit_name, base_quantity, unit_price, line_total, cost_price, variant_id, variant_color, variant_label, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newReturnId,
+            newProductId,
+            String(exchange.product_name ?? ''),
+            Number(exchange.quantity ?? 0),
+            exchange.unit_name ?? null,
+            Number(exchange.base_quantity ?? 0),
+            Number(exchange.unit_price ?? 0),
+            Number(exchange.line_total ?? 0),
+            Number(exchange.cost_price ?? 0),
+            exchange.variant_id != null
+              ? variantIdMap.get(Number(exchange.variant_id)) ?? null
+              : null,
+            exchange.variant_color ?? null,
+            exchange.variant_label ?? null,
+            exchange.created_at || nowLocal(),
+          ],
+        );
+      }
+      // v82 (الجولة 95): سجل تعديل الفواتير — الفاتورة برقمها
+      //  المستقر (المعرّفات الداخلية أُعيد ترقيمها أعلاه).
+      for (const edit of doc.sale_edits ?? []) {
+        const newSaleId = saleIdByInvoiceRef.get(
+          String(edit.sale_invoice_ref),
+        );
+        if (newSaleId == null) {
+          continue;
+        }
+        await tx.execute(
+          `INSERT INTO sale_edits
+            (sale_id, edited_at, before_json, after_json, delta_minor, note)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            newSaleId,
+            edit.edited_at || nowLocal(),
+            String(edit.before_json ?? '{}'),
+            String(edit.after_json ?? '{}'),
+            Number(edit.delta_minor ?? 0),
+            edit.note ?? null,
+          ],
+        );
       }
 
       // Stocktake sessions.
@@ -1703,8 +2323,10 @@ export const BackupService = {
              pos_outstanding_minor, app_outstanding_minor, other_minor,
              pos_purchases_minor, app_purchases_minor,
              last_payment_at, last_payment_amount_minor,
-             reconcile_offset_minor, last_synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             reconcile_offset_minor, last_synced_at,
+             device_outstanding_minor, device_purchases_minor,
+             device_payments_minor)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             customer.customer_id,
             customer.name,
@@ -1725,6 +2347,11 @@ export const BackupService = {
             // backups restore as 0 = the books cover the history).
             Number(customer.reconcile_offset_minor ?? 0),
             customer.last_synced_at ?? null,
+            // v82 (الجولة 95): أرصدة هذا الجهاز — غائبة (نسخ قديمة)
+            //  = صفر وتصحّحها أول مزامنة.
+            Number(customer.device_outstanding_minor ?? 0),
+            Number(customer.device_purchases_minor ?? 0),
+            Number(customer.device_payments_minor ?? 0),
           ],
         );
       }
@@ -1828,7 +2455,7 @@ export const BackupService = {
                COALESCE(?, CASE WHEN EXISTS (
                  SELECT 1 FROM sales s WHERE s.invoice_number = ?
                ) THEN 'sale' ELSE 'direct' END),
-               ?, ?, ?, ?)`,
+               ?, ?, ?)`,
             [
               mappedId,
               debt.invoice_ref,
@@ -1849,8 +2476,16 @@ export const BackupService = {
             ],
           );
           localDebtsRestored += 1;
-        } catch {
-          // Duplicate ref — first copy wins.
+        } catch (error) {
+          // v82 (الجولة 95): كان هذا الالتقاط الصامت يخفي خطأ SQL
+          //  حقيقياً (عدد معاملات لا يطابق الأعمدة منذ v72) فكانت
+          //  «الديون لم تسترجع» بلا أثر في السجل — اليوم يُسجَّل
+          //  السبب كاملاً في التشخيصات.
+          logDiag(
+            'backup',
+            `تخطّي دين محلي ${debt.invoice_ref}: ${toMessage(error)}`,
+            'warn',
+          );
         }
       }
       for (const payment of doc.local_payments ?? []) {
@@ -2083,8 +2718,8 @@ export const BackupService = {
           await tx.execute(
             `INSERT INTO campaign_settlements (
               settlement_id, campaign_id, campaign_name, amount_minor,
-              kind, status, method, reference, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              kind, status, method, reference, created_at, mirrored_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               settlement.settlement_id,
               settlement.campaign_id,
@@ -2095,6 +2730,8 @@ export const BackupService = {
               settlement.method ?? null,
               settlement.reference ?? null,
               settlement.created_at || nowLocal(),
+              // v82: وقت الانعكاس الحقيقي (نسخ قديمة: الآن).
+              settlement.mirrored_at || nowLocal(),
             ],
           );
           settlementsRestored += 1;
@@ -2106,6 +2743,154 @@ export const BackupService = {
         logDiag(
           'backup',
           `استُعيد دفتر القسائم: ${voucherRowsRestored} صرف و${campaignsRestored} حملة و${settlementsRestored} تسوية`,
+        );
+      }
+
+      // v82 (الجولة 95): سجل الخزينة — سندات المصاريف والسحوبات
+      //  والإيداعات بكل قنواتها تُستعاد كما كُتبت (المفاتيح مستقرة
+      //  EXP/WD/DEP/COLL/RFD + تاريخ اليوم؛ المرجع UNIQUE). صورة
+      //  السند تُعاد كتابتها من الصورة المضمّنة قبل المعاملة.
+      let cashRestored = 0;
+      const seenCashRefs = new Set<string>();
+      for (const movement of doc.cash_movements ?? []) {
+        const ref = String(movement.ref ?? '');
+        if (!ref || seenCashRefs.has(ref)) {
+          continue;
+        }
+        seenCashRefs.add(ref);
+        const restoredPhoto =
+          movement.photo_path != null
+            ? imageNewPath.get(movement.photo_path) ?? movement.photo_path
+            : null;
+        try {
+          await tx.execute(
+            `INSERT INTO cash_movements
+              (ref, kind, category, note, amount_minor, auth_method, photo_path, payment_method, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              ref,
+              movement.kind || 'expense',
+              movement.category || 'أخرى',
+              movement.note ?? null,
+              Number(movement.amount_minor ?? 0),
+              movement.auth_method || 'none',
+              restoredPhoto,
+              movement.payment_method ?? null,
+              movement.created_at || nowLocal(),
+            ],
+          );
+          cashRestored += 1;
+        } catch {
+          // A duplicate that slipped the sanitizer — first copy wins.
+        }
+      }
+      if (cashRestored > 0) {
+        logDiag('backup', `استُعيد سجل الخزينة: ${cashRestored} سند`);
+      }
+
+      // v82 (الجولة 95): الطلبات الأونلاين — server_id مفتاح الخادم
+      //  فيُستعاد كما هو (لا إعادة ترقيم)، والبنود تعود لطلبها
+      //  بنفس المفتاح، والمنتج يُعاد ربطه بمعرّفه الجديد.
+      let onlineOrdersRestored = 0;
+      const seenOrderNumbers = new Set<string>();
+      const seenServerIds = new Set<number>();
+      for (const order of doc.online_orders ?? []) {
+        const number = String(order.order_number ?? '');
+        const serverId = Number(order.server_id ?? 0);
+        if (
+          !number ||
+          serverId <= 0 ||
+          seenOrderNumbers.has(number) ||
+          seenServerIds.has(serverId)
+        ) {
+          continue;
+        }
+        seenOrderNumbers.add(number);
+        seenServerIds.add(serverId);
+        try {
+          await tx.execute(
+            `INSERT INTO online_orders (
+              server_id, order_number, status, customer_name,
+              customer_phone, customer_id_number, region_name, address,
+              note, delivery_fee_minor, items_total_minor, total_minor,
+              returned_minor, invoice_ref, reject_reason, cancel_reason,
+              revision, server_created_at, server_updated_at,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              serverId,
+              number,
+              order.status || 'new',
+              order.customer_name ?? '',
+              order.customer_phone ?? '',
+              order.customer_id_number ?? '',
+              order.region_name ?? null,
+              order.address ?? null,
+              order.note ?? null,
+              Number(order.delivery_fee_minor ?? 0),
+              Number(order.items_total_minor ?? 0),
+              Number(order.total_minor ?? 0),
+              Number(order.returned_minor ?? 0),
+              order.invoice_ref ?? null,
+              order.reject_reason ?? null,
+              order.cancel_reason ?? null,
+              Number(order.revision ?? 1),
+              Number(order.server_created_at ?? 0),
+              Number(order.server_updated_at ?? 0),
+              order.created_at || nowLocal(),
+              order.updated_at || nowLocal(),
+            ],
+          );
+          onlineOrdersRestored += 1;
+        } catch {
+          // Duplicate — first copy wins.
+        }
+      }
+      let onlineItemsRestored = 0;
+      for (const item of doc.online_order_items ?? []) {
+        const serverId = Number(item.server_order_id ?? 0);
+        if (serverId <= 0 || !seenServerIds.has(serverId)) {
+          continue;
+        }
+        try {
+          await tx.execute(
+            `INSERT INTO online_order_items (
+              server_order_id, product_id, product_ref, product_name,
+              variant, unit_price_minor, quantity, line_total_minor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              serverId,
+              item.product_id != null
+                ? productMap.get(Number(item.product_id)) ?? null
+                : null,
+              item.product_ref ?? null,
+              item.product_name || '',
+              item.variant ?? null,
+              Number(item.unit_price_minor ?? 0),
+              Number(item.quantity ?? 0),
+              Number(item.line_total_minor ?? 0),
+            ],
+          );
+          onlineItemsRestored += 1;
+        } catch {
+          // Duplicate or malformed line — first copy wins.
+        }
+      }
+      // الطلب يُعاد ربطه بفاتورته INV-O برقمها المستقر (المعرّف
+      //  الداخلي للفاتورة أُعيد ترقيمه أعلاه).
+      await tx.execute(
+        `UPDATE online_orders
+         SET sale_id = (
+           SELECT s.id FROM sales s
+           WHERE s.invoice_number = online_orders.invoice_ref
+           LIMIT 1
+         )
+         WHERE invoice_ref IS NOT NULL`,
+      );
+      if (onlineOrdersRestored > 0) {
+        logDiag(
+          'backup',
+          `استُعيدت الطلبات الأونلاين: ${onlineOrdersRestored} طلب و${onlineItemsRestored} بند`,
         );
       }
       logDiag(

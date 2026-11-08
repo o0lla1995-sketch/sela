@@ -140,10 +140,10 @@ describe('v81 (الجولة 94 #٥) — نقطة البيع: بدائل الاس
 describe('v81 — الإصدار', () => {
   test('config.ts وbuild.gradle عند 81.0.0 / 91', () => {
     const config = R('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '81.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 91');
+    expect(config).toContain("APP_VERSION = '82.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 92');
     const gradle = R('android/app/build.gradle');
-    expect(gradle).toContain('versionName "81.0.0"');
-    expect(gradle).toContain('versionCode 91');
+    expect(gradle).toContain('versionName "82.0.0"');
+    expect(gradle).toContain('versionCode 92');
   });
 });

@@ -186,11 +186,11 @@ describe('v69 — ٤ منع تكرار اسم المنتج والباركود', 
 describe('v69 — ٥ الإصدار', () => {
   test('71.0.0 (79) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '81.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 91');
+    expect(config).toContain("APP_VERSION = '82.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 92');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 91');
-    expect(gradle).toContain('versionName "81.0.0"');
+    expect(gradle).toContain('versionCode 92');
+    expect(gradle).toContain('versionName "82.0.0"');
   });
 });
 
@@ -206,7 +206,7 @@ describe('v69 — تكامل الترحيل', () => {
     expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(36);
     // العمود الجديد موجود على تثبيت نظيف.
     const db = app.connection.getDb();
-    const ret = db.execute(
+    const ret = await db.execute(
       "SELECT COUNT(*) AS cnt FROM pragma_table_info('sale_returns') WHERE name = 'refund_channel'",
     );
     expect(Number((ret.rows as any[])[0].cnt)).toBe(1);

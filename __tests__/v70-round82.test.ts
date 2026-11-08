@@ -163,11 +163,11 @@ describe('v70 — ٥ الشريط السفلي فوق أزرار النظام', 
 describe('v70 — ٦ الإصدار والتوقيع', () => {
   test('71.0.0 (79) في config والبناء', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '81.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 91');
+    expect(config).toContain("APP_VERSION = '82.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 92');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionCode 91');
-    expect(gradle).toContain('versionName "81.0.0"');
+    expect(gradle).toContain('versionCode 92');
+    expect(gradle).toContain('versionName "82.0.0"');
   });
 
   test('CI يوقّع بنفس مفتاح Play في كل بناء (بلا تغيير)', () => {

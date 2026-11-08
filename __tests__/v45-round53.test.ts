@@ -121,11 +121,11 @@ describe('v45 — حرّوس المصدر: الجولة 53 (API 36 + 16 KB)', ()
     expect(app).toContain('SoLoader.init(this, OpenSourceMergedSoMapping)');
     expect(app).not.toContain('SoLoader.init(this, false)');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionName "81.0.0"');
-    expect(gradle).toContain('versionCode 91');
+    expect(gradle).toContain('versionName "82.0.0"');
+    expect(gradle).toContain('versionCode 92');
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '81.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 91');
+    expect(config).toContain("APP_VERSION = '82.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 92');
   });
 
   test('④ autolinking الجديد داخل Gradle Plugin (صيغة RN 0.77)', () => {

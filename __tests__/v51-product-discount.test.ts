@@ -22,13 +22,13 @@ describe('v51 — سلسلة الخصومات الكاملة', () => {
     const app = freshApp(':memory:');
     await app.connection.initDatabase();
     const db = app.connection.getDb();
-    const res = db.execute(
+    const res = await db.execute(
       "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'discount_pct'",
     );
     const rows = (res.rows ?? []) as unknown as {cnt?: number}[];
     expect(Number(rows[0]?.cnt ?? 0)).toBe(1);
     // القيمة الافتراضية 0 — لا خصم على أي منتج قائم.
-    const sample = db.execute(
+    const sample = await db.execute(
       'SELECT COALESCE(discount_pct, -1) AS d FROM products LIMIT 1',
     );
     const sampleRows = (sample.rows ?? []) as unknown as {d?: number}[];

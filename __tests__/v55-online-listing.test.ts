@@ -29,13 +29,13 @@ describe('v55 — الإدراج الانتقائي للبيع أونلاين', 
     const app = freshApp(':memory:');
     await app.connection.initDatabase();
     const db = app.connection.getDb();
-    const res = db.execute(
+    const res = await db.execute(
       "SELECT COUNT(*) AS cnt FROM pragma_table_info('products') WHERE name = 'online_listed'",
     );
     const rows = (res.rows ?? []) as unknown as {cnt?: number}[];
     expect(Number(rows[0]?.cnt ?? 0)).toBe(1);
     // القيمة الافتراضية 0 — لا يدرج شيء قائم قبل أن يختار التاجر.
-    const sample = db.execute(
+    const sample = await db.execute(
       'SELECT COALESCE(online_listed, -1) AS v FROM products LIMIT 1',
     );
     const sampleRows = (sample.rows ?? []) as unknown as {v?: number}[];
@@ -215,10 +215,10 @@ describe('v55 — الإدراج الانتقائي للبيع أونلاين', 
 
   test('⑦ الإصدار: 71.0.0 (79) في config والبناء', () => {
     const config = read('src/core/config.ts');
-    expect(config).toContain("APP_VERSION = '81.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 91');
+    expect(config).toContain("APP_VERSION = '82.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 92');
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 91');
-    expect(gradle).toContain('versionName "81.0.0"');
+    expect(gradle).toContain('versionCode 92');
+    expect(gradle).toContain('versionName "82.0.0"');
   });
 });

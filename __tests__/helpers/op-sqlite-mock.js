@@ -22,7 +22,10 @@ class Shim {
     this.__raw = raw;
   }
 
-  execute(sql, params) {
+  /** v82 (الجولة 95): async — نفس دلالات op-sqlite v8 الحقيقية
+   *  (execute يعيد Promise؛ executeSync هو المتزامن) — كي تعمل
+   *  مسارات .catch() في خدمات النسخ الاحتياطي كما على الجهاز. */
+  async execute(sql, params) {
     const raw = this.__raw;
     const args = (params ?? []).map(p => (p === undefined ? null : p));
     const stmt = raw.prepare(sql);

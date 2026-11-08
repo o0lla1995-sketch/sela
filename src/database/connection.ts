@@ -2351,18 +2351,27 @@ export async function initDatabase(): Promise<void> {
   }
 }
 
-/** DANGEROUS: wipes all business data (used by Settings → reset). */
+/** DANGEROUS: wipes all business data (used by Settings → reset).
+ *  v82 (الجولة 95): اكتمل المسح — كانت تُترك جداول حيّة (متغيرات
+ *  المنتجات، سجل تعديل الفواتير، حسابات الكاشيرين وأجهزتهم) فتعود
+ *  بيانات قديمة بعد «حذف كل البيانات» وتختلط بالنسخة المسترجَعة. */
 export async function wipeAllData(): Promise<void> {
   const database = getDb();
-  await database.execute('DELETE FROM stocktake_items');
-  await database.execute('DELETE FROM stocktakes');
   await database.execute('DELETE FROM sale_return_items');
   await database.execute('DELETE FROM sale_return_exchanges');
   await database.execute('DELETE FROM sale_returns');
+  await database.execute('DELETE FROM sale_edits');
+  await database.execute('DELETE FROM stocktake_items');
+  await database.execute('DELETE FROM stocktakes');
   await database.execute('DELETE FROM sale_items');
   await database.execute('DELETE FROM sales');
+  await database.execute('DELETE FROM online_order_items');
+  await database.execute('DELETE FROM online_orders');
+  await database.execute('DELETE FROM lan_devices');
+  await database.execute('DELETE FROM lan_cashiers');
   await database.execute('DELETE FROM product_embeddings');
   await database.execute('DELETE FROM product_units');
+  await database.execute('DELETE FROM product_variants');
   await database.execute('DELETE FROM products');
   await database.execute('DELETE FROM categories');
   await database.execute('DELETE FROM units');
@@ -2380,11 +2389,8 @@ export async function wipeAllData(): Promise<void> {
   await database.execute('DELETE FROM campaign_debts');
   await database.execute('DELETE FROM voucher_redemptions');
   await database.execute('DELETE FROM cash_movements');
-  // v48: طلبات البيع أونلاين.
-  await database.execute('DELETE FROM online_order_items');
-  await database.execute('DELETE FROM online_orders');
   await database.execute(
-    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sale_return_exchanges','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','merchants','merchant_movements','voucher_redemptions','campaign_settlements','cash_movements','online_order_items')",
+    "DELETE FROM sqlite_sequence WHERE name IN ('categories','units','products','product_embeddings','product_units','product_variants','sales','sale_items','stocktakes','stocktake_items','sale_returns','sale_return_items','sale_return_exchanges','sale_edits','sila_debt_queue','sila_payment_queue','sila_app_collections','local_customers','local_debts','local_payments','merchants','merchant_movements','voucher_redemptions','campaign_settlements','cash_movements','online_order_items','lan_cashiers','lan_devices')",
   );
   logDiag('db', 'تم حذف جميع البيانات بناءً على طلب المستخدم', 'warn');
 }

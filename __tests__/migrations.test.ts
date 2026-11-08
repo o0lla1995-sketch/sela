@@ -20,8 +20,9 @@ import {DatabaseSync} from 'node:sqlite';
 import fs from 'fs';
 
 /** Column names of a table in the opened app DB. */
-function columns(db, table): string[] {
-  const rows = db.execute(`PRAGMA table_info(${table})`).rows as {
+async function columns(db, table): Promise<string[]> {
+  const result = await db.execute(`PRAGMA table_info(${table})`);
+  const rows = result.rows as {
     name: string;
   }[];
   return rows.map(r => String(r.name));
@@ -89,15 +90,15 @@ describe('database startup & migrations', () => {
     const db = app.connection.getDb();
     // The v23.0.1 fix: campaign_debts MUST have active_in_store AND
     // store_state from the fresh DDL.
-    const cols = columns(db, 'campaign_debts');
+    const cols = await columns(db, 'campaign_debts');
     expect(cols).toContain('active_in_store');
     expect(cols).toContain('store_state');
 
     // The full v23 shape must exist everywhere.
-    expect(columns(db, 'sales')).toContain('returned_minor');
-    expect(columns(db, 'sales')).toContain('return_kind');
-    expect(columns(db, 'products')).toContain('is_archived');
-    expect(columns(db, 'sila_payment_queue')).toContain('kind');
+    expect(await columns(db, 'sales')).toContain('returned_minor');
+    expect(await columns(db, 'sales')).toContain('return_kind');
+    expect(await columns(db, 'products')).toContain('is_archived');
+    expect(await columns(db, 'sila_payment_queue')).toContain('kind');
     for (const table of [
       'sale_returns',
       'sale_return_items',
@@ -110,22 +111,22 @@ describe('database startup & migrations', () => {
       'local_payments',
       'sila_app_collections',
     ]) {
-      expect(columns(db, table).length).toBeGreaterThan(0);
+      expect((await columns(db, table)).length).toBeGreaterThan(0);
     }
     // Migrations ran all the way.
     expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(36); // v79: نوع الدين المباشر في حركات التجار /*/ v78: الهوية الاختيارية (إسقاط NOT NULL عن local_customers) /*/ v69: قناة تسوية الاسترداد /*/ v64: قناة المصدر/الوجهة لحركات الخزينة // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
-    expect(columns(db, 'cash_movements')).toContain('photo_path'); // v46
+    expect(await columns(db, 'cash_movements')).toContain('photo_path'); // v46
     // v48 (الجولة 56): جداول البيع أونلاين + توسيع قيود CHECK
     // (الدفتر 'online' وسندات COLL/RFD).
-    expect(columns(db, 'online_orders')).toContain('invoice_ref');
-    expect(columns(db, 'online_order_items')).toContain('product_ref');
+    expect(await columns(db, 'online_orders')).toContain('invoice_ref');
+    expect(await columns(db, 'online_order_items')).toContain('product_ref');
     // v24 إعادة البناء حفظت كل أعمدة الاستبدال.
-    expect(columns(db, 'sale_returns')).toContain('is_exchange');
-    expect(columns(db, 'sale_returns')).toContain('exchange_minor');
+    expect(await columns(db, 'sale_returns')).toContain('is_exchange');
+    expect(await columns(db, 'sale_returns')).toContain('exchange_minor');
     // v32 (round-40 #3): the expiry column exists on a fresh install.
-    expect(columns(db, 'products')).toContain('expiry_date');
+    expect(await columns(db, 'products')).toContain('expiry_date');
     // Seed categories exist.
-    const cats = db.execute('SELECT COUNT(*) AS c FROM categories').rows
+    const cats = (await db.execute('SELECT COUNT(*) AS c FROM categories')).rows
       [0] as {c: number};
     expect(Number(cats.c)).toBeGreaterThanOrEqual(6);
   });
@@ -145,11 +146,11 @@ describe('database startup & migrations', () => {
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
 
     const db = app.connection.getDb();
-    const cols = columns(db, 'campaign_debts');
+    const cols = await columns(db, 'campaign_debts');
     expect(cols).toContain('active_in_store'); // healed by migration v12
     expect(cols).toContain('store_state'); // added by migration v14
     expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(36); // v79: نوع الدين المباشر في حركات التجار /*/ v78: الهوية الاختيارية (إسقاط NOT NULL عن local_customers) /*/ v69: قناة تسوية الاسترداد /*/ v64: قناة المصدر/الوجهة لحركات الخزينة // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
-    expect(columns(db, 'cash_movements')).toContain('photo_path'); // v46
+    expect(await columns(db, 'cash_movements')).toContain('photo_path'); // v46
 
     fs.rmSync(file, {force: true});
   });
@@ -171,13 +172,13 @@ describe('database startup & migrations', () => {
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
 
     const db = app.connection.getDb();
-    const cols = columns(db, 'campaign_debts');
+    const cols = await columns(db, 'campaign_debts');
     expect(cols).toContain('active_in_store');
     expect(cols).toContain('store_state');
-    const row = db
-      .execute(`SELECT active_in_store, store_state FROM campaign_debts
-                WHERE campaign_id = 'cmp-1'`)
-      .rows[0] as {active_in_store: number; store_state: string};
+    const row = (await db.execute(
+      `SELECT active_in_store, store_state FROM campaign_debts
+        WHERE campaign_id = 'cmp-1'`,
+    )).rows?.[0] as {active_in_store: number; store_state: string};
     expect(Number(row.active_in_store)).toBe(0); // no redemptions at this store
     expect(String(row.store_state)).toBe('available');
     fs.rmSync(file, {force: true});
@@ -202,10 +203,10 @@ describe('database startup & migrations', () => {
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
 
     const db = app.connection.getDb();
-    expect(columns(db, 'campaign_debts')).toContain('store_state');
-    const row = db
-      .execute(`SELECT store_state FROM campaign_debts WHERE campaign_id = 'cmp-2'`)
-      .rows[0] as {store_state: string};
+    expect(await columns(db, 'campaign_debts')).toContain('store_state');
+    const row = (await db.execute(
+      `SELECT store_state FROM campaign_debts WHERE campaign_id = 'cmp-2'`,
+    )).rows?.[0] as {store_state: string};
     // v13 switch ON → v14 must carry it into the lifecycle as 'active'.
     expect(String(row.store_state)).toBe('active');
     fs.rmSync(file, {force: true});
@@ -233,15 +234,15 @@ describe('database startup & migrations', () => {
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
 
     const db = app.connection.getDb();
-    expect(columns(db, 'sales')).toContain('returned_minor');
-    expect(columns(db, 'sales')).toContain('return_kind');
-    const sale = db
-      .execute(`SELECT total_amount, returned_minor FROM sales WHERE invoice_number = 'INV-20260101-0001'`)
-      .rows[0] as {total_amount: number; returned_minor: number};
+    expect(await columns(db, 'sales')).toContain('returned_minor');
+    expect(await columns(db, 'sales')).toContain('return_kind');
+    const sale = (await db.execute(
+      `SELECT total_amount, returned_minor FROM sales WHERE invoice_number = 'INV-20260101-0001'`,
+    )).rows?.[0] as {total_amount: number; returned_minor: number};
     expect(Number(sale.total_amount)).toBeCloseTo(25.5, 5);
     expect(Number(sale.returned_minor)).toBe(0);
     expect(app.storage.getNumber(app.storage.KEYS.schemaVersion, 0)).toBe(36); // v79: نوع الدين المباشر في حركات التجار /*/ v78: الهوية الاختيارية (إسقاط NOT NULL عن local_customers) /*/ v69: قناة تسوية الاسترداد /*/ v64: قناة المصدر/الوجهة لحركات الخزينة // v59: client_ref + صلاحيات // v58: كاشير الشبكة المحلية // v51: خصم المنتج // v50: خيار الشراء المختار // v46: photo_path — ترقية الأعمدة // v38: جرد متغيرات الملابس (v21 كان الاستبدال بقيمة المرجع)
-    expect(columns(db, 'cash_movements')).toContain('photo_path'); // v46
+    expect(await columns(db, 'cash_movements')).toContain('photo_path'); // v46
     fs.rmSync(file, {force: true});
   });
 
@@ -256,10 +257,10 @@ describe('database startup & migrations', () => {
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
 
     const db = app.connection.getDb();
-    const cols = columns(db, 'campaign_debts');
+    const cols = await columns(db, 'campaign_debts');
     expect(cols).toContain('active_in_store');
     expect(cols).toContain('store_state');
-    expect(columns(db, 'voucher_redemptions')).toContain('counter_extra_minor');
+    expect(await columns(db, 'voucher_redemptions')).toContain('counter_extra_minor');
     fs.rmSync(file, {force: true});
   });
 
@@ -272,20 +273,23 @@ describe('database startup & migrations', () => {
     await expect(app.connection.initDatabase()).resolves.toBeUndefined();
 
     const db = app.connection.getDb();
-    const check = db.execute('PRAGMA integrity_check').rows
+    const check = (await db.execute('PRAGMA integrity_check')).rows
       [0] as {integrity_check: string};
     expect(String(check.integrity_check)).toBe('ok');
 
     // Every CREATE INDEX in the schema must reference existing columns.
-    const indexes = db
-      .execute(
-        `SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL`,
-      )
-      .rows as {name: string; tbl_name: string; sql: string}[];
+    const indexResult = await db.execute(
+      `SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL`,
+    );
+    const indexes = indexResult.rows as {
+      name: string;
+      tbl_name: string;
+      sql: string;
+    }[];
     expect(indexes.length).toBeGreaterThan(20);
     for (const idx of indexes) {
       expect(typeof idx.sql).toBe('string');
-      const tableCols = columns(db, String(idx.tbl_name));
+      const tableCols = await columns(db, String(idx.tbl_name));
       expect(tableCols.length).toBeGreaterThan(0);
     }
   });
