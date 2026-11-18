@@ -2,6 +2,29 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- ══════════════════════════════════════════════════════════════
+         v83 (round-96): Google Play device-availability fixes.
+         Play flagged two implied-REQUIRED features that block install
+         on desktops / Android XR / wifi-less POS terminals:
+           • android.hardware.screen.portrait — implied by
+             ScannerActivity's locked orientation.
+           • android.hardware.wifi — implied by the ACCESS_WIFI_STATE
+             permission that @react-native-community/netinfo merges in.
+         Every hardware feature below is genuinely OPTIONAL for this
+         app: the POS is 100% offline, the thermal printer is an
+         accessory, the scanner keeps its portrait lock on phones
+         (devices without portrait simply keep the natural
+         orientation), and the app-lock falls back to the merchant
+         PIN when no fingerprint reader exists (BiometricModule
+         reports "unavailable" → PIN path).
+         ══════════════════════════════════════════════════════════════ -->
+    <uses-feature android:name="android.hardware.screen.portrait" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.fingerprint" android:required="false" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+    <uses-feature android:name="android.hardware.location.network" android:required="false" />
+
+    <!-- ══════════════════════════════════════════════════════════════
          On-Device Vision (Camera + TFLite) — 100% offline processing
          ══════════════════════════════════════════════════════════════ -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -9,6 +32,16 @@
          feature; the POS itself keeps working fully offline. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- v83 (round-96): netinfo merges ACCESS_WIFI_STATE, which (a)
+         implied a REQUIRED wifi feature on Google Play and (b) surfaces
+         "Wi-Fi connection information" in the store listing — wrong
+         optics for a fully-offline POS. The app only reads
+         connectivity (isConnected / isInternetReachable via
+         ConnectivityManager — ACCESS_NETWORK_STATE above), never wifi
+         details; netinfo guards every WifiManager call behind
+         isAccessWifiStatePermissionGranted, so stripping the
+         permission is 100% crash-safe. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" tools:node="remove" />
     <!-- Local stock-alert notifications (runtime on Android 13+). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- v13 (round-19 #2): app-lock fingerprint prompt (normal

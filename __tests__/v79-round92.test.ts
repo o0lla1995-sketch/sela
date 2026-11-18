@@ -173,10 +173,10 @@ describe('v79 — ٥ الكاشير: القناة الفعلية لا نقدي �
 describe('v79 — الإصدار', () => {
   test('config.ts وbuild.gradle عند 80.0.0 / 90', () => {
     const config = read(CONFIG);
-    expect(config).toContain("APP_VERSION = '82.0.0'");
-    expect(config).toContain('APP_BUILD_CODE = 92');
+    expect(config).toContain("APP_VERSION = '83.0.0'");
+    expect(config).toContain('APP_BUILD_CODE = 93');
     const gradle = read(GRADLE);
-    expect(gradle).toContain('versionName "82.0.0"');
-    expect(gradle).toContain('versionCode 92');
+    expect(gradle).toContain('versionName "83.0.0"');
+    expect(gradle).toContain('versionCode 93');
   });
 });
